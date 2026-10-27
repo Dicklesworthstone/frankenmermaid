@@ -3469,11 +3469,27 @@ impl MarkerKind {
     }
 }
 
+/// Whether cycle highlighting may replace this edge's ordinary arrow with an open feedback marker.
+/// Explicit endpoint shapes, bidirectional links, co-arrows and ER cardinalities carry authored
+/// meaning that must survive the layout's internal reversal.
+#[must_use]
+pub fn edge_uses_feedback_marker(edge: &fm_core::IrEdge, reversed: bool) -> bool {
+    reversed
+        && edge.er_notation().is_none()
+        && edge.co_arrow().is_none()
+        && matches!(
+            edge.arrow,
+            fm_core::ArrowType::Arrow
+                | fm_core::ArrowType::ThickArrow
+                | fm_core::ArrowType::DottedArrow
+        )
+}
+
 /// Resolve the semantic decorations on both ends of an edge for every rendering backend.
 ///
-/// ER cardinalities take precedence over arrow types. Directed layout-reversed graph edges retain
-/// their open feedback marker, while plain lines remain undirected through cycle removal. A class
-/// relation's co-arrow contributes its authored target marker.
+/// ER cardinalities take precedence over arrow types. Only ordinary single arrows use the open
+/// feedback marker; explicit endpoint shapes and plain lines keep their meaning through cycle
+/// removal. A class relation's co-arrow contributes its authored target marker.
 /// Keeping this mapping shared prevents raster surfaces from inventing target arrows for plain
 /// lines, losing source-only relationships, or collapsing half arrows into full triangles.
 #[must_use]
@@ -3504,7 +3520,7 @@ pub fn edge_marker_kinds(edge: &fm_core::IrEdge, reversed: bool) -> (MarkerKind,
                 .unwrap_or(M::None),
         );
     }
-    if reversed {
+    if edge_uses_feedback_marker(edge, reversed) {
         return (M::None, M::Open);
     }
 
@@ -4626,7 +4642,7 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             });
 
         if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
-            if edge.reversed && ir_edge.er_notation().is_none() {
+            if edge_uses_feedback_marker(ir_edge, edge.reversed) {
                 stroke.dash_array = vec![4.0, 4.0];
                 stroke.color = String::from("#94a3b8");
             } else if ir_edge.er_notation().is_none() {
@@ -10147,7 +10163,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         });
         let task_idx = event_idx / 2;
         let task = &gantt_meta.tasks[task_idx];
-        let day = if event_idx % 2 == 0 {
+        let day = if event_idx.is_multiple_of(2) {
             let start = explicit_starts[task_idx].unwrap_or_else(|| {
                 dependencies[event_idx]
                     .iter()
@@ -10186,12 +10202,13 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             }
         }
     }
-    let start_days: Vec<i32> = resolved_days
-        .chunks_exact(2)
+    let task_dates = resolved_days.as_chunks::<2>().0;
+    let start_days: Vec<i32> = task_dates
+        .iter()
         .map(|dates| dates[0].unwrap_or(base_start_day))
         .collect();
-    let end_exclusive_days: Vec<i32> = resolved_days
-        .chunks_exact(2)
+    let end_exclusive_days: Vec<i32> = task_dates
+        .iter()
         .map(|dates| dates[1].unwrap_or(base_start_day))
         .collect();
 
@@ -24669,6 +24686,138 @@ mod tests {
                     "cycle removal must not invent a direction: {source}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn cycles_preserve_authored_endpoint_markers_and_strokes() {
+        use super::{MarkerKind as M, RenderItem, RenderSource, build_edge_layer, layout_diagram};
+        use std::collections::BTreeSet;
+
+        for (header, link, start, end) in [
+            ("flowchart LR", "--o", M::None, M::Circle),
+            ("flowchart LR", "--x", M::None, M::Cross),
+            ("flowchart LR", "o--o", M::Circle, M::Circle),
+            ("flowchart LR", "x--x", M::Cross, M::Cross),
+            ("flowchart LR", "<-->", M::Arrow, M::Arrow),
+            ("flowchart LR", "<-.->", M::Arrow, M::Arrow),
+            ("flowchart LR", "<==>", M::ThickArrow, M::ThickArrow),
+            ("classDiagram", "o--", M::DiamondOpen, M::None),
+            ("classDiagram", "*--", M::Diamond, M::None),
+            ("classDiagram", "<|--", M::TriangleOpenStart, M::None),
+            ("classDiagram", "()--", M::LollipopStart, M::None),
+            ("classDiagram", "--()", M::None, M::Lollipop),
+            ("classDiagram", "o--|>", M::DiamondOpen, M::TriangleOpen),
+            ("classDiagram", "*--()", M::Diamond, M::Lollipop),
+        ] {
+            let source = format!("{header}\nA {link} B\nB {link} C\nC {link} A\n");
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 3, "{source}");
+            let mut layout = layout_diagram(&ir);
+            assert!(
+                layout.edges.iter().any(|edge| edge.reversed),
+                "the fixture must exercise cycle removal: {source}"
+            );
+            let layer = build_edge_layer(&ir, &layout);
+            for edge in &mut layout.edges {
+                edge.reversed = false;
+            }
+            let unhighlighted = build_edge_layer(&ir, &layout);
+            let paths: Vec<_> = layer
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Path(path) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            let reference_paths: Vec<_> = unhighlighted
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Path(path) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(paths.len(), 3, "{source}");
+            assert_eq!(reference_paths.len(), 3, "{source}");
+            let mut edge_sources = BTreeSet::new();
+            let mut marker_count = 0;
+            for (path, reference) in paths.iter().zip(&reference_paths) {
+                let RenderSource::Edge(index) = path.source else {
+                    panic!("connector lost its source edge: {source}");
+                };
+                assert!(
+                    edge_sources.insert(index),
+                    "duplicate source edge: {source}"
+                );
+                assert_eq!(
+                    (path.marker_start, path.marker_end),
+                    (start, end),
+                    "cycle removal changed endpoint meaning on edge {index}: {source}"
+                );
+                assert_eq!(
+                    path.stroke, reference.stroke,
+                    "cycle removal changed an authored decorated stroke: {source}"
+                );
+                marker_count += usize::from(path.marker_start != M::None)
+                    + usize::from(path.marker_end != M::None);
+            }
+            assert_eq!(edge_sources, BTreeSet::from([0, 1, 2]));
+            assert_eq!(
+                marker_count,
+                3 * (usize::from(start != M::None) + usize::from(end != M::None))
+            );
+        }
+    }
+
+    #[test]
+    fn feedback_markers_preserve_explicit_message_shapes_and_single_arrow_compatibility() {
+        use super::{MarkerKind as M, edge_marker_kinds, edge_uses_feedback_marker};
+        use fm_core::{ArrowType, IrEdge};
+
+        for (link, start, end) in [
+            ("-)", M::None, M::Open),
+            ("-|\\", M::None, M::HalfArrowTop),
+            ("--|/", M::None, M::HalfArrowBottom),
+            ("/|-", M::HalfArrowBottom, M::None),
+            ("\\|--", M::HalfArrowTop, M::None),
+            ("-\\\\", M::None, M::StickArrowTop),
+            ("--//", M::None, M::StickArrowBottom),
+            ("//-", M::StickArrowBottom, M::None),
+            ("\\\\--", M::StickArrowTop, M::None),
+        ] {
+            let source = format!("sequenceDiagram\nA{link}B: message\n");
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 1, "{source}");
+            assert!(!edge_uses_feedback_marker(&ir.edges[0], true), "{source}");
+            for reversed in [false, true] {
+                assert_eq!(
+                    edge_marker_kinds(&ir.edges[0], reversed),
+                    (start, end),
+                    "{source}"
+                );
+            }
+        }
+
+        for arrow in [
+            ArrowType::Arrow,
+            ArrowType::ThickArrow,
+            ArrowType::DottedArrow,
+        ] {
+            let mut edge = IrEdge {
+                arrow,
+                ..Default::default()
+            };
+            assert!(edge_uses_feedback_marker(&edge, true));
+            assert!(!edge_uses_feedback_marker(&edge, false));
+            assert_eq!(edge_marker_kinds(&edge, true), (M::None, M::Open));
+            edge.extras_mut().co_arrow = Some(ArrowType::CompositionReverse);
+            assert!(!edge_uses_feedback_marker(&edge, true));
+            assert_eq!(
+                edge_marker_kinds(&edge, true),
+                edge_marker_kinds(&edge, false)
+            );
         }
     }
 

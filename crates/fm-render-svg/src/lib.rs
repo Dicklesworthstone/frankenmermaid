@@ -4003,13 +4003,20 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
 fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u32> {
     (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
         layout.edges.iter().fold(0, |mask, edge_path| {
-            let edge_mask = if edge_path.reversed {
-                MARKER_OPEN
-            } else {
-                ir.edges
-                    .get(edge_path.edge_index)
-                    .map_or(MARKER_END, |edge| arrow_marker_mask(edge.arrow))
-            };
+            let edge_mask = ir.edges.get(edge_path.edge_index).map_or(
+                if edge_path.reversed {
+                    MARKER_OPEN
+                } else {
+                    MARKER_END
+                },
+                |edge| {
+                    if fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed) {
+                        MARKER_OPEN
+                    } else {
+                        arrow_marker_mask(edge.arrow)
+                    }
+                },
+            );
             mask | edge_mask
         })
     })
@@ -15959,7 +15966,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     // The second marker of a relation marked at BOTH ends (bd-f9t0r); `None` on every other edge.
     let co_arrow = ir_edge.and_then(fm_core::IrEdge::co_arrow);
-    let is_back_edge = edge_path.reversed;
+    let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
+        fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed)
+    });
     // `edgeId@{ animate: … }` opt-in. Resolved once because it gates the raw-fragment fast path
     // below and is applied on the `Element` path; a second lookup is how a gate and its emission
     // drift apart.
@@ -16154,9 +16163,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // same `edge_visuals` mapping. `.or()` and not a plain assignment — a co-arrow fills the empty
     // slot, it never overwrites a marker the primary already placed there.
     //
-    // ⚠️ NOT APPLIED TO A BACK EDGE. That branch deliberately replaces the whole visual with the
-    // dashed cluster-stroke feedback style, and letting a co-arrow through would put a UML diamond
-    // on a layout artefact.
+    // The feedback style is reserved for undecorated single arrows. An authored co-arrow always
+    // reaches this merge and survives cycle removal.
     let marker_end = if is_back_edge {
         marker_end
     } else {
@@ -16721,7 +16729,9 @@ fn render_edge_body_into(
     if arrow == ArrowType::Invisible {
         return;
     }
-    let is_back_edge = edge_path.reversed;
+    let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
+        fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed)
+    });
     // `edgeId@{ animate: … }` opt-in. Resolved once here because it gates BOTH fast paths and is
     // applied on the slow one; a second lookup is how the gate and the emission drift apart.
     let animation_class = ir_edge
@@ -21144,6 +21154,56 @@ mod tests {
         assert!(scene_svg.starts_with("<svg"));
         assert!(scene_svg.contains("data-type=\"flowchart\""));
         assert!(scene_svg.contains("fm-source-kind=\"node\""));
+    }
+
+    #[test]
+    fn cyclic_edges_preserve_authored_markers_in_both_svg_backends() {
+        for (link, start_count, end_count) in [
+            ("---", 0, 0),
+            ("-.-", 0, 0),
+            ("===", 0, 0),
+            ("<-->", 3, 3),
+            ("<==>", 3, 3),
+            ("<-.->", 3, 3),
+            ("o--o", 3, 3),
+            ("x--x", 3, 3),
+            ("--o", 0, 3),
+            ("--x", 0, 3),
+        ] {
+            for label in ["", "|relationship|"] {
+                let source = format!(
+                    "flowchart LR\nA {link}{label} B\nB {link}{label} C\nC {link}{label} A\n"
+                );
+                let ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.edges.len(), 3, "{source}");
+                let layout = fm_layout::layout_diagram(&ir);
+                assert!(
+                    layout.edges.iter().any(|edge| edge.reversed),
+                    "the fixture must exercise cycle removal: {source}"
+                );
+                for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    assert_eq!(
+                        svg.matches(" marker-start=").count(),
+                        start_count,
+                        "{backend:?}: {source}\n{svg}"
+                    );
+                    assert_eq!(
+                        svg.matches(" marker-end=").count(),
+                        end_count,
+                        "{backend:?}: {source}\n{svg}"
+                    );
+                    assert!(
+                        !svg.contains("marker-end=\"url(#arrow-open)\""),
+                        "layout reversal replaced an authored endpoint: {backend:?}: {source}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
