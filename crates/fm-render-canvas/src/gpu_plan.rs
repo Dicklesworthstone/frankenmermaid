@@ -3064,7 +3064,12 @@ impl GpuRenderPlan {
         // an edge may carry cardinality and no label at all.
         let mut graph_label_placer =
             fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type).then(|| {
-                fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding as f32)
+                fm_layout::edge_labels::EdgeLabelPlacer::with_font_metrics(
+                    ir,
+                    layout,
+                    config.padding as f32,
+                    &metrics,
+                )
             });
         let mut graph_label_plates = Vec::new();
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {

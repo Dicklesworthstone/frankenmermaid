@@ -232,8 +232,12 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
         labels: vec![None; ir.edges.len()],
         bounds: layout.bounds,
     };
-    let mut placer =
-        fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding as f32);
+    let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::with_font_metrics(
+        ir,
+        layout,
+        config.padding as f32,
+        &config.font_metrics(),
+    );
     let default_font = secondary_label_font_css(config);
     ctx.save();
     for path in &layout.edges {

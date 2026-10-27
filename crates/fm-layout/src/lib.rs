@@ -5199,7 +5199,7 @@ fn build_label_layer(
     let mut layer =
         RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
     let mut edge_labels = edge_labels::uses_graph_edge_labels(ir.diagram_type)
-        .then(|| edge_labels::EdgeLabelPlacer::new(ir, layout, 20.0));
+        .then(|| edge_labels::EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, metrics));
 
     if let Some(journey) = &layout.extensions.journey {
         layer.children.extend(
@@ -6134,7 +6134,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         DiagramType::Class | DiagramType::Er => {
             spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false);
         }
-        DiagramType::Flowchart | DiagramType::State => {
+        DiagramType::Flowchart | DiagramType::State | DiagramType::Requirement => {
             spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true);
         }
         _ => {}
@@ -6234,7 +6234,10 @@ fn refine_graph_label_spacing(
             spread_shared_edge_ends(
                 ir,
                 layout,
-                matches!(ir.diagram_type, DiagramType::Flowchart | DiagramType::State),
+                matches!(
+                    ir.diagram_type,
+                    DiagramType::Flowchart | DiagramType::State | DiagramType::Requirement
+                ),
             );
             let quality = edge_labels::graph_label_attachment_quality(ir, layout, &metrics);
             if quality.0 < initial.0 && quality.2 <= initial.2 * 1.8 && quality < best_quality {
@@ -6482,6 +6485,11 @@ fn pack_disconnected_components(
                 component.nodes.push(node.clone());
             }
         }
+        for cluster in &layout.clusters {
+            if let Some(component) = &mut components[cluster_owner[cluster.cluster_index]] {
+                component.clusters.push(cluster.clone());
+            }
+        }
         for (path, &group) in layout.edges.iter().zip(&edge_owner) {
             if let Some(component) = &mut components[group] {
                 component.edges.push(path.clone());
@@ -6492,7 +6500,7 @@ fn pack_disconnected_components(
                 component.extensions.state_notes.push(note.clone());
             }
         }
-        let shared = edge_labels::EdgeLabelPlacer::new(ir, layout, 20.0);
+        let shared = edge_labels::EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, metrics);
         for (group, component) in components.iter().enumerate() {
             let Some(component) = component else { continue };
             let mut placer = shared.for_component(component);

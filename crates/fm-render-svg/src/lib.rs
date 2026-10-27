@@ -15208,7 +15208,12 @@ fn resolve_graph_edge_label_positions(
         return None;
     }
     let mut positions = vec![None; ir.edges.len()];
-    let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding);
+    let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::with_font_metrics(
+        ir,
+        layout,
+        config.padding,
+        &config.font_metrics(),
+    );
     for path in &layout.edges {
         if path.bundled || path.points.len() < 2 || !detail.show_edge_labels {
             continue;

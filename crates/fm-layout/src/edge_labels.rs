@@ -16,7 +16,11 @@ use std::sync::Arc;
 pub fn uses_graph_edge_labels(diagram_type: DiagramType) -> bool {
     matches!(
         diagram_type,
-        DiagramType::Flowchart | DiagramType::State | DiagramType::Class | DiagramType::Er
+        DiagramType::Flowchart
+            | DiagramType::State
+            | DiagramType::Class
+            | DiagramType::Er
+            | DiagramType::Requirement
     )
 }
 
@@ -41,12 +45,94 @@ pub fn edge_label_style(ir: &MermaidDiagramIr, edge_index: usize) -> BTreeMap<St
     properties
 }
 
+/// Caption footprints, not whole cluster rectangles: an internal transition may use the
+/// container's empty space, but its opaque label must never erase the container's heading.
+fn graph_cluster_caption_bounds(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutRect> {
+    let mut captions = Vec::new();
+    let base_font_size = (metrics.font_size() * crate::CLUSTER_FONT_SCALE).max(10.0);
+    let baseline = (base_font_size + 2.0).max(16.0);
+    for cluster in &layout.clusters {
+        let metadata = ir.clusters.get(cluster.cluster_index);
+        let title = cluster
+            .title
+            .as_deref()
+            .or_else(|| {
+                metadata
+                    .and_then(|cluster| cluster.title)
+                    .and_then(|label| ir.labels.get(label.0))
+                    .map(|label| label.text.as_str())
+            })
+            .unwrap_or_default();
+        let mut declared_font_size = None;
+        for style in &ir.style_refs {
+            if style.target == IrStyleTarget::Cluster(cluster.cluster_index)
+                && let Some(size) = fm_core::parse_style_string(&style.style)
+                    .properties
+                    .get("font-size")
+                    .and_then(|size| size.trim().trim_end_matches("px").parse::<f32>().ok())
+                    .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+            {
+                declared_font_size = Some(size);
+            }
+        }
+        let mut include = |text: &str, font_size: f32, svg_baseline: f32, canvas_top: f32| {
+            let displayed = crate::displayed_cluster_title(text);
+            if displayed.trim().is_empty() {
+                return;
+            }
+            // Reuse the same proportional/wide-glyph allowance that sizes the frame. That
+            // helper scales a node font to the cluster face; undo the scale for an authored
+            // caption font. The shared scene's 12px face must fit even with a smaller preset.
+            let caption_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size: font_size.max(12.0) / crate::CLUSTER_FONT_SCALE,
+                ..metrics.config().clone()
+            });
+            let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
+            let top = (svg_baseline - font_size).min(canvas_top).min(8.0);
+            let bottom = (svg_baseline + additional_lines * font_size * 1.4 + font_size * 0.3)
+                .max(canvas_top + (additional_lines + 1.0) * base_font_size * 1.2)
+                .max(8.0 + (additional_lines + 1.0) * 12.0 * 1.2);
+            captions.push(LayoutRect {
+                x: cluster.bounds.x + 8.0,
+                y: cluster.bounds.y + top,
+                // Shared scene captions start two pixels farther right than SVG/Canvas.
+                width: crate::cluster_title_width(displayed, &caption_metrics) - 16.0 + 2.0,
+                height: bottom - top,
+            });
+        };
+        include(
+            title,
+            declared_font_size.unwrap_or(base_font_size),
+            baseline,
+            4.0,
+        );
+        if let Some(kind) = metadata
+            .and_then(|cluster| cluster.c4_boundary_type.as_deref())
+            .filter(|kind| !kind.is_empty())
+        {
+            include(
+                &format!("[{kind}]"),
+                base_font_size,
+                baseline + base_font_size * 1.25,
+                4.0 + metrics.font_size() * 1.25,
+            );
+        }
+    }
+    captions
+}
+
 /// Stateful placement for one rendered graph, with shared route and previous-label obstacles.
 pub struct EdgeLabelPlacer<'a> {
     ir: &'a MermaidDiagramIr,
     layout: &'a DiagramLayout,
     padding: f32,
     routes: Vec<(usize, EdgeLabelObstacle)>,
+    captions: Vec<LayoutRect>,
+    metrics: fm_core::FontMetrics,
     plates: Vec<LayoutRect>,
     containers: Arc<Vec<Vec<usize>>>,
     stroke_widths: Arc<Vec<f32>>,
@@ -56,11 +142,30 @@ impl<'a> EdgeLabelPlacer<'a> {
     /// Prepare obstacles once. Call [`Self::place`] in the renderer's label paint order.
     #[must_use]
     pub fn new(ir: &'a MermaidDiagramIr, layout: &'a DiagramLayout, padding: f32) -> Self {
+        Self::with_font_metrics(
+            ir,
+            layout,
+            padding,
+            &fm_core::FontMetrics::default_metrics(),
+        )
+    }
+
+    /// Use the surface's font metrics for subgraph captions as well as the measured edge plates.
+    /// A cluster's interior is usable routing space; only its painted caption is an obstacle.
+    #[must_use]
+    pub fn with_font_metrics(
+        ir: &'a MermaidDiagramIr,
+        layout: &'a DiagramLayout,
+        padding: f32,
+        metrics: &fm_core::FontMetrics,
+    ) -> Self {
         Self {
             ir,
             layout,
             padding,
             routes: graph_edge_label_route_obstacles(ir, layout),
+            captions: graph_cluster_caption_bounds(ir, layout, metrics),
+            metrics: metrics.clone(),
             plates: Vec::new(),
             containers: Arc::new(crate::composite_containers(ir, ir.nodes.len())),
             stroke_widths: Arc::new(
@@ -98,6 +203,8 @@ impl<'a> EdgeLabelPlacer<'a> {
             layout,
             padding: self.padding,
             routes: graph_edge_label_route_obstacles(self.ir, layout),
+            captions: graph_cluster_caption_bounds(self.ir, layout, &self.metrics),
+            metrics: self.metrics.clone(),
             plates: Vec::new(),
             containers: Arc::clone(&self.containers),
             stroke_widths: Arc::clone(&self.stroke_widths),
@@ -130,6 +237,7 @@ impl<'a> EdgeLabelPlacer<'a> {
                 EdgeLabelObstacle::Segment(_, _) => {}
             }
         }
+        foreign_routes.extend(self.captions.iter().copied().map(EdgeLabelObstacle::Bounds));
         // A composite state is also a routing node, but its interior holds its own transitions.
         // Keep unrelated containers as obstacles while allowing a label inside its parent state.
         let mut ignored_nodes = Vec::new();
@@ -1106,7 +1214,7 @@ pub(crate) fn graph_label_attachment_quality(
             1.0,
         ),
     ] {
-        let mut placer = EdgeLabelPlacer::new(ir, layout, 20.0);
+        let mut placer = EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, base_metrics);
         for path in &layout.edges {
             let Some(edge) = ir.edges.get(path.edge_index) else {
                 continue;
@@ -1451,6 +1559,178 @@ mod tests {
             && b.x < a.x + a.width - 0.01
             && a.y < b.y + b.height - 0.01
             && b.y < a.y + a.height - 0.01
+    }
+
+    #[test]
+    fn labels_avoid_cluster_headings_without_excluding_the_container_interior() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut layout = frame();
+        layout.bounds.width = 400.0;
+        layout.bounds.height = 200.0;
+        layout.clusters.push(crate::LayoutClusterBox {
+            cluster_index: 0,
+            span: Span::default(),
+            title: Some(String::from("Payment processing")),
+            color: None,
+            bounds: layout.bounds,
+        });
+        let caption = LayoutRect {
+            x: 8.0,
+            y: 4.0,
+            width: 120.0,
+            height: 18.0,
+        };
+        let path = route(&[(0.0, 15.0), (200.0, 15.0)]);
+        let old_center = edge_label_position(&path);
+        assert!(overlap(
+            caption,
+            LayoutRect {
+                x: old_center.x - 20.0,
+                y: old_center.y - 10.0,
+                width: 40.0,
+                height: 20.0,
+            }
+        ));
+        let mut placer = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+        let center = placer.place(&path, 40.0, 20.0);
+        let plate = LayoutRect {
+            x: center.x - 20.0,
+            y: center.y - 10.0,
+            width: 40.0,
+            height: 20.0,
+        };
+        assert!(!overlap(caption, plate), "edge label obscures the heading");
+        assert!(edge_label_route_distance_squared(&path, plate) < 0.01);
+        assert_eq!(
+            EdgeLabelPlacer::new(&ir, &layout, 0.0).place(&path, 40.0, 20.0),
+            center
+        );
+        let internal_path = route(&[(40.0, 100.0), (160.0, 100.0)]);
+        assert_eq!(
+            placer.place(&internal_path, 40.0, 20.0),
+            LayoutPoint { x: 100.0, y: 100.0 },
+            "only the caption blocks labels, not the whole subgraph"
+        );
+        // Component packing resolves labels against local copies; their captions must not
+        // disappear from the obstacle set when the component is isolated for measurement.
+        let mut local = placer.for_component(&layout);
+        assert_eq!(local.place(&path, 40.0, 20.0), center);
+    }
+
+    #[test]
+    fn caption_obstacles_survive_the_neighborhood_fallback_and_expand_the_frame() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut layout = frame();
+        layout.clusters.push(crate::LayoutClusterBox {
+            cluster_index: 0,
+            span: Span::default(),
+            title: Some(String::from("Payment processing\nExternal providers")),
+            color: None,
+            bounds: layout.bounds,
+        });
+        let path = route(&[(40.0, 12.0), (60.0, 12.0)]);
+        let mut placer = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+        let center = placer.place(&path, 80.0, 24.0);
+        let plate = LayoutRect {
+            x: center.x - 40.0,
+            y: center.y - 12.0,
+            width: 80.0,
+            height: 24.0,
+        };
+        let ink = LayoutRect {
+            x: 8.0,
+            y: 4.0,
+            width: 120.0,
+            height: 34.0,
+        };
+        assert!(!overlap(ink, plate), "fallback lost the heading obstacle");
+        assert!(
+            plate.x < 0.0 || plate.y < 0.0,
+            "a blocked route must find clear space beyond the original frame"
+        );
+        let bounds = placer.bounds();
+        assert!(bounds.x <= plate.x && bounds.y <= plate.y);
+        assert!(bounds.x + bounds.width >= plate.x + plate.width);
+        assert!(bounds.y + bounds.height >= plate.y + plate.height);
+    }
+
+    #[test]
+    fn multiline_and_styled_cluster_captions_use_the_surface_font_metrics() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut layout = frame();
+        layout.clusters.push(crate::LayoutClusterBox {
+            cluster_index: 0,
+            span: Span::default(),
+            title: Some(String::from("Payments\nRisk review")),
+            color: None,
+            bounds: layout.bounds,
+        });
+        let normal = fm_core::FontMetrics::default_metrics();
+        let large = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 30.0,
+            ..Default::default()
+        });
+        let small_bounds = graph_cluster_caption_bounds(&ir, &layout, &normal)[0];
+        let large_bounds = graph_cluster_caption_bounds(&ir, &layout, &large)[0];
+        assert!(large_bounds.width > small_bounds.width * 1.8);
+        assert!(large_bounds.height > small_bounds.height * 1.8);
+        ir.style_refs.push(fm_core::IrStyleRef {
+            target: IrStyleTarget::Cluster(0),
+            style: String::from("font-size:40px"),
+            span: Span::default(),
+        });
+        let styled = graph_cluster_caption_bounds(&ir, &layout, &normal)[0];
+        // SVG keeps the caption's baseline at 16px while CSS enlarges the face. Both
+        // ascenders above that baseline and the second row below it need protection.
+        assert!(styled.y <= -24.0);
+        assert!(styled.y + styled.height >= 83.99);
+        assert!(styled.width > large_bounds.width);
+        ir.clusters.push(fm_core::IrCluster {
+            c4_boundary_type: Some(String::from("SYSTEM")),
+            ..Default::default()
+        });
+        let with_type = graph_cluster_caption_bounds(&ir, &layout, &normal);
+        assert_eq!(with_type.len(), 2);
+        assert!(with_type[1].y + with_type[1].height >= 38.0);
+        layout.clusters[0].title = Some(String::from("   "));
+        ir.clusters.clear();
+        assert!(graph_cluster_caption_bounds(&ir, &layout, &normal).is_empty());
+    }
+
+    #[test]
+    fn requirement_relationships_receive_collision_free_scene_plates_and_bounds() {
+        let source = "requirementDiagram\nrequirement auth {\nid: R1\ntext: Authenticate each request\nrisk: High\nverifymethod: Test\n}\nrequirement audit {\nid: R2\ntext: Keep a complete audit record\nrisk: Medium\nverifymethod: Test\n}\nelement gateway {\ntype: service\n}\ngateway - satisfies -> auth\ngateway - satisfies -> audit\naudit - traces -> auth\n";
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.diagram_type, DiagramType::Requirement);
+        assert_eq!(ir.edges.len(), 3);
+        let layout = crate::layout_diagram(&ir);
+        let scene = crate::build_render_scene(&ir, &layout);
+        let plates = scene_plates(&scene);
+        assert_eq!(
+            plates.len(),
+            3,
+            "requirement captions skipped shared placement"
+        );
+        for (position, (_, plate)) in plates.iter().enumerate() {
+            assert!(
+                layout
+                    .nodes
+                    .iter()
+                    .all(|node| !overlap(*plate, node.bounds))
+            );
+            assert!(
+                plates[position + 1..]
+                    .iter()
+                    .all(|(_, other)| !overlap(*plate, *other))
+            );
+            assert!(plate.x >= scene.bounds.x - 0.01 && plate.y >= scene.bounds.y - 0.01);
+            assert!(plate.x + plate.width <= scene.bounds.x + scene.bounds.width + 0.01);
+            assert!(plate.y + plate.height <= scene.bounds.y + scene.bounds.height + 0.01);
+        }
+        assert_eq!(
+            scene,
+            crate::build_render_scene(&ir, &crate::layout_diagram(&ir))
+        );
     }
 
     const ISSUE_16: &str = "stateDiagram-v2\n[*] --> Idle\nIdle --> Starting: Space down / tap\nStarting --> Idle: closed\nStarting --> Recording: opened\nStarting --> Releasing: Space up, focus lost\nRecording --> Idle: closed\nRecording --> Stopping: Space up, focus lost / tap\nReleasing --> Idle: closed\nReleasing --> Stopping: opened / tap\nStopping --> Settling: closed\nSettling --> Idle: quiet 1 s\nSettling --> Stopping: opened / tap\n";
