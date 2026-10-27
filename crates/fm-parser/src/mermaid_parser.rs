@@ -28200,9 +28200,15 @@ Rel_Back(db, app, "Responds")"#,
         );
         let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
         assert_eq!(meta.x_axis.label.as_deref(), Some("Financial year"));
-        assert_eq!((meta.x_axis.min, meta.x_axis.max), (Some(2025.0), Some(2027.0)));
+        assert_eq!(
+            (meta.x_axis.min, meta.x_axis.max),
+            (Some(2025.0), Some(2027.0))
+        );
         assert_eq!(meta.y_axis.label, None);
-        assert_eq!((meta.y_axis.min, meta.y_axis.max), (Some(-10.0), Some(20.0)));
+        assert_eq!(
+            (meta.y_axis.min, meta.y_axis.max),
+            (Some(-10.0), Some(20.0))
+        );
     }
 
     #[test]
@@ -28216,9 +28222,8 @@ Rel_Back(db, app, "Responds")"#,
             assert_eq!(meta.y_axis.max, None, "{range}");
             assert_eq!(meta.series[0].values, [2.0, 4.0]);
         }
-        let parsed = parse_mermaid(
-            "xychart-beta\n y-axis \"Revenue\" unexpected 0 --> 10\n bar [2, 4]",
-        );
+        let parsed =
+            parse_mermaid("xychart-beta\n y-axis \"Revenue\" unexpected 0 --> 10\n bar [2, 4]");
         let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
         assert_eq!(meta.y_axis.label.as_deref(), Some("Revenue"));
         assert_eq!((meta.y_axis.min, meta.y_axis.max), (None, None));

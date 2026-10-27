@@ -11691,8 +11691,8 @@ fn layout_diagram_xychart_from_meta(
             let x_center = x_band_start + band_width / 2.0;
             let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
             let node_bounds = if is_bar {
-                let x = (local_bar_slot as f32)
-                    .mul_add(bar_slot_width, x_band_start + group_offset);
+                let x =
+                    (local_bar_slot as f32).mul_add(bar_slot_width, x_band_start + group_offset);
                 let y = value_y.min(baseline_y);
                 let height = (baseline_y - value_y).abs().max(1.0);
                 LayoutRect {
@@ -11924,7 +11924,11 @@ pub fn xychart_plot_bounds(meta: &IrXyChartMeta, bounds: LayoutRect) -> LayoutRe
 pub fn xychart_categories(meta: &IrXyChartMeta) -> Vec<String> {
     let count = xy_chart_category_count(meta);
     if meta.x_axis.categories.is_empty() {
-        let min = meta.x_axis.min.filter(|value| value.is_finite()).unwrap_or(0.0);
+        let min = meta
+            .x_axis
+            .min
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0);
         let max = meta
             .x_axis
             .max
@@ -24125,12 +24129,13 @@ fn separate_shared_channels(
                             endpoint_node_index(ir, edge.from),
                             endpoint_node_index(ir, edge.to),
                         ];
-                        let mut moved = [
+                        let original = [
                             points[run.start - 1],
                             points[run.start],
                             points[run.start + 1],
                             points[run.start + 2],
                         ];
+                        let mut moved = original;
                         for bend in &mut moved[1..3] {
                             if horizontal {
                                 bend.y = candidate;
@@ -24157,11 +24162,42 @@ fn separate_shared_channels(
                             // test the rectangle's interior, permitting an endpoint on its face.
                             if left < right
                                 && top < bottom
-                                && moved.windows(2).any(|pair| {
-                                    pair[0].x.max(pair[1].x) > left
-                                        && pair[0].x.min(pair[1].x) < right
-                                        && pair[0].y.max(pair[1].y) > top
-                                        && pair[0].y.min(pair[1].y) < bottom
+                                && moved.windows(2).enumerate().any(|(segment, pair)| {
+                                    // A port on a diamond or circle lies inside its bounding
+                                    // rectangle. Its existing outward stub is already clear of
+                                    // the actual outline; rejecting that unchanged prefix would
+                                    // prevent every track adjustment. Only its added length can
+                                    // introduce a new collision with this endpoint. The middle
+                                    // run and all unrelated nodes still receive the full check.
+                                    let endpoint_stub = match segment {
+                                        0 if run.start == 1
+                                            && endpoint_nodes[0] == Some(node.node_index) =>
+                                        {
+                                            Some((original[0], original[1], moved[1]))
+                                        }
+                                        2 if run.start + 3 == points.len()
+                                            && endpoint_nodes[1] == Some(node.node_index) =>
+                                        {
+                                            Some((original[3], original[2], moved[2]))
+                                        }
+                                        _ => None,
+                                    };
+                                    let (a, b) =
+                                        if let Some((port, old_bend, new_bend)) = endpoint_stub {
+                                            if (across(new_bend) - across(port)).abs()
+                                                <= (across(old_bend) - across(port)).abs()
+                                                    + GEOMETRY_EPS
+                                            {
+                                                return false;
+                                            }
+                                            (old_bend, new_bend)
+                                        } else {
+                                            (pair[0], pair[1])
+                                        };
+                                    a.x.max(b.x) > left
+                                        && a.x.min(b.x) < right
+                                        && a.y.max(b.y) > top
+                                        && a.y.min(b.y) < bottom
                                 })
                             {
                                 return true;
@@ -30081,7 +30117,10 @@ mod tests {
                         (center.y, plot.y + plot.height * (1.0 - index as f32 / 2.0))
                     };
                     assert!(actual.is_finite(), "{source}");
-                    assert!((actual - expected).abs() < 0.001, "{source}: {actual} vs {expected}");
+                    assert!(
+                        (actual - expected).abs() < 0.001,
+                        "{source}: {actual} vs {expected}"
+                    );
                 }
                 let tick_labels: Vec<_> = super::xychart_y_ticks(min, max)
                     .into_iter()
@@ -30142,10 +30181,23 @@ mod tests {
     #[test]
     fn xychart_numeric_labels_preserve_fractional_values() {
         for value in [
-            0.0, -0.0, 0.001, 0.002, -0.0003, 1.25, 1e-9, -1e-9, 3e38, f32::MIN_POSITIVE,
+            0.0,
+            -0.0,
+            0.001,
+            0.002,
+            -0.0003,
+            1.25,
+            1e-9,
+            -1e-9,
+            3e38,
+            f32::MIN_POSITIVE,
         ] {
             let label = super::format_xychart_tick_value(value);
-            assert_eq!(label.parse::<f32>().expect("numeric tick"), value, "{label}");
+            assert_eq!(
+                label.parse::<f32>().expect("numeric tick"),
+                value,
+                "{label}"
+            );
         }
         assert_eq!(super::format_xychart_tick_value(-0.0), "0");
         assert_eq!(super::format_xychart_tick_value(1e-9), "1e-9");
@@ -30184,14 +30236,21 @@ mod tests {
                 let mut previous_end = band_start;
                 for series in &meta.series {
                     let id = series.nodes[category];
-                    let node = layout.nodes.iter().find(|node| node.node_index == id.0).unwrap();
+                    let node = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == id.0)
+                        .unwrap();
                     let (mark_start, thickness) = if horizontal {
                         (node.bounds.y, node.bounds.height)
                     } else {
                         (node.bounds.x, node.bounds.width)
                     };
                     assert!(thickness > 0.0);
-                    assert!(mark_start > previous_end, "series need distinct visible slots");
+                    assert!(
+                        mark_start > previous_end,
+                        "series need distinct visible slots"
+                    );
                     assert!(mark_start + thickness < band_end, "{source}");
                     previous_end = mark_start + thickness;
                 }
@@ -36389,6 +36448,142 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_channels_separate_reciprocal_curved_ports_without_entering_nodes() {
+        for declaration in ["A{Decision}", "A((Decision))"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n {declaration}-->B[Fix]\n B-->A\n E[Obstacle]\n"
+            ))
+            .ir;
+            let diamond = ir.nodes[0].shape == fm_core::NodeShape::Diamond;
+            let port_x = 100.0 + if diamond { 30.0 } else { 1500.0_f32.sqrt() };
+            for transpose in [false, true] {
+                let before = vec![
+                    shared_channel_test_path(
+                        0,
+                        &[
+                            (port_x, 90.0),
+                            (195.0, 90.0),
+                            (195.0, 190.0),
+                            (260.0, 190.0),
+                        ],
+                        transpose,
+                    ),
+                    shared_channel_test_path(
+                        1,
+                        &[
+                            (260.0, 210.0),
+                            (195.0, 210.0),
+                            (195.0, 110.0),
+                            (port_x, 110.0),
+                        ],
+                        transpose,
+                    ),
+                ];
+                let nodes: Vec<_> = [
+                    ("A", 60.0, 60.0, 80.0, 80.0),
+                    ("B", 260.0, 160.0, 80.0, 80.0),
+                    ("E", 202.0, 145.0, 6.0, 15.0),
+                ]
+                .into_iter()
+                .map(|(id, x, y, width, height)| LayoutNodeBox {
+                    node_index: ir.nodes.iter().position(|node| node.id == id).unwrap(),
+                    node_id: id.to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: x,
+                            width: height,
+                            height: width,
+                        }
+                    } else {
+                        LayoutRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        }
+                    },
+                })
+                .collect();
+                assert!(shared_channel_has_false_junction(&ir, &before));
+                let mut unprotected = before.clone();
+                separate_shared_channels(&ir, &nodes[..2], &mut unprotected);
+                let obstacle_hit = |paths: &[LayoutEdgePath]| {
+                    paths.iter().any(|path| {
+                        path.points.windows(2).any(|pair| {
+                            super::cga_routing::segment_intersects_obstacles(
+                                pair[0],
+                                pair[1],
+                                &[nodes[2].bounds],
+                                0.0,
+                            )
+                        })
+                    })
+                };
+                assert!(
+                    obstacle_hit(&unprotected),
+                    "control must require the obstacle check"
+                );
+                assert!(!obstacle_hit(&before));
+                let mut protected = before.clone();
+                separate_shared_channels(&ir, &nodes, &mut protected);
+                assert!(
+                    !obstacle_hit(&protected),
+                    "a new track entered an unrelated node"
+                );
+
+                for after in [&unprotected, &protected] {
+                    assert_shared_channel_geometry_preserved(&before, after);
+                    assert!(!shared_channel_has_false_junction(&ir, after), "{after:?}");
+                    // The closest point on an orthogonal segment minimizes both circle
+                    // distance and diamond L1 distance, so this checks its entire length.
+                    for path in after {
+                        for pair in path.points.windows(2) {
+                            let restore = |point: LayoutPoint| {
+                                if transpose {
+                                    LayoutPoint {
+                                        x: point.y,
+                                        y: point.x,
+                                    }
+                                } else {
+                                    point
+                                }
+                            };
+                            let (a, b) = (restore(pair[0]), restore(pair[1]));
+                            let dx = 100.0_f32.clamp(a.x.min(b.x), a.x.max(b.x)) - 100.0;
+                            let dy = 100.0_f32.clamp(a.y.min(b.y), a.y.max(b.y)) - 100.0;
+                            assert!(
+                                if diamond {
+                                    dx.abs() + dy.abs() >= 40.0 - 0.001
+                                } else {
+                                    dx * dx + dy * dy >= 1600.0 - 0.01
+                                },
+                                "a moved segment entered its curved endpoint: {a:?} -> {b:?}"
+                            );
+                            assert!(
+                                !(a.x.max(b.x) > 260.01
+                                    && a.x.min(b.x) < 339.99
+                                    && a.y.max(b.y) > 160.01
+                                    && a.y.min(b.y) < 239.99),
+                                "a moved segment entered its rectangular endpoint"
+                            );
+                        }
+                    }
+                }
+                let mut repeated = protected.clone();
+                separate_shared_channels(&ir, &nodes, &mut repeated);
+                assert_eq!(repeated, protected, "separation must be idempotent");
+                let mut deterministic = before.clone();
+                separate_shared_channels(&ir, &nodes, &mut deterministic);
+                assert_eq!(deterministic, protected);
+            }
+        }
+    }
+
     /// Two edges that share neither source nor target never run along the same line: a return
     /// edge used to be drawn over the trunk it returns along, and blocked same-row edges over
     /// each other, so the reader could not tell which line went where.
@@ -37726,7 +37921,6 @@ mod tests {
             }
         }
         assert_eq!(traced.layout, layout_diagram_traced(&ir).layout);
-
     }
 
     #[test]
