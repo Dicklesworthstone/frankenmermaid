@@ -7995,6 +7995,17 @@ fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<
             LayoutAlgorithm::Grid,
             LayoutAlgorithm::Sugiyama,
         ],
+        // A cyclic graph rejected from Force still needs cycle removal and crossing
+        // minimization. Tree lays out only a spanning hierarchy, so taking it merely because
+        // it appears first can bury the remaining connections in a tangle of return paths.
+        // Try the layered alternative first; every candidate still has to pass the same
+        // time, iteration, and routing guards below. Tree remains available when the layered
+        // work exceeds one of those limits.
+        _ if selected == LayoutAlgorithm::Force
+            && GraphMetrics::from_ir(ir).back_edge_count > 0 =>
+        {
+            [selected, LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree]
+        }
         _ => [selected, LayoutAlgorithm::Tree, LayoutAlgorithm::Sugiyama],
     };
 
@@ -34507,6 +34518,178 @@ mod tests {
         assert!(traced.trace.guard.iteration_budget_exceeded);
         assert!(traced.trace.guard.route_budget_exceeded);
         assert_eq!(traced.trace.dispatch.reason, traced.trace.guard.reason);
+    }
+
+    #[test]
+    fn cyclic_force_fallback_preserves_layered_feedback_within_surface_budgets() {
+        for (name, source, nodes, edges) in [
+            (
+                "braid",
+                include_str!("../../fm-cli/tests/golden/cycle_braid.mmd"),
+                9,
+                20,
+            ),
+            (
+                "ladder",
+                include_str!("../../fm-cli/tests/golden/cycle_ladder.mmd"),
+                10,
+                22,
+            ),
+        ] {
+            let ir = parse(source).ir;
+            assert_eq!((ir.nodes.len(), ir.edges.len()), (nodes, edges));
+            // CLI/WASM guardrails come from the broker, whose nominal layout share is
+            // smaller than LayoutGuardrails::default(). Both real surface tiers reject
+            // Force here while admitting both Tree and Sugiyama.
+            for tier in [MermaidPressureTier::Nominal, MermaidPressureTier::Elevated] {
+                let broker = MermaidBudgetLedger::new(&MermaidPressureReport {
+                    tier,
+                    telemetry_available: true,
+                    ..MermaidPressureReport::default()
+                });
+                let guardrails = LayoutGuardrails::from(&broker);
+                let traced = layout_diagram_traced_with_algorithm_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Auto,
+                    guardrails,
+                );
+                let guard = traced.trace.guard;
+                assert_eq!(guard.initial_algorithm, LayoutAlgorithm::Force);
+                assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Sugiyama);
+                assert_eq!(guard.reason, "guardrail_fallback_time_budget");
+                assert!(guard.fallback_applied);
+                assert!(guard.selected_estimated_layout_time_ms <= guardrails.max_layout_time_ms);
+                assert!(
+                    guard.selected_estimated_layout_iterations <= guardrails.max_layout_iterations
+                );
+                assert!(guard.selected_estimated_route_ops <= guardrails.max_route_ops);
+
+                let layout = &traced.layout;
+                assert_eq!(layout.nodes.len(), nodes);
+                assert_eq!(layout.edges.len(), edges);
+                assert!(layout.stats.cycle_count > 0);
+                assert!(
+                    layout.edges.iter().any(|edge| edge.reversed),
+                    "{name}/{tier:?}: feedback connections must retain their distinct routing"
+                );
+                for (index, node) in layout.nodes.iter().enumerate() {
+                    assert!(node.bounds.x.is_finite() && node.bounds.y.is_finite());
+                    assert!(node.bounds.width.is_finite() && node.bounds.height.is_finite());
+                    assert!(node.bounds.width > 0.0 && node.bounds.height > 0.0);
+                    for other in &layout.nodes[index + 1..] {
+                        assert!(
+                            !rects_overlap(node.bounds, other.bounds),
+                            "{name}/{tier:?}: fallback overlaps two cards"
+                        );
+                    }
+                }
+                for edge in &layout.edges {
+                    assert!(edge.points.len() >= 2);
+                    assert!(
+                        edge.points
+                            .iter()
+                            .all(|point| point.x.is_finite() && point.y.is_finite())
+                    );
+                }
+
+                // This is the complete layered result, not a spanning-tree layout with a
+                // changed dispatch label; repeated calls must retain identical geometry.
+                let layered = layout_diagram_traced_with_algorithm_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Sugiyama,
+                    guardrails,
+                );
+                assert_eq!(layout, &layered.layout);
+                let repeated = layout_diagram_traced_with_algorithm_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Auto,
+                    guardrails,
+                );
+                assert_eq!(layout, &repeated.layout);
+            }
+        }
+    }
+
+    #[test]
+    fn cyclic_force_fallback_keeps_iteration_and_routing_limits() {
+        let ir = parse(include_str!("../../fm-cli/tests/golden/cycle_braid.mmd")).ir;
+        let broker = MermaidBudgetLedger::new(&MermaidPressureReport {
+            tier: MermaidPressureTier::Nominal,
+            telemetry_available: true,
+            ..MermaidPressureReport::default()
+        });
+        let ordinary = LayoutGuardrails::from(&broker);
+        for guardrails in [
+            LayoutGuardrails {
+                max_layout_iterations: 30,
+                ..ordinary
+            },
+            LayoutGuardrails {
+                max_route_ops: 200,
+                ..ordinary
+            },
+        ] {
+            let guard = evaluate_layout_guardrails(&ir, LayoutAlgorithm::Force, guardrails);
+            assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Tree);
+            assert!(guard.fallback_applied);
+            assert!(guard.selected_estimated_layout_time_ms <= guardrails.max_layout_time_ms);
+            assert!(guard.selected_estimated_layout_iterations <= guardrails.max_layout_iterations);
+            assert!(guard.selected_estimated_route_ops <= guardrails.max_route_ops);
+        }
+
+        // If nothing fits, keep the existing lowest-cost forced fallback and report that
+        // fact honestly instead of treating the preferred layered candidate as admitted.
+        let impossible = LayoutGuardrails {
+            max_layout_time_ms: 1,
+            max_layout_iterations: 1,
+            max_route_ops: 1,
+        };
+        let guard = evaluate_layout_guardrails(&ir, LayoutAlgorithm::Force, impossible);
+        assert!(guard.reason.starts_with("guardrail_forced_"));
+        let selected = estimate_layout_cost(&ir, guard.selected_algorithm);
+        assert_eq!(selected.exceeds(impossible), (true, true, true));
+        for candidate in [
+            LayoutAlgorithm::Force,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Tree,
+        ] {
+            assert!(selected.score() <= estimate_layout_cost(&ir, candidate).score());
+        }
+    }
+
+    #[test]
+    fn cyclic_force_fallback_leaves_tree_and_specialized_preferences_intact() {
+        let tree = graph_ir(
+            DiagramType::Flowchart,
+            9,
+            &[
+                (0, 1),
+                (0, 2),
+                (1, 3),
+                (1, 4),
+                (2, 5),
+                (2, 6),
+                (3, 7),
+                (4, 8),
+            ],
+        );
+        let broker = MermaidBudgetLedger::new(&MermaidPressureReport {
+            tier: MermaidPressureTier::Nominal,
+            telemetry_available: true,
+            ..MermaidPressureReport::default()
+        });
+        let guardrails = LayoutGuardrails::from(&broker);
+        assert!(GraphMetrics::from_ir(&tree).is_tree_like);
+        let guard = evaluate_layout_guardrails(&tree, LayoutAlgorithm::Force, guardrails);
+        assert!(guard.fallback_applied);
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Tree);
+
+        let mut mindmap = parse(include_str!("../../fm-cli/tests/golden/cycle_braid.mmd")).ir;
+        mindmap.diagram_type = DiagramType::Mindmap;
+        assert!(GraphMetrics::from_ir(&mindmap).back_edge_count > 0);
+        let guard = evaluate_layout_guardrails(&mindmap, LayoutAlgorithm::Force, guardrails);
+        assert!(guard.fallback_applied);
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Radial);
     }
 
     #[test]
