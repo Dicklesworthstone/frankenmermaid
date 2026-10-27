@@ -666,7 +666,10 @@ pub fn parse_mermaid_with_detection_and_config(
     // An `info` diagram declares no nodes and no edges by construction — its whole content is
     // the renderer's version, resolved at render time — so the generic emptiness check below would
     // report every valid one as unparseable.
-    let carried_by_meta = diagram_type == DiagramType::Info
+    // A Kanban board's named columns are clusters. They remain meaningful content even when
+    // every column is empty; only a board with no columns and no cards should warn here.
+    let has_non_graph_content = diagram_type == DiagramType::Info
+        || (diagram_type == DiagramType::Kanban && !builder.ir_mut().clusters.is_empty())
         || builder
             .ir_mut()
             .treemap_meta
@@ -677,7 +680,7 @@ pub fn parse_mermaid_with_detection_and_config(
             .radar_meta
             .as_ref()
             .is_some_and(|meta| !meta.axes.is_empty());
-    if builder.node_count() == 0 && builder.edge_count() == 0 && !carried_by_meta {
+    if builder.node_count() == 0 && builder.edge_count() == 0 && !has_non_graph_content {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
         // lib.rs already names those at DETECTION, and its warning reaches this builder through the
         // `detection.warnings` loop above — so a second, differently-worded message from this site
@@ -23947,14 +23950,49 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn kanban_empty_board() {
-        let input = "kanban";
-        let parsed = parse_mermaid(input);
+        for input in [
+            "kanban",
+            "kanban\n  %% No columns yet\n",
+            "kanban\n  @{ wip: 3 }\n",
+        ] {
+            let parsed = parse_mermaid(input);
+            assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
+            assert!(parsed.ir.nodes.is_empty());
+            assert!(parsed.ir.edges.is_empty());
+            assert!(parsed.ir.clusters.is_empty());
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "No kanban columns or cards found"),
+                "{input:?}: a board without any valid columns must warn"
+            );
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "No parseable nodes or edges were found"),
+                "{input:?}: do not suppress the generic warning for unparseable content"
+            );
+        }
+    }
+
+    #[test]
+    fn kanban_named_empty_columns_are_parseable_content() {
+        let parsed = parse_mermaid("kanban\n  Todo\n  progress[In progress]\n  Done\n");
         assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
-        assert_eq!(parsed.ir.nodes.len(), 0);
-        assert!(
-            !parsed.warnings.is_empty(),
-            "Should warn about empty kanban"
-        );
+        assert!(parsed.ir.nodes.is_empty());
+        assert!(parsed.ir.edges.is_empty());
+        assert_eq!(parsed.ir.clusters.len(), 3);
+        let titles: Vec<_> = parsed
+            .ir
+            .clusters
+            .iter()
+            .filter_map(|column| column.title.and_then(|id| parsed.ir.labels.get(id.0)))
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(titles, ["Todo", "In progress", "Done"]);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     #[test]
