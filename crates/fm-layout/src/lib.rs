@@ -2331,6 +2331,8 @@ pub struct LayoutExtensions {
     pub activation_bars: Vec<LayoutActivationBar>,
     /// Sequence diagram notes — text boxes positioned near participant lifelines.
     pub sequence_notes: Vec<LayoutSequenceNote>,
+    /// Measured message captions, including wrapping and the clear space above each arrow.
+    pub sequence_messages: Vec<LayoutSequenceMessage>,
     /// Sequence diagram interaction fragments (loop, alt, par, etc.).
     pub sequence_fragments: Vec<LayoutSequenceFragment>,
     /// Sequence lifecycle markers such as destroy crosses on lifelines.
@@ -2501,6 +2503,41 @@ pub struct LayoutSequenceNote {
     /// Display lines, including measured wraps; the IR retains the authored text.
     pub text: String,
     pub bounds: LayoutRect,
+}
+
+/// A message caption measured by layout and consumed unchanged by graphical renderers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutSequenceMessage {
+    pub edge_index: usize,
+    /// Display rows; the IR retains the original message text.
+    pub text: String,
+    pub bounds: LayoutRect,
+    pub font_size: f32,
+    pub line_height: f32,
+}
+
+impl LayoutSequenceMessage {
+    pub const PADDING_X: f32 = 6.0;
+    pub const PADDING_Y: f32 = 3.0;
+    pub const ARROW_GAP: f32 = 6.0;
+
+    #[must_use]
+    pub fn line_center(&self, row: usize) -> LayoutPoint {
+        LayoutPoint {
+            x: self.bounds.center().x,
+            y: self.bounds.y + Self::PADDING_Y + (row as f32 + 0.5) * self.line_height,
+        }
+    }
+}
+
+impl LayoutExtensions {
+    #[must_use]
+    pub fn sequence_message(&self, edge_index: usize) -> Option<&LayoutSequenceMessage> {
+        self.sequence_messages
+            .binary_search_by_key(&edge_index, |message| message.edge_index)
+            .ok()
+            .and_then(|index| self.sequence_messages.get(index))
+    }
 }
 
 impl LayoutSequenceNote {
@@ -3665,7 +3702,7 @@ pub fn build_render_scene_with_metrics(
     root.children
         .push(RenderItem::Group(build_cluster_layer(layout)));
     if ir.diagram_type == DiagramType::Sequence {
-        append_sequence_scene_layers(&mut root, ir, layout);
+        append_sequence_scene_layers(&mut root, ir, layout, metrics);
     }
     root.children
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
@@ -4136,6 +4173,7 @@ fn append_sequence_scene_layers(
     root: &mut RenderGroup,
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
 ) {
     let mut backgrounds = RenderGroup::new(Some(String::from("sequence-backgrounds")));
     for fragment in &layout.extensions.sequence_fragments {
@@ -4213,8 +4251,8 @@ fn append_sequence_scene_layers(
         ));
     }
 
-    let fragments = build_sequence_fragment_layer(ir, layout);
-    let notes = build_sequence_note_layer(layout);
+    let fragments = build_sequence_fragment_layer(ir, layout, metrics);
+    let notes = build_sequence_note_layer(layout, metrics);
     for group in [backgrounds, lifelines, activations, fragments, notes] {
         if !group.children.is_empty() {
             root.children.push(RenderItem::Group(group));
@@ -4260,12 +4298,15 @@ fn sequence_scene_text(
     })
 }
 
-fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+fn build_sequence_fragment_layer(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderGroup {
     let mut layer = RenderGroup::new(Some(String::from("sequence-fragments")));
-    // The shared scene's node text uses 14px. Fragment labels use the same 75% scale as SVG.
-    const FONT_SIZE: f32 = 14.0;
-    const LABEL_FONT_SIZE: f32 = FONT_SIZE * 0.75;
-    const LABEL_HEIGHT: f32 = FONT_SIZE + 8.0;
+    let font_size = metrics.font_size();
+    let label_font_size = font_size * 0.75;
+    let label_height = font_size + 8.0;
     for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
         let bounds = fragment.bounds;
         let mut stroke = StrokeStyle::solid("#94a3b8", 1.0);
@@ -4299,8 +4340,8 @@ fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) 
         let tab = LayoutRect {
             x: bounds.x,
             y: bounds.y,
-            width: keyword.len() as f32 * 7.0 + 16.0,
-            height: LABEL_HEIGHT,
+            width: metrics.estimate_width(keyword) * 0.75 + 16.0,
+            height: label_height,
         };
         layer.children.push(sequence_scene_path(
             node_path(tab, fm_core::NodeShape::Rect),
@@ -4313,8 +4354,8 @@ fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) 
         layer.children.push(sequence_scene_text(
             keyword.to_owned(),
             bounds.x + 6.0,
-            bounds.y + LABEL_HEIGHT / 2.0,
-            LABEL_FONT_SIZE,
+            bounds.y + label_height / 2.0,
+            label_font_size,
             TextAlign::Start,
             TextBaseline::Middle,
         ));
@@ -4322,8 +4363,8 @@ fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) 
             layer.children.push(sequence_scene_text(
                 format!("[{}]", fragment.label),
                 bounds.center().x,
-                bounds.y + LABEL_HEIGHT + LABEL_FONT_SIZE,
-                LABEL_FONT_SIZE,
+                bounds.y + label_height + label_font_size,
+                label_font_size,
                 TextAlign::Middle,
                 TextBaseline::Middle,
             ));
@@ -4372,7 +4413,7 @@ fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) 
                     format!("[{}]", alternative.label),
                     bounds.x + 6.0,
                     y - 3.0,
-                    LABEL_FONT_SIZE,
+                    label_font_size,
                     TextAlign::Start,
                     TextBaseline::Bottom,
                 ));
@@ -4382,9 +4423,11 @@ fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) 
     layer
 }
 
-fn build_sequence_note_layer(layout: &DiagramLayout) -> RenderGroup {
+fn build_sequence_note_layer(
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderGroup {
     let mut layer = RenderGroup::new(Some(String::from("sequence-notes")));
-    let metrics = fm_core::FontMetrics::default_metrics();
     let font_size = metrics.font_size() * LayoutSequenceNote::FONT_SCALE;
     let line_height = metrics.line_height_px() * LayoutSequenceNote::FONT_SCALE;
     for note in &layout.extensions.sequence_notes {
@@ -4908,6 +4951,11 @@ fn build_label_layer(
             continue;
         }
 
+        if ir.diagram_type == DiagramType::Sequence {
+            append_sequence_participant_text(&mut layer, ir, node_box, &label_text, metrics);
+            continue;
+        }
+
         layer.children.push(RenderItem::Text(RenderText {
             source: RenderSource::Node(node_box.node_index),
             text: label_text,
@@ -4932,19 +4980,7 @@ fn build_label_layer(
             continue;
         }
 
-        layer.children.push(RenderItem::Text(RenderText {
-            source: RenderSource::Node(node_box.node_index),
-            text: label_text,
-            x: node_box.bounds.x + (node_box.bounds.width / 2.0),
-            y: node_box.bounds.y + (node_box.bounds.height / 2.0),
-            font_size: 14.0,
-            align: TextAlign::Middle,
-            baseline: TextBaseline::Middle,
-            fill: FillStyle::Solid {
-                color: String::from("#0f172a"),
-                opacity: 1.0,
-            },
-        }));
+        append_sequence_participant_text(&mut layer, ir, node_box, &label_text, metrics);
     }
 
     for edge in &layout.edges {
@@ -4961,6 +4997,48 @@ fn build_label_layer(
         let Some(label) = edge_ir.label.and_then(|label_id| ir.labels.get(label_id.0)) else {
             continue;
         };
+
+        if let Some(message) = layout.extensions.sequence_message(edge.edge_index) {
+            let source = RenderSource::Edge(edge.edge_index);
+            let style = edge_labels::edge_label_style(ir, edge.edge_index);
+            let color = style
+                .get("color")
+                .and_then(|value| scene_paint(value))
+                .unwrap_or_else(|| String::from("#334155"));
+            let opacity = style
+                .get("opacity")
+                .and_then(|value| value.parse::<f32>().ok())
+                .filter(|opacity| opacity.is_finite())
+                .map_or(1.0, |opacity| opacity.clamp(0.0, 1.0));
+            layer.children.push(RenderItem::Path(RenderPath {
+                source,
+                commands: rounded_rect_path(message.bounds, 4.0),
+                fill: Some(FillStyle::Solid {
+                    color: String::from("#ffffff"),
+                    opacity,
+                }),
+                stroke: None,
+                marker_start: MarkerKind::None,
+                marker_end: MarkerKind::None,
+            }));
+            for (row, text) in message.text.split('\n').enumerate() {
+                let center = message.line_center(row);
+                layer.children.push(RenderItem::Text(RenderText {
+                    source,
+                    text: text.to_owned(),
+                    x: center.x,
+                    y: center.y,
+                    font_size: message.font_size,
+                    align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity,
+                    },
+                }));
+            }
+            continue;
+        }
 
         if let Some(placer) = edge_labels.as_mut() {
             let style = edge_labels::edge_label_style(ir, edge.edge_index);
@@ -5066,6 +5144,45 @@ fn build_label_layer(
         .as_ref()
         .map_or(layout.bounds, edge_labels::EdgeLabelPlacer::bounds);
     (layer, bounds)
+}
+
+fn append_sequence_participant_text(
+    layer: &mut RenderGroup,
+    ir: &MermaidDiagramIr,
+    node: &LayoutNodeBox,
+    label: &str,
+    metrics: &fm_core::FontMetrics,
+) {
+    let style = ir.resolved_node_style(node.node_index);
+    let font_size = style
+        .get("font-size")
+        .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+        .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        .unwrap_or(metrics.font_size());
+    let color = style
+        .get("color")
+        .and_then(|value| scene_paint(value))
+        .unwrap_or_else(|| String::from("#0f172a"));
+    let center = node.bounds.center();
+    let lines: Vec<&str> = label.split('\n').collect();
+    for (row, text) in lines.iter().enumerate() {
+        layer.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Node(node.node_index),
+            text: (*text).to_owned(),
+            x: center.x,
+            y: center.y
+                + (row as f32 - (lines.len() - 1) as f32 * 0.5)
+                    * font_size
+                    * metrics.config().line_height,
+            font_size,
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: color.clone(),
+                opacity: 1.0,
+            },
+        }));
+    }
 }
 
 /// Preferred label anchor before measured collision-aware placement. Graph renderers pass
@@ -5354,6 +5471,7 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .font_metrics
                 .as_ref()
                 .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
         ),
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
@@ -9588,17 +9706,34 @@ pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_sequence_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+    layout_diagram_sequence_traced_with_metrics(
+        ir,
+        &fm_core::FontMetrics::default_metrics(),
+        LayoutSpacing::default(),
+    )
 }
 
 fn layout_diagram_sequence_traced_with_metrics(
     ir: &MermaidDiagramIr,
     metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
 ) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir, metrics);
     // An `actor` is drawn as a stick figure with its name beneath: it needs a taller header.
-    for (size, node) in node_sizes.iter_mut().zip(&ir.nodes) {
+    for (index, (size, node)) in node_sizes.iter_mut().zip(&ir.nodes).enumerate() {
+        if let Some(font_size) = ir
+            .resolved_node_style(index)
+            .get("font-size")
+            .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+            .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        {
+            let participant_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                ..metrics.config().clone()
+            });
+            *size = compute_node_size(ir, node, &participant_metrics, index);
+        }
         if node
             .classes
             .iter()
@@ -9638,8 +9773,6 @@ fn layout_diagram_sequence_traced_with_metrics(
         };
     }
 
-    let spacing = LayoutSpacing::default();
-
     // ── Phase 1: identify participants (declaration order) ──────────────
     // Participants are the nodes; edges are messages between them.
     // Preserve the declaration order from the parser which already sorted
@@ -9653,6 +9786,41 @@ fn layout_diagram_sequence_traced_with_metrics(
             .as_ref()
             .is_some_and(|meta| meta.hide_footbox);
 
+    let mut sequence_messages = measure_sequence_messages(ir, metrics);
+    let mut message_spans: Vec<Vec<(usize, f32)>> = vec![Vec::new(); node_count];
+    let mut self_loop_widths = vec![spacing.sequence_self_loop_width; node_count];
+    for message in &sequence_messages {
+        let edge = &ir.edges[message.edge_index];
+        let (Some(source), Some(target)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            continue;
+        };
+        if source >= node_count || target >= node_count {
+            continue;
+        }
+        if source == target {
+            self_loop_widths[source] = self_loop_widths[source].max(message.bounds.width + 16.0);
+        } else {
+            let creation_inset = ir.sequence_meta.as_ref().map_or(0.0, |meta| {
+                if meta.lifecycle_events.iter().any(|event| {
+                    event.kind == fm_core::LifecycleEventKind::Create
+                        && event.at_edge == message.edge_index
+                        && event.participant.0 == target
+                }) {
+                    node_sizes[target].0 * 0.5
+                } else {
+                    0.0
+                }
+            });
+            message_spans[source.max(target)].push((
+                source.min(target),
+                message.bounds.width + 24.0 + creation_inset,
+            ));
+        }
+    }
+
     // Build participant index → horizontal position mapping.
     // Each participant is centered at (participant_order * gap, header_y).
     let mut rank_by_node = vec![0_usize; node_count];
@@ -9664,7 +9832,18 @@ fn layout_diagram_sequence_traced_with_metrics(
     let mut participant_x_centers: Vec<f32> = Vec::with_capacity(node_count);
     for (participant_order, (width, _height)) in node_sizes.iter().copied().enumerate() {
         let half_width = width / 2.0;
-        let cx = x_cursor + half_width;
+        let mut cx = x_cursor + half_width;
+        for &(source, width) in &message_spans[participant_order] {
+            cx = cx.max(participant_x_centers[source] + width);
+        }
+        if participant_order > 0 {
+            cx = cx.max(
+                participant_x_centers[participant_order - 1]
+                    + self_loop_widths[participant_order - 1]
+                    + half_width
+                    + 24.0,
+            );
+        }
         participant_x_centers.push(cx);
         centers[participant_order] = (cx, header_y);
         rank_by_node[participant_order] = 0;
@@ -9698,25 +9877,30 @@ fn layout_diagram_sequence_traced_with_metrics(
             message_gap,
             &sequence_notes,
             metrics.font_size(),
+            &sequence_messages,
         )
     });
     let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
         (rows.message_y.clone(), rows.end)
     } else {
         let mut message_y_positions: Vec<f32> = Vec::with_capacity(ir.edges.len());
-        let mut y_cursor = first_message_y;
-        for edge in &ir.edges {
-            message_y_positions.push(y_cursor);
-            // Self-messages need more vertical space for the loop.
-            let row_height = if is_self_message(ir, edge) {
-                message_gap * 1.5
+        let mut floor = first_message_y - message_gap;
+        for (edge_index, edge) in ir.edges.iter().enumerate() {
+            let caption_height = sequence_messages
+                .binary_search_by_key(&edge_index, |message| message.edge_index)
+                .ok()
+                .map_or(0.0, |index| sequence_messages[index].bounds.height);
+            let y =
+                floor + message_gap.max(caption_height + LayoutSequenceMessage::ARROW_GAP + 8.0);
+            message_y_positions.push(y);
+            floor = y + if is_self_message(ir, edge) {
+                message_gap * 0.6
             } else {
-                message_gap
+                0.0
             };
-            y_cursor += row_height;
         }
         // Total sequence content height before optional mirrored participant headers.
-        (message_y_positions, message_gap.mul_add(0.5, y_cursor))
+        (message_y_positions, message_gap.mul_add(1.5, floor))
     };
 
     // A participant `create`d mid-diagram is drawn where it is created, as mermaid draws it: its box
@@ -9783,7 +9967,10 @@ fn layout_diagram_sequence_traced_with_metrics(
 
             let points = if is_self_loop {
                 // Self-message: draw a loop to the right and back.
-                let loop_width = spacing.sequence_self_loop_width;
+                let loop_width = self_loop_widths
+                    .get(source_index)
+                    .copied()
+                    .unwrap_or(spacing.sequence_self_loop_width);
                 let loop_height = message_gap * 0.6;
                 smallvec![
                     LayoutPoint { x: source_x, y },
@@ -9820,6 +10007,18 @@ fn layout_diagram_sequence_traced_with_metrics(
         })
         .collect();
 
+    for message in &mut sequence_messages {
+        let edge = &edges[message.edge_index];
+        let first = edge.points[0];
+        let last = if edge.is_self_loop {
+            edge.points[1]
+        } else {
+            edge.points[edge.points.len() - 1]
+        };
+        message.bounds.x = f32::midpoint(first.x, last.x) - message.bounds.width * 0.5;
+        message.bounds.y = first.y - LayoutSequenceMessage::ARROW_GAP - message.bounds.height;
+    }
+
     // ── Phase 5: compute bounds and extensions ─────────────────────────
     let total_width = if node_count > 0 {
         let last_cx = participant_x_centers[node_count - 1];
@@ -9827,7 +10026,14 @@ fn layout_diagram_sequence_traced_with_metrics(
         last_cx + last_half_w
     } else {
         0.0
-    };
+    }
+    .max(
+        edges
+            .iter()
+            .flat_map(|edge| &edge.points)
+            .map(|point| point.x)
+            .fold(0.0, f32::max),
+    );
 
     push_snapshot(
         &mut trace,
@@ -10063,6 +10269,7 @@ fn layout_diagram_sequence_traced_with_metrics(
         diagram_bottom,
         message_gap,
         timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
+        total_width,
     );
 
     // Notes beside the outermost actors and fragment borders can extend beyond the
@@ -10072,7 +10279,16 @@ fn layout_diagram_sequence_traced_with_metrics(
         .iter()
         .map(|cluster| cluster.bounds)
         .chain(sequence_notes.iter().map(|note| note.bounds))
+        .chain(sequence_messages.iter().map(|message| message.bounds))
         .chain(sequence_fragments.iter().map(|fragment| fragment.bounds))
+        .chain(edges.iter().flat_map(|edge| {
+            edge.points.iter().map(|point| LayoutRect {
+                x: point.x - 2.0,
+                y: point.y - 2.0,
+                width: 4.0,
+                height: 4.0,
+            })
+        }))
         .fold(None::<(f32, f32, f32, f32)>, |acc, rect| {
             let right = rect.x + rect.width;
             let bottom = rect.y + rect.height;
@@ -10148,6 +10364,7 @@ fn layout_diagram_sequence_traced_with_metrics(
                 cluster_dividers: Vec::new(),
                 activation_bars,
                 sequence_notes,
+                sequence_messages,
                 sequence_fragments,
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
@@ -10338,6 +10555,54 @@ fn sequence_note_height(line_count: usize, metrics: &fm_core::FontMetrics) -> f3
     )
 }
 
+/// Wrap long captions before placing participants or rows. This bounds a verbose message's
+/// horizontal footprint while retaining every word and every authored line break.
+fn measure_sequence_messages(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutSequenceMessage> {
+    ir.edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge_index, edge)| {
+            if edge.arrow == fm_core::ArrowType::Invisible {
+                return None;
+            }
+            let text = &ir.labels.get(edge.label?.0)?.text;
+            if text.is_empty() {
+                return None;
+            }
+            let style = edge_labels::edge_label_style(ir, edge_index);
+            let font_size = style
+                .get("font-size")
+                .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+                .unwrap_or(metrics.font_size() * 0.85);
+            let width_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size: font_size * 1.15,
+                ..metrics.config().clone()
+            });
+            let lines = width_metrics.wrap_to_width(text, (font_size * 24.0).max(320.0));
+            let text = lines.join("\n");
+            let line_height = font_size * metrics.config().line_height;
+            Some(LayoutSequenceMessage {
+                edge_index,
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: width_metrics.estimate_multiline_width(&text)
+                        + 2.0 * LayoutSequenceMessage::PADDING_X,
+                    height: lines.len().max(1) as f32 * line_height
+                        + 2.0 * LayoutSequenceMessage::PADDING_Y,
+                },
+                text,
+                font_size,
+                line_height,
+            })
+        })
+        .collect()
+}
+
 /// Where the sequence timeline puts each message, note and fragment.
 struct SequenceTimelineRows {
     message_y: Vec<f32>,
@@ -10362,6 +10627,7 @@ fn sequence_timeline_rows(
     message_gap: f32,
     notes: &[LayoutSequenceNote],
     font: f32,
+    messages: &[LayoutSequenceMessage],
 ) -> Option<SequenceTimelineRows> {
     use fm_core::IrSequenceStep as Step;
     let timeline = &meta.timeline;
@@ -10407,12 +10673,17 @@ fn sequence_timeline_rows(
     for step in timeline {
         match step {
             Step::Message => {
-                let y = floor
-                    + if after_message {
-                        message_gap
-                    } else {
-                        message_gap * 0.5
-                    };
+                let edge_index = rows.message_y.len();
+                let caption_height = messages
+                    .binary_search_by_key(&edge_index, |message| message.edge_index)
+                    .ok()
+                    .map_or(0.0, |index| messages[index].bounds.height);
+                let pitch = if after_message {
+                    message_gap
+                } else {
+                    message_gap * 0.5
+                };
+                let y = floor + pitch.max(caption_height + LayoutSequenceMessage::ARROW_GAP + 8.0);
                 let edge = &ir.edges[rows.message_y.len()];
                 rows.message_y.push(y);
                 floor = if is_self_message(ir, edge) {
@@ -10559,6 +10830,7 @@ fn build_sequence_fragment_geometry(
     diagram_bottom: f32,
     message_gap: f32,
     timeline_spans: Option<&[(f32, f32, Vec<f32>)]>,
+    message_right: f32,
 ) -> Vec<LayoutSequenceFragment> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
@@ -10571,7 +10843,8 @@ fn build_sequence_fragment_geometry(
         let last_cx = participant_x_centers[last_idx];
         let last_half_w = node_sizes.get(last_idx).map_or(50.0, |(w, _)| w / 2.0);
         last_cx + last_half_w
-    };
+    }
+    .max(message_right);
 
     meta.fragments
         .iter()
@@ -30973,8 +31246,34 @@ mod tests {
 
     #[test]
     fn render_scene_plain_sequences_add_only_lifelines() {
-        let ir = parse("sequenceDiagram\nA->>B: ping\nB-->>A: pong\n").ir;
+        let mut ir = parse("sequenceDiagram\nA->>B: ping\nB-->>A: pong\n").ir;
+        // This fixture asserts both head and foot labels below. Mirroring is an explicit
+        // configuration; the default without a footbox is checked independently here too.
+        let default_layout = layout_diagram(&ir);
+        assert!(default_layout.extensions.sequence_mirror_headers.is_empty());
+        let default_scene = build_render_scene(&ir, &default_layout);
+        for name in ["A", "B"] {
+            let count = default_scene
+                .root
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Group(group) if group.id.as_deref() == Some("labels") => {
+                        Some(group)
+                    }
+                    _ => None,
+                })
+                .flat_map(|group| &group.children)
+                .filter(|item| matches!(item, RenderItem::Text(text) if text.text == name))
+                .count();
+            assert_eq!(
+                count, 1,
+                "the default must draw exactly one participant header"
+            );
+        }
+        ir.meta.init.config.sequence_mirror_actors = Some(true);
         let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_mirror_headers.len(), 2);
         let scene = build_render_scene(&ir, &layout);
         let layer_ids: Vec<&str> = scene
             .root
@@ -36738,6 +37037,135 @@ mod tests {
             })
             .expect("edge layer");
         assert_eq!(edge_paths, 2, "only the two visible edges are drawn");
+    }
+
+    #[test]
+    fn sequence_messages_reserve_their_wrapped_rows_and_self_loop_corridors() {
+        let long = "Validate the supplied authorization token and retry the operation after the remote service responds ".repeat(4);
+        let source = format!(
+            "sequenceDiagram\nparticipant A as Request<br/>handler\nparticipant B as Remote service\nparticipant C as Audit log\n\
+             A->>B: {long}\nB->>B: first row<br/><br/>last row\n\
+             Note over A,B: Processing has completed\nalt accepted\nB-->>A: {long}\nelse deferred\nB->>C: saved\nend\n"
+        );
+        for font_size in [15.0, 30.0] {
+            for source_order in [true, false] {
+                let mut ir = parse(&source).ir;
+                if !source_order {
+                    ir.sequence_meta.as_mut().unwrap().timeline.clear();
+                }
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size,
+                    line_height: 1.5,
+                    ..Default::default()
+                });
+                let config = super::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                };
+                let layout = super::layout_diagram_with_config(&ir, config.clone());
+                assert_eq!(layout, super::layout_diagram_with_config(&ir, config));
+                assert_eq!(layout.extensions.sequence_messages.len(), 4);
+                let first = layout.extensions.sequence_message(0).unwrap();
+                assert!(first.text.split('\n').count() > 3);
+                assert_eq!(
+                    first.text.split_whitespace().collect::<Vec<_>>(),
+                    long.split_whitespace().collect::<Vec<_>>(),
+                    "wrapping must retain the full caption"
+                );
+                assert!(
+                    layout
+                        .extensions
+                        .sequence_message(1)
+                        .unwrap()
+                        .text
+                        .contains("\n\n")
+                );
+                for message in &layout.extensions.sequence_messages {
+                    let edge = &layout.edges[message.edge_index];
+                    let arrow_y = edge.points[0].y;
+                    assert!(message.bounds.y + message.bounds.height <= arrow_y - 5.99);
+                    assert!(message.bounds.x >= layout.bounds.x);
+                    assert!(message.bounds.y >= layout.bounds.y);
+                    assert!(
+                        message.bounds.x + message.bounds.width
+                            <= layout.bounds.x + layout.bounds.width
+                    );
+                    assert!(
+                        message.bounds.y + message.bounds.height
+                            <= layout.bounds.y + layout.bounds.height
+                    );
+                    assert!((message.font_size - font_size * 0.85).abs() < 0.001);
+                    for earlier in &layout.edges[..message.edge_index] {
+                        assert!(
+                            earlier
+                                .points
+                                .iter()
+                                .all(|point| point.y < message.bounds.y)
+                        );
+                    }
+                }
+                let loop_edge = &layout.edges[1];
+                assert!(loop_edge.is_self_loop);
+                assert!(loop_edge.points[1].x < layout.nodes[2].bounds.x);
+                for edge in &layout.edges {
+                    assert!(edge.points.iter().all(|point| {
+                        point.x >= layout.bounds.x
+                            && point.x <= layout.bounds.x + layout.bounds.width
+                            && point.y >= layout.bounds.y
+                            && point.y <= layout.bounds.y + layout.bounds.height
+                    }));
+                }
+                let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+                let labels = scene
+                    .root
+                    .children
+                    .iter()
+                    .find_map(|item| match item {
+                        RenderItem::Group(group) if group.id.as_deref() == Some("labels") => {
+                            Some(group)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                for text in ["Request", "handler"] {
+                    assert!(labels.children.iter().any(|item| {
+                        matches!(item, RenderItem::Text(row) if row.text == text && row.font_size == font_size)
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_message_spacing_honors_configuration_and_created_participants() {
+        let ir = parse("sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: This caption needs clear space before the created participant header\nB->>B: finishing\n").ir;
+        let mut config = super::LayoutConfig::default();
+        config.spacing.sequence_participant_gap_extra = 600.0;
+        config.spacing.sequence_min_message_gap = 160.0;
+        let layout = super::layout_diagram_with_config(&ir, config);
+        assert!(layout.nodes[1].bounds.x - layout.nodes[0].bounds.x > 600.0);
+        let caption = layout.extensions.sequence_message(0).unwrap();
+        assert!(caption.bounds.x + caption.bounds.width < layout.nodes[1].bounds.x);
+        assert!(layout.edges[1].points[0].y - layout.edges[0].points[0].y >= 160.0);
+        let last_point = layout.edges[1].points[1];
+        assert!(last_point.x <= layout.bounds.x + layout.bounds.width);
+    }
+
+    #[test]
+    fn sequence_fragment_contains_the_rightmost_wide_self_message() {
+        let ir = parse("sequenceDiagram\nparticipant Worker\nloop until persisted\nWorker->>Worker: Serialize the completed transaction into durable storage before releasing the request\nend\n").ir;
+        let layout = layout_diagram(&ir);
+        let frame = layout.extensions.sequence_fragments[0].bounds;
+        let message = layout.extensions.sequence_message(0).unwrap();
+        assert!(message.text.contains('\n'));
+        assert!(message.bounds.x >= frame.x);
+        assert!(message.bounds.x + message.bounds.width <= frame.x + frame.width);
+        assert!(layout.edges[0].points.iter().all(|point| {
+            point.x >= frame.x
+                && point.x <= frame.x + frame.width
+                && point.y >= frame.y
+                && point.y <= frame.y + frame.height
+        }));
     }
 
     #[test]

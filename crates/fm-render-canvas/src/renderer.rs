@@ -2788,7 +2788,34 @@ impl Canvas2dRenderer {
 
             // A Sankey edge label stores its quantity. The ribbon width and node totals
             // communicate that value; SVG likewise omits a separate number on each link.
-            if ir.diagram_type != DiagramType::Sankey
+            if let Some(message) = layout.extensions.sequence_message(edge_path.edge_index) {
+                let bounds = message.bounds;
+                ctx.set_fill_style(&self.config.node_fill);
+                ctx.fill_rect(
+                    f64::from(bounds.x) + offset_x,
+                    f64::from(bounds.y) + offset_y,
+                    f64::from(bounds.width),
+                    f64::from(bounds.height),
+                );
+                self.draw_calls += 1;
+                ctx.set_fill_style(edge_label_fill);
+                ctx.set_font(&format!(
+                    "{}px {}",
+                    message.font_size, self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for (row, text) in message.text.split('\n').enumerate() {
+                    let center = message.line_center(row);
+                    ctx.fill_text(
+                        text,
+                        f64::from(center.x) + offset_x,
+                        f64::from(center.y) + offset_y,
+                    );
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                }
+            } else if ir.diagram_type != DiagramType::Sankey
                 && let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
                 && points.len() >= 2
@@ -6771,6 +6798,138 @@ mod tests {
                             if text == "+go()")
                     ));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn measured_sequence_captions_share_geometry_across_graphical_backends() {
+        let source = "sequenceDiagram\nparticipant Client\nparticipant Server\nClient->>Server: Authenticate the incoming request with a signed identity token that includes the resource owner and permission scope before continuing\nServer->>Server: persist session<br/>write audit record<br/>return result\nServer-->>Client: complete\n";
+        let ir = fm_parser::parse(source).ir;
+        for font_size in [15.0, 28.0] {
+            let config = CanvasRenderConfig {
+                font_size,
+                line_height: 1.5,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let messages = &layout.extensions.sequence_messages;
+            assert_eq!(messages.len(), 3);
+            assert!(messages[0].text.contains('\n'), "long captions must wrap");
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                for message in messages {
+                    for (row, text) in message.text.split('\n').enumerate() {
+                        let center = message.line_center(row);
+                        let (offset_x, offset_y) = if use_scene {
+                            (-scene.bounds.x, -scene.bounds.y)
+                        } else {
+                            (-layout.bounds.x, -layout.bounds.y)
+                        };
+                        let mut font = String::new();
+                        let drawn: Vec<_> = ctx
+                            .operations()
+                            .iter()
+                            .filter_map(|op| match op {
+                                DrawOperation::SetFont(value) => {
+                                    font.clone_from(value);
+                                    None
+                                }
+                                DrawOperation::FillText(value, x, y) if value == text => {
+                                    Some((*x, *y, font.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(drawn.len(), 1, "scene={use_scene}, row={text}");
+                        assert!((drawn[0].0 - f64::from(center.x + offset_x)).abs() < 0.01);
+                        assert!((drawn[0].1 - f64::from(center.y + offset_y)).abs() < 0.01);
+                        let size = drawn[0]
+                            .2
+                            .split_whitespace()
+                            .find_map(|part| {
+                                part.strip_suffix("px")
+                                    .and_then(|size| size.parse::<f32>().ok())
+                            })
+                            .unwrap();
+                        assert!((size - message.font_size).abs() < 0.01);
+                    }
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            for message in messages {
+                let runs: Vec<_> = plan
+                    .text_runs
+                    .iter()
+                    .filter(|run| {
+                        run.source == crate::gpu_plan::GpuTextSource::Edge
+                            && run.node_index as usize == message.edge_index
+                    })
+                    .collect();
+                let rows: Vec<_> = message
+                    .text
+                    .split('\n')
+                    .enumerate()
+                    .filter(|(_, line)| !line.is_empty())
+                    .collect();
+                assert_eq!(
+                    runs.len(),
+                    rows.len(),
+                    "every visible message row needs a GPU run"
+                );
+                for (run, (row, text)) in runs.iter().zip(rows) {
+                    let quads = &plan.text_quads
+                        [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                    assert_eq!(
+                        quads.len(),
+                        text.chars().filter(|ch| !ch.is_control()).count()
+                    );
+                    assert!(quads.iter().all(|quad| {
+                        (quad.half_extent[1] * 2.0 - message.font_size).abs() < 0.01
+                            && (quad.center[1] - message.line_center(row).y).abs() < 0.01
+                    }));
+                }
+            }
+            for backend in [
+                fm_render_svg::SvgBackend::LegacyLayout,
+                fm_render_svg::SvgBackend::Scene,
+            ] {
+                let svg_config = fm_render_svg::SvgRenderConfig {
+                    backend,
+                    font_size: font_size as f32,
+                    line_height: 1.5,
+                    ..Default::default()
+                };
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
+                for message in messages {
+                    for line in message.text.split('\n') {
+                        assert!(
+                            svg.contains(&format!(">{line}<")),
+                            "{backend:?}: lost caption row {line}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    svg,
+                    fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
+                );
             }
         }
     }

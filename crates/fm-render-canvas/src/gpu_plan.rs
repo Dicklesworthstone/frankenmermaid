@@ -2441,6 +2441,13 @@ impl GpuRenderPlan {
                     .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
             )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
+            .chain(
+                layout
+                    .extensions
+                    .sequence_messages
+                    .iter()
+                    .map(|message| message.font_size),
+            )
             .chain(layout.edges.iter().filter_map(|edge| {
                 edge_label_text(ir, edge)?;
                 crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
@@ -2499,6 +2506,7 @@ impl GpuRenderPlan {
                     .map(|(_, _, text)| *text)
                     .chain(class_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
+                    .chain(layout.extensions.sequence_messages.iter().map(|message| message.text.as_str()))
                     .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
                     .chain(
                         layout
@@ -2715,7 +2723,21 @@ impl GpuRenderPlan {
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
-            if let Some(text) = edge_label_text(ir, edge).filter(|_| edge.points.len() >= 2) {
+            if let Some(message) = layout.extensions.sequence_message(edge.edge_index) {
+                graph_label_plates.push(message.bounds);
+                for (row, text) in message.text.split('\n').enumerate() {
+                    let center = message.line_center(row);
+                    sink.push_centred_with_font(
+                        text,
+                        (center.x, center.y),
+                        message.font_size,
+                        colour,
+                        GpuTextSource::Edge,
+                        edge.edge_index,
+                    );
+                }
+            } else if let Some(text) = edge_label_text(ir, edge).filter(|_| edge.points.len() >= 2)
+            {
                 if let Some(placer) = &mut graph_label_placer {
                     let font = crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
                         .map_or(font_px * 0.85, |size| size as f32);

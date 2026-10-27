@@ -5663,6 +5663,7 @@ fn render_layout_to_svg(
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
         preserved_label_positions: preserved_label_positions.as_deref(),
+        sequence_messages: &layout.extensions.sequence_messages,
         // Computed ONCE here; the per-edge helper used to recompute it, re-parsing every flow
         // value on every edge.
         sankey_widest_flow: sankey_widest_flow(ir),
@@ -15116,6 +15117,7 @@ struct EdgeRenderContext<'a> {
     /// Positions indexed by IR edge index, resolved once in paint order for generic graphs.
     /// Sequence messages and chart annotations retain their specialized label placement.
     preserved_label_positions: Option<&'a [Option<fm_layout::LayoutPoint>]>,
+    sequence_messages: &'a [fm_layout::LayoutSequenceMessage],
     /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
     ///
     /// Every ribbon's width is its value normalised against this ONE number, so it is invariant
@@ -15411,6 +15413,19 @@ fn compute_edge_label<'a>(
         ..
     } = *context;
     let edge_index = edge_path.edge_index;
+    if detail.show_edge_labels
+        && let Ok(index) = context
+            .sequence_messages
+            .binary_search_by_key(&edge_index, |message| message.edge_index)
+    {
+        let message = &context.sequence_messages[index];
+        let center = message.bounds.center();
+        return Some((
+            Cow::Borrowed(&message.text),
+            center.x + offset_x,
+            center.y + offset_y,
+        ));
+    }
     // ⚠️ A SANKEY LINK CARRIES NO LABEL AT ALL, and this is parity, not a simplification. mermaid
     // 11.15.0 draws text only on the NODES: for `A,B,10` its drawn text is exactly
     // `["A\n10", "B\n10"]`, with no standalone `10` anywhere — measured in Chromium 151 against the
@@ -15759,9 +15774,14 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
         preserved_label_positions,
+        sequence_messages,
     } = *context;
 
     let edge_index = edge_path.edge_index;
+    let sequence_message = sequence_messages
+        .binary_search_by_key(&edge_index, |message| message.edge_index)
+        .ok()
+        .map(|index| &sequence_messages[index]);
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     // The second marker of a relation marked at BOTH ends (bd-f9t0r); `None` on every other edge.
@@ -16109,6 +16129,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     if let Some((label_text, lx, ly)) = &edge_label {
         let label_str = label_text.as_ref();
         if config.embed_theme_css
+            && sequence_message.is_none()
             && config.a11y.aria_labels
             && config.a11y.keyboard_nav
             && config.a11y.text_alternatives
@@ -16266,14 +16287,26 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
-        let centered = preserved_label_positions.is_some();
-        let label_font_size = if centered {
+        let centered = preserved_label_positions.is_some() || sequence_message.is_some();
+        let label_font_size = if let Some(message) = sequence_message {
+            message.font_size
+        } else if centered {
             edge_label_font_size(ir, edge_index, detail.edge_font_size)
         } else {
             detail.edge_font_size
         };
-        let (label_width, label_height, total_text_height) =
-            edge_label_dimensions(label_text, label_font_size, config, centered);
+        let (label_width, label_height, total_text_height) = sequence_message.map_or_else(
+            || edge_label_dimensions(label_text, label_font_size, config, centered),
+            |message| {
+                (
+                    message.bounds.width,
+                    message.bounds.height,
+                    message.bounds.height
+                        - 2.0 * fm_layout::LayoutSequenceMessage::PADDING_Y
+                        - message.line_height,
+                )
+            },
+        );
         let start_y =
             ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
 
@@ -16296,7 +16329,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             .y(start_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(label_font_size)
-            .line_height(config.line_height)
+            .line_height(sequence_message.map_or(config.line_height, |message| {
+                message.line_height / message.font_size
+            }))
             .anchor(TextAnchor::Middle)
             .baseline(if centered {
                 text::DominantBaseline::Central
@@ -16521,6 +16556,7 @@ fn render_edge_body_into(
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
         preserved_label_positions,
+        sequence_messages,
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
@@ -16552,6 +16588,7 @@ fn render_edge_body_into(
     // family still falling to the ~5-alloc `Element` slow path. Mixed a11y (`A11yConfig::minimal()`) still
     // takes the slow path, exactly as before.
     if arrow == ArrowType::Arrow
+        && sequence_messages.is_empty()
         && !is_back_edge
         // Cheap label-presence gate BEFORE `uniform_a11y`/`compute_edge_label`: an unlabeled Arrow edge
         // (the common flowchart/state case) is handled by the unlabeled fast path below, so short-circuit
@@ -17749,6 +17786,7 @@ mod tests {
                             colors: &colors,
                             accessible_node_labels: None,
                             preserved_label_positions: Some(positions),
+                            sequence_messages: &[],
                             sankey_widest_flow: None,
                         };
                         let mut streamed = String::new();
@@ -18296,6 +18334,7 @@ mod tests {
                             colors: &colors,
                             accessible_node_labels: None,
                             preserved_label_positions: Some(&positions),
+                            sequence_messages: &[],
                             sankey_widest_flow: None,
                         };
                         let edge = &layout.edges[1];
@@ -18385,6 +18424,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: Some(&positions),
+                sequence_messages: &[],
                 sankey_widest_flow: None,
             };
             for edge in &layout.edges {
@@ -19487,6 +19527,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19564,6 +19605,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19667,6 +19709,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19841,6 +19884,7 @@ mod tests {
             colors: &colors,
             accessible_node_labels: None,
             preserved_label_positions: None,
+            sequence_messages: &[],
             sankey_widest_flow: sankey_widest_flow(&ir),
         };
 
