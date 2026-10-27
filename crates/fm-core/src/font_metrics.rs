@@ -605,6 +605,72 @@ impl FontMetrics {
         result
     }
 
+    /// Wrap complete text without collapsing spaces or splitting joined glyphs.
+    ///
+    /// Rows are slices of the authored lines, so concatenating the rows for one source line
+    /// recovers that line exactly. Widths use the conservative measurement used by card layout.
+    /// A single indivisible glyph may exceed the requested width, but is never truncated.
+    #[must_use]
+    pub fn wrap_preserved_to_width(&self, text: &str, max_width: f32) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut authored_lines = text.split('\n').peekable();
+        while let Some(line) = authored_lines.next() {
+            let line = if authored_lines.peek().is_some() {
+                line.strip_suffix('\r').unwrap_or(line)
+            } else {
+                line
+            };
+            if line.is_empty() || !max_width.is_finite() || max_width <= 0.0 {
+                rows.push(line.to_owned());
+                continue;
+            }
+            let mut boundaries = vec![0];
+            let mut after_joiner = false;
+            let mut regional_count = 0;
+            for (offset, character) in line.char_indices() {
+                let regional = matches!(character, '\u{1f1e6}'..='\u{1f1ff}');
+                if offset > 0
+                    && !is_zero_width(character)
+                    && !after_joiner
+                    && (!regional || regional_count % 2 == 0)
+                {
+                    boundaries.push(offset);
+                }
+                after_joiner = character == ZERO_WIDTH_JOINER;
+                regional_count = if regional { regional_count + 1 } else { 0 };
+            }
+            boundaries.push(line.len());
+            let mut start = 0;
+            while start + 1 < boundaries.len() {
+                let mut end = start + 1;
+                let mut word_break = None;
+                while end < boundaries.len() {
+                    let candidate = &line[boundaries[start]..boundaries[end]];
+                    let width = self.estimate_preserved_width(
+                        candidate,
+                        self.font_size(),
+                        self.avg_char_width(),
+                    );
+                    if width > max_width && end > start + 1 {
+                        break;
+                    }
+                    if candidate.ends_with(char::is_whitespace) {
+                        word_break = Some(end);
+                    }
+                    end += 1;
+                }
+                let end = if end == boundaries.len() {
+                    end - 1
+                } else {
+                    word_break.unwrap_or(end - 1)
+                };
+                rows.push(line[boundaries[start]..boundaries[end]].to_owned());
+                start = end;
+            }
+        }
+        rows
+    }
+
     /// Wrap text at word boundaries, retaining authored line breaks and every word.
     ///
     /// A word wider than the available space is split without truncation. Combining marks,
@@ -812,6 +878,45 @@ mod tests {
 
         assert_eq!(wrapped.len(), 1);
         assert_eq!(wrapped[0], "Short");
+    }
+
+    #[test]
+    fn preserved_wrapping_keeps_spaces_and_every_authored_row() {
+        let metrics = FontMetrics::default();
+        for text in [
+            "  Keep   these    spaces  ",
+            "                         ",
+            "αβγ δει ζηθ averylongwordwithoutbreaks0123456789",
+        ] {
+            let rows = metrics.wrap_preserved_to_width(text, 90.0);
+            assert_eq!(rows.concat(), text);
+            assert!(rows.iter().all(|row| metrics.estimate_preserved_width(
+                row,
+                metrics.font_size(),
+                metrics.avg_char_width(),
+            ) <= 90.01));
+        }
+        assert_eq!(
+            metrics.wrap_preserved_to_width("First\r\n\r\nLast\r\n", 200.0),
+            ["First", "", "Last", ""],
+        );
+        for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                metrics
+                    .wrap_preserved_to_width("a  b\n\nend\n", width)
+                    .join("\n"),
+                "a  b\n\nend\n"
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_wrapping_never_splits_combining_or_joined_glyphs() {
+        let metrics = FontMetrics::default();
+        for glyph in ["e\u{301}", "👨\u{200d}👩\u{200d}👧", "🇺🇸"] {
+            let rows = metrics.wrap_preserved_to_width(&glyph.repeat(3), 1.0);
+            assert_eq!(rows, vec![glyph.to_string(); 3]);
+        }
     }
 
     #[test]

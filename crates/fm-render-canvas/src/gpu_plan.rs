@@ -2288,6 +2288,7 @@ impl GpuRenderPlan {
         let mut class_cards = Vec::new();
         let mut er_cards = Vec::new();
         let mut c4_cards = Vec::new();
+        let mut requirement_cards = Vec::new();
         for (position, node) in graph_nodes.iter().enumerate() {
             if fm_layout::is_composite_state_node(ir, node) {
                 continue;
@@ -2427,6 +2428,67 @@ impl GpuRenderPlan {
                     .unwrap_or(DEFAULT_LABEL_RGBA);
                 color[3] *= opacity;
                 er_cards.push((node.node_index, node.bounds, card, color));
+                continue;
+            }
+            if let Some(ir_node) = ir.nodes.get(node.node_index)
+                && let Some(meta) = ir_node.requirement_meta.as_deref()
+            {
+                let name = ir.node_display_text(ir_node);
+                let declared = ir.resolved_node_style(node.node_index);
+                let card_metrics = declared.get("font-family").map(|family| {
+                    fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                        preset: fm_core::FontPreset::from_family(family),
+                        ..metrics.config().clone()
+                    })
+                });
+                let card = fm_core::RequirementCardLayout::new(
+                    meta,
+                    name,
+                    card_metrics.as_ref().unwrap_or(&metrics),
+                    Some(node.bounds.width),
+                    declared.get("font-size").map(String::as_str),
+                )
+                .fit_to_height(node.bounds.height);
+                let opacity = crate::renderer::resolve_node_opacity(ir, node.node_index)
+                    .unwrap_or(1.0) as f32;
+                let (fill, stroke) =
+                    crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
+                let fallback_color = fm_core::readable_label_color(
+                    fill.as_deref().unwrap_or(&config.node_fill),
+                    &config.label_color,
+                    &config.node_fill,
+                );
+                let mut color = crate::renderer::resolve_node_text_color(ir, node.node_index)
+                    .as_deref()
+                    .and_then(parse_paint_rgba)
+                    .or_else(|| parse_paint_rgba(fallback_color))
+                    .unwrap_or(DEFAULT_LABEL_RGBA);
+                color[3] *= opacity;
+                if card.rows.iter().any(|row| {
+                    !matches!(
+                        row.kind,
+                        fm_core::RequirementCardRowKind::Name
+                            | fm_core::RequirementCardRowKind::Stereotype
+                    )
+                }) {
+                    let mut border =
+                        parse_paint_rgba(stroke.as_deref().unwrap_or(&config.node_stroke))
+                            .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                    border[3] *= opacity;
+                    let y = node.bounds.y
+                        + ((node.bounds.height - card.height) * 0.5).max(0.0)
+                        + card.header_height;
+                    node_border_segments.push(GpuEdgeSegment {
+                        from: [node.bounds.x + 2.0, y],
+                        to: [node.bounds.x + node.bounds.width - 2.0, y],
+                        edge_index: u32::try_from(node.node_index).unwrap_or(u32::MAX),
+                        color: border,
+                        dash_phase: 0.0,
+                        dash: [0.0; 2],
+                        width: 0.8,
+                    });
+                }
+                requirement_cards.push((node.node_index, node.bounds, card, color));
                 continue;
             }
             if let Some(ir_node) = ir.nodes.get(node.node_index)
@@ -2585,6 +2647,11 @@ impl GpuRenderPlan {
                     .iter()
                     .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
             )
+            .chain(
+                requirement_cards
+                    .iter()
+                    .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
+            )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
             .chain(
                 layout
@@ -2638,6 +2705,7 @@ impl GpuRenderPlan {
                     .chain(class_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(er_cards.iter().flat_map(|(_, _, card, _)| card.text.iter().map(|run| run.text.as_str())))
                     .chain(c4_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
+                    .chain(requirement_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
                     .chain(layout.extensions.sequence_messages.iter().map(|message| message.text.as_str()))
                     .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
@@ -2833,6 +2901,20 @@ impl GpuRenderPlan {
                         node_index,
                     );
                 }
+            }
+        }
+
+        for (node_index, bounds, card, color) in requirement_cards {
+            let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
+            for row in card.rows {
+                sink.push_centred_with_font(
+                    &row.text,
+                    (bounds.x + bounds.width * 0.5, top + row.center_y),
+                    row.font_size,
+                    color,
+                    GpuTextSource::Node,
+                    node_index,
+                );
             }
         }
 

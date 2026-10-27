@@ -89,7 +89,7 @@ fn attach_message_labels_preserves_activation_numbering_notes_and_repeated_edits
 
 #[test]
 fn message_attachments_reject_syntax_unused_labels_and_unrequested_metadata() {
-    let lens = SequenceParseLens::parse("sequenceDiagram\nA->>B:\n").unwrap();
+    let lens = SequenceParseLens::parse("sequenceDiagram\nautonumber\nA->>B:\n").unwrap();
     for text in ["", "changed\"\nB->>A: injected"] {
         let mut edited = lens.ir().clone();
         let label = fm_core::IrLabelId(edited.labels.len());

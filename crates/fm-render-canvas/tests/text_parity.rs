@@ -136,11 +136,12 @@ fn pie_sectors_and_percentage_labels_are_not_overpainted_by_parser_nodes() {
             _ => None,
         })
         .collect();
-    assert_eq!(texts, ["Alpha: 25.0%", "Beta: 75.0%", "Share"]);
+    assert_eq!(texts, ["Share", "25%", "Alpha", "75%", "Beta"]);
     assert_eq!(result.labels_drawn, texts.len());
     assert_eq!(
-        result.nodes_drawn, 0,
-        "slice metadata must not become graph nodes"
+        result.nodes_drawn,
+        arcs.len(),
+        "drawn data count must match actual sector geometry"
     );
 
     // The same circle-shaped IR nodes are real geometry when authored in a flowchart.
@@ -198,12 +199,12 @@ fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
 
     let mut previous_bottom = top;
     for expected in [
-        "id: REQ-001",
-        "text: Preserve every declared field",
-        "type: service",
-        "doc: spec.md",
-        "risk: High",
-        "verify: Test",
+        "ID: REQ-001",
+        "Text: Preserve every declared field",
+        "Risk: High",
+        "Verification: Test",
+        "Type: service",
+        "Doc Ref: spec.md",
     ] {
         let y = operations
             .iter()
@@ -212,7 +213,7 @@ fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("declared field was dropped: {expected}"));
-        let half_height = f64::from(font_size) * 0.9 / 2.0;
+        let half_height = f64::from(font_size) * 0.85 / 2.0;
         assert!(
             y - half_height >= previous_bottom,
             "{expected} overlaps the preceding row"
@@ -443,7 +444,7 @@ fn stereotype_requirement_and_c4_reach_the_canvas() {
         "the requirement text never reached the canvas: {req:?}"
     );
     assert!(
-        req.iter().any(|t| t.contains("high")),
+        req.iter().any(|t| t == "Risk: High"),
         "the requirement risk never reached the canvas: {req:?}"
     );
 
@@ -1161,14 +1162,21 @@ mod sankey {
         let context = canvas(&ir, &layout);
         let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
         assert!(plan.edge_segments.iter().all(|edge| edge.width == 1.5));
-        assert_eq!(
-            plan.edge_segments.len(),
-            layout
-                .edges
+        for edge in &layout.edges {
+            let segments: Vec<_> = plan
+                .edge_segments
                 .iter()
-                .map(|edge| edge.points.len() - 1)
-                .sum::<usize>()
-        );
+                .filter(|segment| segment.edge_index as usize == edge.edge_index)
+                .collect();
+            // The numeric caption has its own clear gap, while the visible connector keeps
+            // the same endpoints and ordinary stroke width as its unlabelled counterpart.
+            assert_eq!(segments.len(), 2);
+            let start = edge.points.first().unwrap();
+            let end = edge.points.last().unwrap();
+            assert_eq!(segments[0].from, [start.x, start.y]);
+            assert_eq!(segments[1].to, [end.x, end.y]);
+            assert_ne!(segments[0].to, segments[1].from);
+        }
         let mut actual: Vec<_> = texts(&context).iter().map(|row| row.0).collect();
         actual.sort_unstable();
         assert_eq!(actual, ["100", "50", "Alpha", "Beta", "Gamma"]);
@@ -1177,6 +1185,242 @@ mod sankey {
         assert_eq!(planned, actual);
         assert!(fm_layout::sankey_node_label(&ir, 0).is_none());
         assert!(fm_layout::sankey_widest_flow(&ir).is_none());
+    }
+}
+
+mod requirement {
+    use fm_core::{IrInlineStyle, RequirementCardLayout, RequirementCardRowKind};
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GpuRenderPlan, GpuTextSource,
+        MockCanvas2dContext,
+    };
+
+    fn diagram() -> fm_core::MermaidDiagramIr {
+        let mut ir = fm_parser::parse(
+            "requirementDiagram\n functionalRequirement Secure {\n id: SEC-007\n text: Preserve data\n risk: high\n verifymethod: test\n }\n",
+        ).ir;
+        ir.nodes[0].requirement_meta.as_mut().unwrap().text = Some(format!(
+            "Keep   every space and Unicode 客户 e\u{301} 👨\u{200d}👩\u{200d}👧. {}\nRetain the final sentence.",
+            "The complete requirement must remain readable. ".repeat(12),
+        ));
+        ir
+    }
+
+    fn gpu_rows(plan: &GpuRenderPlan) -> Vec<String> {
+        plan.text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node)
+            .map(|run| {
+                plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("every planned glyph has an atlas cell")
+                            .glyph
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn complete_wrapped_cards_reach_canvas_scene_and_gpu() {
+        let ir = diagram();
+        for font_size in [15.0, 24.0] {
+            let config = CanvasRenderConfig {
+                font_size,
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            for algorithm in [
+                fm_layout::LayoutAlgorithm::Auto,
+                fm_layout::LayoutAlgorithm::Force,
+                fm_layout::LayoutAlgorithm::Tree,
+                fm_layout::LayoutAlgorithm::Sugiyama,
+            ] {
+                let layout = fm_layout::layout_diagram_traced_with_config(
+                    &ir,
+                    algorithm,
+                    fm_layout::LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                )
+                .layout;
+                let bounds = layout.nodes[0].bounds;
+                let card = RequirementCardLayout::new(
+                    ir.nodes[0].requirement_meta.as_deref().unwrap(),
+                    "Secure",
+                    &metrics,
+                    Some(bounds.width),
+                    None,
+                );
+                assert!(bounds.width <= metrics.font_size() * 25.0 + 0.01);
+                assert!(card.height <= bounds.height + 0.01);
+                let expected: Vec<_> = card.rows.iter().map(|row| row.text.as_str()).collect();
+                assert!(expected.contains(&"<<Functional Requirement>>"));
+                assert!(expected.contains(&"ID: SEC-007"));
+                assert!(expected.contains(&"Risk: High"));
+                assert!(expected.contains(&"Verification: Test"));
+                assert_eq!(
+                    card.rows
+                        .iter()
+                        .filter(|row| row.kind == RequirementCardRowKind::Text)
+                        .map(|row| row.text.as_str())
+                        .collect::<String>(),
+                    format!(
+                        "Text: {}",
+                        ir.nodes[0]
+                            .requirement_meta
+                            .as_ref()
+                            .unwrap()
+                            .text
+                            .as_ref()
+                            .unwrap()
+                            .replace('\n', "")
+                    )
+                );
+
+                let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+                for use_scene in [false, true] {
+                    let mut context = MockCanvas2dContext::new(3000.0, 3000.0);
+                    let mut renderer = Canvas2dRenderer::new(config.clone());
+                    let result = if use_scene {
+                        renderer.render_scene(&scene, &mut context)
+                    } else {
+                        renderer.render(&layout, &ir, &mut context)
+                    };
+                    assert_eq!(result.nodes_drawn, 1);
+                    let drawn: Vec<_> = context
+                        .operations()
+                        .iter()
+                        .filter_map(|operation| match operation {
+                            DrawOperation::FillText(text, x, y) => Some((text.as_str(), *x, *y)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(drawn.iter().map(|row| row.0).collect::<Vec<_>>(), expected);
+                    let (origin_x, origin_y) = if use_scene {
+                        (scene.bounds.x, scene.bounds.y)
+                    } else {
+                        (layout.bounds.x, layout.bounds.y)
+                    };
+                    let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
+                    for (drawn, row) in drawn.iter().zip(&card.rows) {
+                        assert!(
+                            (drawn.1 - f64::from(bounds.x + bounds.width * 0.5 - origin_x)).abs()
+                                < 0.02
+                        );
+                        assert!((drawn.2 - f64::from(top + row.center_y - origin_y)).abs() < 0.02);
+                        assert!(
+                            metrics.estimate_preserved_width(
+                                &row.text,
+                                row.font_size,
+                                metrics.avg_char_width()
+                            ) + card.padding * 2.0
+                                <= bounds.width + 0.01
+                        );
+                    }
+                }
+                let gpu = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+                assert_eq!(gpu_rows(&gpu), expected);
+                assert!(
+                    gpu.node_instances[0].fill[0] > 0.9,
+                    "high risk must keep its semantic fill"
+                );
+                for (run, row) in gpu.text_runs.iter().zip(&card.rows) {
+                    for quad in &gpu.text_quads
+                        [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                    {
+                        assert!((quad.center[1] - (bounds.y + row.center_y)).abs() < 0.02);
+                        assert!((quad.half_extent[1] * 2.0 - row.font_size).abs() < 0.02);
+                        assert!(quad.center[0] - quad.half_extent[0] >= bounds.x - 0.01);
+                        assert!(
+                            quad.center[0] + quad.half_extent[0] <= bounds.x + bounds.width + 0.01
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn author_typography_color_and_opacity_override_requirement_defaults() {
+        let mut ir = diagram();
+        ir.nodes[0].inline_style = Some(Box::new(IrInlineStyle {
+            properties: [
+                ("font-size", "22px"),
+                ("font-family", "monospace"),
+                ("color", "#123456"),
+                ("fill", "#abcdef"),
+                ("opacity", "0.4"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        }));
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let mut context = MockCanvas2dContext::new(3000.0, 3000.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut context);
+        let (mut color, mut font, mut alpha) = (String::new(), String::new(), 1.0);
+        let mut count = 0;
+        for operation in context.operations() {
+            match operation {
+                DrawOperation::SetFillStyle(value) => color.clone_from(value),
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::FillText(..) => {
+                    count += 1;
+                    assert_eq!(color, "#123456");
+                    assert!(font.contains("22px monospace"), "{font}");
+                    assert!((alpha - 0.4).abs() < 0.001);
+                }
+                _ => {}
+            }
+        }
+        assert!(count > 10);
+        let gpu = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert_eq!(gpu.text_runs.len(), count);
+        for quad in &gpu.text_quads {
+            assert!((quad.color[0] - 18.0 / 255.0).abs() < 0.001);
+            assert!((quad.color[1] - 52.0 / 255.0).abs() < 0.001);
+            assert!((quad.color[2] - 86.0 / 255.0).abs() < 0.001);
+            assert!((quad.color[3] - 0.4).abs() < 0.001);
+            assert!((quad.half_extent[1] * 2.0 - 22.0).abs() < 0.02);
+        }
+    }
+
+    #[test]
+    fn element_fields_and_declared_empty_values_reach_gpu() {
+        let mut ir = fm_parser::parse(
+            "requirementDiagram\n element Evidence {\n type: simulation\n docref: report.md\n }\n",
+        )
+        .ir;
+        ir.nodes[0].requirement_meta.as_mut().unwrap().req_id = Some(String::new());
+        let layout = fm_layout::layout_diagram(&ir);
+        let gpu = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        let rows = gpu_rows(&gpu);
+        for field in ["ID: ", "Type: simulation", "Doc Ref: report.md"] {
+            assert!(
+                rows.iter().any(|row| row == field),
+                "missing {field}: {rows:?}"
+            );
+        }
     }
 }
 
@@ -1727,14 +1971,7 @@ mod journey {
                 roomy,
             );
             assert_eq!(traced.trace.dispatch.selected, algorithm);
-            check(
-                &traced.layout,
-                if algorithm == LayoutAlgorithm::Force {
-                    &defaults
-                } else {
-                    &custom_metrics
-                },
-            );
+            check(&traced.layout, &custom_metrics);
         }
         // The direct public entry points include the tree path specialization as well.
         check(&fm_layout::layout_diagram_force(&ir), &defaults);

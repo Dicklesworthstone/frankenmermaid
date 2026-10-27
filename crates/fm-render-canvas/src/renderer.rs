@@ -3018,7 +3018,6 @@ impl Canvas2dRenderer {
             return 0;
         }
         let mut count = 0;
-        let mut class_compartment_fonts = None;
         let mut standard_label_font = None;
         // Resolved gantt name placements, indexed by node. Built once and only when the diagram has
         // any, so every other diagram type takes exactly the path it took before.
@@ -3096,6 +3095,7 @@ impl Canvas2dRenderer {
                 .and_then(sanitize_canvas_paint);
             let label_fill = text_color.as_deref().unwrap_or_else(|| {
                 if ir.diagram_type == DiagramType::Journey
+                    || ir_node.is_some_and(|node| node.requirement_meta.is_some())
                     || (gantt_task.is_some()
                         && gantt_label.is_none_or(|entry| {
                             entry.placement == fm_layout::GanttLabelPlacement::Inside
@@ -3139,28 +3139,7 @@ impl Canvas2dRenderer {
                 ctx.set_global_alpha(alpha);
             }
             let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
-            // The COMPARTMENT fonts derive different defaults from the plain label — the heading is
-            // bold at the theme size, the member rows are 0.9x — so they are composed separately
-            // from the same declared components. Only built when the author declared something, so
-            // an undeclared node still uses the hoisted pair and costs nothing.
             let declared_parts = resolve_declared_node_font(ir, node_box.node_index);
-            let (declared_heading_font, declared_member_font) =
-                if declared_parts.declares_anything() {
-                    (
-                        Some(declared_parts.compose(
-                            self.config.font_size,
-                            Some("bold"),
-                            &self.config.font_family,
-                        )),
-                        Some(declared_parts.compose(
-                            self.config.font_size * 0.9,
-                            None,
-                            &self.config.font_family,
-                        )),
-                    )
-                } else {
-                    (None, None)
-                };
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
@@ -3404,65 +3383,64 @@ impl Canvas2dRenderer {
             } else if let Some((node, meta)) =
                 ir_node.and_then(|n| n.requirement_meta.as_deref().map(|m| (n, m)))
             {
-                // REQUIREMENT rows (bd-rk14) — canvas twin of the terminal fix in bd-039t.
-                // Measured: `requirement R { id: 1 / text: hello }` drew `hello` in the SVG and not
-                // on the canvas. Field order matches the SVG's row order.
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
-
                 ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.set_text_align(TextAlign::Center);
                 let name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.0.as_str()),
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(
+                        declared_parts
+                            .family
+                            .as_deref()
+                            .unwrap_or(&self.config.font_family),
+                    ),
+                    ..self.config.font_metrics().config().clone()
+                });
+                let card = fm_core::RequirementCardLayout::new(
+                    meta,
+                    name,
+                    &metrics,
+                    Some(node_box.bounds.width),
+                    declared.get("font-size").map(String::as_str),
+                )
+                .fit_to_height(node_box.bounds.height);
+                let top = y + ((h - f64::from(card.height)) * 0.5).max(0.0);
+                if card.rows.iter().any(|row| {
+                    !matches!(
+                        row.kind,
+                        fm_core::RequirementCardRowKind::Name
+                            | fm_core::RequirementCardRowKind::Stereotype
+                    )
+                }) {
+                    ctx.set_stroke_style(stroke.as_deref().unwrap_or(&self.config.node_stroke));
+                    ctx.set_line_width(0.8);
+                    ctx.begin_path();
+                    ctx.move_to(x + 2.0, top + f64::from(card.header_height));
+                    ctx.line_to(x + w - 2.0, top + f64::from(card.header_height));
+                    ctx.stroke();
+                    self.draw_calls += 1;
                 }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-                ctx.fill_text(name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
-                ctx.begin_path();
-                ctx.move_to(x, cursor_y);
-                ctx.line_to(x + w, cursor_y);
-                ctx.stroke();
-                self.draw_calls += 1;
-                cursor_y += member_font * 0.5;
-
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.1.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Left);
-                // `type`/`doc` are an ELEMENT's fields (bd-qdmn), in the SVG's row order so all
-                // three backends read alike — ID, Text, Type, Doc, then Risk and Verify.
-                for (prefix, value) in [
-                    ("id: ", meta.req_id.as_deref()),
-                    ("text: ", meta.text.as_deref()),
-                    ("type: ", meta.element_type.as_deref()),
-                    ("doc: ", meta.doc_ref.as_deref()),
-                    ("risk: ", meta.risk.as_deref()),
-                    ("verify: ", meta.verify_method.as_deref()),
-                ] {
-                    let Some(value) = value.filter(|v| !v.is_empty()) else {
-                        continue;
-                    };
-                    if cursor_y > y + h - member_font * 0.5 {
-                        break;
-                    }
-                    ctx.fill_text(&format!("{prefix}{value}"), x + padding, cursor_y);
+                for row in card.rows {
+                    let font = declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::RequirementCardRowKind::Name).then_some("bold"),
+                        &self.config.font_family,
+                    );
+                    ctx.set_font(&if row.kind == fm_core::RequirementCardRowKind::Stereotype
+                        && declared_parts.style.is_none()
+                    {
+                        format!("italic {font}")
+                    } else {
+                        font
+                    });
+                    ctx.fill_text(&row.text, x + w * 0.5, top + f64::from(row.center_y));
                     self.draw_calls += 1;
                     *labels_drawn += 1;
-                    cursor_y += member_font * 1.2;
                 }
             } else if let Some((node, meta)) =
                 ir_node.and_then(|n| n.c4_meta.as_deref().map(|m| (n, m)))
@@ -4205,6 +4183,16 @@ pub(crate) fn resolve_node_colors_with_defaults(
     config: &CanvasRenderConfig,
 ) -> (Option<String>, Option<String>) {
     let (fill, stroke) = resolve_node_colors(ir, node_index);
+    if let Some(meta) = ir
+        .nodes
+        .get(node_index)
+        .and_then(|node| node.requirement_meta.as_deref())
+    {
+        return (
+            fill.or_else(|| fm_core::requirement_risk_fill(meta).map(str::to_owned)),
+            stroke,
+        );
+    }
     if ir.diagram_type == DiagramType::Journey {
         return (
             fill.or_else(|| fm_layout::journey_score_fill(ir, node_index).map(str::to_owned)),
@@ -4706,13 +4694,6 @@ fn secondary_label_font_css(config: &CanvasRenderConfig) -> String {
 
 fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
     format!("bold {}px {}", config.font_size * 0.8, config.font_family)
-}
-
-fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
-    (
-        format!("bold {}px {}", config.font_size, config.font_family),
-        format!("{}px {}", config.font_size * 0.9, config.font_family),
-    )
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
@@ -6054,33 +6035,6 @@ mod tests {
                 ..CanvasRenderConfig::default()
             };
             assert_eq!(sequence_fragment_font_css(&config), expected);
-        }
-    }
-
-    #[test]
-    fn class_compartment_fonts_preserve_canvas_css_format() {
-        for (font_size, font_family, expected) in [
-            (0.0, "sans-serif", ("bold 0px sans-serif", "0px sans-serif")),
-            (
-                12.5,
-                "Test Sans, serif",
-                ("bold 12.5px Test Sans, serif", "11.25px Test Sans, serif"),
-            ),
-            (
-                20.0,
-                "'Inter', Arial",
-                ("bold 20px 'Inter', Arial", "18px 'Inter', Arial"),
-            ),
-        ] {
-            let config = CanvasRenderConfig {
-                font_size,
-                font_family: font_family.to_owned(),
-                ..CanvasRenderConfig::default()
-            };
-            assert_eq!(
-                class_compartment_font_css(&config),
-                (expected.0.to_owned(), expected.1.to_owned())
-            );
         }
     }
 

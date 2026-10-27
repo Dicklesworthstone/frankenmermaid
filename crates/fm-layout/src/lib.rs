@@ -5102,17 +5102,46 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             .nodes
             .get(node_box.node_index)
             .map_or(fm_core::NodeShape::Rect, |node| node.shape);
+        let requirement = ir
+            .nodes
+            .get(node_box.node_index)
+            .and_then(|node| node.requirement_meta.as_deref());
+        let declared = requirement.map(|_| ir.resolved_node_style(node_box.node_index));
+        let opacity = declared
+            .as_ref()
+            .and_then(|style| style.get("opacity"))
+            .and_then(|raw| raw.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        let mut stroke = StrokeStyle::solid(
+            declared
+                .as_ref()
+                .and_then(|style| style.get("stroke"))
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#94a3b8".to_owned()),
+            1.5,
+        );
+        stroke.opacity = opacity;
 
         layer.children.push(RenderItem::Path(RenderPath {
             source: RenderSource::Node(node_box.node_index),
             commands: node_path(node_box.bounds, shape),
             fill: Some(FillStyle::Solid {
-                color: journey_score_fill(ir, node_box.node_index)
-                    .unwrap_or("#ffffff")
-                    .to_owned(),
-                opacity: 1.0,
+                color: declared
+                    .as_ref()
+                    .and_then(|style| style.get("fill"))
+                    .and_then(|paint| scene_paint(paint))
+                    .or_else(|| {
+                        requirement
+                            .and_then(fm_core::requirement_risk_fill)
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| journey_score_fill(ir, node_box.node_index).map(str::to_owned))
+                    .unwrap_or_else(|| "#ffffff".to_owned()),
+                opacity,
             }),
-            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+            stroke: Some(stroke),
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
         }));
@@ -5357,6 +5386,100 @@ fn build_label_layer(
                         opacity: 1.0,
                     },
                 }));
+            }
+            continue;
+        }
+        if let Some(meta) = node.requirement_meta.as_deref() {
+            let name = display_node_label_ref(ir, node);
+            let declared = ir.resolved_node_style(node_box.node_index);
+            let card_metrics = declared.get("font-family").map(|family| {
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(family),
+                    ..metrics.config().clone()
+                })
+            });
+            let card = fm_core::RequirementCardLayout::new(
+                meta,
+                name,
+                card_metrics.as_ref().unwrap_or(metrics),
+                Some(node_box.bounds.width),
+                declared.get("font-size").map(String::as_str),
+            )
+            .fit_to_height(node_box.bounds.height);
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#1e293b".to_owned());
+            let border = declared
+                .get("stroke")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#7c8da5".to_owned());
+            let opacity = declared
+                .get("opacity")
+                .and_then(|raw| raw.parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let source = RenderSource::Node(node_box.node_index);
+            let bounds = node_box.bounds;
+            let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
+            if card.rows.iter().any(|row| {
+                !matches!(
+                    row.kind,
+                    fm_core::RequirementCardRowKind::Name
+                        | fm_core::RequirementCardRowKind::Stereotype
+                )
+            }) {
+                let mut stroke = StrokeStyle::solid(border, 0.8);
+                stroke.opacity = opacity;
+                layer.children.push(RenderItem::Path(RenderPath {
+                    source,
+                    commands: vec![
+                        PathCmd::MoveTo {
+                            x: bounds.x + 2.0,
+                            y: top + card.header_height,
+                        },
+                        PathCmd::LineTo {
+                            x: bounds.x + bounds.width - 2.0,
+                            y: top + card.header_height,
+                        },
+                    ],
+                    fill: None,
+                    stroke: Some(stroke),
+                    marker_start: MarkerKind::None,
+                    marker_end: MarkerKind::None,
+                }));
+            }
+            for (index, row) in card.rows.into_iter().enumerate() {
+                let role = match row.kind {
+                    fm_core::RequirementCardRowKind::Stereotype => "type-label",
+                    fm_core::RequirementCardRowKind::Name => "name",
+                    fm_core::RequirementCardRowKind::Id => "id",
+                    fm_core::RequirementCardRowKind::Text => "text",
+                    fm_core::RequirementCardRowKind::Risk => "risk",
+                    fm_core::RequirementCardRowKind::Verification => "verification",
+                    fm_core::RequirementCardRowKind::ElementType => "element-type",
+                    fm_core::RequirementCardRowKind::DocRef => "docref",
+                };
+                let mut group = RenderGroup::new(Some(format!(
+                    "fm-req-{role}-{}-{index}",
+                    node_box.node_index
+                )))
+                .with_source(source);
+                group.children.push(RenderItem::Text(RenderText {
+                    source,
+                    text: row.text,
+                    x: bounds.x + bounds.width * 0.5,
+                    y: top + row.center_y,
+                    font_size: row.font_size,
+                    align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity,
+                    },
+                }));
+                layer.children.push(RenderItem::Group(group));
             }
             continue;
         }
@@ -16900,6 +17023,24 @@ fn compute_node_size(
         return (card.width, card.height);
     }
 
+    if let Some(meta) = node.requirement_meta.as_deref() {
+        let style = ir.resolved_node_style(node_index);
+        let card_metrics = style.get("font-family").map(|family| {
+            fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                preset: fm_core::FontPreset::from_family(family),
+                ..metrics.config().clone()
+            })
+        });
+        let card = fm_core::RequirementCardLayout::new(
+            meta,
+            text,
+            card_metrics.as_ref().unwrap_or(metrics),
+            None,
+            style.get("font-size").map(String::as_str),
+        );
+        return (card.width, card.height);
+    }
+
     match node.shape {
         fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
         fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
@@ -17012,12 +17153,6 @@ fn compute_node_size(
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
-            // Requirement fields form independent rows, including the element's Type and Doc Ref.
-            // Size the complete stack for both SVG and Canvas before the renderers place its text.
-            let (width, height) = match requirement_row_dimensions(node, text, metrics) {
-                Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
-                None => (width, height),
-            };
             if node.shape == fm_core::NodeShape::Diamond {
                 // A rectangle that fits the bounds can still cross a diamond's sloping sides.
                 // At each padded content corner, |x|/(w/2) + |y|/(h/2) must be at most one.
@@ -17030,122 +17165,6 @@ fn compute_node_size(
         }
     }
 }
-
-/// Measure the displayed requirement fields, including their prefixes and type display names.
-/// SVG centers a stack of full-size name lines and smaller subtitle lines; Canvas uses a name,
-/// divider, and left-aligned fields at a larger subtitle size. The box must contain both layouts.
-fn requirement_row_dimensions(
-    node: &IrNode,
-    name: &str,
-    metrics: &fm_core::FontMetrics,
-) -> Option<(f32, f32)> {
-    let meta = node.requirement_meta.as_deref()?;
-    let font_size = metrics.font_size();
-    let subtitle_font = (font_size * 0.75).max(REQUIREMENT_FONT_FLOOR);
-    // Metadata is emitted as one text run, so embedded line breaks become spaces rather than
-    // separate lines. Only the name uses a multiline text builder.
-    let row_width = |row: &str, size| {
-        if row.contains(['\r', '\n']) {
-            metrics.estimate_preserved_width(
-                &row.replace(['\r', '\n'], " "),
-                size,
-                metrics.avg_char_width(),
-            )
-        } else {
-            metrics.estimate_preserved_width(row, size, metrics.avg_char_width())
-        }
-    };
-    let mut widest = metrics.estimate_preserved_width(name, font_size, metrics.avg_char_width());
-    let mut subtitle_rows = 0_usize;
-
-    if let Some(req_type) = meta.requirement_type.as_deref() {
-        let row = format!("<<{}>>", fm_core::requirement_type_display(req_type));
-        widest = widest.max(row_width(&row, subtitle_font));
-        subtitle_rows += 1;
-    }
-
-    let mut canvas_rows = 0_usize;
-    for (prefix, canvas_prefix, value, display) in [
-        (
-            "ID: ",
-            "id: ",
-            meta.req_id.as_deref(),
-            meta.req_id.as_deref(),
-        ),
-        (
-            "Text: ",
-            "text: ",
-            meta.text.as_deref(),
-            meta.text.as_deref(),
-        ),
-        (
-            "Risk: ",
-            "risk: ",
-            meta.risk.as_deref(),
-            meta.risk.as_deref().map(fm_core::requirement_risk_display),
-        ),
-        (
-            "Verification: ",
-            "verify: ",
-            meta.verify_method.as_deref(),
-            meta.verify_method
-                .as_deref()
-                .map(fm_core::requirement_verify_method_display),
-        ),
-        (
-            "Type: ",
-            "type: ",
-            meta.element_type.as_deref(),
-            meta.element_type.as_deref(),
-        ),
-        (
-            "Doc Ref: ",
-            "doc: ",
-            meta.doc_ref.as_deref(),
-            meta.doc_ref.as_deref(),
-        ),
-    ] {
-        let Some(display) = display else { continue };
-        widest = widest.max(row_width(&format!("{prefix}{display}"), subtitle_font));
-        subtitle_rows += 1;
-        if let Some(value) = value.filter(|value| !value.is_empty()) {
-            widest = widest.max(row_width(
-                &format!("{canvas_prefix}{value}"),
-                font_size * 0.9,
-            ));
-            canvas_rows += 1;
-        }
-    }
-
-    if subtitle_rows == 0 {
-        return None;
-    }
-
-    let svg_height = metrics.estimate_height(name)
-        + subtitle_rows as f32 * subtitle_font * metrics.config().line_height
-        + REQUIREMENT_ROW_MARGIN;
-    // Canvas puts its name at 1.3em, the divider half a name line below, and metadata rows at
-    // 0.9em with 1.2 line spacing. Include the final row's lower half and its 6px inset.
-    let canvas_height = if canvas_rows == 0 {
-        0.0
-    } else {
-        font_size * 1.3 * 1.5
-            + font_size * 0.9
-            + canvas_rows.saturating_sub(1) as f32 * font_size * 0.9 * 1.2
-            + 6.0
-    };
-    Some((
-        widest + REQUIREMENT_ROW_MARGIN,
-        svg_height.max(canvas_height),
-    ))
-}
-
-/// Smallest font the requirement subtitle rows are measured at, mirroring the renderer's
-/// `config.min_font_size` clamp on `font_size * 0.75`.
-const REQUIREMENT_FONT_FLOOR: f32 = 8.0;
-
-/// Total content padding around a requirement stack, split evenly between opposite sides.
-const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 
 /// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
 /// attribute and method). `None` for any node that is not a class node or that declares no members.
@@ -17346,6 +17365,12 @@ fn node_size_cache_key(
     // Every requirement field sizes a drawn row. Include presence as well as contents: a declared
     // empty value still has a prefix in SVG and therefore occupies a row.
     if let Some(meta) = node.requirement_meta.as_deref() {
+        let style = ir.resolved_node_style(node_index);
+        hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
+        hash_str(
+            &mut hash,
+            style.get("font-family").map_or("", String::as_str),
+        );
         for field in [
             &meta.requirement_type,
             &meta.risk,
@@ -26795,7 +26820,7 @@ mod tests {
         layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
-        layout_source_map, node_size_cache_key, requirement_row_dimensions, route_edge_points,
+        layout_source_map, node_size_cache_key, route_edge_points,
         route_edge_points_with_obstacles, solve_constraint_coordinates,
         try_relayout_directed_path_suffix,
     };
@@ -44577,20 +44602,38 @@ mod tests {
     #[test]
     fn requirement_box_holds_its_id_and_text_rows() {
         let metrics = fm_core::FontMetrics::default_metrics();
-        let subtitle_scale = 0.75_f32;
 
         let mut previous_width = 0.0_f32;
         for extra in 0_usize..=20 {
             let text = format!("Users must authenticate{}", " thoroughly".repeat(extra));
             let ir = requirement_ir_full(None, None, None, Some("REQ-001"), Some(&text));
-            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
-
-            for row in [format!("Text: {text}"), "ID: REQ-001".to_string()] {
-                let row_width = metrics.estimate_width(&row) * subtitle_scale;
-                assert!(
-                    width >= row_width,
-                    "box width {width} is narrower than its own row {row:?} ({row_width})"
+            let (width, height) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
+            let card = fm_core::RequirementCardLayout::new(
+                ir.nodes[0].requirement_meta.as_deref().unwrap(),
+                "LoginReq",
+                &metrics,
+                Some(width),
+                None,
+            );
+            assert!(width <= metrics.font_size() * 25.0);
+            assert!(card.height <= height + 0.01);
+            assert_eq!(
+                card.rows
+                    .iter()
+                    .filter(|row| row.kind == fm_core::RequirementCardRowKind::Text)
+                    .map(|row| row.text.as_str())
+                    .collect::<String>(),
+                format!("Text: {text}")
+            );
+            assert!(card.rows.iter().any(|row| row.text == "ID: REQ-001"));
+            for row in &card.rows {
+                let row_width = metrics.estimate_preserved_width(
+                    &row.text,
+                    row.font_size,
+                    metrics.avg_char_width(),
                 );
+                assert!(row_width + 2.0 * card.padding <= width + 0.01);
+                assert!(row.center_y + row.font_size * 0.5 <= height);
             }
             assert!(
                 width >= previous_width,
@@ -44615,34 +44658,63 @@ mod tests {
             );
         }
 
-        // Field text remains a single run even when the IR contains authored line breaks.
+        // Explicit line breaks remain separate rows and every word survives wrapping.
         let text = "Record the completed deployment\nVerify all approval signatures\nRetain the complete audit history";
         let ir = requirement_ir_full(None, None, None, None, Some(text));
-        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
-        let displayed = format!("text: {}", text.replace('\n', " "));
-        assert!(width >= metrics.estimate_width(&displayed) * 0.9);
+        let (width, height) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
+        let card = fm_core::RequirementCardLayout::new(
+            ir.nodes[0].requirement_meta.as_deref().unwrap(),
+            "LoginReq",
+            &metrics,
+            Some(width),
+            None,
+        );
+        assert!(card.height <= height + 0.01);
+        assert_eq!(
+            card.rows
+                .iter()
+                .filter(|row| row.kind == fm_core::RequirementCardRowKind::Text)
+                .map(|row| row.text.as_str())
+                .collect::<String>(),
+            format!("Text: {}", text.replace('\n', ""))
+        );
     }
 
     /// The display header, risk, and verification are independent rows with their rendered labels.
     #[test]
     fn requirement_box_holds_its_type_and_metadata_rows() {
         let metrics = fm_core::FontMetrics::default_metrics();
-        let subtitle_scale = 0.75_f32;
 
         let mut previous_width = 0.0_f32;
         for extra in 0_usize..=20 {
             let verify = format!("Demonstration{}", "s".repeat(extra));
             let ir = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some(&verify));
-            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
-
-            for row in [
-                "Risk: Medium".to_string(),
-                format!("Verification: {verify}"),
-            ] {
-                let row_width = metrics.estimate_width(&row) * subtitle_scale;
+            let (width, height) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
+            let card = fm_core::RequirementCardLayout::new(
+                ir.nodes[0].requirement_meta.as_deref().unwrap(),
+                "LoginReq",
+                &metrics,
+                Some(width),
+                None,
+            );
+            assert!(card.height <= height + 0.01);
+            assert!(card.rows.iter().any(|row| row.text == "Risk: Medium"));
+            assert_eq!(
+                card.rows
+                    .iter()
+                    .filter(|row| row.kind == fm_core::RequirementCardRowKind::Verification)
+                    .map(|row| row.text.as_str())
+                    .collect::<String>(),
+                format!("Verification: {verify}")
+            );
+            for row in &card.rows {
                 assert!(
-                    width >= row_width,
-                    "box width {width} is narrower than its metadata row {row:?} ({row_width})"
+                    metrics.estimate_preserved_width(
+                        &row.text,
+                        row.font_size,
+                        metrics.avg_char_width()
+                    ) + 2.0 * card.padding
+                        <= width + 0.01
                 );
             }
             assert!(
@@ -44656,27 +44728,33 @@ mod tests {
         let long_type = "aVeryLongRequirementTypeNameIndeedForThisNode";
         let ir = requirement_ir(Some(long_type), None, None);
         let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
-        let header_width = metrics.estimate_width(&format!("<<{long_type}>>")) * subtitle_scale;
-        assert!(
-            width >= header_width,
-            "box width {width} is narrower than its type header {header_width}"
+        let card = fm_core::RequirementCardLayout::new(
+            ir.nodes[0].requirement_meta.as_deref().unwrap(),
+            "LoginReq",
+            &metrics,
+            Some(width),
+            None,
+        );
+        assert_eq!(
+            card.rows
+                .iter()
+                .filter(|row| row.kind == fm_core::RequirementCardRowKind::Stereotype)
+                .map(|row| row.text.as_str())
+                .collect::<String>(),
+            format!("<<{long_type}>>")
         );
 
-        // No metadata must add no width. Requirement boxes retain their existing vertical
-        // allowance; only unannotated process boxes use the compact default height.
+        // A card without metadata draws only the name, with no invented field rows.
         let bare = requirement_ir(None, None, None);
-        let mut plain = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        plain.nodes.push(IrNode {
-            id: "LoginReq".to_string(),
-            shape: NodeShape::Rect,
-            ..IrNode::default()
-        });
-        assert_eq!(
-            compute_node_size(&bare, &bare.nodes[0], &metrics, 0).0,
-            compute_node_size(&plain, &plain.nodes[0], &metrics, 0).0,
-            "a requirement with no type and no metadata must not gain width"
+        let card = fm_core::RequirementCardLayout::new(
+            bare.nodes[0].requirement_meta.as_deref().unwrap(),
+            "LoginReq",
+            &metrics,
+            None,
+            None,
         );
-        assert!(requirement_row_dimensions(&bare.nodes[0], "LoginReq", &metrics).is_none());
+        assert_eq!(card.rows.len(), 1);
+        assert_eq!(card.rows[0].text, "LoginReq");
     }
 
     /// Editing a requirement's metadata must invalidate the cached node size (bd-jnc1).

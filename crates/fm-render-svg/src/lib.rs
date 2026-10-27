@@ -2274,6 +2274,34 @@ fn render_scene_group(
 
     if let Some(id) = &group.id {
         elem = elem.id(id);
+        if let Some(ir) = ir
+            && let RenderSource::Node(index) = group.source
+            && ir
+                .nodes
+                .get(index)
+                .is_some_and(|node| node.requirement_meta.is_some())
+        {
+            let class = [
+                ("fm-req-type-label-", "fm-req-type-label"),
+                ("fm-req-name-", "fm-req-name"),
+                ("fm-req-id-", "fm-req-id"),
+                ("fm-req-text-", "fm-req-text"),
+                ("fm-req-risk-", "fm-req-metadata"),
+                ("fm-req-verification-", "fm-req-metadata"),
+                ("fm-req-element-type-", "fm-req-element-type"),
+                ("fm-req-docref-", "fm-req-docref"),
+            ]
+            .into_iter()
+            .find_map(|(prefix, class)| id.starts_with(prefix).then_some(class));
+            if let Some(class) = class {
+                elem = elem.class(class);
+                if class == "fm-req-name" {
+                    elem = elem.attr("font-weight", "600");
+                } else if class == "fm-req-type-label" {
+                    elem = elem.attr("font-style", "italic");
+                }
+            }
+        }
     }
 
     elem = apply_source_metadata(elem, group.source, config.include_source_spans, ir);
@@ -2387,6 +2415,16 @@ fn render_scene_path(
             }
         } else if let Some(style) = resolve_scene_node_inline_styles(ir, index).0 {
             elem = elem.attr("style", &style);
+            if ir
+                .nodes
+                .get(index)
+                .is_some_and(|node| node.requirement_meta.is_some())
+                && ir.resolved_node_style(index).contains_key("opacity")
+            {
+                // Requirement scenes carry node opacity in their paint for Canvas. The SVG
+                // author cascade applies the same opacity to the whole path exactly once.
+                elem = elem.fill_opacity(1.0).stroke_opacity(1.0);
+            }
         }
     }
 
@@ -2626,14 +2664,22 @@ fn render_scene_text(
 
     elem = apply_fill_style(elem, &text.fill);
     if let Some(ir) = ir
-        && matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Gantt)
+        && matches!(
+            ir.diagram_type,
+            DiagramType::Journey | DiagramType::Gantt | DiagramType::Requirement
+        )
     {
         let theme = resolve_theme(Some(ir), config);
         let color = if let RenderSource::Node(index) = text.source
             && (ir.diagram_type == DiagramType::Journey || text.align == RenderTextAlign::Middle)
         {
             let declared = ir.resolved_node_style(index);
-            let semantic_fill = if ir.diagram_type == DiagramType::Gantt {
+            let semantic_fill = if ir.diagram_type == DiagramType::Requirement {
+                ir.nodes
+                    .get(index)
+                    .and_then(|node| node.requirement_meta.as_deref())
+                    .and_then(fm_core::requirement_risk_fill)
+            } else if ir.diagram_type == DiagramType::Gantt {
                 ir.gantt_meta.as_ref().map(|meta| {
                     let flags = meta
                         .tasks
@@ -2661,16 +2707,24 @@ fn render_scene_text(
         && let RenderSource::Node(index) = text.source
     {
         let mut style = resolve_scene_node_inline_styles(ir, index).1;
-        if ir
-            .nodes
-            .get(index)
-            .is_some_and(|node| node.c4_meta.is_some() || !node.members.is_empty())
-            && ir.resolved_node_style(index).contains_key("font-size")
+        if ir.nodes.get(index).is_some_and(|node| {
+            node.c4_meta.is_some() || node.requirement_meta.is_some() || !node.members.is_empty()
+        }) && ir.resolved_node_style(index).contains_key("font-size")
         {
             style = Some(measured_card_font_style(style.as_deref(), text.font_size));
         }
         if let Some(style) = style {
             elem = elem.attr("style", &style);
+            if ir
+                .nodes
+                .get(index)
+                .is_some_and(|node| node.requirement_meta.is_some())
+                && ir.resolved_node_style(index).contains_key("opacity")
+            {
+                // The shared paint already carries the node opacity. Keep the inline author
+                // value without multiplying it by another fill-opacity on the text.
+                elem = elem.fill_opacity(1.0);
+            }
         }
     }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
@@ -3503,10 +3557,12 @@ fn resolve_scene_node_inline_styles(
         })
         .collect();
     let (shape, mut text) = split_style_properties(&properties);
-    // Journey rows occupy a separate layer in both SVG backends. Preserve node opacity there
-    // instead of relying on inheritance from the shape's group.
-    if ir.diagram_type == DiagramType::Journey
-        && let Some(opacity) = shape.get("opacity")
+    // These card rows occupy a separate layer in the scene backend. Preserve node opacity on
+    // their text instead of relying on inheritance from the shape's group.
+    if matches!(
+        ir.diagram_type,
+        DiagramType::Journey | DiagramType::Requirement
+    ) && let Some(opacity) = shape.get("opacity")
     {
         text.insert("opacity".to_owned(), opacity.clone());
     }
@@ -10732,32 +10788,103 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     }
 }
 
-/// Top of the centered requirement text stack. Layout reserves the same full-size name lines and
-/// subtitle line heights; each writer then advances its cursor through the rows it actually draws.
-fn requirement_text_start_y(
+/// Draw the shared measured requirement card without truncating any authored field.
+#[allow(clippy::too_many_arguments)]
+fn write_requirement_node_content_into(
+    out: &mut String,
     meta: &fm_core::IrRequirementNodeMeta,
     label: &str,
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    x: f32,
     y: f32,
-    height: f32,
-    font_size: f32,
+    w: f32,
+    h: f32,
     config: &SvgRenderConfig,
-) -> f32 {
-    let subtitles = usize::from(meta.requirement_type.is_some())
-        + [
-            &meta.req_id,
-            &meta.text,
-            &meta.risk,
-            &meta.verify_method,
-            &meta.element_type,
-            &meta.doc_ref,
-        ]
-        .iter()
-        .filter(|field| field.is_some())
-        .count();
-    let subtitle_font = clamp_font_size(font_size * 0.75, config.min_font_size);
-    let name_height = label.lines().count().max(1) as f32 * font_size * config.line_height;
-    let content_height = name_height + subtitles as f32 * subtitle_font * config.line_height;
-    y + (height - content_height) / 2.0
+    colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
+) {
+    let declared = ir.resolved_node_style(node_index);
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        preset: fm_core::FontPreset::from_family(
+            declared
+                .get("font-family")
+                .map_or(&config.font_family, String::as_str),
+        ),
+        ..config.font_metrics().config().clone()
+    });
+    let card = fm_core::RequirementCardLayout::new(
+        meta,
+        label,
+        &metrics,
+        Some(w),
+        declared.get("font-size").map(String::as_str),
+    )
+    .fit_to_height(h);
+    let top = y + ((h - card.height) * 0.5).max(0.0);
+    let fill = declared
+        .get("fill")
+        .map(String::as_str)
+        .or_else(|| fm_core::requirement_risk_fill(meta))
+        .unwrap_or(&colors.node_fill);
+    let color = fm_core::readable_label_color(fill, &colors.text, &colors.background);
+    if card.rows.iter().any(|row| {
+        !matches!(
+            row.kind,
+            fm_core::RequirementCardRowKind::Stereotype | fm_core::RequirementCardRowKind::Name
+        )
+    }) {
+        let mut divider = Element::line()
+            .x1(x + 2.0)
+            .y1(top + card.header_height)
+            .x2(x + w - 2.0)
+            .y2(top + card.header_height)
+            .stroke(&colors.node_stroke)
+            .stroke_width(0.8)
+            .class("fm-req-divider");
+        if let Some(style) = resolve_scene_node_inline_styles(ir, node_index).0 {
+            divider = divider.attr("style", &style);
+        }
+        divider.write_to_string(out);
+    }
+    for row in card.rows {
+        let class = match row.kind {
+            fm_core::RequirementCardRowKind::Stereotype => "fm-req-type-label",
+            fm_core::RequirementCardRowKind::Name => "fm-req-name",
+            fm_core::RequirementCardRowKind::Id => "fm-req-id",
+            fm_core::RequirementCardRowKind::Text => "fm-req-text",
+            fm_core::RequirementCardRowKind::Risk
+            | fm_core::RequirementCardRowKind::Verification => "fm-req-metadata",
+            fm_core::RequirementCardRowKind::ElementType => "fm-req-element-type",
+            fm_core::RequirementCardRowKind::DocRef => "fm-req-docref",
+        };
+        let mut text = TextBuilder::new(&row.text)
+            .x(x + w / 2.0)
+            .y(top + row.center_y)
+            .baseline(text::DominantBaseline::Central)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(row.font_size)
+            .anchor(TextAnchor::Middle)
+            .fill(color)
+            .class(class);
+        if row.kind == fm_core::RequirementCardRowKind::Name {
+            text = text.font_weight("600");
+        } else if row.kind == fm_core::RequirementCardRowKind::Stereotype {
+            text = text.font_style("italic");
+        }
+        let mut text = text.build().attr("xml:space", "preserve");
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        // Theme CSS must not replace the contrast-correct fallback. Author text properties
+        // remain last in the cascade, including opacity and an explicitly chosen colour.
+        let mut style = format!("fill:{color};{}", label_style.unwrap_or_default());
+        if declared.contains_key("font-size") {
+            style = measured_card_font_style(Some(&style), row.font_size);
+        }
+        text.attr("style", &style).write_to_string(out);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10768,17 +10895,15 @@ fn requirement_text_start_y(
 fn write_requirement_node_fragment_into<const A11Y: bool>(
     out: &mut String,
     meta: &fm_core::IrRequirementNodeMeta,
+    ir: &MermaidDiagramIr,
     node_id: &str,
     node_index: usize,
     raw_label: &str,
-    label: &str,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     rx: f32,
-    cx: f32,
-    font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) {
@@ -10826,129 +10951,17 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("\" rx=\"");
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"");
-    if let Some(fill) = requirement_risk_fill(meta) {
+    if let Some(fill) = fm_core::requirement_risk_fill(meta) {
         out.push_str(" style=\"fill: ");
         out.push_str(fill);
+        out.push(';');
         out.push('"');
     }
     out.push_str("/>");
 
-    let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
-    let subtitle_line_height = subtitle_font_size * config.line_height;
-    let name_line_height = font_size * config.line_height;
-    let mut text_y = requirement_text_start_y(meta, label, y, h, font_size, config);
-    if let Some(req_type) = meta.requirement_type.as_deref() {
-        // ⚠️ `<<Type>>`, NOT `«keyword»`, and both halves changed. mermaid draws
-        // `` `<<${n.type}>>` `` with ASCII angles — the same wrapper this renderer already uses for a
-        // CLASS stereotype — and `n.type` is the DISPLAY name from its `RequirementType` table, not
-        // the authored keyword. We drew `«functionalRequirement»` where mermaid draws
-        // `<<Functional Requirement>>`: wrong words inside a wrapper we spell differently from our
-        // own class path. `>` IS XML-special, so the escaper writes the whole thing.
-        let req_type = fm_core::requirement_type_display(req_type);
-        write_req_subtitle_body_into(
-            out,
-            cx,
-            text_y + subtitle_line_height / 2.0,
-            subtitle_font_size,
-            " font-style=\"italic\"",
-            "",
-            &colors.text,
-            "fm-req-type-label",
-            |f| {
-                let _ = write_escaped_text(f, "<<");
-                let _ = write_escaped_text(f, req_type);
-                let _ = write_escaped_text(f, ">>");
-            },
-        );
-        text_y += subtitle_line_height;
-    }
-
-    out.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(out, cx);
-    out.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(
-        out,
-        text_y + name_line_height / 2.0 + font_size / 3.0,
+    write_requirement_node_content_into(
+        out, meta, raw_label, ir, node_index, x, y, w, h, config, colors, None, false,
     );
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = crate::attributes::write_number_into(out, font_size);
-    out.push_str("\" fill=\"");
-    let _ = write_escaped_attr(out, &colors.text);
-    out.push_str("\">");
-    let _ = write_escaped_text(out, label);
-    out.push_str("</text>");
-    text_y += name_line_height;
-
-    // `id:` and `text:` are the requirement's traceability key and the requirement itself — the
-    // sentence the diagram exists to record. Both were parsed into the IR, held there, and read by
-    // nothing (bd-f3tc). The incumbent draws them as their own rows between the name and the risk
-    // row (`ID: …` then `Text: …` in mermaid 11.15.0's requirement renderer), which is what these
-    // reproduce. The fixed prefixes hold no XML specials, so streaming the parts is byte-identical
-    // to escaping a joined `format!` without the per-node String.
-    // `Type:` and `Doc:` are an ELEMENT's fields, added by bd-qdmn for the same reason bd-f3tc added
-    // the two above: declared by the author, dropped before the IR, drawn by nothing. They join this
-    // table rather than getting their own block so an element's rows stack with a requirement's in
-    // one order, and so a future row cannot forget the `text_y` advance below.
-    // ⚠️ ONE ROW PER FIELD, IN mermaid's ORDER, WITH mermaid's LABELS. Its requirement renderer emits
-    // each as an independent line and nothing is ever joined:
-    //
-    // ```text
-    //   `ID: ${n.requirementId}`     `Text: ${n.text}`
-    //   `Risk: ${n.risk}`            `Verification: ${n.verifyMethod}`      <- a requirement
-    //   `Type: ${a.type}`            `Doc Ref: ${a.docRef}`                 <- an element
-    // ```
-    //
-    // Two divergences lived here and both were found by rendering the incumbent in Chromium and
-    // diffing drawn text (`scripts/headtohead/chromium_text_diff.mjs`):
-    //
-    //   * risk and verification were fused into ONE row, `Risk: High | Verify: Test`, a separator
-    //     mermaid never draws;
-    //   * the labels were `Verify:` and `Doc:` where mermaid writes `Verification:` and `Doc Ref:`.
-    //
-    // A node carries either the requirement fields or the element fields, never both, so one table in
-    // this order reproduces both orders. Folding risk and verification in here rather than leaving
-    // them in their own block is also what stops a future row forgetting the `text_y` advance below.
-    for (prefix, value, class) in [
-        ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
-        ("Text: ", meta.text.as_deref(), "fm-req-text"),
-        // Risk and verification are drawn through their DISPLAY tables, not echoed: mermaid
-        // prints the enum name (`high` -> `High`, `TEST` -> `Test`), discarding the author's casing.
-        (
-            "Risk: ",
-            meta.risk.as_deref().map(fm_core::requirement_risk_display),
-            "fm-req-metadata",
-        ),
-        (
-            "Verification: ",
-            meta.verify_method
-                .as_deref()
-                .map(fm_core::requirement_verify_method_display),
-            "fm-req-metadata",
-        ),
-        (
-            "Type: ",
-            meta.element_type.as_deref(),
-            "fm-req-element-type",
-        ),
-        ("Doc Ref: ", meta.doc_ref.as_deref(), "fm-req-docref"),
-    ] {
-        let Some(value) = value else { continue };
-        write_req_subtitle_body_into(
-            out,
-            cx,
-            text_y + subtitle_line_height / 2.0,
-            subtitle_font_size,
-            "",
-            " opacity=\"0.7\"",
-            &colors.text,
-            class,
-            |f| {
-                f.push_str(prefix);
-                let _ = write_escaped_text(f, value);
-            },
-        );
-        text_y += subtitle_line_height;
-    }
 
     if A11Y {
         out.push_str("<title>Node: ");
@@ -10956,19 +10969,6 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
         out.push_str(", rectangle</title></g>");
     } else {
         out.push_str("</g>");
-    }
-}
-
-fn requirement_risk_fill(meta: &fm_core::IrRequirementNodeMeta) -> Option<&'static str> {
-    let risk = meta.risk.as_deref()?;
-    if risk.eq_ignore_ascii_case("high") {
-        Some("#fca5a5")
-    } else if risk.eq_ignore_ascii_case("medium") {
-        Some("#fde68a")
-    } else if risk.eq_ignore_ascii_case("low") {
-        Some("#bbf7d0")
-    } else {
-        None
     }
 }
 
@@ -11103,17 +11103,15 @@ fn render_node_into(
         write_requirement_node_fragment_into::<true>(
             out,
             meta,
+            ir,
             node_id,
             node_box.node_index,
             raw_label_text,
-            &label_text,
             x,
             y,
             w,
             h,
             config.rounded_corners * 0.55,
-            cx,
-            node_font_size,
             config,
             colors,
         );
@@ -11150,17 +11148,15 @@ fn render_node_into(
         write_requirement_node_fragment_into::<false>(
             out,
             meta,
+            ir,
             node_id,
             node_box.node_index,
             raw_label_text,
-            &label_text,
             x,
             y,
             w,
             h,
             config.rounded_corners * 0.55,
-            cx,
-            node_font_size,
             config,
             colors,
         );
@@ -11630,12 +11626,18 @@ fn render_node(
         palette
     });
     let colors = flowchart_colors.as_ref().unwrap_or(colors);
-    let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey {
+    let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey
+        || ir_node.is_some_and(|node| node.requirement_meta.is_some())
+    {
         resolve_scene_node_inline_styles(ir, node_box.node_index)
     } else {
         resolve_node_inline_styles(ir, node_box.node_index)
     };
-    let shape_style = if let Some(fill) = fm_layout::journey_score_fill(ir, node_box.node_index) {
+    let semantic_fill = ir_node
+        .and_then(|node| node.requirement_meta.as_deref())
+        .and_then(fm_core::requirement_risk_fill)
+        .or_else(|| fm_layout::journey_score_fill(ir, node_box.node_index));
+    let shape_style = if let Some(fill) = semantic_fill {
         Some(format!(
             "fill: {fill};{}",
             shape_style.as_deref().unwrap_or("")
@@ -11697,9 +11699,6 @@ fn render_node(
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
-    let apply_label_class =
-        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
-
     let mut is_highlighted = false;
     let mut is_inactive = false;
     let mut dashed_border = false;
@@ -11888,17 +11887,6 @@ fn render_node(
     if is_block_beta_space {
         group = group.class("fm-node-block-beta-space");
     }
-
-    // Requirement diagram: add risk level and requirement type CSS classes.
-    let req_risk_fill: Option<&str> = ir_node
-        .and_then(|n| n.requirement_meta.as_ref())
-        .and_then(|meta| meta.risk.as_ref())
-        .and_then(|risk| match risk.to_ascii_lowercase().as_str() {
-            "high" => Some("#fca5a5"),
-            "medium" => Some("#fde68a"),
-            "low" => Some("#bbf7d0"),
-            _ => None,
-        });
 
     // Kanban priority → border color styling.
     let kanban_priority_fill: Option<&str> = ir_node.and_then(|n| {
@@ -13134,9 +13122,6 @@ fn render_node(
     // Apply inline style from style directives if present.
     let shape_elem = if let Some(inline_style) = shape_style.as_deref() {
         shape_elem.attr("style", inline_style)
-    } else if let Some(risk_fill) = req_risk_fill {
-        // Requirement risk-level fill when no explicit style override.
-        shape_elem.attr("style", &format!("fill: {risk_fill}"))
     } else if let Some(score_fill) = journey_score_fill {
         // Journey score-based fill color.
         shape_elem.attr("style", &format!("fill: {score_fill}"))
@@ -13215,153 +13200,23 @@ fn render_node(
         } else if let Some(node) = ir_node
             && let Some(ref req_meta) = node.requirement_meta
         {
-            // Requirement node: centered type, name, and field rows with separate line heights.
-            let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
-            let subtitle_line_height = subtitle_font_size * config.line_height;
-            let name_line_height = node_font_size * config.line_height;
-            let mut text_y =
-                requirement_text_start_y(req_meta, &label_text, y, h, node_font_size, config);
-
-            // Requirement type header (e.g., "<<requirement>>"). Stream the `<text>` bytes directly under
-            // the common themed config (embedded CSS, no per-label style/classdef) instead of building an
-            // `Element` + its `Attributes` Vec — requirement nodes always take this slow path, and the
-            // Element machinery was the top of requirement render.
-            let stream_req_subtitles =
-                config.embed_theme_css && !emit_classdef_classes && text_style.is_none();
-            if let Some(ref req_type) = req_meta.requirement_type {
-                // Same contract as the streaming path above: mermaid's display name, ASCII angles.
-                let type_label = format!("<<{}>>", fm_core::requirement_type_display(req_type));
-                if stream_req_subtitles {
-                    let mut f = String::new();
-                    write_req_subtitle_into(
-                        &mut f,
-                        cx,
-                        text_y + subtitle_line_height / 2.0,
-                        subtitle_font_size,
-                        " font-style=\"italic\"",
-                        "",
-                        &colors.text,
-                        "fm-req-type-label",
-                        &type_label,
-                    );
-                    group = group.child(Element::raw_svg(f));
-                } else {
-                    let mut type_elem = Element::text()
-                        .x(cx)
-                        .y(text_y + subtitle_line_height / 2.0)
-                        .content(&type_label)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", subtitle_font_size)
-                        .attr("font-style", "italic")
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&colors.text)
-                        .class("fm-req-type-label");
-                    type_elem = apply_label_class(type_elem);
-                    if let Some(style) = text_style.as_deref() {
-                        type_elem = type_elem.attr("style", style);
-                    }
-                    group = group.child(type_elem);
-                }
-                text_y += subtitle_line_height;
-            }
-
-            // Main label
-            let text_elem = render_node_label_text(
+            let mut fragment = String::new();
+            write_requirement_node_content_into(
+                &mut fragment,
+                req_meta,
+                raw_label_text,
                 ir,
-                label_id,
-                &label_text,
-                cx,
-                text_y + name_line_height / 2.0 + node_font_size / 3.0,
-                node_font_size,
-                fit_width((w - 20.0).max(node_font_size)),
-                (h - 20.0).max(node_font_size),
+                node_box.node_index,
+                x,
+                y,
+                w,
+                h,
                 config,
                 colors,
                 text_style.as_deref(),
                 emit_classdef_classes,
             );
-            group = group.child(text_elem);
-            text_y += name_line_height * label_text.lines().count().max(1) as f32;
-
-            // The field rows — see the fast writer's comment for the reference. Kept in lockstep with
-            // it: same order, same labels, same classes, same `opacity 0.7`, same cursor advance.
-            //
-            // ⚠️ THE LOCKSTEP HAD ALREADY BROKEN, and the comment claiming it is how that went
-            // unnoticed. This copy carried only `ID:` and `Text:`; the `Type:` and `Doc Ref:` rows an
-            // ELEMENT declares existed solely in the fast writer, so which fields a requirement
-            // diagram drew depended on which path it happened to take. Both tables are now the same
-            // six rows in mermaid's order.
-            for (prefix, value, class) in [
-                ("ID: ", req_meta.req_id.as_deref(), "fm-req-id"),
-                ("Text: ", req_meta.text.as_deref(), "fm-req-text"),
-                // ⚠️ THE SECOND OF TWO ROW TABLES. Both must go through the display helpers or the
-                // two requirement render paths disagree on the same diagram.
-                (
-                    "Risk: ",
-                    req_meta
-                        .risk
-                        .as_deref()
-                        .map(fm_core::requirement_risk_display),
-                    "fm-req-metadata",
-                ),
-                (
-                    "Verification: ",
-                    req_meta
-                        .verify_method
-                        .as_deref()
-                        .map(fm_core::requirement_verify_method_display),
-                    "fm-req-metadata",
-                ),
-                (
-                    "Type: ",
-                    req_meta.element_type.as_deref(),
-                    "fm-req-element-type",
-                ),
-                ("Doc Ref: ", req_meta.doc_ref.as_deref(), "fm-req-docref"),
-            ] {
-                let Some(value) = value else { continue };
-                let row = format!("{prefix}{value}");
-                if stream_req_subtitles {
-                    let mut f = String::new();
-                    write_req_subtitle_into(
-                        &mut f,
-                        cx,
-                        text_y + subtitle_line_height / 2.0,
-                        subtitle_font_size,
-                        "",
-                        " opacity=\"0.7\"",
-                        &colors.text,
-                        class,
-                        &row,
-                    );
-                    group = group.child(Element::raw_svg(f));
-                } else {
-                    let mut row_elem = Element::text()
-                        .x(cx)
-                        .y(text_y + subtitle_line_height / 2.0)
-                        .content(&row)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", subtitle_font_size)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&colors.text)
-                        .attr("opacity", "0.7")
-                        .class(class);
-                    row_elem = apply_label_class(row_elem);
-                    if let Some(style) = text_style.as_deref() {
-                        row_elem = row_elem.attr("style", style);
-                    }
-                    group = group.child(row_elem);
-                }
-                text_y += subtitle_line_height;
-            }
+            group = group.child(Element::raw_svg(fragment));
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
             && ir.diagram_type == fm_core::DiagramType::Er
@@ -13642,75 +13497,6 @@ fn stable_accent_index(node_id: &str) -> usize {
         hash = hash.wrapping_mul(0x01000193);
     }
     (hash as usize % 8) + 1
-}
-
-/// Stream a requirement-node subtitle `<text>` (the `«type»` header / `Risk … | Verify …` metadata line)
-/// byte-identical to the `Element` the slow path builds under the common themed config (embedded CSS,
-/// no per-label style/classdef → `font-family` and `fm-node-label` absent). `before_fill`/`after_fill`
-/// carry the config-specific attribute in the slow path's exact position: the type header's
-/// `font-style="italic"` sits BEFORE `fill`, the metadata's `opacity="0.7"` AFTER it.
-#[allow(clippy::too_many_arguments)]
-fn write_req_subtitle_into(
-    f: &mut String,
-    x: f32,
-    y: f32,
-    font_size: f32,
-    before_fill: &str,
-    after_fill: &str,
-    fill: &str,
-    class: &str,
-    text: &str,
-) {
-    write_req_subtitle_body_into(
-        f,
-        x,
-        y,
-        font_size,
-        before_fill,
-        after_fill,
-        fill,
-        class,
-        |f| {
-            let _ = crate::attributes::write_escaped_text(f, text);
-        },
-    );
-}
-
-/// Writes the requirement-subtitle `<text …>…</text>` envelope, leaving the body to a caller closure so
-/// multi-part subtitles (`Risk: {risk} | Verify: {vm}`, `«{type}»`) stream their fixed labels + escaped
-/// fields straight in instead of `format!`-allocating a joined `String` per node. Byte-identical because
-/// `write_escaped_text` escapes per char (escape(a ++ b) == escape(a) ++ escape(b)) and the fixed labels
-/// hold no XML specials.
-#[allow(clippy::too_many_arguments)]
-fn write_req_subtitle_body_into(
-    f: &mut String,
-    x: f32,
-    y: f32,
-    font_size: f32,
-    before_fill: &str,
-    after_fill: &str,
-    fill: &str,
-    class: &str,
-    write_body: impl FnOnce(&mut String),
-) {
-    use crate::attributes::write_escaped_attr;
-    f.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(f, x);
-    f.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
-    let _ = crate::attributes::write_number_into(f, font_size);
-    f.push('"');
-    f.push_str(before_fill);
-    f.push_str(" fill=\"");
-    let _ = write_escaped_attr(f, fill);
-    f.push('"');
-    f.push_str(after_fill);
-    f.push_str(" class=\"");
-    f.push_str(class);
-    f.push_str("\">");
-    write_body(f);
-    f.push_str("</text>");
 }
 
 /// Render the shared UML card geometry through the same writer as the whole-node path.
@@ -19547,67 +19333,24 @@ mod tests {
     }
 
     #[test]
-    fn requirement_subtitle_streaming_matches_element_render() {
-        let cases = [
-            (
-                123.25,
-                45.5,
-                10.75,
-                " font-style=\"italic\"",
-                "",
-                "fm-req-type-label",
-                "\u{00ab}functional & safe\u{00bb}",
-                true,
-            ),
-            (
-                -2.0,
-                77.25,
-                9.5,
-                "",
-                " opacity=\"0.7\"",
-                "fm-req-metadata",
-                "Risk: high | Verify: test <manual>",
-                false,
-            ),
-        ];
-
-        for (x, y, font_size, before_fill, after_fill, class, text, italic) in cases {
-            let mut elem = Element::text()
-                .x(x)
-                .y(y)
-                .content(text)
-                .attr("text-anchor", "middle")
-                .attr("dominant-baseline", "central")
-                .attr_num("font-size", font_size);
-            if italic {
-                elem = elem.attr("font-style", "italic");
-            }
-            elem = elem.fill("#1a1a2e");
-            if !after_fill.is_empty() {
-                elem = elem.attr("opacity", "0.7");
-            }
-            elem = elem.class(class);
-
-            let mut expected = String::new();
-            elem.write_to_string(&mut expected);
-
-            let mut streamed = String::new();
-            write_req_subtitle_into(
-                &mut streamed,
-                x,
-                y,
-                font_size,
-                before_fill,
-                after_fill,
-                "#1a1a2e",
-                class,
-                text,
-            );
-
-            assert_eq!(
-                streamed, expected,
-                "streamed requirement subtitle must match Element render for {class}"
-            );
+    fn requirement_cards_preserve_whitespace_escaping_and_semantic_typography() {
+        let ir = fm_parser::parse(
+            "requirementDiagram\n  requirement Safety {\n    id: REQ-42\n    text: functional  & safe <manual>\n    risk: high\n    verifymethod: test\n  }\n",
+        )
+        .ir;
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            let group = svg.split_once("data-id=\"Safety\"").unwrap().1;
+            assert!(group.contains("Text: functional  &amp; safe &lt;manual>"));
+            assert!(group.contains("xml:space=\"preserve\""));
+            assert!(group.contains("font-style=\"italic\""));
+            assert!(group.contains("font-weight=\"600\""));
+            assert!(group.contains("class=\"fm-req-divider\""));
+            assert!(!group.contains("opacity=\"0.7\""));
         }
     }
 

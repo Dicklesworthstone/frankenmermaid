@@ -8772,6 +8772,191 @@ pub struct IrRequirementNodeMeta {
     pub doc_ref: Option<String>,
 }
 
+/// The semantic role of a measured requirement-card row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequirementCardRowKind {
+    Stereotype,
+    Name,
+    Id,
+    Text,
+    Risk,
+    Verification,
+    ElementType,
+    DocRef,
+}
+
+/// One complete row, with its center measured from the card's top edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequirementCardRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: RequirementCardRowKind,
+}
+
+/// The same requirement content and geometry for layout and every graphical backend.
+///
+/// Long requirements grow vertically, preserving every field and authored space. Rendering
+/// never decides which rows fit: the complete stack determines the node's size first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequirementCardLayout {
+    pub rows: Vec<RequirementCardRow>,
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+    pub header_height: f32,
+}
+
+impl RequirementCardLayout {
+    #[must_use]
+    pub fn new(
+        meta: &IrRequirementNodeMeta,
+        name: &str,
+        metrics: &FontMetrics,
+        width: Option<f32>,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(metrics.font_size());
+        let body_font = declared_font_size.unwrap_or((font_size * 0.85).max(8.0));
+        let padding = font_size;
+        let mut sections = Vec::with_capacity(8);
+        if let Some(kind) = meta.requirement_type.as_deref() {
+            sections.push((
+                format!("<<{}>>", requirement_type_display(kind)),
+                body_font,
+                RequirementCardRowKind::Stereotype,
+            ));
+        }
+        sections.push((name.to_owned(), font_size, RequirementCardRowKind::Name));
+        for (prefix, value, kind) in [
+            ("ID: ", meta.req_id.as_deref(), RequirementCardRowKind::Id),
+            ("Text: ", meta.text.as_deref(), RequirementCardRowKind::Text),
+            (
+                "Risk: ",
+                meta.risk.as_deref().map(requirement_risk_display),
+                RequirementCardRowKind::Risk,
+            ),
+            (
+                "Verification: ",
+                meta.verify_method
+                    .as_deref()
+                    .map(requirement_verify_method_display),
+                RequirementCardRowKind::Verification,
+            ),
+            (
+                "Type: ",
+                meta.element_type.as_deref(),
+                RequirementCardRowKind::ElementType,
+            ),
+            (
+                "Doc Ref: ",
+                meta.doc_ref.as_deref(),
+                RequirementCardRowKind::DocRef,
+            ),
+        ] {
+            if let Some(value) = value {
+                sections.push((format!("{prefix}{value}"), body_font, kind));
+            }
+        }
+        let natural_width = sections
+            .iter()
+            .map(|(text, size, _)| {
+                metrics.estimate_preserved_width(text, *size, metrics.avg_char_width()) * 1.12
+                    + 2.0 * padding
+            })
+            .fold(font_size * 12.0, f32::max)
+            .min(font_size * 25.0);
+        let width = width
+            .filter(|width| width.is_finite() && *width > 2.0 * padding)
+            .unwrap_or(natural_width);
+        // The allowance also leaves room for the emphasized heading in actual system fonts.
+        let available = ((width - 2.0 * padding) / 1.12).max(font_size);
+        let mut rows = Vec::new();
+        let mut cursor = padding;
+        let mut header_height = padding;
+        for (text, size, kind) in sections {
+            let row_metrics = FontMetrics::new(FontMetricsConfig {
+                font_size: size,
+                ..metrics.config().clone()
+            });
+            let pitch = size * metrics.config().line_height.max(1.3);
+            for text in row_metrics.wrap_preserved_to_width(&text, available) {
+                rows.push(RequirementCardRow {
+                    text,
+                    center_y: cursor + pitch * 0.5,
+                    font_size: size,
+                    kind,
+                });
+                cursor += pitch;
+            }
+            if kind == RequirementCardRowKind::Name {
+                header_height = cursor + padding * 0.5;
+                cursor += padding;
+            }
+        }
+        Self {
+            rows,
+            width,
+            height: cursor + padding,
+            padding,
+            header_height,
+        }
+    }
+
+    /// Fit a previously measured box by tightening row spacing, never shrinking fonts or
+    /// omitting content. This keeps a compact layout readable when the renderer's default
+    /// line-height differs. A box too small for the minimum readable pitch is left unchanged.
+    #[must_use]
+    pub fn fit_to_height(mut self, height: f32) -> Self {
+        if !height.is_finite() || height >= self.height {
+            return self;
+        }
+        let Some(header_end) = self
+            .rows
+            .iter()
+            .rposition(|row| row.kind == RequirementCardRowKind::Name)
+        else {
+            return self;
+        };
+        let total_font_size: f32 = self.rows.iter().map(|row| row.font_size).sum();
+        let pitch = (height - 3.0 * self.padding) / total_font_size;
+        if !pitch.is_finite() || pitch < 1.3 - 0.0001 {
+            return self;
+        }
+        let mut cursor = self.padding;
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            let line_height = row.font_size * pitch.max(1.3);
+            row.center_y = cursor + line_height * 0.5;
+            cursor += line_height;
+            if index == header_end {
+                self.header_height = cursor + self.padding * 0.5;
+                cursor += self.padding;
+            }
+        }
+        self.height = cursor + self.padding;
+        self
+    }
+}
+
+/// Requirement risk is a semantic fill fallback; author styles take precedence.
+#[must_use]
+pub fn requirement_risk_fill(meta: &IrRequirementNodeMeta) -> Option<&'static str> {
+    match meta.risk.as_deref()?.trim().to_ascii_lowercase().as_str() {
+        "high" => Some("#fca5a5"),
+        "medium" => Some("#fde68a"),
+        "low" => Some("#bbf7d0"),
+        _ => None,
+    }
+}
+
 /// A data point in a quadrant chart with normalized [0, 1] coordinates.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrQuadrantPoint {
