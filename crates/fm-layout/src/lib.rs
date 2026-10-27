@@ -3633,12 +3633,22 @@ pub enum RenderItem {
 /// Build a target-agnostic render scene from semantic IR and computed layout.
 #[must_use]
 pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
+    build_render_scene_with_metrics(ir, layout, &fm_core::FontMetrics::default_metrics())
+}
+
+/// Build a scene with the same font measurements that were used to size its node boxes.
+#[must_use]
+pub fn build_render_scene_with_metrics(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderScene {
     if ir.diagram_type == DiagramType::XyChart
         && let Some(meta) = ir.xy_chart_meta.as_ref()
     {
         return build_xychart_render_scene(ir, meta, layout);
     }
-    let (label_layer, label_bounds) = build_label_layer(ir, layout);
+    let (label_layer, label_bounds) = build_label_layer(ir, layout, metrics);
     let bounds = RenderRect::from(label_bounds);
 
     let mut root =
@@ -4740,7 +4750,11 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
     layer
 }
 
-fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> (RenderGroup, LayoutRect) {
+fn build_label_layer(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> (RenderGroup, LayoutRect) {
     let mut layer =
         RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
     let mut edge_labels = edge_labels::uses_graph_edge_labels(ir.diagram_type)
@@ -4771,6 +4785,124 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> (RenderGr
         let Some(node) = ir.nodes.get(node_box.node_index) else {
             continue;
         };
+        if let Some(meta) = node
+            .class_meta
+            .as_deref()
+            .filter(|meta| meta.has_compartments())
+        {
+            let name = node
+                .label
+                .and_then(|id| ir.labels.get(id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            let declared = ir.resolved_node_style(node_box.node_index);
+            let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+                meta,
+                name,
+                metrics.font_size(),
+                metrics.config().line_height,
+                declared.get("font-size").map(String::as_str),
+            );
+            let border = declared
+                .get("stroke")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#7c8da5".to_owned());
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#1e293b".to_owned());
+            let source = RenderSource::Node(node_box.node_index);
+            let bounds = node_box.bounds;
+            if !declared.contains_key("fill") && bounds.width > 2.0 && bounds.height > 2.0 {
+                layer.children.push(RenderItem::Path(RenderPath {
+                    source,
+                    commands: rounded_rect_path(
+                        LayoutRect {
+                            x: bounds.x + 0.75,
+                            y: bounds.y + 0.75,
+                            width: bounds.width - 1.5,
+                            height: card.header_height.min(bounds.height) - 0.75,
+                        },
+                        4.0,
+                    ),
+                    fill: Some(FillStyle::Solid {
+                        color: fm_core::mindmap::branch_fill("#f8fafc", &border, false),
+                        opacity: 1.0,
+                    }),
+                    stroke: None,
+                    marker_start: MarkerKind::None,
+                    marker_end: MarkerKind::None,
+                }));
+            }
+            for separator_y in card.separator_ys {
+                let mut stroke = StrokeStyle::solid(&border, 0.75);
+                stroke.opacity = 0.65;
+                layer.children.push(RenderItem::Path(RenderPath {
+                    source,
+                    commands: vec![
+                        PathCmd::MoveTo {
+                            x: bounds.x + 0.75,
+                            y: bounds.y + separator_y,
+                        },
+                        PathCmd::LineTo {
+                            x: bounds.x + bounds.width - 0.75,
+                            y: bounds.y + separator_y,
+                        },
+                    ],
+                    fill: None,
+                    stroke: Some(stroke),
+                    marker_start: MarkerKind::None,
+                    marker_end: MarkerKind::None,
+                }));
+            }
+            for row in card.rows {
+                let centered = row.centered();
+                let x = if centered {
+                    bounds.x + bounds.width * 0.5
+                } else {
+                    bounds.x + fm_core::ClassCompartmentLayout::PADDING_X
+                };
+                let y = bounds.y + row.center_y;
+                if row.underline {
+                    let width =
+                        metrics.estimate_width(&row.text) * row.font_size / metrics.font_size();
+                    layer.children.push(RenderItem::Path(RenderPath {
+                        source,
+                        commands: vec![
+                            PathCmd::MoveTo {
+                                x,
+                                y: y + row.font_size * 0.5,
+                            },
+                            PathCmd::LineTo {
+                                x: x + width,
+                                y: y + row.font_size * 0.5,
+                            },
+                        ],
+                        fill: None,
+                        stroke: Some(StrokeStyle::solid(&color, 0.75)),
+                        marker_start: MarkerKind::None,
+                        marker_end: MarkerKind::None,
+                    }));
+                }
+                layer.children.push(RenderItem::Text(RenderText {
+                    source,
+                    text: row.text,
+                    x,
+                    y,
+                    font_size: row.font_size,
+                    align: if centered {
+                        TextAlign::Middle
+                    } else {
+                        TextAlign::Start
+                    },
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity: 1.0,
+                    },
+                }));
+            }
+            continue;
+        }
         let label_text = display_node_label(ir, node);
         if label_text.is_empty() {
             continue;
@@ -6207,7 +6339,8 @@ impl IncrementalLayoutEngine {
                                         .get(node_index)
                                         .map(|graph_node| &graph_node.subgraphs)
                                 && {
-                                    let (width, height) = compute_node_size(ir, node, &metrics);
+                                    let (width, height) =
+                                        compute_node_size(ir, node, &metrics, node_index);
                                     width.to_bits() == node_box.bounds.width.to_bits()
                                         && height.to_bits() == node_box.bounds.height.to_bits()
                                 }
@@ -8354,7 +8487,8 @@ pub fn try_relayout_directed_path_suffix(
     let metrics = fm_core::FontMetrics::default_metrics();
     let suffix_sizes = ir.nodes[prefix.node_count..]
         .iter()
-        .map(|node| compute_node_size(ir, node, &metrics))
+        .enumerate()
+        .map(|(offset, node)| compute_node_size(ir, node, &metrics, prefix.node_count + offset))
         .collect::<Vec<_>>();
     if suffix_sizes
         .iter()
@@ -15840,7 +15974,8 @@ pub fn compute_node_sizes(
             return ir
                 .nodes
                 .iter()
-                .map(|node| compute_node_size(ir, node, metrics))
+                .enumerate()
+                .map(|(index, node)| compute_node_size(ir, node, metrics, index))
                 .collect();
         };
 
@@ -15850,8 +15985,9 @@ pub fn compute_node_sizes(
         let sizes = ir
             .nodes
             .iter()
-            .map(|node| {
-                let cache_key = node_size_cache_key(ir, node, metrics);
+            .enumerate()
+            .map(|(index, node)| {
+                let cache_key = node_size_cache_key(ir, node, metrics, index);
                 if let Some(entry) = state.node_size_cache.get(&node.id)
                     && entry.key == cache_key
                 {
@@ -15870,7 +16006,7 @@ pub fn compute_node_sizes(
                     cache_key,
                     "incremental.dependency_update"
                 );
-                let size = compute_node_size(ir, node, metrics);
+                let size = compute_node_size(ir, node, metrics, index);
                 state.node_size_cache.insert(
                     node.id.clone(),
                     CachedNodeSize {
@@ -15906,6 +16042,7 @@ fn compute_node_size(
     ir: &MermaidDiagramIr,
     node: &IrNode,
     metrics: &fm_core::FontMetrics,
+    node_index: usize,
 ) -> (f32, f32) {
     let text = display_node_label_ref(ir, node);
 
@@ -15978,7 +16115,19 @@ fn compute_node_size(
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
             // than overflowing — see `class_compartment_dimensions`.
-            let (width, height) = match class_compartment_dimensions(node, metrics) {
+            let class_style = node
+                .class_meta
+                .as_ref()
+                .map(|_| ir.resolved_node_style(node_index));
+            let (width, height) = match class_compartment_dimensions(
+                node,
+                metrics,
+                text,
+                class_style
+                    .as_ref()
+                    .and_then(|style| style.get("font-size"))
+                    .map(String::as_str),
+            ) {
                 Some((members_width, members_height)) => {
                     (width.max(members_width), height.max(members_height))
                 }
@@ -16309,14 +16458,14 @@ fn wrapped_line_count(text: &str, max_width: f32, avg_char_width: f32) -> usize 
 /// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
 /// attribute and method). `None` for any node that is not a class node or that declares no members.
 ///
-/// This mirrors `fm-render-svg`'s `write_class_compartments_into` cursor advance exactly, because that
-/// renderer drops any member row landing below `y + h - line_h * 0.5` instead of growing the box:
-/// under-sizing here deletes content from the output, so the arithmetic below must stay in step with
-/// the renderer's. Over-sizing is harmless (the extra space renders as padding), so every term is
-/// rounded up rather than fitted tight.
+/// The same compartment geometry is consumed by SVG, Canvas2D and the GPU plan. Keeping the
+/// vertical measure here tied to their row centers prevents a font or line-height change from
+/// clipping members or leaving unrelated amounts of whitespace in different backends.
 fn class_compartment_dimensions(
     node: &IrNode,
     metrics: &fm_core::FontMetrics,
+    class_name: &str,
+    declared_font_size: Option<&str>,
 ) -> Option<(f32, f32)> {
     let meta = node.class_meta.as_deref()?;
     // A stereotype (bd-d48wi) or generic header still needs the class renderer when no members
@@ -16325,41 +16474,29 @@ fn class_compartment_dimensions(
         return None;
     }
 
-    let line_h = metrics.line_height_px();
-    // Renderer: `member_font_size * config.line_height * 0.9` with `member_font_size = font_size * 0.9`,
-    // i.e. `line_height_px * 0.81`.
-    let row_h = line_h * 0.81;
-
-    // Cursor offsets from the top of the box, in renderer order.
-    let mut height = line_h; // initial `cursor_y = y + line_h` (name baseline)
-    if meta.stereotype.is_some() {
-        height += line_h; // stereotype occupies the first row, name moves down one
-    }
-    height += line_h * 0.5; // name -> separator
-    height += line_h * 0.3; // separator -> first member row
-    height += row_h * meta.attributes.len() as f32;
-    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-        height += line_h * 0.6; // attribute/method separator (0.3 before + 0.3 after)
-    }
-    height += row_h * meta.methods.len() as f32;
-    // The renderer keeps a row only while `cursor_y <= y + h - line_h * 0.5`, so the box needs that
-    // much slack past the last row's baseline.
-    height += line_h * 0.5;
-    // Mirroring the cursor arithmetic exactly leaves the last row sitting ON the boundary, where f32
-    // rounding — or a render font size that does not match `metrics` — drops it again. Half a row of
-    // margin costs a few pixels of padding and takes the decision off the knife edge.
-    height += row_h * 0.5;
+    let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+        meta,
+        class_name,
+        metrics.font_size(),
+        metrics.config().line_height,
+        declared_font_size,
+    );
+    let header = compartments
+        .rows
+        .iter()
+        .find(|row| row.kind == fm_core::ClassCompartmentRowKind::Name)?;
+    let font_size = header.font_size;
 
     // Member rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row
     // stays inside the box.
     let member_width = meta
         .attributes
         .iter()
-        .map(|attr| class_member_row_width(attr, false, metrics))
+        .map(|attr| class_member_row_width(attr, false, metrics, font_size))
         .chain(
             meta.methods
                 .iter()
-                .map(|method| class_member_row_width(method, true, metrics)),
+                .map(|method| class_member_row_width(method, true, metrics, font_size)),
         )
         .fold(0.0_f32, f32::max);
 
@@ -16370,15 +16507,24 @@ fn class_compartment_dimensions(
     // omission survive, since a too-narrow box overflows visibly rather than dropping content.
     // Renderers draw it at `font_size * 0.85`. Use the same conservative glyph allowances as
     // other preserved text so a wide stereotype cannot cross its own compartment border.
-    let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
-        metrics.estimate_preserved_width(
-            &stereotype.label(),
-            metrics.font_size() * 0.85,
-            metrics.avg_char_width(),
-        )
+    let stereotype_width = compartments
+        .rows
+        .iter()
+        .find(|row| row.kind == fm_core::ClassCompartmentRowKind::Stereotype)
+        .map_or(0.0, |row| {
+            metrics.estimate_preserved_width(&row.text, row.font_size, metrics.avg_char_width())
+        });
+    // The generic label estimate uses the configured font. Only an authored override needs
+    // a separate header measure here; leave the unstyled card's established width unchanged.
+    let header_width = declared_font_size.map_or(0.0, |_| {
+        metrics.estimate_preserved_width(&header.text, header.font_size, metrics.avg_char_width())
     });
 
-    Some((member_width.max(stereotype_width) + 16.0, height))
+    Some((
+        member_width.max(stereotype_width).max(header_width)
+            + fm_core::ClassCompartmentLayout::PADDING_X * 2.0,
+        compartments.height,
+    ))
 }
 
 /// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
@@ -16447,45 +16593,25 @@ fn er_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> O
 /// pitch), so assuming the floor applies is the direction that over-sizes rather than spills.
 const ER_ATTR_FONT_FLOOR: f32 = 8.0;
 
-/// Width of one rendered member row. Mirrors the renderer's row text: a visibility symbol, the member
-/// name, a `*`/`$` suffix for abstract/static methods, and a `": {return_type}"` tail.
+/// Width of the complete member row shared with the graphical renderers.
 fn class_member_row_width(
     member: &fm_core::IrClassMember,
     is_method: bool,
     metrics: &fm_core::FontMetrics,
+    font_size: f32,
 ) -> f32 {
-    let mut row = String::with_capacity(member.name.len() + 8);
-    row.push_str(match member.visibility {
-        fm_core::ClassVisibility::Unmarked => "",
-        fm_core::ClassVisibility::Public => "+",
-        fm_core::ClassVisibility::Private => "-",
-        fm_core::ClassVisibility::Protected => "#",
-        fm_core::ClassVisibility::Package => "~",
-    });
-    // The renderers draw generics rewritten (`List~int~` -> `List<int>`), so measure the rewritten
-    // row: the substitution is character-for-character but `<`/`>` and `~` are not the same width.
-    row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
-    // ⚠️ NO CLASSIFIER CHARACTER (bd-r2gll). The renderers carry a method's `$`/`*` as a STYLE —
-    // `text-decoration:underline` / `font-style:italic`, as mermaid does — not as a byte in the row
-    // text, so measuring one here would size every static and abstract row one character too wide.
-    // This string and the drawn string move together or the box stops matching its contents.
-    if let Some(ref return_type) = member.return_type {
-        // ` : ` matches what the renderers draw (bd-ci658). This string is what the BOX IS SIZED
-        // FROM, so it has to move in the same commit as they do or the row is measured one
-        // character narrower than it is drawn.
-        row.push_str(" : ");
-        row.push_str(&fm_core::parse_generic_types(return_type));
-    }
+    let row = member.display_text(is_method);
     // Preserve the full-size allowance for rows drawn at 90% size, then account for the actual
     // wide glyphs and font fallback differences. The plain estimate still let `+Decimal amount`
     // cross Payment's right border in the default browser font.
-    metrics.estimate_preserved_width(&row, metrics.font_size(), metrics.avg_char_width())
+    metrics.estimate_preserved_width(&row, font_size, metrics.avg_char_width())
 }
 
 fn node_size_cache_key(
     ir: &MermaidDiagramIr,
     node: &IrNode,
     metrics: &fm_core::FontMetrics,
+    node_index: usize,
 ) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_str(&mut hash, &node.id);
@@ -16499,6 +16625,12 @@ fn node_size_cache_key(
     // key: editing a class body without touching its label would otherwise serve the cached size from
     // before the edit and silently truncate the new members.
     if let Some(meta) = node.class_meta.as_deref() {
+        hash_str(
+            &mut hash,
+            ir.resolved_node_style(node_index)
+                .get("font-size")
+                .map_or("", String::as_str),
+        );
         hash_u64(&mut hash, meta.attributes.len() as u64);
         hash_u64(&mut hash, meta.methods.len() as u64);
         hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
@@ -25775,7 +25907,7 @@ mod tests {
         );
 
         let metrics = fm_core::FontMetrics::default();
-        let sized = super::class_compartment_dimensions(node, &metrics);
+        let sized = super::class_compartment_dimensions(node, &metrics, &node.id, None);
         assert!(
             sized.is_some(),
             "a stereotype-only class was refused a compartment box, so no backend will draw it"
@@ -25828,9 +25960,11 @@ mod tests {
         assert_eq!(meta.methods.len(), 1, "CONTROL FAILED: expected one method");
 
         let metrics = fm_core::FontMetrics::default();
-        let (width, _) = super::class_compartment_dimensions(node, &metrics)
+        let (width, _) = super::class_compartment_dimensions(node, &metrics, &node.id, None)
             .expect("a class with a member is sized");
-        let expected = super::class_member_row_width(&meta.methods[0], true, &metrics) + 16.0;
+        let expected =
+            super::class_member_row_width(&meta.methods[0], true, &metrics, metrics.font_size())
+                + 16.0;
         assert!(
             (width - expected).abs() < f32::EPSILON,
             "width {width} is not the member row plus padding ({expected}); the stereotype term \
@@ -37105,7 +37239,7 @@ mod tests {
                         shape,
                         ..IrNode::default()
                     };
-                    let (width, height) = compute_node_size(&ir, &node, &metrics);
+                    let (width, height) = compute_node_size(&ir, &node, &metrics, 0);
                     assert_eq!(width, height, "{shape:?}: bounds must match the circle");
                     let radius = width / 2.0
                         - if shape == NodeShape::DoubleCircle {
@@ -37144,7 +37278,7 @@ mod tests {
                 shape: NodeShape::Diamond,
                 ..IrNode::default()
             };
-            let (width, height) = compute_node_size(&ir, &node, &metrics);
+            let (width, height) = compute_node_size(&ir, &node, &metrics, 0);
             let (text_width, text_height) = metrics.estimate_dimensions(text);
             let padded_corner = (text_width + 16.0) / width + (text_height + 16.0) / height;
             assert!(
@@ -39353,8 +39487,12 @@ mod tests {
         let metrics = fm_core::FontMetrics::default_metrics();
         let mut right = expected.nodes[19].bounds.x + expected.nodes[19].bounds.width;
         let mut rounded_differently = false;
-        for (node, expected_node) in next.nodes[20..].iter().zip(&expected.nodes[20..]) {
-            let (width, _) = compute_node_size(&next, node, &metrics);
+        for (offset, (node, expected_node)) in next.nodes[20..]
+            .iter()
+            .zip(&expected.nodes[20..])
+            .enumerate()
+        {
+            let (width, _) = compute_node_size(&next, node, &metrics, 20 + offset);
             let reconstructed_x = right + spacing.rank_spacing;
             rounded_differently |= reconstructed_x.to_bits() != expected_node.bounds.x.to_bits();
             right = reconstructed_x + width;
@@ -41627,7 +41765,7 @@ mod tests {
         assert_eq!(meta.generics, ["EntityIdentifier"]);
 
         let metrics = fm_core::FontMetrics::default();
-        let (width, _) = compute_node_size(&ir, node, &metrics);
+        let (width, _) = compute_node_size(&ir, node, &metrics, 0);
         let header_width = metrics
             .estimate_dimensions("Repository<EntityIdentifier>")
             .0;
@@ -41636,7 +41774,7 @@ mod tests {
             "class width {width} must contain the full generic header ({header_width}) and padding"
         );
         assert!(
-            super::class_compartment_dimensions(node, &metrics).is_some(),
+            super::class_compartment_dimensions(node, &metrics, &node.id, None).is_some(),
             "a generic-only class still uses the class header renderer"
         );
     }
@@ -41662,7 +41800,7 @@ mod tests {
                     font_size,
                     ..Default::default()
                 });
-                let (width, _) = compute_node_size(&ir, node, &metrics);
+                let (width, _) = compute_node_size(&ir, node, &metrics, 0);
                 let rendered_font = font_size * if meta.stereotype.is_some() { 0.85 } else { 0.9 };
                 let minimum = 16.0 * rendered_font + 16.0;
                 assert!(
@@ -41670,6 +41808,67 @@ mod tests {
                     "{body:?} at {font_size}px needs {minimum}px including side padding, got {width}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn class_card_font_size_overrides_expand_boxes_and_invalidate_cached_sizes() {
+        let source = "classDiagram\nclass Repository~T~ {\n<<interface>>\n+String identifier\n+String revision\n+fetch() List~T~\n+save()$\n}\nclassDef default font-size:24px\n";
+        let base = parse(source).ir;
+        let expanded = parse(&format!("{source}style Repository font-size:40px\n")).ir;
+        assert_eq!(expanded.nodes.len(), 1);
+        assert_eq!(
+            expanded
+                .resolved_node_style(0)
+                .get("font-size")
+                .map(String::as_str),
+            Some("40px")
+        );
+        let metrics = fm_core::FontMetrics::default();
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let mut engine = IncrementalLayoutEngine::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &base,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let after = engine.layout_diagram_traced_with_config_and_guardrails(
+            &expanded,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let bounds = after.layout.nodes[0].bounds;
+        assert!(bounds.width > before.layout.nodes[0].bounds.width);
+        assert!(bounds.height > before.layout.nodes[0].bounds.height);
+        assert_eq!(
+            *after.layout,
+            super::layout_diagram_with_config(&expanded, config)
+        );
+        let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+            expanded.nodes[0]
+                .class_meta
+                .as_deref()
+                .expect("class metadata"),
+            "Repository",
+            metrics.font_size(),
+            metrics.config().line_height,
+            Some("40px"),
+        );
+        for row in &card.rows {
+            assert_eq!(row.font_size, 40.0);
+            assert!(row.center_y - 20.0 > 0.0);
+            assert!(row.center_y + 20.0 < bounds.height);
+            let needed_width =
+                metrics.estimate_preserved_width(&row.text, 40.0, metrics.avg_char_width());
+            assert!(bounds.width >= needed_width + 16.0);
+        }
+        for rows in card.rows.windows(2) {
+            assert!(rows[0].center_y + 20.0 < rows[1].center_y - 20.0);
         }
     }
 
@@ -41928,7 +42127,7 @@ mod tests {
         let mut previous_height = 0.0_f32;
         for count in 1_usize..=24 {
             let ir = er_entity_ir(count);
-            let (_, height) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+            let (_, height) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
 
             let last_baseline =
                 node_font * 1.5 + attr_font * 0.9 + attr_font * 1.3 * (count - 1) as f32;
@@ -41955,8 +42154,8 @@ mod tests {
             ..IrNode::default()
         });
         assert_eq!(
-            compute_node_size(&bare, &bare.nodes[0], &metrics),
-            compute_node_size(&plain, &plain.nodes[0], &metrics),
+            compute_node_size(&bare, &bare.nodes[0], &metrics, 0),
+            compute_node_size(&plain, &plain.nodes[0], &metrics, 0),
             "an entity with no attributes must size exactly like the same node without members"
         );
         assert!(er_compartment_dimensions(&bare.nodes[0], &metrics).is_none());
@@ -42006,7 +42205,7 @@ mod tests {
         for extra in 0_usize..=20 {
             let text = format!("Users must authenticate{}", " thoroughly".repeat(extra));
             let ir = requirement_ir_full(None, None, None, Some("REQ-001"), Some(&text));
-            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
 
             for row in [format!("Text: {text}"), "ID: REQ-001".to_string()] {
                 let row_width = metrics.estimate_width(&row) * subtitle_scale;
@@ -42025,14 +42224,14 @@ mod tests {
         // Editing either field must invalidate the cached size, for the same reason the other three
         // strings do.
         let base = requirement_ir_full(None, None, None, Some("REQ-001"), Some("a"));
-        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics);
+        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics, 0);
         for changed in [
             requirement_ir_full(None, None, None, Some("REQ-002"), Some("a")),
             requirement_ir_full(None, None, None, Some("REQ-001"), Some("b")),
         ] {
             assert_ne!(
                 base_key,
-                node_size_cache_key(&changed, &changed.nodes[0], &metrics),
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics, 0),
                 "editing id:/text: left the size cache key unchanged: {:?}",
                 changed.nodes[0].requirement_meta
             );
@@ -42041,7 +42240,7 @@ mod tests {
         // Field text remains a single run even when the IR contains authored line breaks.
         let text = "Record the completed deployment\nVerify all approval signatures\nRetain the complete audit history";
         let ir = requirement_ir_full(None, None, None, None, Some(text));
-        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
         let displayed = format!("text: {}", text.replace('\n', " "));
         assert!(width >= metrics.estimate_width(&displayed) * 0.9);
     }
@@ -42056,7 +42255,7 @@ mod tests {
         for extra in 0_usize..=20 {
             let verify = format!("Demonstration{}", "s".repeat(extra));
             let ir = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some(&verify));
-            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
 
             for row in [
                 "Risk: Medium".to_string(),
@@ -42078,7 +42277,7 @@ mod tests {
         // The display header includes the same ASCII angle brackets as the SVG renderer.
         let long_type = "aVeryLongRequirementTypeNameIndeedForThisNode";
         let ir = requirement_ir(Some(long_type), None, None);
-        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics, 0);
         let header_width = metrics.estimate_width(&format!("<<{long_type}>>")) * subtitle_scale;
         assert!(
             width >= header_width,
@@ -42095,8 +42294,8 @@ mod tests {
             ..IrNode::default()
         });
         assert_eq!(
-            compute_node_size(&bare, &bare.nodes[0], &metrics).0,
-            compute_node_size(&plain, &plain.nodes[0], &metrics).0,
+            compute_node_size(&bare, &bare.nodes[0], &metrics, 0).0,
+            compute_node_size(&plain, &plain.nodes[0], &metrics, 0).0,
             "a requirement with no type and no metadata must not gain width"
         );
         assert!(requirement_row_dimensions(&bare.nodes[0], "LoginReq", &metrics).is_none());
@@ -42111,7 +42310,7 @@ mod tests {
     fn requirement_metadata_changes_the_node_size_cache_key() {
         let metrics = fm_core::FontMetrics::default_metrics();
         let base = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some("Test"));
-        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics);
+        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics, 0);
 
         for changed in [
             requirement_ir(Some("performanceRequirement"), Some("Medium"), Some("Test")),
@@ -42124,7 +42323,7 @@ mod tests {
         ] {
             assert_ne!(
                 base_key,
-                node_size_cache_key(&changed, &changed.nodes[0], &metrics),
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics, 0),
                 "editing requirement metadata left the size cache key unchanged: {:?}",
                 changed.nodes[0].requirement_meta
             );
@@ -42141,11 +42340,11 @@ mod tests {
             }
             assert_ne!(
                 base_key,
-                node_size_cache_key(&changed, &changed.nodes[0], &metrics)
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics, 0)
             );
             assert!(
-                compute_node_size(&changed, &changed.nodes[0], &metrics).0
-                    > compute_node_size(&base, &base.nodes[0], &metrics).0,
+                compute_node_size(&changed, &changed.nodes[0], &metrics, 0).0
+                    > compute_node_size(&base, &base.nodes[0], &metrics, 0).0,
                 "{field} must contribute to the measured width"
             );
         }
@@ -42158,7 +42357,7 @@ mod tests {
             .doc_ref = Some(String::new());
         assert_ne!(
             base_key,
-            node_size_cache_key(&empty_field, &empty_field.nodes[0], &metrics)
+            node_size_cache_key(&empty_field, &empty_field.nodes[0], &metrics, 0)
         );
     }
 

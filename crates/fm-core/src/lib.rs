@@ -3015,6 +3015,177 @@ pub struct IrClassMember {
     pub is_abstract: bool,
 }
 
+impl IrClassMember {
+    /// The complete UML row displayed and measured by every graphical backend.
+    #[must_use]
+    pub fn display_text(&self, is_method: bool) -> String {
+        let visibility = match self.visibility {
+            ClassVisibility::Unmarked => "",
+            ClassVisibility::Public => "+",
+            ClassVisibility::Private => "-",
+            ClassVisibility::Protected => "#",
+            ClassVisibility::Package => "~",
+        };
+        let mut text = format!(
+            "{visibility}{}",
+            class_member_display_name(&self.name, is_method)
+        );
+        if let Some(return_type) = &self.return_type {
+            text.push_str(" : ");
+            text.push_str(&parse_generic_types(return_type));
+        }
+        text
+    }
+}
+
+/// A class row's role determines its alignment and typographic emphasis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassCompartmentRowKind {
+    Stereotype,
+    Name,
+    Attribute,
+    Method,
+}
+
+/// One complete class label, positioned relative to the top of its node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassCompartmentRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: ClassCompartmentRowKind,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl ClassCompartmentRow {
+    #[must_use]
+    pub fn centered(&self) -> bool {
+        matches!(
+            self.kind,
+            ClassCompartmentRowKind::Stereotype | ClassCompartmentRowKind::Name
+        )
+    }
+}
+
+/// Shared geometry for a UML card: a distinct header and two aligned member compartments.
+///
+/// Layout reserves this exact height and renderers consume these exact row centers. Empty
+/// attribute or method compartments retain a small amount of space, while authored members
+/// are never dropped because a renderer independently guessed a different line height.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassCompartmentLayout {
+    pub rows: Vec<ClassCompartmentRow>,
+    pub header_height: f32,
+    pub separator_ys: [f32; 2],
+    pub height: f32,
+}
+
+impl ClassCompartmentLayout {
+    pub const PADDING_X: f32 = 8.0;
+
+    #[must_use]
+    pub fn new(meta: &IrClassNodeMeta, class_name: &str, font_size: f32, line_height: f32) -> Self {
+        Self::with_font_size_override(meta, class_name, font_size, line_height, None)
+    }
+
+    /// Resolve an authored node font size before measuring the compartment stack.
+    ///
+    /// An inline CSS size applies to every class row, including the otherwise smaller
+    /// stereotype and members. Their line boxes and the surrounding padding must grow with
+    /// that actual size; replacing glyph sizes after positioning rows makes them overlap.
+    #[must_use]
+    pub fn with_font_size_override(
+        meta: &IrClassNodeMeta,
+        class_name: &str,
+        font_size: f32,
+        line_height: f32,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(font_size);
+        let font_size = if font_size.is_finite() && font_size > 0.0 {
+            font_size
+        } else {
+            15.0
+        };
+        let line_height = if line_height.is_finite() && line_height > 0.0 {
+            line_height
+        } else {
+            1.5
+        };
+        let mut rows = Vec::with_capacity(meta.attributes.len() + meta.methods.len() + 2);
+        let mut cursor = font_size * 0.5;
+        if let Some(stereotype) = &meta.stereotype {
+            let size = declared_font_size.unwrap_or(font_size * 0.85);
+            let row_height = size * line_height;
+            rows.push(ClassCompartmentRow {
+                text: stereotype.label().into_owned(),
+                center_y: cursor + row_height * 0.5,
+                font_size: size,
+                kind: ClassCompartmentRowKind::Stereotype,
+                italic: true,
+                underline: false,
+            });
+            cursor += row_height;
+        }
+        let name_height = font_size * line_height;
+        rows.push(ClassCompartmentRow {
+            text: meta.display_header(class_name).into_owned(),
+            center_y: cursor + name_height * 0.5,
+            font_size,
+            kind: ClassCompartmentRowKind::Name,
+            italic: false,
+            underline: false,
+        });
+        cursor += name_height + font_size * 0.5;
+        let header_height = cursor;
+        let member_size = declared_font_size.unwrap_or(font_size * 0.9);
+        let member_height = member_size * line_height;
+        let section_padding = font_size * 0.4;
+        let mut separator_ys = [header_height; 2];
+        for (section, members) in [&meta.attributes, &meta.methods].into_iter().enumerate() {
+            cursor += section_padding;
+            for member in members {
+                let is_method = section == 1;
+                let classifier = is_method
+                    .then(|| class_member_classifier_css(member.is_static, member.is_abstract))
+                    .flatten();
+                rows.push(ClassCompartmentRow {
+                    text: member.display_text(is_method),
+                    center_y: cursor + member_height * 0.5,
+                    font_size: member_size,
+                    kind: if is_method {
+                        ClassCompartmentRowKind::Method
+                    } else {
+                        ClassCompartmentRowKind::Attribute
+                    },
+                    italic: classifier == Some("font-style:italic"),
+                    underline: classifier == Some("text-decoration:underline"),
+                });
+                cursor += member_height;
+            }
+            cursor += section_padding;
+            if section == 0 {
+                separator_ys[1] = cursor;
+            }
+        }
+        Self {
+            rows,
+            header_height,
+            separator_ys,
+            height: cursor,
+        }
+    }
+}
+
 /// A journey step's actors, as the AUTHOR wrote them (bd-mq273).
 ///
 /// ⚠️ THE CSS CLASSES CANNOT CARRY THIS, which is the whole reason the field exists. The parser also
@@ -10237,6 +10408,152 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn class_cards_keep_every_member_inside_distinct_compartments() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            stereotype: Some(ClassStereotype::Interface),
+            generics: vec!["T".into()],
+            attributes: vec![IrClassMember {
+                visibility: ClassVisibility::Private,
+                name: "items".into(),
+                return_type: Some("List~T~".into()),
+                ..Default::default()
+            }],
+            methods: vec![
+                IrClassMember {
+                    visibility: ClassVisibility::Public,
+                    name: "load()".into(),
+                    return_type: Some("T".into()),
+                    is_abstract: true,
+                    ..Default::default()
+                },
+                IrClassMember {
+                    name: "count()".into(),
+                    is_static: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        for font_size in [10.0, 15.0, 28.0] {
+            for line_height in [1.2, 1.5, 2.0] {
+                let card = ClassCompartmentLayout::new(&meta, "Repository", font_size, line_height);
+                let text: Vec<_> = card.rows.iter().map(|row| row.text.as_str()).collect();
+                assert_eq!(
+                    text,
+                    [
+                        "«interface»",
+                        "Repository<T>",
+                        "-items : List<T>",
+                        "+load() : T",
+                        "count()"
+                    ]
+                );
+                assert!(card.rows[3].italic);
+                assert!(card.rows[4].underline);
+                for row in &card.rows {
+                    let (top, bottom) = match row.kind {
+                        ClassCompartmentRowKind::Name | ClassCompartmentRowKind::Stereotype => {
+                            (0.0, card.header_height)
+                        }
+                        ClassCompartmentRowKind::Attribute => {
+                            (card.header_height, card.separator_ys[1])
+                        }
+                        ClassCompartmentRowKind::Method => (card.separator_ys[1], card.height),
+                    };
+                    assert!(row.center_y - row.font_size * 0.5 > top);
+                    assert!(row.center_y + row.font_size * 0.5 < bottom);
+                }
+                for adjacent in card.rows.windows(2) {
+                    assert!(
+                        adjacent[0].center_y + adjacent[0].font_size * 0.5
+                            < adjacent[1].center_y - adjacent[1].font_size * 0.5
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_cards_preserve_empty_compartments_and_sanitize_metrics() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            generics: vec!["T".into()],
+            ..Default::default()
+        };
+        let card = ClassCompartmentLayout::new(&meta, "Empty", 15.0, 1.5);
+        assert_eq!(card.rows.len(), 1);
+        assert_eq!(card.rows[0].text, "Empty<T>");
+        assert!(card.header_height < card.separator_ys[1]);
+        assert!(card.separator_ys[1] < card.height);
+        assert_eq!(
+            card,
+            ClassCompartmentLayout::new(&meta, "Empty", f32::NAN, -1.0)
+        );
+    }
+
+    #[test]
+    fn class_cards_measure_author_font_sizes_before_positioning_rows() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            stereotype: Some(ClassStereotype::Interface),
+            attributes: vec![
+                IrClassMember {
+                    name: "identifier".into(),
+                    ..Default::default()
+                },
+                IrClassMember {
+                    name: "revision".into(),
+                    ..Default::default()
+                },
+            ],
+            methods: vec![IrClassMember {
+                name: "save()".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for declared in ["40px", "40", " 40 px "] {
+            let card = ClassCompartmentLayout::with_font_size_override(
+                &meta,
+                "Repository",
+                15.0,
+                1.5,
+                Some(declared),
+            );
+            assert!(card.rows.iter().all(|row| row.font_size == 40.0));
+            for adjacent in card.rows.windows(2) {
+                assert!(adjacent[0].center_y + 20.0 < adjacent[1].center_y - 20.0);
+            }
+            for row in &card.rows {
+                let (top, bottom) = match row.kind {
+                    ClassCompartmentRowKind::Stereotype | ClassCompartmentRowKind::Name => {
+                        (0.0, card.header_height)
+                    }
+                    ClassCompartmentRowKind::Attribute => {
+                        (card.header_height, card.separator_ys[1])
+                    }
+                    ClassCompartmentRowKind::Method => (card.separator_ys[1], card.height),
+                };
+                assert!(row.center_y - 20.0 > top);
+                assert!(row.center_y + 20.0 < bottom);
+            }
+        }
+        let default = ClassCompartmentLayout::new(&meta, "Repository", 15.0, 1.5);
+        for invalid in ["NaN", "inf", "0", "-5px", "100000px", "big"] {
+            assert_eq!(
+                default,
+                ClassCompartmentLayout::with_font_size_override(
+                    &meta,
+                    "Repository",
+                    15.0,
+                    1.5,
+                    Some(invalid),
+                )
+            );
+        }
+    }
 
     #[test]
     fn readable_label_color_keeps_fixed_task_palettes_legible_in_both_themes() {

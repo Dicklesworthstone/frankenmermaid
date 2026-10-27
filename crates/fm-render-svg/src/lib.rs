@@ -57,9 +57,9 @@ use fm_layout::{
     LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
     MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-    TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
-    format_xychart_tick_value, is_composite_state_node, resolve_xychart_y_domain,
-    sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
+    TextBaseline as RenderTextBaseline, build_render_scene_with_metrics,
+    certify_directed_path_layout_prefix, format_xychart_tick_value, is_composite_state_node,
+    resolve_xychart_y_domain, sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
     try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
@@ -711,7 +711,7 @@ fn render_svg_with_layout_impl_reusing(
             )
         }
         SvgBackend::Scene => {
-            let scene = build_render_scene(ir, layout);
+            let scene = build_render_scene_with_metrics(ir, layout, &config.font_metrics());
             (
                 render_scene_document_with_ir(&scene, config, Some(ir)),
                 None,
@@ -9406,6 +9406,7 @@ fn write_class_compartments_into(
     node: &fm_core::IrNode,
     meta: &fm_core::IrClassNodeMeta,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -9413,116 +9414,104 @@ fn write_class_compartments_into(
     font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) {
-    let line_h = font_size * config.line_height;
-    let text_x = x + 8.0;
-    let mut cursor_y = y + line_h;
-    let fill = colors.text.as_str();
     let class_name = node
         .label
         .and_then(|lid| ir.labels.get(lid.0))
         .map(|l| l.text.as_str())
         .unwrap_or(&node.id);
-    if let Some(stereotype) = &meta.stereotype {
-        let stereo_text = stereotype.label();
-        let stereo_text = stereo_text.as_ref();
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size * 0.85,
-            " font-style=\"italic\"",
-            fill,
-            stereo_text,
-        );
-        cursor_y += line_h;
-    }
-    let display_name = meta.display_header(class_name);
-    write_class_text_into(
-        f,
-        x + w / 2.0,
-        cursor_y,
-        "middle",
+    let declared = ir.resolved_node_style(node_index);
+    let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+        meta,
+        class_name,
         font_size,
-        " font-weight=\"bold\"",
-        fill,
-        &display_name,
+        config.line_height,
+        declared.get("font-size").map(String::as_str),
     );
-    cursor_y += line_h * 0.5;
-    write_class_separator_into(f, x, cursor_y, x + w);
-    cursor_y += line_h * 0.3;
-    let member_font_size = font_size * 0.9;
-    for attr in &meta.attributes {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(attr.visibility);
-        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
-        // turns it into `List<int>` only when the row is drawn (bd class-generics).
-        let name = fm_core::class_member_display_name(&attr.name, false);
-        let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
-        } else {
-            format!("{vis}{name}")
-        };
-        write_class_text_into(
-            f,
-            text_x,
-            cursor_y,
-            "start",
-            member_font_size,
-            "",
-            fill,
-            &text,
+    let border = declared
+        .get("stroke")
+        .and_then(|paint| sanitize_svg_paint(paint))
+        .unwrap_or_else(|| colors.node_stroke.clone());
+    // The header is a quiet secondary surface. An explicitly authored fill retains full
+    // precedence: do not cover it with a theme-derived decoration.
+    if !declared.contains_key("fill") && w > 2.0 && h > 2.0 {
+        let hx = x + 0.75;
+        let hy = y + 0.75;
+        let hw = w - 1.5;
+        let hh = compartments.header_height.min(h) - 0.75;
+        let radius = config.rounded_corners.max(0.0).min(hw * 0.5).min(hh * 0.5);
+        let path = format!(
+            "M {} {hy} H {} Q {} {hy} {} {} V {} H {hx} V {} Q {hx} {hy} {} {hy} Z",
+            hx + radius,
+            hx + hw - radius,
+            hx + hw,
+            hx + hw,
+            hy + radius,
+            hy + hh,
+            hy + radius,
+            hx + radius,
+        );
+        let fill = fm_core::mindmap::branch_fill(&colors.node_fill, &border, false);
+        f.push_str(
+            &Element::path()
+                .attr("d", &path)
+                .fill(&fill)
+                .attr("style", "stroke:none;filter:none")
+                .class("fm-class-header")
+                .render(),
         );
     }
-    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-        cursor_y += line_h * 0.3;
-        write_class_separator_into(f, x, cursor_y, x + w);
-        cursor_y += line_h * 0.3;
+    for separator_y in compartments.separator_ys {
+        f.push_str(
+            &Element::line()
+                .x1(x + 0.75)
+                .y1(y + separator_y)
+                .x2(x + w - 0.75)
+                .y2(y + separator_y)
+                .attr(
+                    "style",
+                    &format!("stroke:{border};stroke-width:0.75;opacity:0.65"),
+                )
+                .class("fm-class-divider")
+                .render(),
+        );
     }
-    for method in &meta.methods {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
+    for row in compartments.rows {
+        let mut text = TextBuilder::new(&row.text)
+            .x(if row.centered() {
+                x + w * 0.5
+            } else {
+                x + fm_core::ClassCompartmentLayout::PADDING_X
+            })
+            .y(y + row.center_y)
+            .anchor(if row.centered() {
+                TextAnchor::Middle
+            } else {
+                TextAnchor::Start
+            })
+            .baseline(text::DominantBaseline::Central)
+            .font_size(row.font_size)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .fill(&colors.text);
+        if row.kind == fm_core::ClassCompartmentRowKind::Name {
+            text = text.font_weight("600");
         }
-        let vis = visibility_symbol(method.visibility);
-        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
-        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
-        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
-        // here made the same member read as a different NAME.
-        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
-        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
-        // typed method row differed from the incumbent by one character in every class diagram.
-        let ret = method
-            .return_type
-            .as_deref()
-            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
-            .unwrap_or_default();
-        let text = format!(
-            "{vis}{}{ret}",
-            fm_core::class_member_display_name(&method.name, true)
-        );
-        // Same slot `TextBuilder` emits `font-style`/`text-decoration` into — after `font-size`,
-        // before `fill` — so the streaming and Element paths stay byte-identical.
-        let classifier_attr = match classifier {
-            Some("font-style:italic") => " font-style=\"italic\"",
-            Some("text-decoration:underline") => " text-decoration=\"underline\"",
-            _ => "",
-        };
-        write_class_text_into(
-            f,
-            text_x,
-            cursor_y,
-            "start",
-            member_font_size,
-            classifier_attr,
-            fill,
-            &text,
-        );
+        if row.italic {
+            text = text.italic();
+        }
+        if row.underline {
+            text = text.text_decoration("underline");
+        }
+        let mut text = text.build();
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        if let Some(style) = label_style {
+            text = text.attr("style", style);
+        }
+        f.push_str(&text.render());
     }
 }
 
@@ -9733,7 +9722,9 @@ fn write_class_node_fragment_into<const A11Y: bool>(
     out.push_str("\" rx=\"");
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
-    write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
+    write_class_compartments_into(
+        out, node, meta, ir, node_index, x, y, w, h, font_size, config, colors, None, false,
+    );
     if A11Y {
         // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
         out.push_str("<title>Node: ");
@@ -12987,6 +12978,7 @@ fn render_node(
                 group,
                 node,
                 ir,
+                node_box.node_index,
                 x,
                 y,
                 w,
@@ -13511,42 +13503,6 @@ fn stable_accent_index(node_id: &str) -> usize {
     (hash as usize % 8) + 1
 }
 
-/// Render a UML three-compartment class box: header | attributes | methods.
-///
-/// Adds separator lines and member text elements to the node group.
-#[allow(clippy::too_many_arguments)]
-/// Stream one class-compartment `<text>` byte-identical to the `TextBuilder` the slow path builds under
-/// embedded CSS with no label-style/classdef class: attrs `x, y, text-anchor, font-size, [extra], fill`
-/// then escaped content. `extra` is ` font-weight="bold"` (name), ` font-style="italic"` (stereotype), or
-/// `""` (members) — placed right after `font-size` exactly as `TextBuilder::build`'s call order does.
-fn write_class_text_into(
-    f: &mut String,
-    x: f32,
-    y: f32,
-    anchor: &str,
-    font_size: f32,
-    extra: &str,
-    fill: &str,
-    text: &str,
-) {
-    use crate::attributes::{write_escaped_attr, write_escaped_text};
-    f.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(f, x);
-    f.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" text-anchor=\"");
-    f.push_str(anchor);
-    f.push_str("\" font-size=\"");
-    let _ = crate::attributes::write_number_into(f, font_size);
-    f.push('"');
-    f.push_str(extra);
-    f.push_str(" fill=\"");
-    let _ = write_escaped_attr(f, fill);
-    f.push_str("\">");
-    let _ = write_escaped_text(f, text);
-    f.push_str("</text>");
-}
-
 /// Stream a requirement-node subtitle `<text>` (the `«type»` header / `Risk … | Verify …` metadata line)
 /// byte-identical to the `Element` the slow path builds under the common themed config (embedded CSS,
 /// no per-label style/classdef → `font-family` and `fm-node-label` absent). `before_fill`/`after_fill`
@@ -13616,25 +13572,13 @@ fn write_req_subtitle_body_into(
     f.push_str("</text>");
 }
 
-/// Stream a class-compartment separator `<line>` byte-identical to the slow path's `Element::Line` under
-/// embedded CSS (stroke is CSS-driven, so absent inline): `x1 y1 x2 y2 stroke-width="1"`.
-fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
-    f.push_str("<line x1=\"");
-    let _ = crate::attributes::write_number_into(f, x1);
-    f.push_str("\" y1=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" x2=\"");
-    let _ = crate::attributes::write_number_into(f, x2);
-    f.push_str("\" y2=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" stroke-width=\"1\"/>");
-}
-
+/// Render the shared UML card geometry through the same writer as the whole-node path.
 #[allow(clippy::too_many_arguments)]
 fn render_class_compartments(
-    mut group: Element,
+    group: Element,
     node: &fm_core::IrNode,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -13650,164 +13594,24 @@ fn render_class_compartments(
         None => return group,
     };
 
-    // Streaming fast path: no per-label style, no classdef class, embedded CSS -> the whole compartment
-    // stack (stereotype + name + separators + member rows) is a fixed set of `<text>`/`<line>` bytes with
-    // no per-element class/style, so stream it into ONE raw fragment instead of ~5+ `Element`s per class
-    // node. Byte-identical to the Element path below (same attrs/order/positions/cursor advance); every
-    // other case (label style, classdef, non-embedded CSS) falls through.
-    if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
-        let mut f = String::new();
-        write_class_compartments_into(
-            &mut f, node, meta, ir, x, y, w, h, font_size, config, colors,
-        );
-        group = group.child(Element::raw_svg(f));
-        return group;
-    }
-
-    let apply_label_style = |mut elem: Element| {
-        if let Some(style) = label_style {
-            elem = elem.attr("style", style);
-        }
-        elem
-    };
-    let apply_label_class =
-        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
-
-    let line_h = font_size * config.line_height;
-    let padding_x = 8.0;
-    let text_x = x + padding_x;
-    let mut cursor_y = y + line_h;
-
-    // Header: class name (centered, bold).
-    let class_name = node
-        .label
-        .and_then(|lid| ir.labels.get(lid.0))
-        .map(|l| l.text.as_str())
-        .unwrap_or(&node.id);
-
-    // Stereotype above class name if present.
-    if let Some(ref stereotype) = meta.stereotype {
-        let stereo_text = stereotype.label();
-        let stereo_elem = TextBuilder::new(stereo_text.as_ref())
-            .x(x + w / 2.0)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(font_size * 0.85)
-            .anchor(TextAnchor::Middle)
-            .italic()
-            .fill(&colors.text)
-            .build();
-        group = group.child(apply_label_style(apply_label_class(stereo_elem)));
-        cursor_y += line_h;
-    }
-
-    // Append generic parameters to class name if present (e.g., "List<T>").
-    let display_name = meta.display_header(class_name);
-
-    let name_elem = TextBuilder::new(&display_name)
-        .x(x + w / 2.0)
-        .y(cursor_y)
-        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-        .font_size(font_size)
-        .anchor(TextAnchor::Middle)
-        .bold()
-        .fill(&colors.text)
-        .build();
-    group = group.child(apply_label_style(apply_label_class(name_elem)));
-    cursor_y += line_h * 0.5;
-
-    // Separator line after header.
-    let sep1 = Element::new(crate::element::ElementKind::Line)
-        .attr_num("x1", x)
-        .attr_num("y1", cursor_y)
-        .attr_num("x2", x + w)
-        .attr_num("y2", cursor_y)
-        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-        .stroke_width(1.0);
-    group = group.child(sep1);
-    cursor_y += line_h * 0.3;
-
-    // Attributes compartment.
-    let member_font_size = font_size * 0.9;
-    for attr in &meta.attributes {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(attr.visibility);
-        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
-        // turns it into `List<int>` only when the row is drawn (bd class-generics).
-        let name = fm_core::class_member_display_name(&attr.name, false);
-        let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
-        } else {
-            format!("{vis}{name}")
-        };
-        let elem = TextBuilder::new(&text)
-            .x(text_x)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(member_font_size)
-            .anchor(TextAnchor::Start)
-            .fill(&colors.text)
-            .build();
-        group = group.child(apply_label_style(apply_label_class(elem)));
-    }
-
-    // Separator before methods (only if both sections present).
-    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-        cursor_y += line_h * 0.3;
-        let sep2 = Element::new(crate::element::ElementKind::Line)
-            .attr_num("x1", x)
-            .attr_num("y1", cursor_y)
-            .attr_num("x2", x + w)
-            .attr_num("y2", cursor_y)
-            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width(1.0);
-        group = group.child(sep2);
-        cursor_y += line_h * 0.3;
-    }
-
-    // Methods compartment.
-    for method in &meta.methods {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(method.visibility);
-        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
-        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
-        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
-        // here made the same member read as a different NAME.
-        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
-        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
-        // typed method row differed from the incumbent by one character in every class diagram.
-        let ret = method
-            .return_type
-            .as_deref()
-            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
-            .unwrap_or_default();
-        let text = format!(
-            "{vis}{}{ret}",
-            fm_core::class_member_display_name(&method.name, true)
-        );
-        let builder = TextBuilder::new(&text)
-            .x(text_x)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(member_font_size)
-            .anchor(TextAnchor::Start);
-        let builder = match classifier {
-            Some("font-style:italic") => builder.font_style("italic"),
-            Some("text-decoration:underline") => builder.text_decoration("underline"),
-            _ => builder,
-        };
-        let elem = builder.fill(&colors.text).build();
-        group = group.child(apply_label_style(apply_label_class(elem)));
-    }
-
-    group
+    let mut fragment = String::new();
+    write_class_compartments_into(
+        &mut fragment,
+        node,
+        meta,
+        ir,
+        node_index,
+        x,
+        y,
+        w,
+        h,
+        font_size,
+        config,
+        colors,
+        label_style,
+        emit_classdef_classes,
+    );
+    group.child(Element::raw_svg(fragment))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15165,16 +14969,6 @@ fn c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<(&'static str, &'static str)>
         entries.push(("⬚", "Boundary"));
     }
     entries
-}
-
-fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
-    match vis {
-        fm_core::ClassVisibility::Unmarked => "",
-        fm_core::ClassVisibility::Public => "+",
-        fm_core::ClassVisibility::Private => "-",
-        fm_core::ClassVisibility::Protected => "#",
-        fm_core::ClassVisibility::Package => "~",
-    }
 }
 
 /// One curly brace, drawn down the left or right edge of `(x, y, w, h)`.
@@ -26026,6 +25820,111 @@ marker#arrow-open path {
             "class",
             1,
         );
+    }
+
+    #[test]
+    fn class_card_rows_reach_both_svg_backends_at_configured_font_sizes() {
+        let source = "classDiagram\nclass Repository~T~ {\n<<interface>>\n+String identifier\n+fetch() List~T~\n+save()$\n}\n";
+        for (font_size, line_height, style) in [
+            (15.0, 1.5, ""),
+            (24.0, 1.8, ""),
+            (
+                15.0,
+                1.5,
+                "classDef default font-size:24px\nstyle Repository font-size:40px\n",
+            ),
+        ] {
+            let ir = fm_parser::parse(&format!("{source}{style}")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            let name = node
+                .label
+                .and_then(|id| ir.labels.get(id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            let declared = ir.resolved_node_style(0);
+            let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+                meta,
+                name,
+                font_size,
+                line_height,
+                declared.get("font-size").map(String::as_str),
+            );
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                for embed_theme_css in [false, true] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        font_size,
+                        line_height,
+                        embed_theme_css,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_config(&ir, &config);
+                    let drawn = issue14_drawn_text(&svg);
+                    for row in &card.rows {
+                        assert_eq!(
+                            drawn.get(&escape_xml_text(&row.text)),
+                            Some(&1),
+                            "backend={backend:?}, font_size={font_size}: missing or duplicated {}",
+                            row.text,
+                        );
+                    }
+                    if !style.is_empty() {
+                        let mut row_ys = Vec::new();
+                        for row in &card.rows {
+                            let label = format!(">{}", escape_xml_text(&row.text));
+                            let element = svg
+                                .split("<text ")
+                                .filter_map(|chunk| {
+                                    chunk.split_once("</text>").map(|(text, _)| text)
+                                })
+                                .find(|text| text.contains(&label))
+                                .expect("class row text");
+                            assert_eq!(edge_label_test_number(element, "font-size"), 40.0);
+                            row_ys.push(edge_label_test_number(element, "y"));
+                        }
+                        for rows in row_ys.windows(2) {
+                            assert!(
+                                rows[1] - rows[0] > 40.0,
+                                "backend={backend:?}: styled class rows overlap"
+                            );
+                        }
+                    }
+                    if backend == SvgBackend::LegacyLayout {
+                        assert!(svg.contains("class=\"fm-class-header\""));
+                        assert_eq!(svg.matches("class=\"fm-class-divider\"").count(), 2);
+                        assert!(svg.contains("font-weight=\"600\""));
+                        assert!(svg.contains("text-decoration=\"underline\""));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_card_header_tint_preserves_authored_fill_and_label_styles() {
+        let source = "classDiagram\nclass Account {\n+String owner\n+save()\n}\nstyle Account fill:#fff4e6,color:#78350f,stroke:#d97706\n";
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(
+            ir.resolved_node_style(0).get("fill").map(String::as_str),
+            Some("#fff4e6")
+        );
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert!(
+                !svg.contains("class=\"fm-class-header\""),
+                "the header must not obscure the authored fill"
+            );
+            assert!(svg.contains("#fff4e6"));
+            assert!(svg.contains("fill:#78350f"));
+            assert!(svg.contains("stroke:#d97706;stroke-width:0.75;opacity:0.65"));
+            let drawn = issue14_drawn_text(&svg);
+            assert_eq!(drawn.get("Account"), Some(&1));
+            assert_eq!(drawn.get("+save()"), Some(&1));
+        }
     }
 
     #[test]

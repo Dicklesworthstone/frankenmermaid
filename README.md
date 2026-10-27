@@ -1113,6 +1113,8 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 
 **Phase 7 — Post-processing.** Cluster boundaries are computed to enclose their member nodes with configurable padding (default 52px), coordinates are normalized to non-negative values, and edge-length quality metrics (`total_edge_length`, `reversed_edge_total_length`) are recorded.
 
+General graph layouts with many disconnected components automatically consider a balanced arrangement of complete components. Nodes, containers, routed edges, labels, and notes move together, preserving each component's internal flow direction. Small parallel layouts and explicitly constrained diagrams retain their authored arrangement.
+
 ### Cycle strategies
 
 | Strategy | How it works | When to use |
@@ -1603,7 +1605,7 @@ The `:N` suffix sets `grid_span = N` on the node. `space` and `space:N` create e
 The class parser handles:
 
 - **Generic type parameters** — `class List~T~` and `class Map~K,V~` produce a `generics: ["T"]` field on the node, which the SVG renderer formats as `List<T>`.
-- **Three-compartment box rendering** — class name (with stereotype `<<interface>>` etc.), attributes (with `+` / `-` / `#` / `~` visibility prefixes), and methods (with parameter types and return types) get their own horizontal stripes inside the node.
+- **Three-compartment cards** — a restrained header surface separates the class name and stereotype from attributes and methods. SVG, Canvas, shared scenes, and GPU plans use the same measured row geometry and retain complete member text, visibility prefixes, generics, and return types. Explicit fills and font sizes take precedence over the default presentation.
 - **Inheritance, composition, aggregation, dependency, realization** — each with a distinct arrowhead (`<|--`, `*--`, `o--`, `..>`, `..|>`).
 - **Cardinality labels** — `Customer "1" -- "*" Order : places` produces multiplicity badges at each endpoint.
 - **Namespace blocks** — `namespace Foo { class A; class B }` groups classes into a cluster.
@@ -1654,6 +1656,12 @@ kanban
 ```
 
 `wip` triggers warning styling on the column when exceeded, `priority` maps to color, and `assigned` becomes a badge on the card.
+
+Column widths and card positions follow their measured contents. Cards align within each lane, lane frames share a common height, and named empty lanes remain visible. Long headings and multiline cards reserve space instead of overlapping neighboring content.
+
+### Timeline — measured periods and events
+
+Timeline columns reserve the width of their period, events, and section headings. Events stack according to their measured heights, preserving chronology and section grouping. Period transitions connect horizontally; event connections use the vertical faces of their nodes. Configured typography and spacing apply to the whole layout.
 
 ### Sankey — flow-weighted column layout
 

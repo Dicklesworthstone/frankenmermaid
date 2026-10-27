@@ -1944,7 +1944,7 @@ impl GpuRenderPlan {
                 | fm_core::DiagramType::Mindmap
                 | fm_core::DiagramType::Journey
         )
-        .then(crate::renderer::CanvasRenderConfig::default);
+        .then_some(config);
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
         // them, so this costs an unused Vec and no allocation.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
@@ -1969,10 +1969,12 @@ impl GpuRenderPlan {
             let fill = declared_fill
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.node_fill))
                 .unwrap_or(DEFAULT_NODE_FILL_RGBA);
             let stroke = declared_stroke
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.node_stroke))
                 .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
             // A declared `opacity` multiplies BOTH alphas, which is what the property means: CSS
             // `opacity` applies to the whole element, and the Canvas2D pass implements it with
@@ -2233,8 +2235,95 @@ impl GpuRenderPlan {
             Vec::new()
         };
         let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
+        let mut class_cards = Vec::new();
         for (position, node) in graph_nodes.iter().enumerate() {
             if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
+            if let Some(ir_node) = ir.nodes.get(node.node_index)
+                && let Some(meta) = ir_node
+                    .class_meta
+                    .as_deref()
+                    .filter(|meta| meta.has_compartments())
+            {
+                let name = ir_node
+                    .label
+                    .and_then(|id| ir.labels.get(id.0))
+                    .map_or(ir_node.id.as_str(), |label| label.text.as_str());
+                let declared = ir.resolved_node_style(node.node_index);
+                let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+                    meta,
+                    name,
+                    font_px,
+                    metrics.config().line_height,
+                    declared.get("font-size").map(String::as_str),
+                );
+                let opacity = crate::renderer::resolve_node_opacity(ir, node.node_index)
+                    .unwrap_or(1.0) as f32;
+                let border = declared
+                    .get("stroke")
+                    .map_or(config.node_stroke.as_str(), String::as_str);
+                let mut border_rgba = parse_paint_rgba(border).unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                border_rgba[3] *= opacity * 0.65;
+                if !declared.contains_key("fill")
+                    && node.bounds.width > 2.0
+                    && node.bounds.height > 2.0
+                {
+                    let header_height = compartments.header_height.min(node.bounds.height) - 0.75;
+                    let header_fill =
+                        fm_core::mindmap::branch_fill(&config.node_fill, border, false);
+                    let mut fill = parse_paint_rgba(&header_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                    fill[3] *= opacity;
+                    node_instances.push(GpuNodeInstance {
+                        center: [
+                            node.bounds.x + node.bounds.width * 0.5,
+                            node.bounds.y + 0.75 + header_height * 0.5,
+                        ],
+                        half_extent: [(node.bounds.width - 1.5) * 0.5, header_height * 0.5],
+                        fill,
+                        stroke: [0.0; 4],
+                        stroke_width: 0.0,
+                        shape: GpuNodeShape::Rect as u32,
+                        node_index: u32::try_from(node.node_index).unwrap_or(u32::MAX),
+                    });
+                }
+                for separator_y in compartments.separator_ys {
+                    node_border_segments.push(GpuEdgeSegment {
+                        from: [node.bounds.x + 0.75, node.bounds.y + separator_y],
+                        to: [
+                            node.bounds.x + node.bounds.width - 0.75,
+                            node.bounds.y + separator_y,
+                        ],
+                        edge_index: u32::try_from(node.node_index).unwrap_or(u32::MAX),
+                        color: border_rgba,
+                        dash_phase: 0.0,
+                        dash: [0.0; 2],
+                        width: 0.75,
+                    });
+                }
+                let mut color = crate::renderer::resolve_node_text_color(ir, node.node_index)
+                    .as_deref()
+                    .and_then(parse_paint_rgba)
+                    .or_else(|| parse_paint_rgba(&config.label_color))
+                    .unwrap_or(DEFAULT_LABEL_RGBA);
+                color[3] *= opacity;
+                for row in &compartments.rows {
+                    if row.underline {
+                        let x = node.bounds.x + fm_core::ClassCompartmentLayout::PADDING_X;
+                        let y = node.bounds.y + row.center_y + row.font_size * 0.5;
+                        let width = metrics.estimate_width(&row.text) * row.font_size / font_px;
+                        node_border_segments.push(GpuEdgeSegment {
+                            from: [x, y],
+                            to: [x + width, y],
+                            edge_index: u32::try_from(node.node_index).unwrap_or(u32::MAX),
+                            color,
+                            dash_phase: 0.0,
+                            dash: [0.0; 2],
+                            width: 0.75,
+                        });
+                    }
+                }
+                class_cards.push((node.node_index, node.bounds, compartments, color));
                 continue;
             }
             if layout
@@ -2346,6 +2435,11 @@ impl GpuRenderPlan {
         let max_font_px = run_font_px
             .iter()
             .copied()
+            .chain(
+                class_cards
+                    .iter()
+                    .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
+            )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
             .chain(layout.edges.iter().filter_map(|edge| {
                 edge_label_text(ir, edge)?;
@@ -2403,6 +2497,7 @@ impl GpuRenderPlan {
                 labelled
                     .iter()
                     .map(|(_, _, text)| *text)
+                    .chain(class_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
                     .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
                     .chain(
@@ -2535,6 +2630,38 @@ impl GpuRenderPlan {
                 GpuTextSource::Node,
                 *node_index as usize,
             );
+        }
+
+        for (node_index, bounds, card, color) in class_cards {
+            for row in card.rows {
+                let anchor = (
+                    if row.centered() {
+                        bounds.x + bounds.width * 0.5
+                    } else {
+                        bounds.x + fm_core::ClassCompartmentLayout::PADDING_X
+                    },
+                    bounds.y + row.center_y,
+                );
+                if row.centered() {
+                    sink.push_centred_with_font(
+                        &row.text,
+                        anchor,
+                        row.font_size,
+                        color,
+                        GpuTextSource::Node,
+                        node_index,
+                    );
+                } else {
+                    sink.push_left(
+                        &row.text,
+                        anchor,
+                        row.font_size,
+                        color,
+                        GpuTextSource::Node,
+                        node_index,
+                    );
+                }
+            }
         }
 
         for (row, source, node_index, color) in journey_rows {

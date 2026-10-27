@@ -3098,120 +3098,82 @@ impl Canvas2dRenderer {
                 && let Some(ref meta) = node.class_meta
                 && meta.has_compartments()
             {
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
-
-                ctx.set_fill_style(label_fill);
-                ctx.set_text_baseline(TextBaseline::Middle);
-
-                // Header: class name centered + bold.
                 let class_name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let display_name = meta.display_header(class_name);
-
-                let class_fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.0.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-
-                // STEREOTYPE above the name, where fm-render-svg puts it (bd-rk14).
-                //
-                // Measured SVG vs canvas: an `interface` stereotype drew in the SVG and not on the
-                // canvas. Same gap the terminal had (bd-039t) — the compartment path drew name,
-                // attributes and methods and skipped `meta.stereotype`. Mapping mirrors
-                // fm-render-svg, including Enum rendering as `enumeration` and a Custom stereotype
-                // written verbatim.
-                if let Some(stereotype) = &meta.stereotype {
-                    let stereo_text = stereotype.label();
-                    ctx.fill_text(&stereo_text, x + w / 2.0, cursor_y);
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+                    meta,
+                    class_name,
+                    self.config.font_size as f32,
+                    self.config.resolved_line_height(),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let border = stroke.as_deref().unwrap_or(&self.config.node_stroke);
+                if fill.is_none() && w > 2.0 && h > 2.0 {
+                    ctx.set_fill_style(&fm_core::mindmap::branch_fill(
+                        &self.config.node_fill,
+                        border,
+                        false,
+                    ));
+                    ctx.fill_rect(
+                        x + 0.75,
+                        y + 0.75,
+                        w - 1.5,
+                        f64::from(compartments.header_height).min(h) - 0.75,
+                    );
                     self.draw_calls += 1;
-                    *labels_drawn += 1;
-                    cursor_y += line_h * 0.8;
                 }
-
-                ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
-                // Separator line.
-                ctx.begin_path();
-                ctx.move_to(x, cursor_y);
-                ctx.line_to(x + w, cursor_y);
-                ctx.stroke();
-                self.draw_calls += 1;
-                cursor_y += member_font * 0.5;
-
-                // Attributes.
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.1.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Left);
-                for attr in &meta.attributes {
-                    if cursor_y > y + h - line_h * 0.5 {
-                        break;
-                    }
-                    let text = class_member_row(attr, false);
-                    ctx.fill_text(&text, x + padding, cursor_y);
-                    self.draw_calls += 1;
-                    *labels_drawn += 1;
-                    cursor_y += member_font * 1.2;
-                }
-
-                // Separator before methods.
-                if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+                ctx.set_stroke_style(border);
+                ctx.set_line_width(0.75);
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.65);
+                for separator_y in compartments.separator_ys {
                     ctx.begin_path();
-                    ctx.move_to(x, cursor_y);
-                    ctx.line_to(x + w, cursor_y);
+                    ctx.move_to(x + 0.75, y + f64::from(separator_y));
+                    ctx.line_to(x + w - 0.75, y + f64::from(separator_y));
                     ctx.stroke();
                     self.draw_calls += 1;
-                    cursor_y += member_font * 0.5;
                 }
-
-                // Methods.
-                let base_member_font = match declared_member_font.as_deref() {
-                    Some(font) => font.to_string(),
-                    None => class_fonts.1.clone(),
-                };
-                for method in &meta.methods {
-                    if cursor_y > y + h - member_font * 0.5 {
-                        break;
-                    }
-                    let text = class_member_row(method, true);
-                    // ⚠️ THE CLASSIFIER IS A STYLE HERE TOO (bd-r2gll). `class_member_row` no longer
-                    // puts `$`/`*` in the text, so this backend has to draw the marker or the
-                    // static/abstract distinction is simply LOST — which is worse than the literal
-                    // character it replaced. Canvas2D has no `text-decoration`, so the underline is
-                    // a measured rule; italic goes through the font string.
-                    let classifier =
-                        fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-                    if classifier == Some("font-style:italic") {
-                        ctx.set_font(&format!("italic {base_member_font}"));
-                    }
-                    ctx.fill_text(&text, x + padding, cursor_y);
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0));
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for row in compartments.rows {
+                    let font = declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::ClassCompartmentRowKind::Name).then_some("600"),
+                        &self.config.font_family,
+                    );
+                    ctx.set_font(&if row.italic && declared_parts.style.is_none() {
+                        format!("italic {font}")
+                    } else {
+                        font
+                    });
+                    ctx.set_text_align(if row.centered() {
+                        TextAlign::Center
+                    } else {
+                        TextAlign::Left
+                    });
+                    let text_x = if row.centered() {
+                        x + w * 0.5
+                    } else {
+                        x + f64::from(fm_core::ClassCompartmentLayout::PADDING_X)
+                    };
+                    let text_y = y + f64::from(row.center_y);
+                    ctx.fill_text(&row.text, text_x, text_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
-                    if classifier == Some("font-style:italic") {
-                        ctx.set_font(&base_member_font);
-                    } else if classifier == Some("text-decoration:underline") {
-                        let width = ctx.measure_text(&text).width;
-                        let baseline = cursor_y + member_font * 0.15;
+                    if row.underline {
+                        let width = ctx.measure_text(&row.text).width;
+                        let baseline = text_y + f64::from(row.font_size) * 0.5;
+                        ctx.set_stroke_style(label_fill);
                         ctx.begin_path();
-                        ctx.move_to(x + padding, baseline);
-                        ctx.line_to(x + padding + width, baseline);
+                        ctx.move_to(text_x, baseline);
+                        ctx.line_to(text_x + width, baseline);
                         ctx.stroke();
                         self.draw_calls += 1;
                     }
-                    cursor_y += member_font * 1.2;
                 }
             } else if let Some(node) = ir_node.filter(|n| !n.members.is_empty()) {
                 // ER entities get the SAME compartment treatment as classes (bd-rk14).
@@ -4625,47 +4587,6 @@ fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> 
         let converted: Vec<f64> = dash.iter().copied().map(f64::from).collect();
         use_dash(&converted)
     }
-}
-
-fn class_vis_symbol(vis: fm_core::ClassVisibility) -> &'static str {
-    match vis {
-        fm_core::ClassVisibility::Unmarked => "",
-        fm_core::ClassVisibility::Public => "+",
-        fm_core::ClassVisibility::Private => "-",
-        fm_core::ClassVisibility::Protected => "#",
-        fm_core::ClassVisibility::Package => "~",
-    }
-}
-
-/// The text of one class compartment row: `{vis}{name}{*|$}{": " return_type}` (bd-9wdra).
-///
-/// ONE function for attributes and methods because the row is one contract, not two. The canvas used
-/// to build the two lines separately and inline, and both had quietly diverged from the other
-/// backends: neither drew a member's type, and the methods line drew no abstract/static classifier
-/// at all — `is_abstract` and `is_static` were referenced ZERO times in this crate, against two in
-/// fm-render-svg and one in fm-render-term.
-///
-/// This mirrors `fm_layout::class_member_row_width`, which builds the SAME string to MEASURE the box
-/// this text is drawn into, and whose doc comment already claimed to mirror "the renderer's row
-/// text". The box was therefore always sized for the fuller row; the canvas simply declined to draw
-/// it. That is why this fix cannot move any geometry.
-///
-/// `is_method` gates the classifier, not the type: mermaid writes `*`/`$` on methods only, and SVG's
-/// attribute path likewise appends a type but never a suffix.
-fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String {
-    let mut row = String::with_capacity(member.name.len() + 8);
-    row.push_str(class_vis_symbol(member.visibility));
-    row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
-    // ⚠️ NO CLASSIFIER CHARACTER (bd-r2gll); it is a STYLE, and the caller applies it. Keeping the
-    // byte here would also disagree with `fm_layout::class_member_row_width`, which this function's
-    // own doc comment promises to mirror and which sizes the box this text is drawn into.
-    if let Some(ref return_type) = member.return_type {
-        // ` : `, as mermaid draws it and as `fm_layout::class_member_row_width` measures it
-        // (bd-ci658).
-        row.push_str(" : ");
-        row.push_str(&fm_core::parse_generic_types(return_type));
-    }
-    row
 }
 
 fn standard_node_font(config: &CanvasRenderConfig) -> String {
@@ -6807,13 +6728,172 @@ mod tests {
                     ),
                     "canvas (scene: {use_scene}) lost the complete generic heading"
                 );
-                if !use_scene && !members.is_empty() {
+                if !members.is_empty() {
                     assert!(ctx.operations().iter().any(
                         |operation| matches!(operation, DrawOperation::FillText(text, _, _)
                             if text == "+go()")
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn class_card_rows_share_canvas_scene_and_gpu_geometry() {
+        let source = "classDiagram\nclass Repository~T~ {\n<<interface>>\n+String identifier\n+fetch() List~T~\n+save()$\n}\n";
+        for (font_size, line_height, style) in [
+            (15.0, 1.5, ""),
+            (24.0, 1.8, ""),
+            (
+                15.0,
+                1.5,
+                "classDef default font-size:24px\nstyle Repository font-size:40px\n",
+            ),
+        ] {
+            let ir = fm_parser::parse(&format!("{source}{style}")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            assert_eq!(meta.attributes.len(), 1);
+            assert_eq!(meta.methods.len(), 2);
+            let config = CanvasRenderConfig {
+                font_size,
+                line_height,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let bounds = layout.nodes[0].bounds;
+            let name = node
+                .label
+                .and_then(|id| ir.labels.get(id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            let declared = ir.resolved_node_style(0);
+            let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+                meta,
+                name,
+                font_size as f32,
+                line_height as f32,
+                declared.get("font-size").map(String::as_str),
+            );
+            if !style.is_empty() {
+                assert!(card.rows.iter().all(|row| row.font_size == 40.0));
+                for rows in card.rows.windows(2) {
+                    assert!(rows[0].center_y + 20.0 < rows[1].center_y - 20.0);
+                }
+            }
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(1600.0, 1200.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                for row in &card.rows {
+                    let mut font = String::new();
+                    let positions: Vec<_> = ctx
+                        .operations()
+                        .iter()
+                        .filter_map(|operation| match operation {
+                            DrawOperation::SetFont(value) => {
+                                font.clone_from(value);
+                                None
+                            }
+                            DrawOperation::FillText(text, x, y) if text == &row.text => {
+                                Some((*x, *y, font.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        positions.len(),
+                        1,
+                        "scene={use_scene}: missing or duplicated {}",
+                        row.text
+                    );
+                    let expected_x = if row.centered() {
+                        bounds.x + bounds.width * 0.5
+                    } else {
+                        bounds.x + fm_core::ClassCompartmentLayout::PADDING_X
+                    };
+                    let offset_x = if use_scene {
+                        -scene.bounds.x
+                    } else {
+                        -layout.bounds.x
+                    };
+                    let offset_y = if use_scene {
+                        -scene.bounds.y
+                    } else {
+                        -layout.bounds.y
+                    };
+                    assert!((positions[0].0 - f64::from(expected_x + offset_x)).abs() < 0.01);
+                    assert!(
+                        (positions[0].1 - f64::from(bounds.y + row.center_y + offset_y)).abs()
+                            < 0.01
+                    );
+                    let rendered_font = positions[0]
+                        .2
+                        .split_whitespace()
+                        .find_map(|part| {
+                            part.strip_suffix("px")
+                                .and_then(|size| size.parse::<f64>().ok())
+                        })
+                        .expect("canvas row font size");
+                    assert!(
+                        (rendered_font - f64::from(row.font_size)).abs() < 0.01,
+                        "scene={use_scene}: {} uses the wrong font: {}",
+                        row.text,
+                        positions[0].2
+                    );
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Node)
+                .collect();
+            assert_eq!(runs.len(), card.rows.len());
+            for (run, row) in runs.into_iter().zip(&card.rows) {
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                assert_eq!(quads.len(), row.text.chars().count());
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.center[1] - bounds.y - row.center_y).abs() < 0.01)
+                );
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.half_extent[1] * 2.0 - row.font_size).abs() < 0.01)
+                );
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| quad.center[1] - quad.half_extent[1] >= bounds.y
+                            && quad.center[1] + quad.half_extent[1] <= bounds.y + bounds.height)
+                );
+            }
+            assert!(
+                plan.node_border_segments.len() >= 3,
+                "two dividers and static underline must be drawn"
+            );
+            assert_eq!(
+                plan.node_instances.len(),
+                2,
+                "class body and header must both be drawn"
+            );
         }
     }
 
