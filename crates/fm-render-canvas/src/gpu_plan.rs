@@ -5274,7 +5274,7 @@ pub(crate) fn rendered_label_gap(
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuNodeShape, GpuRenderPlan};
+    use super::{GpuNodeShape, GpuRenderPlan, GpuTextSource};
 
     #[test]
     fn radar_fills_cover_concave_and_crossing_paths_without_overdraw() {
