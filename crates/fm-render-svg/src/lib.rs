@@ -14006,14 +14006,15 @@ fn node_typography_config(
     if !style.contains_key("font-size") && !style.contains_key("font-family") {
         return None;
     }
-    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+    let base_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
         font_size: inherited_font_size,
         ..config.font_metrics().config().clone()
-    })
-    .with_style_overrides(
-        style.get("font-size").map(String::as_str),
-        style.get("font-family").map(String::as_str),
-    )?;
+    });
+    let metrics = ir.effective_node_font_metrics(node_index, &base_metrics);
+    if matches!(metrics, Cow::Borrowed(_)) {
+        return None;
+    }
+    let metrics = metrics.as_ref();
     Some(SvgRenderConfig {
         font_size: metrics.font_size(),
         avg_char_width: config.avg_char_width * metrics.font_size() / config.font_size.max(1.0),

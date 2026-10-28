@@ -2692,14 +2692,12 @@ impl GpuRenderPlan {
         // Paragraph breaks and glyph advances must use the same authored font metrics. The atlas
         // still carries the configured raster face, but a size or family override must not make
         // the label occupy a different rectangle from the one layout reserved for it.
-        let run_metrics: Vec<Option<fm_core::FontMetrics>> = labelled
+        let run_metrics: Vec<Cow<'_, fm_core::FontMetrics>> = labelled
             .iter()
             .map(|(node_index, _, _)| {
-                let declared =
-                    ir.resolved_node_style(usize::try_from(*node_index).unwrap_or(usize::MAX));
-                metrics.with_style_overrides(
-                    declared.get("font-size").map(String::as_str),
-                    declared.get("font-family").map(String::as_str),
+                ir.effective_node_font_metrics(
+                    usize::try_from(*node_index).unwrap_or(usize::MAX),
+                    &metrics,
                 )
             })
             .collect();
@@ -2768,10 +2766,7 @@ impl GpuRenderPlan {
         // pathological declaration cannot ask a backend for an enormous texture.
         let max_font_px = run_metrics
             .iter()
-            .map(|run| {
-                run.as_ref()
-                    .map_or(font_px, fm_core::FontMetrics::font_size)
-            })
+            .map(|run| run.as_ref().font_size())
             .chain(
                 class_cards
                     .iter()
@@ -2964,7 +2959,7 @@ impl GpuRenderPlan {
             .as_deref()
             .and_then(parse_paint_rgba)
             .unwrap_or(DEFAULT_LABEL_RGBA);
-            let node_metrics = node_metrics.as_ref().unwrap_or(&metrics);
+            let node_metrics = node_metrics.as_ref();
             let mut node_sink = TextSink {
                 atlas: sink.atlas,
                 quads: &mut *sink.quads,

@@ -5649,11 +5649,8 @@ fn build_label_layer(
             continue;
         }
         let declared = ir.resolved_node_style(node_box.node_index);
-        let styled_metrics = metrics.with_style_overrides(
-            declared.get("font-size").map(String::as_str),
-            declared.get("font-family").map(String::as_str),
-        );
-        let metrics = styled_metrics.as_ref().unwrap_or(metrics);
+        let styled_metrics = ir.effective_node_font_metrics(node_box.node_index, metrics);
+        let metrics = styled_metrics.as_ref();
         let label_text = if node.class_meta.is_some() {
             std::borrow::Cow::Owned(display_node_label(ir, node))
         } else {
@@ -17253,12 +17250,8 @@ fn compute_node_size(
     // Typography participates in geometry: painting a styled label at 32px into a box measured
     // at 15px makes both its outline and the routes around it wrong. Resolve the same style
     // cascade as the renderers before measuring ordinary nodes, their icons, or compartments.
-    let style = ir.resolved_node_style(node_index);
-    let styled_metrics = metrics.with_style_overrides(
-        style.get("font-size").map(String::as_str),
-        style.get("font-family").map(String::as_str),
-    );
-    let metrics = styled_metrics.as_ref().unwrap_or(metrics);
+    let styled_metrics = ir.effective_node_font_metrics(node_index, metrics);
+    let metrics = styled_metrics.as_ref();
 
     let paragraph_text = ir.node_layout_text(node, metrics);
     let text = paragraph_text.as_ref();

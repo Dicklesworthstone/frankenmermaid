@@ -9485,6 +9485,71 @@ impl MermaidDiagramIr {
             .map_or(node.id.as_str(), |label| label.text.as_str())
     }
 
+    /// Resolve the authored font cascade for one node against a surface's base metrics.
+    ///
+    /// This is the single typography boundary shared by layout and every graphical renderer.
+    /// Keeping it on the IR prevents a classDef or inline font edit from being measured with one
+    /// face and painted with another.
+    #[must_use]
+    pub fn effective_node_font_metrics<'a>(
+        &self,
+        node_index: usize,
+        base: &'a FontMetrics,
+    ) -> Cow<'a, FontMetrics> {
+        let style = self.resolved_node_style(node_index);
+        base.with_style_overrides(
+            style.get("font-size").map(String::as_str),
+            style.get("font-family").map(String::as_str),
+        )
+        .map_or(Cow::Borrowed(base), Cow::Owned)
+    }
+
+    /// Measure the widest authored row for one IR label.
+    #[must_use]
+    pub fn label_multiline_width(
+        &self,
+        label_id: IrLabelId,
+        metrics: &FontMetrics,
+    ) -> Option<f32> {
+        self.labels
+            .get(label_id.0)
+            .map(|label| metrics.estimate_multiline_width(&label.text))
+    }
+
+    /// Measure the complete authored height for one IR label.
+    #[must_use]
+    pub fn label_height(&self, label_id: IrLabelId, metrics: &FontMetrics) -> Option<f32> {
+        self.labels
+            .get(label_id.0)
+            .map(|label| metrics.estimate_height(&label.text))
+    }
+
+    /// Wrap one IR label to a requested width without changing the stored source text.
+    #[must_use]
+    pub fn wrap_label_to_width(
+        &self,
+        label_id: IrLabelId,
+        metrics: &FontMetrics,
+        max_width: f32,
+    ) -> Option<Vec<String>> {
+        self.labels
+            .get(label_id.0)
+            .map(|label| metrics.wrap_to_width(&label.text, max_width))
+    }
+
+    /// Truncate one IR label to a requested width without changing the stored source text.
+    #[must_use]
+    pub fn truncate_label_to_width(
+        &self,
+        label_id: IrLabelId,
+        metrics: &FontMetrics,
+        max_width: f32,
+    ) -> Option<String> {
+        self.labels
+            .get(label_id.0)
+            .map(|label| metrics.truncate_to_width(&label.text, max_width))
+    }
+
     /// Compose a readable paragraph before generic nodes are sized and routed.
     ///
     /// Flowchart and state labels use an 18-em text column, so a sentence grows its card
@@ -11044,6 +11109,58 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn ir_font_metric_helpers_share_authored_labels_and_node_style_resolution() {
+        use super::*;
+
+        let metrics = FontMetrics::new(FontMetricsConfig {
+            line_height: 1.6,
+            ..Default::default()
+        });
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(IrLabel {
+            text: "alpha beta gamma\nsecond row".into(),
+            ..Default::default()
+        });
+        let label = IrLabelId(0);
+        assert_eq!(
+            ir.label_multiline_width(label, &metrics),
+            Some(metrics.estimate_multiline_width(&ir.labels[0].text))
+        );
+        assert_eq!(
+            ir.label_height(label, &metrics),
+            Some(metrics.estimate_height(&ir.labels[0].text))
+        );
+        assert_eq!(
+            ir.wrap_label_to_width(label, &metrics, 70.0),
+            Some(metrics.wrap_to_width(&ir.labels[0].text, 70.0))
+        );
+        assert_eq!(
+            ir.truncate_label_to_width(label, &metrics, 70.0),
+            Some(metrics.truncate_to_width(&ir.labels[0].text, 70.0))
+        );
+        assert!(ir.label_height(IrLabelId(99), &metrics).is_none());
+
+        ir.nodes.push(IrNode {
+            id: "A".into(),
+            label: Some(label),
+            inline_style: Some(Box::new(IrInlineStyle {
+                properties: [("font-size".into(), "30px".into()), ("font-family".into(), "monospace".into())]
+                    .into_iter()
+                    .collect(),
+            })),
+            ..Default::default()
+        });
+        let effective = ir.effective_node_font_metrics(0, &metrics);
+        assert_eq!(effective.font_size(), 30.0);
+        assert_eq!(
+            effective.estimate_width("iii"),
+            effective.estimate_width("WWW"),
+            "monospace must be resolved before any geometry is measured"
+        );
+        assert_eq!(ir.labels[0].text, "alpha beta gamma\nsecond row");
+    }
 
     #[test]
     fn node_paragraphs_preserve_text_and_authored_breaks_at_readable_widths() {

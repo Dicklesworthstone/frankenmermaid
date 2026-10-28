@@ -3620,12 +3620,9 @@ impl Canvas2dRenderer {
                 // Layout and SVG use the same rule: state ornaments and junctions draw no text,
                 // while gitGraph commits keep their labels even when they use those shapes.
                 let sankey_label = fm_layout::sankey_node_label(ir, node_box.node_index);
-                let declared = ir.resolved_node_style(node_box.node_index);
-                let styled_metrics = label_metrics.with_style_overrides(
-                    declared.get("font-size").map(String::as_str),
-                    declared.get("font-family").map(String::as_str),
-                );
-                let node_metrics = styled_metrics.as_ref().unwrap_or(&label_metrics);
+                let node_metrics =
+                    ir.effective_node_font_metrics(node_box.node_index, &label_metrics);
+                let node_metrics = node_metrics.as_ref();
                 let paragraph = ir_node.map(|node| ir.node_layout_text(node, node_metrics));
                 let label_text = sankey_label
                     .as_deref()
