@@ -1936,6 +1936,8 @@ struct LayoutDiff {
 fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> LayoutDiff {
     let mut edits = Vec::new();
     let shared_nodes = previous.nodes.len().min(current.nodes.len());
+    let style_declarations_changed =
+        previous.style_refs != current.style_refs || previous.style_defs != current.style_defs;
 
     // A length change is itself a topology change, and it also means the trailing
     // added/removed loops below will fire.
@@ -1964,6 +1966,15 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
             true
         } else {
             node_labels_differ(previous, left.label, current, right.label)
+                || ((style_declarations_changed
+                    || left.classes != right.classes
+                    || left.inline_style != right.inline_style)
+                    && {
+                        let previous_style = previous.resolved_node_style(node_index);
+                        let current_style = current.resolved_node_style(node_index);
+                        previous_style.get("font-size") != current_style.get("font-size")
+                            || previous_style.get("font-family") != current_style.get("font-family")
+                    })
         };
 
         if changed {
@@ -6155,12 +6166,7 @@ fn compute_traced_layout_with_config_and_guardrails(
             layout_diagram_sugiyama_traced_with_config(ir, config)
         }
         LayoutAlgorithm::Force => layout_diagram_force_traced_impl(ir, &config),
-        LayoutAlgorithm::Tree => {
-            let metrics = config
-                .font_metrics
-                .unwrap_or_else(fm_core::FontMetrics::default_metrics);
-            layout_diagram_tree_traced_with_metrics(ir, &metrics)
-        }
+        LayoutAlgorithm::Tree => layout_diagram_tree_traced_with_config(ir, &config),
         LayoutAlgorithm::Radial => layout_diagram_radial_traced_with_config(ir, config),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced_with_metrics(
             ir,
@@ -8907,29 +8913,35 @@ pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out using the tree algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_tree_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+    layout_diagram_tree_traced_with_config(ir, &LayoutConfig::default())
 }
 
-fn layout_diagram_tree_traced_with_metrics(
+fn layout_diagram_tree_traced_with_config(
     ir: &MermaidDiagramIr,
-    metrics: &fm_core::FontMetrics,
+    config: &LayoutConfig,
 ) -> TracedLayout {
-    let mut traced = layout_diagram_tree_traced_impl(ir, metrics);
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let mut traced = layout_diagram_tree_traced_impl(ir, config, &metrics);
     let cluster_dividers =
         build_state_cluster_dividers(ir, &traced.layout.nodes, &traced.layout.clusters);
     Arc::make_mut(&mut traced.layout)
         .extensions
         .cluster_dividers = cluster_dividers;
-    attach_journey_content(ir, &mut traced, metrics);
+    attach_journey_content(ir, &mut traced, &metrics);
     traced
 }
 
 fn layout_diagram_tree_traced_impl(
     ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
     metrics: &fm_core::FontMetrics,
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
+    let spacing = spacing_with_source_hints(config.spacing, ir);
+    let edge_routing = edge_routing_with_source_hints(config.edge_routing, ir);
     let node_sizes = compute_node_sizes(ir, metrics);
     let node_count = ir.nodes.len();
 
@@ -8957,13 +8969,9 @@ fn layout_diagram_tree_traced_impl(
     // Tree selection must preserve the same subgraph containment as the layered algorithm.
     // Reserve each complete frame before placing its parent, using tree coordinates at every
     // level; a plain directed path can still take its allocation-saving specialization below.
-    let mut nodes = if let Some(nodes) = compound::compound_tree_node_boxes(
-        ir,
-        &node_sizes,
-        &LayoutConfig::default(),
-        spacing,
-        metrics,
-    ) {
+    let mut nodes = if let Some(nodes) =
+        compound::compound_tree_node_boxes(ir, &node_sizes, config, spacing, metrics)
+    {
         push_snapshot(
             &mut trace,
             "compound_placement",
@@ -8976,7 +8984,13 @@ fn layout_diagram_tree_traced_impl(
     } else {
         if let Some(path_order) = directed_path_order(ir) {
             return layout_directed_path_tree_traced(
-                ir, path_order, node_sizes, spacing, metrics, trace,
+                ir,
+                path_order,
+                node_sizes,
+                spacing,
+                edge_routing,
+                metrics,
+                trace,
             );
         }
         push_snapshot(
@@ -8992,18 +9006,10 @@ fn layout_diagram_tree_traced_impl(
     let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     anchor_composite_state_nodes(ir, &mut nodes, &clusters);
     let edges = if clusters.is_empty() {
-        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
-            .unwrap_or_else(|| {
-                build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default())
-            })
+        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), edge_routing)
+            .unwrap_or_else(|| build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), edge_routing))
     } else {
-        build_edge_paths(
-            ir,
-            &nodes,
-            &clusters,
-            &BTreeSet::new(),
-            EdgeRouting::default(),
-        )
+        build_edge_paths(ir, &nodes, &clusters, &BTreeSet::new(), edge_routing)
     };
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -9121,6 +9127,7 @@ fn layout_directed_path_tree_traced(
     path_order: Vec<usize>,
     node_sizes: Vec<(f32, f32)>,
     spacing: LayoutSpacing,
+    edge_routing: EdgeRouting,
     metrics: &fm_core::FontMetrics,
     mut trace: LayoutTrace,
 ) -> TracedLayout {
@@ -9187,13 +9194,9 @@ fn layout_directed_path_tree_traced(
 
     let order_by_rank = vec![0_usize; node_count];
     let nodes = node_boxes_from_centers(ir, &node_sizes, &depth, &order_by_rank, &centers);
-    let edges = build_directed_path_edge_paths_unchecked(
-        ir,
-        &nodes,
-        &BTreeSet::new(),
-        EdgeRouting::default(),
-    )
-    .expect("validated directed path endpoints");
+    let edges =
+        build_directed_path_edge_paths_unchecked(ir, &nodes, &BTreeSet::new(), edge_routing)
+            .expect("validated directed path endpoints");
     let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -17239,6 +17242,16 @@ fn compute_node_size(
         return (card.width, card.height);
     }
 
+    // Typography participates in geometry: painting a styled label at 32px into a box measured
+    // at 15px makes both its outline and the routes around it wrong. Resolve the same style
+    // cascade as the renderers before measuring ordinary nodes, their icons, or compartments.
+    let style = ir.resolved_node_style(node_index);
+    let styled_metrics = metrics.with_style_overrides(
+        style.get("font-size").map(String::as_str),
+        style.get("font-family").map(String::as_str),
+    );
+    let metrics = styled_metrics.as_ref().unwrap_or(metrics);
+
     match node.shape {
         fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
         fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
@@ -17513,6 +17526,22 @@ fn node_size_cache_key(
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.line_height_px().to_bits()));
+    // Ordinary labels use authored fonts too. A style-only edit must invalidate their cached
+    // extents even when the node id, text, and global metrics have not changed.
+    let style = ir.resolved_node_style(node_index);
+    hash_u64(
+        &mut hash,
+        style.get("font-size").map_or(0, |value| value.len()) as u64,
+    );
+    hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
+    hash_u64(
+        &mut hash,
+        style.get("font-family").map_or(0, |value| value.len()) as u64,
+    );
+    hash_str(
+        &mut hash,
+        style.get("font-family").map_or("", String::as_str),
+    );
     // Class members feed `compute_node_size` via `class_compartment_dimensions`, so they belong in the
     // key: editing a class body without touching its label would otherwise serve the cached size from
     // before the edit and silently truncate the new members.
@@ -34553,6 +34582,231 @@ mod tests {
     }
 
     #[test]
+    fn tree_layout_respects_configured_and_authored_spacing() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let horizontal = matches!(direction, "LR" | "RL");
+            for branching in [false, true] {
+                let mut source = format!("flowchart {direction}\n");
+                for index in 0..10 {
+                    source.push_str(&format!("N{index} --> N{}\n", index + 1));
+                }
+                if branching {
+                    source.push_str("N0 --> Side\n");
+                }
+                for authored in [false, true] {
+                    let input = if authored {
+                        format!(
+                            "%%{{init: {{'flowchart': {{'nodeSpacing': 124, 'rankSpacing': 188}}}}}}%%\n{source}"
+                        )
+                    } else {
+                        source.clone()
+                    };
+                    let ir = parse(&input).ir;
+                    if authored {
+                        assert_eq!(ir.meta.node_spacing, Some(124));
+                        assert_eq!(ir.meta.rank_spacing, Some(188));
+                    }
+                    let config = LayoutConfig {
+                        spacing: LayoutSpacing {
+                            node_spacing: 92.0,
+                            rank_spacing: 132.0,
+                            ..Default::default()
+                        },
+                        fnx_enabled: false,
+                        ..Default::default()
+                    };
+                    let expected_rank_gap = if authored { 188.0 } else { 132.0 };
+                    let expected_node_gap = if authored { 124.0 } else { 92.0 };
+                    for algorithm in [LayoutAlgorithm::Tree, LayoutAlgorithm::Auto] {
+                        let traced = super::layout_diagram_traced_with_config(
+                            &ir,
+                            algorithm,
+                            config.clone(),
+                        );
+                        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                        let layout = &traced.layout;
+                        for index in 0..10 {
+                            let a = node_bounds(layout, &format!("N{index}"));
+                            let b = node_bounds(layout, &format!("N{}", index + 1));
+                            let gap = match direction {
+                                "LR" => b.x - a.x - a.width,
+                                "RL" => a.x - b.x - b.width,
+                                "BT" => a.y - b.y - b.height,
+                                _ => b.y - a.y - a.height,
+                            };
+                            assert!(
+                                (gap - expected_rank_gap).abs() < 0.01,
+                                "{algorithm:?}/{direction}, branching={branching}, authored={authored}: \
+                                 rank gap {gap} must be {expected_rank_gap}"
+                            );
+                        }
+                        if branching {
+                            let a = node_bounds(layout, "N1");
+                            let b = node_bounds(layout, "Side");
+                            let gap = if horizontal {
+                                a.y.max(b.y) - (a.y + a.height).min(b.y + b.height)
+                            } else {
+                                a.x.max(b.x) - (a.x + a.width).min(b.x + b.width)
+                            };
+                            assert!(
+                                (gap - expected_node_gap).abs() < 0.01,
+                                "{algorithm:?}/{direction}: sibling gap {gap} must be {expected_node_gap}"
+                            );
+                        }
+                        assert_eq!(layout.nodes.len(), ir.nodes.len());
+                        assert_eq!(layout.edges.len(), ir.edges.len());
+                    }
+                    // Default entry points must agree, including when the source declares its
+                    // own gaps. The direct path and ordinary tree exercise different kernels.
+                    let wrapper = layout_diagram_tree(&ir);
+                    let defaults = super::layout_diagram_traced_with_config(
+                        &ir,
+                        LayoutAlgorithm::Tree,
+                        LayoutConfig::default(),
+                    );
+                    assert_eq!(wrapper.nodes, defaults.layout.nodes);
+                    assert_eq!(wrapper.edges, defaults.layout.edges);
+                    assert_eq!(wrapper.bounds, defaults.layout.bounds);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_layout_respects_caller_routing_and_source_precedence() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+
+        let has_diagonal = |path: &super::LayoutEdgePath| {
+            path.points.windows(2).any(|pair| {
+                (pair[0].x - pair[1].x).abs() > 0.001 && (pair[0].y - pair[1].y).abs() > 0.001
+            })
+        };
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let mut ir = parse(&format!(
+                "flowchart {direction}\nA --> B --> D --> G --> H --> I\nA --> C --> E --> J --> K --> L\n"
+            ))
+            .ir;
+            for algorithm in [LayoutAlgorithm::Tree, LayoutAlgorithm::Auto] {
+                let placed = |ir: &MermaidDiagramIr, edge_routing| {
+                    let traced = super::layout_diagram_traced_with_config(
+                        ir,
+                        algorithm,
+                        LayoutConfig {
+                            edge_routing,
+                            fnx_enabled: false,
+                            ..Default::default()
+                        },
+                    );
+                    assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                    traced.layout
+                };
+                let orthogonal = placed(&ir, EdgeRouting::Orthogonal);
+                let curved = placed(&ir, EdgeRouting::Spline);
+                assert_eq!(orthogonal.nodes, curved.nodes);
+                assert!(orthogonal.edges.iter().all(|path| !has_diagonal(path)));
+                assert!(curved.edges.iter().any(has_diagonal));
+                for (plain, rounded) in orthogonal.edges.iter().zip(&curved.edges) {
+                    assert_eq!(plain.points.first(), rounded.points.first());
+                    assert_eq!(plain.points.last(), rounded.points.last());
+                }
+
+                ir.meta.edge_routing = Some(Routing::Orthogonal);
+                assert_eq!(placed(&ir, EdgeRouting::Spline).edges, orthogonal.edges);
+                ir.meta.edge_routing = Some(Routing::Curved);
+                assert_eq!(placed(&ir, EdgeRouting::Orthogonal).edges, curved.edges);
+
+                let changed = curved.edges.iter().find(|path| has_diagonal(path)).unwrap();
+                ir.edges[changed.edge_index].extras_mut().routing = Some(Routing::Orthogonal);
+                let mixed = placed(&ir, EdgeRouting::Spline);
+                for (path, original) in mixed.edges.iter().zip(&curved.edges) {
+                    if path.edge_index == changed.edge_index {
+                        assert!(!has_diagonal(path));
+                        assert_ne!(path.points, original.points);
+                    } else {
+                        assert_eq!(path, original, "one edge's override changed another edge");
+                    }
+                }
+                ir.edges[changed.edge_index].extras_mut().routing = None;
+                ir.meta.edge_routing = None;
+            }
+        }
+    }
+
+    #[test]
+    fn tree_nested_clusters_reserve_configured_spacing_and_padding() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let ir = parse(&format!(
+                "flowchart {direction}\nsubgraph First[Group]\nsubgraph Inner[Lane]\nA --> B --> C --> D --> E\nend\nend\nsubgraph Second[Other]\nF --> G --> H --> I --> J\nend\nRoot --> A\nRoot --> F\n"
+            ))
+            .ir;
+            let config = LayoutConfig {
+                spacing: LayoutSpacing {
+                    node_spacing: 96.0,
+                    rank_spacing: 120.0,
+                    cluster_padding: 58.0,
+                    ..Default::default()
+                },
+                fnx_enabled: false,
+                ..Default::default()
+            };
+            for algorithm in [LayoutAlgorithm::Tree, LayoutAlgorithm::Auto] {
+                let traced =
+                    super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                assert!(
+                    traced
+                        .trace
+                        .snapshots
+                        .iter()
+                        .any(|stage| stage.stage == "compound_placement")
+                );
+                let layout = &traced.layout;
+                let a = node_bounds(layout, "A");
+                let b = node_bounds(layout, "B");
+                let gap = match direction {
+                    "LR" => b.x - a.x - a.width,
+                    "RL" => a.x - b.x - b.width,
+                    "BT" => a.y - b.y - b.height,
+                    _ => b.y - a.y - a.height,
+                };
+                assert!((gap - config.spacing.rank_spacing).abs() < 0.01);
+
+                let inner = layout
+                    .clusters
+                    .iter()
+                    .find(|cluster| cluster.title.as_deref() == Some("Lane"))
+                    .expect("the nested frame is retained");
+                for id in ["A", "B", "C", "D", "E"] {
+                    let node = node_bounds(layout, id);
+                    let padding = config.spacing.cluster_padding - 0.01;
+                    assert!(node.x - inner.bounds.x >= padding);
+                    assert!(node.y - inner.bounds.y >= padding);
+                    assert!(inner.bounds.x + inner.bounds.width - node.x - node.width >= padding);
+                    assert!(inner.bounds.y + inner.bounds.height - node.y - node.height >= padding);
+                }
+                let first = layout
+                    .clusters
+                    .iter()
+                    .find(|cluster| cluster.title.as_deref() == Some("Group"))
+                    .unwrap();
+                let second = layout
+                    .clusters
+                    .iter()
+                    .find(|cluster| cluster.title.as_deref() == Some("Other"))
+                    .unwrap();
+                assert!(!rects_overlap(first.bounds, second.bounds));
+                assert!(inner.bounds.x > first.bounds.x);
+                assert!(inner.bounds.y > first.bounds.y);
+                assert!(inner.bounds.x + inner.bounds.width < first.bounds.x + first.bounds.width);
+                assert!(
+                    inner.bounds.y + inner.bounds.height < first.bounds.y + first.bounds.height
+                );
+                assert_eq!(layout.edges.len(), ir.edges.len());
+            }
+        }
+    }
+
+    #[test]
     fn tree_reverse_directions_preserve_variable_rank_sizes_and_clearance() {
         let spacing = LayoutSpacing::default();
         for (forward_direction, reverse_direction) in [
@@ -45630,6 +45884,69 @@ mod tests {
             long_label.layout.nodes[5].bounds.width,
             short_label.layout.nodes[5].bounds.width,
         );
+    }
+
+    #[test]
+    fn ordinary_nodes_measure_authored_fonts_before_layout() {
+        let source = "flowchart TB\nA[\"First line<br/>Second line\"] --> B((Circle))\nB --> C{Release approved?}\nC --> D[iii narrow type]";
+        let plain = parse(source).ir;
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let authored = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 32.0,
+            preset: fm_core::FontPreset::Monospace,
+            ..metrics.config().clone()
+        });
+        let expected = super::compute_node_sizes(&plain, &authored);
+        for declarations in [
+            "classDef default font-size:32px,font-family:monospace",
+            "classDef heading font-size:32px,font-family:monospace\nclass A,B,C,D heading",
+            "style A font-size:32px,font-family:monospace\nstyle B font-size:32px,font-family:monospace\nstyle C font-size:32px,font-family:monospace\nstyle D font-size:32px,font-family:monospace",
+        ] {
+            let styled = parse(&format!("{source}\n{declarations}")).ir;
+            assert_eq!(super::compute_node_sizes(&styled, &metrics), expected);
+        }
+        let default_sizes = super::compute_node_sizes(&plain, &metrics);
+        for (styled, plain) in expected.iter().zip(default_sizes) {
+            assert!(styled.0 > plain.0 && styled.1 > plain.1);
+        }
+    }
+
+    #[test]
+    fn incremental_layout_remeasures_fonts_during_a_mixed_label_and_style_edit() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut ir = large_two_subgraph_ir(32);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        ir.nodes[5].inline_style = Some(fm_core::parse_style_string(
+            "font-size:32px;font-family:monospace",
+        ));
+        let label = ir.nodes[6].label.unwrap();
+        ir.labels[label.0].text = "Different text".to_string();
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let fresh = super::layout_diagram_with_config(&ir, config);
+        let bounds = |layout: &super::DiagramLayout| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == 5)
+                .unwrap()
+                .bounds
+        };
+        assert!(bounds(&updated.layout).width > bounds(&before.layout).width);
+        assert!(bounds(&updated.layout).height > bounds(&before.layout).height);
+        assert_eq!(bounds(&updated.layout).width, bounds(&fresh).width);
+        assert_eq!(bounds(&updated.layout).height, bounds(&fresh).height);
     }
 
     #[test]

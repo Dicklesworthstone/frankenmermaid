@@ -11329,6 +11329,17 @@ fn render_node(
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let styled_config = ir_node
+        .filter(|node| {
+            node.class_meta.is_none()
+                && node.c4_meta.is_none()
+                && node.requirement_meta.is_none()
+                && node.members.is_empty()
+        })
+        .and_then(|_| {
+            node_typography_config(ir, node_box.node_index, detail.node_font_size, config)
+        });
+    let config = styled_config.as_ref().unwrap_or(config);
     let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
     let flowchart_colors = semantic_colors.as_ref().map(|style| {
         let mut palette = colors.clone();
@@ -11392,7 +11403,9 @@ fn render_node(
     // diagram small enough for the auto tier to pick `Normal` (a 48-char cap) — i.e. most of them —
     // while two shapes passed the runs even for a truncated label.
     let label_id = label_id.filter(|_| matches!(label_text, Cow::Borrowed(_)));
-    let node_font_size = detail.node_font_size;
+    let node_font_size = styled_config
+        .as_ref()
+        .map_or(detail.node_font_size, |styled| styled.font_size);
     // ⚠️ A PACKET FIELD IS NEVER ELLIPSIZED, because its box width is the PROTOCOL, not a layout
     // choice. `fit_node_label_text` shrinks a label to 10px and then cuts it, which is right for a
     // node whose box was sized for its text — and wrong for a one-bit field, whose width is fixed at
@@ -13967,6 +13980,38 @@ fn render_custom_svg_icon(
         )
 }
 
+/// Resolve the font that ordinary node text will draw before fitting and placing its lines.
+/// A family-only style retains the detail tier's size; an authored size takes precedence.
+fn node_typography_config(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    inherited_font_size: f32,
+    config: &SvgRenderConfig,
+) -> Option<SvgRenderConfig> {
+    let style = ir.resolved_node_style(node_index);
+    if !style.contains_key("font-size") && !style.contains_key("font-family") {
+        return None;
+    }
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: inherited_font_size,
+        ..config.font_metrics().config().clone()
+    })
+    .with_style_overrides(
+        style.get("font-size").map(String::as_str),
+        style.get("font-family").map(String::as_str),
+    )?;
+    Some(SvgRenderConfig {
+        font_size: metrics.font_size(),
+        avg_char_width: config.avg_char_width * metrics.font_size() / config.font_size.max(1.0),
+        font_family: style
+            .get("font-family")
+            .filter(|family| !family.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| config.font_family.clone()),
+        ..config.clone()
+    })
+}
+
 /// Conservative proportional measurement for text that must remain visible. Keep a caller's
 /// larger calibration, but do not let a small average erase the font preset's glyph widths.
 /// Wide Latin glyphs need an additional advance allowance: the preset's average-based W/M
@@ -14338,6 +14383,17 @@ fn render_node_label_text(
     emit_classdef_classes: bool,
 ) -> Element {
     let fitted = fit_node_label_text(label_text, max_width, max_height, font_size, config);
+    // SVG inline CSS wins over presentation attributes. If an authored font needed fitting,
+    // its old CSS size must not silently undo the size used to position the fitted lines.
+    let fitted_style = label_style
+        .filter(|_| fitted.font_size != font_size)
+        .filter(|style| {
+            fm_core::parse_style_string(style)
+                .properties
+                .contains_key("font-size")
+        })
+        .map(|style| format!("{style};font-size:{}px!important", fitted.font_size));
+    let label_style = fitted_style.as_deref().or(label_style);
     // Callers position the first baseline of the original block. Keep its visual center when
     // fitting changes either the number of lines or their font size.
     let y = if fitted.changed {
@@ -20115,6 +20171,89 @@ mod tests {
         assert!(!fitted.changed);
         assert!(matches!(fitted.text, Cow::Borrowed("Short label")));
         assert_eq!(fitted.font_size, 15.0);
+    }
+
+    #[test]
+    fn authored_node_fonts_drive_multiline_baselines_and_shape_fitting() {
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Circle,
+            NodeShape::Diamond,
+            NodeShape::Triangle,
+        ] {
+            let mut ir = fm_parser::parse(
+                "flowchart TB\nA[\"First row<br/>Second row\"]\nclassDef default font-size:32px,font-family:monospace",
+            )
+            .ir;
+            ir.nodes[0].shape = shape;
+            let layout = fm_layout::layout_diagram(&ir);
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    embed_theme_css,
+                    preserve_labels: true,
+                    ..Default::default()
+                };
+                let svg = render_node(
+                    &layout.nodes[0],
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    resolve_detail_profile(layout.bounds.width, layout.bounds.height, &config),
+                    &ThemeColors::default(),
+                    false,
+                    &HashMap::new(),
+                    false,
+                )
+                .render();
+                let text = svg.split("<text").nth(1).expect("the node label");
+                assert_eq!(
+                    edge_label_test_number(text, "font-size"),
+                    32.0,
+                    "{shape:?}: {svg}"
+                );
+                let rows: Vec<_> = text.split("<tspan").skip(1).collect();
+                assert_eq!(rows.len(), 2, "{shape:?}: {svg}");
+                assert_eq!(edge_label_test_number(rows[1], "dy"), 48.0);
+                assert!(rows[0].contains("First row") && rows[1].contains("Second row"));
+                let first_baseline = edge_label_test_number(text, "y");
+                let center = first_baseline + 24.0 - 32.0 / 3.0;
+                let bounds = layout.nodes[0].bounds;
+                let region = shape.label_region(bounds.width, bounds.height);
+                let expected_center = region.map_or(bounds.y + bounds.height / 2.0, |region| {
+                    bounds.y + region.y + region.height / 2.0
+                });
+                assert!((center - expected_center).abs() < 0.02);
+            }
+        }
+    }
+
+    #[test]
+    fn fitted_authored_font_cannot_be_overridden_by_its_original_css_size() {
+        let config = SvgRenderConfig {
+            font_size: 32.0,
+            avg_char_width: 16.0,
+            ..Default::default()
+        };
+        let svg = render_node_label_text(
+            &MermaidDiagramIr::empty(DiagramType::Flowchart),
+            None,
+            "alpha beta",
+            24.0,
+            24.0,
+            32.0,
+            48.0,
+            48.0,
+            &config,
+            &ThemeColors::default(),
+            Some("font-size:32px;fill:#123456"),
+            false,
+        )
+        .render();
+        let fitted_size = edge_label_test_number(&svg, "font-size");
+        assert!(fitted_size < 32.0);
+        assert!(svg.contains("px!important"));
+        assert!(svg.contains("fill:#123456"));
     }
 
     #[test]

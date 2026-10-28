@@ -360,6 +360,38 @@ impl FontMetrics {
         })
     }
 
+    /// Resolve authored font properties before measuring or positioning text.
+    ///
+    /// Sizes use the same pixel interpretation as diagram styles. Unsupported or invalid
+    /// sizes retain the caller's font; a family-only override retains its size and line height.
+    /// `None` keeps the common unstyled path borrowing its existing metrics.
+    #[must_use]
+    pub fn with_style_overrides(
+        &self,
+        font_size: Option<&str>,
+        font_family: Option<&str>,
+    ) -> Option<Self> {
+        let font_size = font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_family = font_family
+            .map(str::trim)
+            .filter(|family| !family.is_empty());
+        if font_size.is_none() && font_family.is_none() {
+            return None;
+        }
+        Some(Self::new(FontMetricsConfig {
+            font_size: font_size.unwrap_or(self.config.font_size),
+            preset: font_family.map_or(self.config.preset, FontPreset::from_family),
+            ..self.config.clone()
+        }))
+    }
+
     /// Get the configuration.
     #[must_use]
     pub const fn config(&self) -> &FontMetricsConfig {
@@ -823,6 +855,29 @@ mod tests {
         assert!((metrics.font_size() - 15.0).abs() < f32::EPSILON);
         assert!(metrics.avg_char_width() > 5.0);
         assert!(metrics.avg_char_width() < 15.0);
+    }
+
+    #[test]
+    fn authored_fonts_keep_the_base_line_height_and_measure_the_effective_face() {
+        let metrics = FontMetrics::new(FontMetricsConfig {
+            line_height: 1.75,
+            ..FontMetricsConfig::default()
+        });
+        let styled = metrics
+            .with_style_overrides(Some(" 32px "), Some("monospace"))
+            .unwrap();
+        assert_eq!(styled.font_size(), 32.0);
+        assert_eq!(styled.line_height_px(), 56.0);
+        assert_eq!(styled.estimate_width("iii"), styled.estimate_width("WWW"));
+        let family_only = metrics
+            .with_style_overrides(None, Some("monospace"))
+            .unwrap();
+        assert_eq!(family_only.font_size(), metrics.font_size());
+        assert_eq!(family_only.line_height_px(), metrics.line_height_px());
+        for size in ["0", "-1px", "NaN", "inf", "513px", "large", "2em"] {
+            assert!(metrics.with_style_overrides(Some(size), None).is_none());
+        }
+        assert!(metrics.with_style_overrides(None, Some(" ")).is_none());
     }
 
     #[test]
