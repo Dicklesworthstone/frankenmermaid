@@ -9,6 +9,7 @@ use fm_layout::{
     DiagramLayout, LayoutPoint, LayoutRect, MarkerKind, PathCmd, RenderGroup, RenderItem,
     RenderScene,
 };
+use std::borrow::Cow;
 
 /// Shape discriminator consumed by an SDF node shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2399,7 +2400,7 @@ impl GpuRenderPlan {
         } else {
             Vec::new()
         };
-        let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
+        let mut labelled: Vec<(u32, [f32; 2], Cow<'_, str>)> = Vec::new();
         let mut class_cards = Vec::new();
         let mut er_cards = Vec::new();
         let mut c4_cards = Vec::new();
@@ -2653,14 +2654,20 @@ impl GpuRenderPlan {
                         node.bounds.x + node.bounds.width * 0.5,
                         node.bounds.y + node.bounds.height * 0.5,
                     ],
-                    label,
+                    Cow::Borrowed(label.as_str()),
                 ));
                 continue;
             }
             if let Some(ir_node) = ir.nodes.get(node.node_index) {
                 // Share Canvas/SVG's display rule: implicit state names are visible,
                 // while state ornaments have no text even when their internal ID exists.
-                let label = ir.node_display_text(ir_node);
+                let declared = ir.resolved_node_style(node.node_index);
+                let styled_metrics = metrics.with_style_overrides(
+                    declared.get("font-size").map(String::as_str),
+                    declared.get("font-family").map(String::as_str),
+                );
+                let label =
+                    ir.node_layout_text(ir_node, styled_metrics.as_ref().unwrap_or(&metrics));
                 if label.is_empty() {
                     continue;
                 }
@@ -2682,20 +2689,18 @@ impl GpuRenderPlan {
             }
         }
 
-        // PER-RUN FONT SIZE (bd-eudpo). Resolved from the node, exactly like fill, stroke, stroke
-        // width and opacity -- NOT from the layout text primitive, whose `font_size` is a hardcoded
-        // 14.0/12.0 in every branch of `build_render_scene` and would have delivered nothing.
-        let run_font_px: Vec<f32> = labelled
+        // Paragraph breaks and glyph advances must use the same authored font metrics. The atlas
+        // still carries the configured raster face, but a size or family override must not make
+        // the label occupy a different rectangle from the one layout reserved for it.
+        let run_metrics: Vec<Option<fm_core::FontMetrics>> = labelled
             .iter()
             .map(|(node_index, _, _)| {
-                crate::renderer::resolve_declared_node_font(
-                    ir,
-                    usize::try_from(*node_index).unwrap_or(usize::MAX),
+                let declared =
+                    ir.resolved_node_style(usize::try_from(*node_index).unwrap_or(usize::MAX));
+                metrics.with_style_overrides(
+                    declared.get("font-size").map(String::as_str),
+                    declared.get("font-family").map(String::as_str),
                 )
-                .size
-                .map(|size| size as f32)
-                .filter(|size| size.is_finite() && *size > 0.0)
-                .unwrap_or(font_px)
             })
             .collect();
 
@@ -2761,9 +2766,12 @@ impl GpuRenderPlan {
         // The default cell is 32px for a 14px glyph, so the headroom ratio is what scales; smaller
         // labels then sample DOWN from a sharp cell, which is the harmless direction. Capped so a
         // pathological declaration cannot ask a backend for an enormous texture.
-        let max_font_px = run_font_px
+        let max_font_px = run_metrics
             .iter()
-            .copied()
+            .map(|run| {
+                run.as_ref()
+                    .map_or(font_px, fm_core::FontMetrics::font_size)
+            })
             .chain(
                 class_cards
                     .iter()
@@ -2849,7 +2857,7 @@ impl GpuRenderPlan {
             GlyphAtlasPlan::for_texts(
                 labelled
                     .iter()
-                    .map(|(_, _, text)| *text)
+                    .map(|(_, _, text)| text.as_ref())
                     .chain(class_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(er_cards.iter().flat_map(|(_, _, card, _)| card.text.iter().map(|run| run.text.as_str())))
                     .chain(c4_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
@@ -2948,7 +2956,7 @@ impl GpuRenderPlan {
             metrics: &metrics,
         };
 
-        for ((node_index, center, text), font_px) in labelled.iter().zip(run_font_px) {
+        for ((node_index, center, text), node_metrics) in labelled.iter().zip(&run_metrics) {
             let label_rgba = crate::renderer::resolve_node_text_color(
                 ir,
                 usize::try_from(*node_index).unwrap_or(usize::MAX),
@@ -2956,10 +2964,17 @@ impl GpuRenderPlan {
             .as_deref()
             .and_then(parse_paint_rgba)
             .unwrap_or(DEFAULT_LABEL_RGBA);
-            sink.push_centred_with_font(
+            let node_metrics = node_metrics.as_ref().unwrap_or(&metrics);
+            let mut node_sink = TextSink {
+                atlas: sink.atlas,
+                quads: &mut *sink.quads,
+                runs: &mut *sink.runs,
+                metrics: node_metrics,
+            };
+            node_sink.push_centred_with_font(
                 text,
                 (center[0], center[1]),
-                font_px,
+                node_metrics.font_size(),
                 label_rgba,
                 GpuTextSource::Node,
                 *node_index as usize,

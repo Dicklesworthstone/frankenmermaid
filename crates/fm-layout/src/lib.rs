@@ -5648,7 +5648,17 @@ fn build_label_layer(
             }
             continue;
         }
-        let label_text = display_node_label(ir, node);
+        let declared = ir.resolved_node_style(node_box.node_index);
+        let styled_metrics = metrics.with_style_overrides(
+            declared.get("font-size").map(String::as_str),
+            declared.get("font-family").map(String::as_str),
+        );
+        let metrics = styled_metrics.as_ref().unwrap_or(metrics);
+        let label_text = if node.class_meta.is_some() {
+            std::borrow::Cow::Owned(display_node_label(ir, node))
+        } else {
+            ir.node_layout_text(node, metrics)
+        };
         if label_text.is_empty() {
             continue;
         }
@@ -5658,45 +5668,43 @@ fn build_label_layer(
             continue;
         }
 
-        if let Some(region) = node
+        let (center_x, center_y) = node
             .shape
             .label_region(node_box.bounds.width, node_box.bounds.height)
-        {
-            let center_x = node_box.bounds.x + region.x + region.width / 2.0;
-            let center_y = node_box.bounds.y + region.y + region.height / 2.0;
-            let lines: Vec<&str> = label_text.split('\n').collect();
-            for (row, text) in lines.iter().enumerate() {
-                layer.children.push(RenderItem::Text(RenderText {
-                    source: RenderSource::Node(node_box.node_index),
-                    text: (*text).to_owned(),
-                    x: center_x,
-                    y: center_y
-                        + (row as f32 - (lines.len() - 1) as f32 / 2.0) * metrics.line_height_px(),
-                    font_size: metrics.font_size(),
-                    align: TextAlign::Middle,
-                    baseline: TextBaseline::Middle,
-                    fill: FillStyle::Solid {
-                        color: String::from("#0f172a"),
-                        opacity: 1.0,
-                    },
-                }));
-            }
-            continue;
+            .map_or_else(
+                || {
+                    let center = node_box.bounds.center();
+                    (center.x, center.y)
+                },
+                |region| {
+                    (
+                        node_box.bounds.x + region.x + region.width / 2.0,
+                        node_box.bounds.y + region.y + region.height / 2.0,
+                    )
+                },
+            );
+        let color = declared
+            .get("color")
+            .and_then(|paint| scene_paint(paint))
+            .unwrap_or_else(|| "#0f172a".to_owned());
+        let row_count = label_text.lines().count();
+        for (row, text) in label_text.lines().enumerate() {
+            layer.children.push(RenderItem::Text(RenderText {
+                source: RenderSource::Node(node_box.node_index),
+                text: text.to_owned(),
+                x: center_x,
+                y: center_y
+                    + (row as f32 - row_count.saturating_sub(1) as f32 / 2.0)
+                        * metrics.line_height_px(),
+                font_size: metrics.font_size(),
+                align: TextAlign::Middle,
+                baseline: TextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: color.clone(),
+                    opacity: 1.0,
+                },
+            }));
         }
-
-        layer.children.push(RenderItem::Text(RenderText {
-            source: RenderSource::Node(node_box.node_index),
-            text: label_text,
-            x: node_box.bounds.x + (node_box.bounds.width / 2.0),
-            y: node_box.bounds.y + (node_box.bounds.height / 2.0),
-            font_size: 14.0,
-            align: TextAlign::Middle,
-            baseline: TextBaseline::Middle,
-            fill: FillStyle::Solid {
-                color: String::from("#0f172a"),
-                opacity: 1.0,
-            },
-        }));
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
@@ -17252,6 +17260,12 @@ fn compute_node_size(
     );
     let metrics = styled_metrics.as_ref().unwrap_or(metrics);
 
+    let paragraph_text = ir.node_layout_text(node, metrics);
+    let text = paragraph_text.as_ref();
+    let paragraph_width = matches!(paragraph_text, std::borrow::Cow::Owned(_)).then(|| {
+        metrics.estimate_preserved_width(text, metrics.font_size(), metrics.avg_char_width())
+    });
+
     match node.shape {
         fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
         fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
@@ -17260,6 +17274,7 @@ fn compute_node_size(
         | fm_core::NodeShape::DoubleCircle
         | fm_core::NodeShape::CrossedCircle => {
             let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let label_width = paragraph_width.map_or(label_width, |width| width.max(label_width));
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
             let content_width = label_width
                 .max(icon_width)
@@ -17291,6 +17306,7 @@ fn compute_node_size(
                 .map(|meta| meta.display_header(text));
             let (label_width, label_height) =
                 metrics.estimate_dimensions(class_header.as_deref().unwrap_or(text));
+            let label_width = paragraph_width.map_or(label_width, |width| width.max(label_width));
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
             let content_width = label_width
                 .max(icon_width)
@@ -26788,6 +26804,92 @@ mod tests {
         clippy::similar_names,
         clippy::many_single_char_names
     )]
+
+    #[test]
+    fn default_node_paragraphs_are_compact_complete_and_shared_with_scenes() {
+        use super::{LayoutConfig, RenderItem, RenderSource, build_label_layer};
+        use fm_core::{FontMetrics, FontMetricsConfig, NodeShape};
+
+        let label = "Validate  the deployment request and notify every service owner before publishing the approved release to all regions";
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for shape in [
+                NodeShape::Rect,
+                NodeShape::Diamond,
+                NodeShape::Circle,
+                NodeShape::Hexagon,
+            ] {
+                let mut ir = fm_parser::parse(&format!(
+                    "flowchart {direction}\nA[\"{label}\"] --> B[Publish]\nA --> C[Revise]"
+                ))
+                .ir;
+                ir.nodes[0].shape = shape;
+                for font_size in [15.0, 28.0] {
+                    let metrics = FontMetrics::new(FontMetricsConfig {
+                        font_size,
+                        ..Default::default()
+                    });
+                    let layout = super::layout_diagram_with_config(
+                        &ir,
+                        LayoutConfig {
+                            font_metrics: Some(metrics.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    let bounds = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == 0)
+                        .unwrap()
+                        .bounds;
+                    assert!(
+                        bounds.width < metrics.estimate_width(label),
+                        "{shape:?}/{direction}"
+                    );
+                    if shape == NodeShape::Rect {
+                        assert!(bounds.width <= font_size * 18.0 + 72.01);
+                    }
+                    let (labels, _) = build_label_layer(&ir, &layout, &metrics);
+                    let rows: Vec<_> = labels
+                        .children
+                        .iter()
+                        .filter_map(|item| match item {
+                            RenderItem::Text(text) if text.source == RenderSource::Node(0) => {
+                                Some(text)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert!(rows.len() >= 3);
+                    assert_eq!(
+                        rows.iter().map(|row| row.text.as_str()).collect::<String>(),
+                        label
+                    );
+                    for row in &rows {
+                        assert_eq!(row.font_size, font_size);
+                        let width = metrics.estimate_preserved_width(
+                            &row.text,
+                            font_size,
+                            metrics.avg_char_width(),
+                        );
+                        assert!(row.x - width / 2.0 >= bounds.x);
+                        assert!(row.x + width / 2.0 <= bounds.x + bounds.width);
+                        assert!(row.y - font_size / 2.0 >= bounds.y);
+                        assert!(row.y + font_size / 2.0 <= bounds.y + bounds.height);
+                    }
+                    for pair in rows.windows(2) {
+                        assert!((pair[1].y - pair[0].y - metrics.line_height_px()).abs() < 0.01);
+                    }
+                    for (index, a) in layout.nodes.iter().enumerate() {
+                        for b in &layout.nodes[index + 1..] {
+                            assert!(!rects_overlap(a.bounds, b.bounds));
+                        }
+                    }
+                    assert_eq!(layout.edges.len(), 2);
+                    assert_eq!(ir.labels[ir.nodes[0].label.unwrap().0].text, label);
+                }
+            }
+        }
+    }
 
     #[test]
     fn undirected_cycles_do_not_acquire_feedback_arrowheads() {

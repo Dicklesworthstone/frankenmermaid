@@ -3148,6 +3148,7 @@ impl Canvas2dRenderer {
         }
         let mut count = 0;
         let mut standard_label_font = None;
+        let label_metrics = self.config.font_metrics();
         // Resolved gantt name placements, indexed by node. Built once and only when the diagram has
         // any, so every other diagram type takes exactly the path it took before.
         let gantt_label_by_node: Option<
@@ -3619,9 +3620,17 @@ impl Canvas2dRenderer {
                 // Layout and SVG use the same rule: state ornaments and junctions draw no text,
                 // while gitGraph commits keep their labels even when they use those shapes.
                 let sankey_label = fm_layout::sankey_node_label(ir, node_box.node_index);
-                let label_text = sankey_label.as_deref().unwrap_or_else(|| {
-                    ir_node.map(|node| ir.node_display_text(node)).unwrap_or("")
-                });
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let styled_metrics = label_metrics.with_style_overrides(
+                    declared.get("font-size").map(String::as_str),
+                    declared.get("font-family").map(String::as_str),
+                );
+                let node_metrics = styled_metrics.as_ref().unwrap_or(&label_metrics);
+                let paragraph = ir_node.map(|node| ir.node_layout_text(node, node_metrics));
+                let label_text = sankey_label
+                    .as_deref()
+                    .or(paragraph.as_deref())
+                    .unwrap_or("");
 
                 if !label_text.is_empty() {
                     // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).

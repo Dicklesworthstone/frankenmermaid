@@ -9485,6 +9485,39 @@ impl MermaidDiagramIr {
             .map_or(node.id.as_str(), |label| label.text.as_str())
     }
 
+    /// Compose a readable paragraph before generic nodes are sized and routed.
+    ///
+    /// Flowchart and state labels use an 18-em text column, so a sentence grows its card
+    /// vertically instead of making the whole graph several screens wide. The caller supplies
+    /// the effective node font metrics, including authored size and family overrides. Short
+    /// labels remain borrowed; wrapped labels preserve every character, explicit line break,
+    /// and joined glyph. The authored IR text is never changed.
+    ///
+    /// Specialized cards and diagram families have their own measured text compositions.
+    #[must_use]
+    pub fn node_layout_text<'a>(&'a self, node: &'a IrNode, metrics: &FontMetrics) -> Cow<'a, str> {
+        let text = self.node_display_text(node);
+        if !matches!(
+            self.diagram_type,
+            DiagramType::Flowchart | DiagramType::State
+        ) || node.class_meta.is_some()
+            || node.c4_meta.is_some()
+            || node.requirement_meta.is_some()
+            || !node.members.is_empty()
+        {
+            return Cow::Borrowed(text);
+        }
+
+        let max_width = metrics.font_size() * 18.0;
+        if metrics.estimate_preserved_width(text, metrics.font_size(), metrics.avg_char_width())
+            <= max_width
+        {
+            Cow::Borrowed(text)
+        } else {
+            Cow::Owned(metrics.wrap_preserved_to_width(text, max_width).join("\n"))
+        }
+    }
+
     /// Whether `node` is a pure ornament — a glyph whose generated id must never be displayed.
     ///
     /// Two families draw these shapes as bare marks, and BOTH are confirmed against pinned
@@ -11011,6 +11044,79 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn node_paragraphs_preserve_text_and_authored_breaks_at_readable_widths() {
+        use super::*;
+        let metrics = FontMetrics::default_metrics();
+        let label = "Validate  the deployment request and notify every service owner before publishing\n\nKeep 👩🏽‍💻 and cafe\u{301} together with 世界世界世界世界世界世界世界世界世界世界";
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(IrLabel {
+            text: label.into(),
+            ..Default::default()
+        });
+        let node = IrNode {
+            id: "approval".into(),
+            label: Some(IrLabelId(0)),
+            ..Default::default()
+        };
+        let composed = ir.node_layout_text(&node, &metrics);
+        assert!(matches!(composed, Cow::Owned(_)));
+        assert!(composed.lines().count() > label.lines().count());
+        assert_eq!(composed.replace('\n', ""), label.replace('\n', ""));
+        assert!(composed.contains("\n\n"));
+        assert!(composed.contains("👩🏽‍💻"));
+        assert!(composed.contains("cafe\u{301}"));
+        for row in composed.split('\n') {
+            assert!(
+                metrics.estimate_preserved_width(
+                    row,
+                    metrics.font_size(),
+                    metrics.avg_char_width()
+                ) <= metrics.font_size() * 18.0 + 0.01,
+                "row exceeds the paragraph width: {row:?}"
+            );
+        }
+        assert_eq!(ir.labels[0].text, label);
+
+        let composed = composed.into_owned();
+        ir.diagram_type = DiagramType::State;
+        assert_eq!(ir.node_layout_text(&node, &metrics), composed);
+    }
+
+    #[test]
+    fn node_paragraphs_keep_short_labels_and_specialized_families_borrowed() {
+        use super::*;
+        let metrics = FontMetrics::default_metrics();
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut node = IrNode {
+            id: "Ready\nfor review".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ir.node_layout_text(&node, &metrics),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
+        node.id =
+            "a_very_long_identifier_that_must_remain_complete_even_without_any_word_breaks".into();
+        let composed = ir.node_layout_text(&node, &metrics);
+        assert!(composed.contains('\n'));
+        assert_eq!(composed.replace('\n', ""), node.id);
+
+        for family in [
+            DiagramType::Sequence,
+            DiagramType::Class,
+            DiagramType::C4Context,
+        ] {
+            ir.diagram_type = family;
+            assert!(matches!(
+                ir.node_layout_text(&node, &metrics),
+                Cow::Borrowed(_)
+            ));
+            assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
+        }
+    }
 
     #[test]
     fn graph_captions_measure_the_same_numbered_and_technology_rows_they_draw() {

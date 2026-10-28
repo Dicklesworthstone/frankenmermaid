@@ -10774,7 +10774,14 @@ fn render_node_into(
     // Owned, so it must outlive the borrow above; `None` for every other diagram type.
     let sankey_label = sankey_node_label(ir, node_box.node_index);
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
-    let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    let paragraph_text = if placeholder_space_node || sankey_label.is_some() {
+        Cow::Borrowed(raw_label_text)
+    } else {
+        ir_node.map_or(Cow::Borrowed(raw_label_text), |node| {
+            ir.node_layout_text(node, &config.font_metrics())
+        })
+    };
+    let label_text = truncate_label(paragraph_text.as_ref(), detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let label_may_overflow =
         node_label_may_overflow(shape, w, h, &label_text, node_font_size, config);
@@ -11397,7 +11404,14 @@ fn render_node(
     // Owned, so it must outlive the borrow above; `None` for every other diagram type.
     let sankey_label = sankey_node_label(ir, node_box.node_index);
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
-    let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    let paragraph_text = if placeholder_space_node || sankey_label.is_some() {
+        Cow::Borrowed(raw_label_text)
+    } else {
+        ir_node.map_or(Cow::Borrowed(raw_label_text), |node| {
+            ir.node_layout_text(node, &config.font_metrics())
+        })
+    };
+    let label_text = truncate_label(paragraph_text.as_ref(), detail.node_label_max_chars);
     // Markdown runs describe the UNTRUNCATED text, so they apply only while truncation left it
     // whole. Gating on whether a cap was CONFIGURED instead dropped bold and italics from every
     // diagram small enough for the auto tier to pick `Normal` (a 48-char cap) — i.e. most of them —
@@ -14406,7 +14420,13 @@ fn render_node_label_text(
     } else {
         y
     };
-    let markup_unchanged = fitted.text.as_ref() == label_text;
+    // The shared paragraph may already contain soft breaks before fitting begins. Compare
+    // against the authored label so its markup is reflowed onto those rows as well.
+    let markup_unchanged = label_id
+        .and_then(|id| ir.labels.get(id.0))
+        .map_or(fitted.text.as_ref() == label_text, |label| {
+            fitted.text.as_ref() == label.text
+        });
     let label_text = fitted.text.as_ref();
     let font_size = fitted.font_size;
     if let Some(label_id) = label_id
@@ -14453,6 +14473,7 @@ fn render_node_label_text(
             .content(label_text)
     };
     text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
+    text = text.attr("xml:space", "preserve");
 
     if let Some(style) = label_style {
         text = text.attr("style", style);
@@ -14479,6 +14500,7 @@ fn render_markdown_text_segments(
         .x(x)
         .y(y)
         .attr("text-anchor", TextAnchor::Middle.as_str())
+        .attr("xml:space", "preserve")
         .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .attr_num("font-size", font_size)
         .fill(fill);
@@ -14490,6 +14512,7 @@ fn render_markdown_text_segments(
 
     let mut first_in_line = true;
     let mut line_index = 0usize;
+    let mut previous_line_index = 0usize;
 
     for segment in segments {
         match segment {
@@ -14509,8 +14532,9 @@ fn render_markdown_text_segments(
                 // top of each other.
                 let mut tspan = Element::tspan();
                 if first_in_line {
-                    let dy = if line_index == 0 { 0.0 } else { line_height_px };
+                    let dy = (line_index - previous_line_index) as f32 * line_height_px;
                     tspan = tspan.x(x).attr_num("dy", dy);
+                    previous_line_index = line_index;
                 }
                 let mut tspan = tspan.content(value);
                 if *bold {
@@ -20300,6 +20324,157 @@ mod tests {
                 "the long label needs wrapping room"
             );
         }
+    }
+
+    #[test]
+    fn default_node_paragraphs_share_layout_rows_without_shrinking_or_losing_text() {
+        let label = "Validate  the deployment request and notify every service owner before publishing the approved release to all regions";
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Circle,
+            NodeShape::Diamond,
+            NodeShape::Hexagon,
+        ] {
+            let mut ir = fm_parser::parse(&format!("flowchart TB\nA[\"{label}\"]")).ir;
+            ir.nodes[0].shape = shape;
+            let layout = fm_layout::layout_diagram(&ir);
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                let detail =
+                    resolve_detail_profile(layout.bounds.width, layout.bounds.height, &config);
+                let colors = ThemeColors::default();
+                let centrality = HashMap::new();
+                let svg = render_node(
+                    &layout.nodes[0],
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                    true,
+                )
+                .render();
+                let mut streamed = String::new();
+                render_node_into(
+                    &mut streamed,
+                    &layout.nodes[0],
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                );
+                assert_eq!(streamed, svg);
+                let text = svg
+                    .split("<text")
+                    .nth(1)
+                    .unwrap()
+                    .split("</text>")
+                    .next()
+                    .unwrap();
+                assert_eq!(
+                    edge_label_test_number(text, "font-size"),
+                    15.0,
+                    "{shape:?}: {text}"
+                );
+                assert!(text.contains("xml:space=\"preserve\""));
+                let rows: Vec<_> = text
+                    .split("<tspan")
+                    .skip(1)
+                    .map(|row| {
+                        row.split_once('>')
+                            .unwrap()
+                            .1
+                            .split("</tspan>")
+                            .next()
+                            .unwrap()
+                    })
+                    .collect();
+                let expected = ir.node_layout_text(&ir.nodes[0], &config.font_metrics());
+                assert_eq!(rows, expected.lines().collect::<Vec<_>>());
+                assert_eq!(rows.concat(), label);
+                assert!(rows.len() >= 3);
+                assert!(!text.contains('…'));
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_markup_follows_soft_breaks_and_keeps_authored_blank_rows() {
+        let label = "Review all international shipment documentation before approval and notify every participating team";
+        let mut ir = fm_parser::parse(&format!("flowchart TB\nA[\"{label}\"]")).ir;
+        let label_id = ir.nodes[0].label.unwrap();
+        ir.label_markup.insert(
+            label_id,
+            vec![IrLabelSegment::Text {
+                text: label.into(),
+                bold: true,
+                italic: false,
+                code: false,
+                strike: false,
+            }],
+        );
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = SvgRenderConfig::default();
+        let svg = render_node(
+            &layout.nodes[0],
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            resolve_detail_profile(layout.bounds.width, layout.bounds.height, &config),
+            &ThemeColors::default(),
+            false,
+            &HashMap::new(),
+            false,
+        )
+        .render();
+        let text = svg
+            .split("<text")
+            .nth(1)
+            .unwrap()
+            .split("</text>")
+            .next()
+            .unwrap();
+        let rows: Vec<_> = text.split("<tspan").skip(1).collect();
+        let expected = ir.node_layout_text(&ir.nodes[0], &config.font_metrics());
+        assert_eq!(rows.len(), expected.lines().count());
+        assert!(rows.iter().all(|row| row.contains("font-weight=\"700\"")));
+
+        let segment = |text: &str| IrLabelSegment::Text {
+            text: text.into(),
+            bold: false,
+            italic: false,
+            code: false,
+            strike: false,
+        };
+        let blank_rows = render_markdown_text_segments(
+            &[
+                segment("First"),
+                IrLabelSegment::LineBreak,
+                IrLabelSegment::LineBreak,
+                segment("Third"),
+            ],
+            50.0,
+            20.0,
+            15.0,
+            &config,
+            "#123456",
+            None,
+            false,
+        )
+        .render();
+        let last = blank_rows.split("<tspan").nth(2).unwrap();
+        assert_eq!(edge_label_test_number(last, "dy"), 45.0);
     }
 
     #[test]

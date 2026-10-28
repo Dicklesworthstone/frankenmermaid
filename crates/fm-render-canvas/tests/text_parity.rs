@@ -1188,6 +1188,171 @@ mod sankey {
     }
 }
 
+mod node_paragraphs {
+    use fm_core::{FontMetrics, IrInlineStyle, MermaidDiagramIr, NodeShape};
+    use fm_layout::{LayoutAlgorithm, LayoutConfig};
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GpuRenderPlan, GpuTextSource,
+        MockCanvas2dContext,
+    };
+
+    fn diagram() -> MermaidDiagramIr {
+        fm_parser::parse(
+            "flowchart TB\n A[\"Validate   every customer request before publishing the complete deployment report.<br/>Keep 客户 é 👩‍💻 together and retain this final sentence.\"]\n",
+        )
+        .ir
+    }
+
+    fn assert_paragraph_is_complete_and_contained(
+        ir: &MermaidDiagramIr,
+        config: &CanvasRenderConfig,
+        metrics: &FontMetrics,
+        algorithm: LayoutAlgorithm,
+    ) {
+        let layout = fm_layout::layout_diagram_traced_with_config(
+            ir,
+            algorithm,
+            LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        )
+        .layout;
+        let bounds = layout.nodes[0].bounds;
+        let source_text = ir.node_display_text(&ir.nodes[0]);
+        let mut canvas = MockCanvas2dContext::new(2400.0, 1800.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, ir, &mut canvas);
+        let painted: Vec<_> = canvas
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, x, y) => Some((text.as_str(), *x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.len() >= 4,
+            "long labels must form readable paragraphs"
+        );
+        assert_eq!(
+            painted.iter().map(|row| row.0).collect::<String>(),
+            source_text.replace('\n', ""),
+            "soft wrapping must preserve every character and authored space"
+        );
+        assert!(painted.iter().any(|row| row.0.contains("é")));
+        assert!(painted.iter().any(|row| row.0.contains("👩‍💻")));
+
+        let region = ir.nodes[0]
+            .shape
+            .label_region(bounds.width, bounds.height)
+            .unwrap_or(fm_layout::LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: bounds.width,
+                height: bounds.height,
+            });
+        for row in &painted {
+            let width = metrics.estimate_preserved_width(
+                row.0,
+                metrics.font_size(),
+                metrics.avg_char_width(),
+            );
+            assert!(
+                width <= region.width + 0.01,
+                "row exceeds its node: {row:?}"
+            );
+            let center_y = row.2 + f64::from(layout.bounds.y);
+            assert!(center_y - f64::from(metrics.font_size() / 2.0) >= f64::from(bounds.y) - 0.01);
+            assert!(
+                center_y + f64::from(metrics.font_size() / 2.0)
+                    <= f64::from(bounds.y + bounds.height) + 0.01
+            );
+        }
+        for pair in painted.windows(2) {
+            assert!((pair[1].2 - pair[0].2 - f64::from(metrics.line_height_px())).abs() < 0.02);
+        }
+
+        let gpu = GpuRenderPlan::from_layout_with_config(ir, &layout, config);
+        let runs: Vec<_> = gpu
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node && run.node_index == 0)
+            .collect();
+        assert_eq!(runs.len(), painted.len());
+        for (run, row) in runs.into_iter().zip(&painted) {
+            let quads = &gpu.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+            let text: String = quads
+                .iter()
+                .map(|quad| {
+                    gpu.glyph_atlas
+                        .cells
+                        .iter()
+                        .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                        .expect("each displayed character must have an atlas cell")
+                        .glyph
+                })
+                .collect();
+            assert_eq!(text, row.0, "Canvas and GPU must use identical line breaks");
+            for quad in quads {
+                assert!((f64::from(quad.center[1] - layout.bounds.y) - row.2).abs() < 0.02);
+                assert!((quad.half_extent[1] * 2.0 - metrics.font_size()).abs() < 0.02);
+            }
+        }
+        assert_eq!(
+            gpu,
+            GpuRenderPlan::from_layout_with_config(ir, &layout, config)
+        );
+    }
+
+    #[test]
+    fn long_default_labels_keep_complete_paragraphs_in_canvas_and_gpu() {
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        for shape in [NodeShape::Rect, NodeShape::Diamond, NodeShape::Hexagon] {
+            let mut ir = diagram();
+            ir.nodes[0].shape = shape;
+            for algorithm in [
+                LayoutAlgorithm::Auto,
+                LayoutAlgorithm::Tree,
+                LayoutAlgorithm::Sugiyama,
+            ] {
+                assert_paragraph_is_complete_and_contained(
+                    &ir,
+                    &config,
+                    &config.font_metrics(),
+                    algorithm,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_breaks_follow_authored_font_size_and_family() {
+        let mut ir = diagram();
+        ir.nodes[0].inline_style = Some(Box::new(IrInlineStyle {
+            properties: [("font-size", "28px"), ("font-family", "monospace")]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        }));
+        let config = CanvasRenderConfig {
+            line_height: 1.75,
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let metrics = config
+            .font_metrics()
+            .with_style_overrides(Some("28px"), Some("monospace"))
+            .unwrap();
+        assert_paragraph_is_complete_and_contained(&ir, &config, &metrics, LayoutAlgorithm::Auto);
+    }
+}
+
 mod requirement {
     use fm_core::{IrInlineStyle, RequirementCardLayout, RequirementCardRowKind};
     use fm_render_canvas::{
