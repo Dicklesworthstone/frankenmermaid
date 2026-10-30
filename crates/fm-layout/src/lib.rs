@@ -17819,6 +17819,20 @@ fn force_build_edge_paths(
                 && !cga_routing::segment_intersects_obstacles(from_pt, to_pt, &obstacle_bounds, 8.0)
             {
                 smallvec![from_pt, to_pt]
+            } else if nested_anchors.is_none()
+                && fan_offset.is_none()
+                && !polygon_ports
+                && let Some(route) = route_mixed_face_edge(
+                    from_pt,
+                    to_pt,
+                    [
+                        node_outline_bounds(from_box.bounds, from_shape),
+                        node_outline_bounds(to_box.bounds, to_shape),
+                    ],
+                    &obstacle_bounds,
+                )
+            {
+                route
             } else {
                 route_edge_points_with_obstacle_index(
                     from_pt,
@@ -24876,6 +24890,89 @@ fn node_outline_bounds(bounds: LayoutRect, shape: fm_core::NodeShape) -> LayoutR
     }
 }
 
+/// Axis and outward sign of an unambiguous rectangular face. Curved outlines and corners
+/// keep their existing routing policy instead of guessing a normal from their bounding box.
+fn rectangular_port_direction(point: LayoutPoint, bounds: LayoutRect) -> Option<(bool, f32)> {
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return None;
+    }
+    let on_side = ((point.x - bounds.x).abs() < 0.01
+        || (point.x - bounds.x - bounds.width).abs() < 0.01)
+        && point.y >= bounds.y - 0.01
+        && point.y <= bounds.y + bounds.height + 0.01;
+    let on_top_bottom = ((point.y - bounds.y).abs() < 0.01
+        || (point.y - bounds.y - bounds.height).abs() < 0.01)
+        && point.x >= bounds.x - 0.01
+        && point.x <= bounds.x + bounds.width + 0.01;
+    if on_side == on_top_bottom {
+        return None;
+    }
+    Some((
+        on_side,
+        if on_side {
+            (point.x - bounds.center().x).signum()
+        } else {
+            (point.y - bounds.center().y).signum()
+        },
+    ))
+}
+
+/// Connect a side face to a top/bottom face without sliding along either outline. Most
+/// such edges need only one bend; obstructed corners reuse the bounded corridor search.
+fn route_mixed_face_edge(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    endpoint_bounds: [LayoutRect; 2],
+    obstacles: &[LayoutRect],
+) -> Option<EdgePoints> {
+    let (source_horizontal, source_outward) =
+        rectangular_port_direction(source, endpoint_bounds[0])?;
+    let (target_horizontal, target_outward) =
+        rectangular_port_direction(target, endpoint_bounds[1])?;
+    if source_horizontal == target_horizontal {
+        return None;
+    }
+    let corner = if source_horizontal {
+        LayoutPoint {
+            x: target.x,
+            y: source.y,
+        }
+    } else {
+        LayoutPoint {
+            x: source.x,
+            y: target.y,
+        }
+    };
+    let along = |point: LayoutPoint, horizontal| if horizontal { point.x } else { point.y };
+    let departure = along(corner, source_horizontal) - along(source, source_horizontal);
+    let arrival = along(target, target_horizontal) - along(corner, target_horizontal);
+    let direct = smallvec![source, corner, target];
+    if departure * source_outward > 0.001
+        && arrival * target_outward < -0.001
+        && direct.windows(2).all(|pair| {
+            !cga_routing::segment_intersects_obstacles(pair[0], pair[1], obstacles, 8.0)
+        })
+    {
+        return Some(direct);
+    }
+    // The search needs a nonzero primary span, but each endpoint supplies its own axis and
+    // direction. Choosing the other span here does not alter either port or its approach.
+    let horizontal =
+        if (along(target, source_horizontal) - along(source, source_horizontal)).abs() >= 0.001 {
+            source_horizontal
+        } else {
+            !source_horizontal
+        };
+    bounded_orthogonal_route(
+        source,
+        target,
+        horizontal,
+        obstacles,
+        None,
+        Some(endpoint_bounds),
+    )
+}
+
 fn edge_anchors(
     source_box: &LayoutNodeBox,
     target_box: &LayoutNodeBox,
@@ -25421,7 +25518,15 @@ fn bounded_orthogonal_route_with_budget(
     let source_cell = source_y * width + source_x;
     let target_cell = target_y * width + target_x;
     let preferred_axis = usize::from(horizontal_ranks);
-    let initial = source_cell * 2 + preferred_axis;
+    let mixed_ports = endpoint_bounds.and_then(|bounds| {
+        let source_port = rectangular_port_direction(source, bounds[0])?;
+        let target_port = rectangular_port_direction(target, bounds[1])?;
+        (source_port.0 != target_port.0).then_some([source_port, target_port])
+    });
+    let [source_axis, target_axis] = mixed_ports.map_or([preferred_axis; 2], |ports| {
+        ports.map(|(horizontal, _)| usize::from(horizontal))
+    });
+    let initial = source_cell * 2 + source_axis;
     let mut costs = vec![f32::INFINITY; width * ys.len() * 2];
     let mut previous = vec![usize::MAX; costs.len()];
     let mut queue = BinaryHeap::new();
@@ -25445,7 +25550,7 @@ fn bounded_orthogonal_route_with_budget(
         expanded += 1;
         let cell = state / 2;
         let (x, y) = (cell % width, cell / width);
-        if cell == target_cell && state % 2 == preferred_axis {
+        if cell == target_cell && state % 2 == target_axis {
             let mut route = EdgePoints::new();
             let mut cursor = state;
             loop {
@@ -25470,7 +25575,9 @@ fn bounded_orthogonal_route_with_budget(
         ];
         for (next_x, next_y, axis) in candidates.into_iter().flatten() {
             let next_cell = next_y * width + next_x;
-            if (cell == source_cell || next_cell == target_cell) && axis != preferred_axis {
+            if (cell == source_cell && axis != source_axis)
+                || (next_cell == target_cell && axis != target_axis)
+            {
                 continue;
             }
             let (from, to) = (
@@ -25485,8 +25592,23 @@ fn bounded_orthogonal_route_with_budget(
             } else {
                 to.y - from.y
             };
+            if let Some(ports) = mixed_ports {
+                let step = if axis == 1 {
+                    to.x - from.x
+                } else {
+                    to.y - from.y
+                };
+                // A mixed-face route can wind against the global source-target direction,
+                // but its first/last legs must still cross the actual outlines normally.
+                if (cell == source_cell && step * ports[0].1 <= 0.0)
+                    || (next_cell == target_cell && step * ports[1].1 >= 0.0)
+                {
+                    continue;
+                }
+            }
             if primary_step * forward < 0.0
-                && (endpoint_bounds.is_none() || cell == source_cell || next_cell == target_cell)
+                && (endpoint_bounds.is_none()
+                    || (mixed_ports.is_none() && (cell == source_cell || next_cell == target_cell)))
             {
                 continue;
             }
@@ -39443,6 +39565,276 @@ mod tests {
                     (along(last) - along(before_last)) * (along(last) - along(target.center()))
                         < 0.0
                 );
+            }
+        }
+    }
+
+    fn assert_mixed_face_approaches(
+        points: &[LayoutPoint],
+        ports: [(LayoutPoint, LayoutPoint); 2],
+        endpoint_bounds: [LayoutRect; 2],
+    ) {
+        assert_eq!(points.first(), Some(&ports[0].0));
+        assert_eq!(points.last(), Some(&ports[1].0));
+        for (segment, normal, outward) in [
+            (&points[..2], ports[0].1, true),
+            (&points[points.len() - 2..], ports[1].1, false),
+        ] {
+            let dx = segment[1].x - segment[0].x;
+            let dy = segment[1].y - segment[0].y;
+            assert!((dx * normal.y - dy * normal.x).abs() < 0.001);
+            let dot = dx * normal.x + dy * normal.y;
+            assert!(if outward { dot > 0.0 } else { dot < 0.0 });
+        }
+        for pair in points.windows(2) {
+            assert!(
+                pair.iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+            assert!((pair[0].x - pair[1].x).abs() < 0.001 || (pair[0].y - pair[1].y).abs() < 0.001);
+            for bounds in endpoint_bounds {
+                let interior = LayoutRect {
+                    x: bounds.x + 0.01,
+                    y: bounds.y + 0.01,
+                    width: bounds.width - 0.02,
+                    height: bounds.height - 0.02,
+                };
+                assert!(!super::cga_routing::segment_intersects_obstacles(
+                    pair[0],
+                    pair[1],
+                    &[interior],
+                    0.0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn force_mixed_faces_keep_normal_approaches_through_clear_and_blocked_corridors() {
+        for transpose in [false, true] {
+            for mirror in [false, true] {
+                let point = |mut point: LayoutPoint, vector| {
+                    if mirror {
+                        point.x = if vector { -point.x } else { 700.0 - point.x };
+                    }
+                    if transpose {
+                        std::mem::swap(&mut point.x, &mut point.y);
+                    }
+                    point
+                };
+                let rect = |mut bounds: LayoutRect| {
+                    if mirror {
+                        bounds.x = 700.0 - bounds.x - bounds.width;
+                    }
+                    if transpose {
+                        std::mem::swap(&mut bounds.x, &mut bounds.y);
+                        std::mem::swap(&mut bounds.width, &mut bounds.height);
+                    }
+                    bounds
+                };
+                let bounds = [
+                    rect(LayoutRect {
+                        x: 40.0,
+                        y: 40.0,
+                        width: 220.0,
+                        height: 40.0,
+                    }),
+                    rect(LayoutRect {
+                        x: 360.0,
+                        y: 120.0,
+                        width: 80.0,
+                        height: 180.0,
+                    }),
+                ];
+                let blocker = rect(LayoutRect {
+                    x: 165.0,
+                    y: 140.0,
+                    width: 80.0,
+                    height: 40.0,
+                });
+                let ports = [
+                    (
+                        super::clip_to_shape_border(
+                            bounds[0].center(),
+                            bounds[1].center(),
+                            &bounds[0],
+                            fm_core::NodeShape::Rect,
+                        ),
+                        point(LayoutPoint { x: 0.0, y: 1.0 }, true),
+                    ),
+                    (
+                        super::clip_to_shape_border(
+                            bounds[1].center(),
+                            bounds[0].center(),
+                            &bounds[1],
+                            fm_core::NodeShape::Rect,
+                        ),
+                        point(LayoutPoint { x: -1.0, y: 0.0 }, true),
+                    ),
+                ];
+                for reversed in [false, true] {
+                    // A foreign node, group frame, and measured heading must all obstruct the
+                    // otherwise optimal one-bend route without changing its attachment points.
+                    for obstacle_kind in 0..4 {
+                        let mut ir =
+                            parse("flowchart TB\nA[Wide source] --> B[Tall target]\nC[Other]\n").ir;
+                        if reversed {
+                            ir.edges[0].from = IrEndpoint::Node(IrNodeId(1));
+                            ir.edges[0].to = IrEndpoint::Node(IrNodeId(0));
+                        }
+                        let other = if obstacle_kind == 1 {
+                            blocker
+                        } else {
+                            rect(LayoutRect {
+                                x: 550.0,
+                                y: 400.0,
+                                width: 80.0,
+                                height: 40.0,
+                            })
+                        };
+                        let nodes: Vec<_> = ir
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .map(|(index, node)| LayoutNodeBox {
+                                node_index: index,
+                                node_id: node.id.clone(),
+                                rank: 0,
+                                order: index,
+                                span: node.span_primary,
+                                bounds: [bounds[0], bounds[1], other][index],
+                            })
+                            .collect();
+                        let clusters = if obstacle_kind == 2 {
+                            vec![super::LayoutClusterBox {
+                                cluster_index: 0,
+                                span: Span::default(),
+                                title: Some(String::from("Foreign frame")),
+                                color: None,
+                                bounds: blocker,
+                            }]
+                        } else {
+                            vec![]
+                        };
+                        let captions = if obstacle_kind == 3 {
+                            vec![blocker]
+                        } else {
+                            vec![]
+                        };
+                        let paths =
+                            super::force_build_edge_paths(&ir, &nodes, &clusters, &captions);
+                        assert_eq!(paths.len(), 1);
+                        let expected_ports = if reversed {
+                            [ports[1], ports[0]]
+                        } else {
+                            ports
+                        };
+                        assert_mixed_face_approaches(&paths[0].points, expected_ports, bounds);
+                        if obstacle_kind == 0 {
+                            assert_eq!(
+                                paths[0].points.len(),
+                                3,
+                                "clear mixed faces need only one bend"
+                            );
+                            ir.diagram_type = DiagramType::Mindmap;
+                            let spokes =
+                                super::force_build_edge_paths(&ir, &nodes, &clusters, &captions);
+                            assert_eq!(
+                                spokes[0].points.as_slice(),
+                                &[expected_ports[0].0, expected_ports[1].0]
+                            );
+                            ir.diagram_type = DiagramType::Flowchart;
+                        } else {
+                            assert!(paths[0].points.len() > 3);
+                            assert!(paths[0].points.windows(2).all(|pair| {
+                                !super::cga_routing::segment_intersects_obstacles(
+                                    pair[0],
+                                    pair[1],
+                                    &[blocker],
+                                    8.0,
+                                )
+                            }));
+                        }
+                        assert_eq!(
+                            paths,
+                            super::force_build_edge_paths(&ir, &nodes, &clusters, &captions)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_face_search_handles_aligned_ports_and_departure_against_the_global_axis() {
+        for transpose in [false, true] {
+            let point = |mut point: LayoutPoint| {
+                if transpose {
+                    std::mem::swap(&mut point.x, &mut point.y);
+                }
+                point
+            };
+            let rect = |mut bounds: LayoutRect| {
+                if transpose {
+                    std::mem::swap(&mut bounds.x, &mut bounds.y);
+                    std::mem::swap(&mut bounds.width, &mut bounds.height);
+                }
+                bounds
+            };
+            for (source, target, source_normal, target_normal, target_bounds) in [
+                (
+                    LayoutPoint { x: 150.0, y: 125.0 },
+                    LayoutPoint { x: 50.0, y: 200.0 },
+                    LayoutPoint { x: 1.0, y: 0.0 },
+                    LayoutPoint { x: 0.0, y: -1.0 },
+                    LayoutRect {
+                        x: 0.0,
+                        y: 200.0,
+                        width: 100.0,
+                        height: 50.0,
+                    },
+                ),
+                (
+                    LayoutPoint { x: 125.0, y: 150.0 },
+                    LayoutPoint { x: 300.0, y: 150.0 },
+                    LayoutPoint { x: 0.0, y: 1.0 },
+                    LayoutPoint { x: -1.0, y: 0.0 },
+                    LayoutRect {
+                        x: 300.0,
+                        y: 100.0,
+                        width: 50.0,
+                        height: 120.0,
+                    },
+                ),
+            ] {
+                let bounds = [
+                    rect(LayoutRect {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 50.0,
+                        height: 50.0,
+                    }),
+                    rect(target_bounds),
+                ];
+                let ports = [
+                    (point(source), point(source_normal)),
+                    (point(target), point(target_normal)),
+                ];
+                for reversed in [false, true] {
+                    let (bounds, ports) = if reversed {
+                        ([bounds[1], bounds[0]], [ports[1], ports[0]])
+                    } else {
+                        (bounds, ports)
+                    };
+                    let route = super::route_mixed_face_edge(ports[0].0, ports[1].0, bounds, &[])
+                        .expect("a clear external corridor exists");
+                    assert_mixed_face_approaches(&route, ports, bounds);
+                    assert!(route.len() >= 4);
+                    assert_eq!(
+                        Some(route),
+                        super::route_mixed_face_edge(ports[0].0, ports[1].0, bounds, &[])
+                    );
+                }
             }
         }
     }
