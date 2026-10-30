@@ -703,6 +703,135 @@ impl FontMetrics {
         rows
     }
 
+    /// Balance a short paragraph without increasing its row count or widest row.
+    ///
+    /// Greedy wrapping can leave a single word below an almost full-width line. Choosing the
+    /// word boundaries together gives a more compact, evenly filled label while preserving every
+    /// character. Authored line breaks and words that already need glyph-level splitting retain
+    /// the preserved wrapping above. The bounded search is reserved for ordinary node captions;
+    /// unusually long prose keeps the same complete, width-bounded fallback.
+    #[must_use]
+    pub fn wrap_balanced_to_width(&self, text: &str, max_width: f32) -> Vec<String> {
+        const MAX_ROWS: usize = 8;
+        const MAX_WORDS: usize = 96;
+        const WIDTH_TOLERANCE: f32 = 0.01;
+
+        let original = self.wrap_preserved_to_width(text, max_width);
+        let row_count = original.len();
+        if !(2..=MAX_ROWS).contains(&row_count)
+            || !max_width.is_finite()
+            || max_width <= 0.0
+            || text.contains('\n')
+            || text.contains('\r')
+        {
+            return original;
+        }
+
+        // Break only after complete whitespace runs, keeping those spaces with their word.
+        // A combining mark attached to a space stays with that space rather than becoming the
+        // first glyph of a new line. No candidate can split a word, emoji sequence, or flag pair.
+        let mut boundaries = vec![0];
+        let mut after_space = false;
+        let mut seen_word = false;
+        for (offset, character) in text.char_indices() {
+            let space = character.is_whitespace();
+            if after_space && !space && seen_word && !is_zero_width(character) {
+                boundaries.push(offset);
+                if boundaries.len() > MAX_WORDS {
+                    return original;
+                }
+            }
+            seen_word |= !space;
+            after_space = space;
+        }
+        boundaries.push(text.len());
+        let word_count = boundaries.len() - 1;
+        if word_count < row_count {
+            return original;
+        }
+
+        let measure = |line: &str| {
+            self.estimate_preserved_width(line, self.font_size(), self.avg_char_width())
+        };
+        let widest = original
+            .iter()
+            .map(|line| measure(line))
+            .fold(0.0, f32::max);
+        let width_limit = max_width.min(widest);
+        let mut prefix_widths = Vec::with_capacity(boundaries.len());
+        prefix_widths.push(0.0_f64);
+        for pair in boundaries.windows(2) {
+            let width = measure(&text[pair[0]..pair[1]]);
+            // A word wider than the existing column needs the glyph-safe fallback, not a
+            // narrower column that introduces a different split through that word.
+            if !width.is_finite() || width > width_limit + WIDTH_TOLERANCE {
+                return original;
+            }
+            prefix_widths.push(prefix_widths.last().copied().unwrap_or(0.0) + f64::from(width));
+        }
+        let target_width = prefix_widths[word_count] / row_count as f64;
+        let stride = word_count + 1;
+        let mut costs = vec![f64::INFINITY; (row_count + 1) * stride];
+        let mut starts = vec![usize::MAX; costs.len()];
+        costs[0] = 0.0;
+
+        // Minimize raggedness across the fixed number of rows. Stable iteration order resolves
+        // equal costs in favour of a fuller earlier line, with no clock or platform heuristics.
+        for row in 1..=row_count {
+            for end in row..=word_count - (row_count - row) {
+                let cell = row * stride + end;
+                for start in (row - 1..end).rev() {
+                    let width = prefix_widths[end] - prefix_widths[start];
+                    if width > f64::from(width_limit + WIDTH_TOLERANCE) {
+                        break;
+                    }
+                    let deviation = width - target_width;
+                    let cost = costs[(row - 1) * stride + start] + deviation * deviation;
+                    if cost < costs[cell] {
+                        costs[cell] = cost;
+                        starts[cell] = start;
+                    }
+                }
+            }
+        }
+
+        let mut balanced = Vec::with_capacity(row_count);
+        let mut end = word_count;
+        for row in (1..=row_count).rev() {
+            let start = starts[row * stride + end];
+            if start == usize::MAX {
+                return original;
+            }
+            balanced.push(text[boundaries[start]..boundaries[end]].to_owned());
+            end = start;
+        }
+        balanced.reverse();
+
+        // Prefix sums avoid repeatedly measuring every candidate substring. Check the selected
+        // rows with the actual text metric as well, so floating-point accumulation cannot admit
+        // a wider card or a less balanced result at a width boundary.
+        if balanced
+            .iter()
+            .any(|line| measure(line) > width_limit + WIDTH_TOLERANCE)
+        {
+            return original;
+        }
+        let raggedness = |lines: &[String]| {
+            lines
+                .iter()
+                .map(|line| {
+                    let deviation = f64::from(measure(line)) - target_width;
+                    deviation * deviation
+                })
+                .sum::<f64>()
+        };
+        if raggedness(&balanced) + f64::from(WIDTH_TOLERANCE) < raggedness(&original) {
+            balanced
+        } else {
+            original
+        }
+    }
+
     /// Wrap text at word boundaries, retaining authored line breaks and every word.
     ///
     /// A word wider than the available space is split without truncation. Combining marks,
@@ -972,6 +1101,80 @@ mod tests {
             let rows = metrics.wrap_preserved_to_width(&glyph.repeat(3), 1.0);
             assert_eq!(rows, vec![glyph.to_string(); 3]);
         }
+    }
+
+    #[test]
+    fn balanced_wrapping_removes_an_orphan_without_adding_rows_or_width() {
+        let metrics = FontMetrics::monospace(10.0);
+        let text = "alpha alpha alpha alpha";
+        let original = metrics.wrap_preserved_to_width(text, 130.0);
+        let balanced = metrics.wrap_balanced_to_width(text, 130.0);
+        assert_eq!(original, ["alpha alpha alpha ", "alpha"]);
+        assert_eq!(balanced, ["alpha alpha ", "alpha alpha"]);
+        assert_eq!(balanced.concat(), text);
+        assert_eq!(balanced.len(), original.len());
+        let widest = |lines: &[String]| {
+            lines
+                .iter()
+                .map(|line| {
+                    metrics.estimate_preserved_width(
+                        line,
+                        metrics.font_size(),
+                        metrics.avg_char_width(),
+                    )
+                })
+                .fold(0.0, f32::max)
+        };
+        assert!(widest(&balanced) < widest(&original) * 0.75);
+    }
+
+    #[test]
+    fn balanced_wrapping_preserves_spaces_and_complete_unicode_glyphs() {
+        let metrics = FontMetrics::default();
+        let text = "  Keep  cafe\u{301} and 👩🏽‍💻 together before reviewing 🇺🇸 deployment plans  ";
+        let original = metrics.wrap_preserved_to_width(text, 220.0);
+        let balanced = metrics.wrap_balanced_to_width(text, 220.0);
+        assert_eq!(balanced.concat(), text);
+        assert_eq!(balanced.len(), original.len());
+        assert_eq!(balanced, metrics.wrap_balanced_to_width(text, 220.0));
+        for glyph in ["cafe\u{301}", "👩🏽‍💻", "🇺🇸"] {
+            assert!(
+                balanced.iter().any(|line| line.contains(glyph)),
+                "split {glyph}"
+            );
+        }
+        assert!(balanced.iter().all(|line| metrics.estimate_preserved_width(
+            line,
+            metrics.font_size(),
+            metrics.avg_char_width(),
+        ) <= 220.01));
+    }
+
+    #[test]
+    fn balanced_wrapping_retains_authored_rows_and_bounded_fallbacks() {
+        let metrics = FontMetrics::default();
+        for text in [
+            "First authored line\n\nSecond authored line\n",
+            "First authored line\r\nSecond authored line\r\n",
+            "an_identifier_without_any_legal_word_boundary_at_all",
+            "👩🏽‍💻👩🏽‍💻👩🏽‍💻🇺🇸🇺🇸🇺🇸",
+            "short",
+            "",
+        ] {
+            assert_eq!(
+                metrics.wrap_balanced_to_width(text, 90.0),
+                metrics.wrap_preserved_to_width(text, 90.0)
+            );
+        }
+        for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let text = "Do not reflow this paragraph";
+            assert_eq!(metrics.wrap_balanced_to_width(text, width), [text]);
+        }
+        let long = "a long paragraph whose complete contents remain visible ".repeat(100);
+        assert_eq!(
+            metrics.wrap_balanced_to_width(&long, 90.0),
+            metrics.wrap_preserved_to_width(&long, 90.0)
+        );
     }
 
     #[test]

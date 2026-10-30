@@ -9610,7 +9610,8 @@ impl MermaidDiagramIr {
     /// vertically instead of making the whole graph several screens wide. The caller supplies
     /// the effective node font metrics, including authored size and family overrides. Short
     /// labels remain borrowed; wrapped labels preserve every character, explicit line break,
-    /// and joined glyph. The authored IR text is never changed.
+    /// and joined glyph. Short prose balances its existing rows to avoid orphan words and
+    /// unnecessarily wide cards. The authored IR text is never changed.
     ///
     /// Specialized cards and diagram families have their own measured text compositions.
     #[must_use]
@@ -9633,7 +9634,7 @@ impl MermaidDiagramIr {
         {
             Cow::Borrowed(text)
         } else {
-            Cow::Owned(metrics.wrap_preserved_to_width(text, max_width).join("\n"))
+            Cow::Owned(metrics.wrap_balanced_to_width(text, max_width).join("\n"))
         }
     }
 
@@ -10064,6 +10065,56 @@ impl MermaidDiagramIr {
         matches.sort_unstable_by_key(|id| id.0);
         matches.dedup();
         matches
+    }
+
+    /// Number of framed ancestors for each cluster, indexed by [`IrClusterId`].
+    ///
+    /// Renderers use this structural depth to distinguish nested surfaces without assigning
+    /// arbitrary colors to identifiers. Unframed subgraphs do not add a visual layer. Missing
+    /// hierarchy entries remain at depth zero; malformed parent cycles terminate at the same
+    /// safe fallback. Iterative memoization visits each subgraph once, including deep nesting.
+    #[must_use]
+    pub fn cluster_nesting_depths(&self) -> Vec<usize> {
+        let subgraphs = &self.graph.subgraphs;
+        let mut result = vec![0; self.clusters.len()];
+        let mut depths = vec![None; subgraphs.len()];
+        let mut active = vec![false; subgraphs.len()];
+        let mut chain = Vec::new();
+
+        for start in 0..subgraphs.len() {
+            if depths[start].is_some() {
+                continue;
+            }
+            let mut current = Some(start);
+            while let Some(index) = current.filter(|&index| index < subgraphs.len()) {
+                if depths[index].is_some() || active[index] {
+                    break;
+                }
+                active[index] = true;
+                chain.push(index);
+                current = subgraphs[index].parent.map(|parent| parent.0);
+            }
+
+            let cycle = current.is_some_and(|index| active.get(index) == Some(&true));
+            let mut depth = current
+                .and_then(|index| depths.get(index).copied().flatten().map(|d| (index, d)))
+                .map_or(0, |(index, depth)| {
+                    depth + usize::from(subgraphs[index].cluster.is_some_and(|id| id.0 < result.len()))
+                });
+            while let Some(index) = chain.pop() {
+                active[index] = false;
+                depths[index] = Some(depth);
+                if let Some(cluster) = subgraphs[index].cluster
+                    && let Some(slot) = result.get_mut(cluster.0)
+                {
+                    *slot = depth;
+                    if !cycle {
+                        depth += 1;
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Find nodes that belong to *all* specified `cluster_indices` using worst-case-optimal
@@ -11290,6 +11341,22 @@ mod tests {
             ));
             assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
         }
+    }
+
+    #[test]
+    fn node_paragraphs_balance_prose_without_reflowing_authored_rows() {
+        use super::*;
+        let metrics = FontMetrics::monospace(10.0);
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut node = IrNode {
+            id: "alpha alpha alpha alpha alpha alpha".into(),
+            ..Default::default()
+        };
+        let composed = ir.node_layout_text(&node, &metrics);
+        assert_eq!(composed, "alpha alpha alpha \nalpha alpha alpha");
+        assert_eq!(composed.replace('\n', ""), node.id);
+        node.id = "alpha alpha alpha alpha\nalpha alpha".into();
+        assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
     }
 
     #[test]
@@ -16423,6 +16490,86 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![IrSubgraphId(0), IrSubgraphId(1), IrSubgraphId(2)]
         );
+    }
+
+    #[test]
+    fn cluster_nesting_depths_count_frames_without_counting_unframed_subgraphs() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.clusters = (0..5)
+            .map(|index| IrCluster {
+                id: IrClusterId(index),
+                ..Default::default()
+            })
+            .collect();
+        ir.graph.subgraphs = [
+            (None, Some(0)),
+            (Some(0), None),
+            (Some(1), Some(1)),
+            (Some(2), Some(2)),
+            (Some(0), Some(3)),
+            (None, Some(4)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (parent, cluster))| IrSubgraph {
+            id: IrSubgraphId(index),
+            parent: parent.map(IrSubgraphId),
+            cluster: cluster.map(IrClusterId),
+            ..Default::default()
+        })
+        .collect();
+
+        assert_eq!(ir.cluster_nesting_depths(), vec![0, 1, 2, 1, 0]);
+    }
+
+    #[test]
+    fn cluster_nesting_depths_follow_parents_independent_of_storage_order() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.clusters = vec![IrCluster::default(); 4];
+        ir.graph.subgraphs = [
+            (Some(2), Some(2)),
+            (None, Some(0)),
+            (Some(1), Some(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (parent, cluster))| IrSubgraph {
+            id: IrSubgraphId(index),
+            parent: parent.map(IrSubgraphId),
+            cluster: cluster.map(IrClusterId),
+            ..Default::default()
+        })
+        .collect();
+
+        assert_eq!(ir.cluster_nesting_depths(), vec![0, 1, 2, 0]);
+        ir.graph.subgraphs.clear();
+        assert_eq!(ir.cluster_nesting_depths(), vec![0; 4]);
+    }
+
+    #[test]
+    fn cluster_nesting_depths_bound_malformed_parent_chains() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.clusters = vec![IrCluster::default(); 3];
+        ir.graph.subgraphs = [
+            (Some(1), Some(0)),
+            (Some(0), Some(1)),
+            (Some(99), Some(2)),
+            (Some(3), Some(99)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (parent, cluster))| IrSubgraph {
+            id: IrSubgraphId(index),
+            parent: parent.map(IrSubgraphId),
+            cluster: cluster.map(IrClusterId),
+            ..Default::default()
+        })
+        .collect();
+
+        assert_eq!(ir.cluster_nesting_depths(), vec![0; 3]);
+        assert!(MermaidDiagramIr::empty(DiagramType::Flowchart)
+            .cluster_nesting_depths()
+            .is_empty());
     }
 
     fn subgraph_members_recursive_sort_reference(

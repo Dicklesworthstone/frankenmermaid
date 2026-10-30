@@ -6126,8 +6126,10 @@ fn compute_traced_layout_with_config_and_guardrails(
     if guard.fallback_applied {
         guarded_dispatch.reason = guard.reason;
     }
-    let label_spacing_config = (guarded_dispatch.selected == LayoutAlgorithm::Sugiyama
-        && !config.collapse_cycle_clusters
+    let label_spacing_config = (matches!(
+        guarded_dispatch.selected,
+        LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Tree
+    ) && !config.collapse_cycle_clusters
         && edge_labels::can_refine_graph_label_spacing(ir))
     .then(|| config.clone());
     let component_packing = (ir.nodes.len() > 4
@@ -6275,7 +6277,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         _ => {}
     }
     if let Some(config) = label_spacing_config {
-        refine_graph_label_spacing(ir, &config, &mut traced);
+        refine_graph_label_spacing(ir, guarded_dispatch.selected, &config, &mut traced);
     }
     if let Some((spacing, metrics)) = component_packing
         && pack_disconnected_components(ir, Arc::make_mut(&mut traced.layout), spacing, &metrics)
@@ -6312,6 +6314,7 @@ fn compute_traced_layout_with_config_and_guardrails(
 /// and area growth are bounded, and ordinary diagrams that already fit do no extra layout work.
 fn refine_graph_label_spacing(
     ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
     config: &LayoutConfig,
     traced: &mut TracedLayout,
 ) {
@@ -6359,7 +6362,17 @@ fn refine_graph_label_spacing(
                 cross_step * (metrics.font_size() * 2.0 / 3.0).max(4.0);
             candidate_config.spacing.rank_spacing =
                 rank_base + rank_step * (metrics.font_size() * 0.8).max(4.0);
-            let mut candidate = layout_diagram_sugiyama_traced_with_config(ir, candidate_config);
+            // Auto chooses tidy trees for larger branch diagrams. Their shared corridors need
+            // the same caption clearance, while retaining the selected tree geometry and order.
+            let mut candidate = match algorithm {
+                LayoutAlgorithm::Tree => {
+                    layout_diagram_tree_traced_with_config(ir, &candidate_config)
+                }
+                LayoutAlgorithm::Sugiyama => {
+                    layout_diagram_sugiyama_traced_with_config(ir, candidate_config)
+                }
+                _ => return,
+            };
             let layout = Arc::make_mut(&mut candidate.layout);
             if !ir.state_notes.is_empty() {
                 layout.extensions.state_notes =
@@ -36185,6 +36198,76 @@ mod tests {
     }
 
     #[test]
+    fn tree_branch_captions_stay_attached_to_their_routes() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let source = "flowchart TD\n\
+            Request[Review request]\n\
+            Request -->|Identity and access verification| Access[Access]\n\
+            Request -->|Inventory and capacity validation| Stock[Stock]\n\
+            Request -->|Payment and fraud assessment| Payment[Payment]\n\
+            Request -->|Scheduling and delivery planning| Delivery[Delivery]\n\
+            Access --> User[User]\n\
+            Access --> Role[Role]\n\
+            Stock --> Item[Item]\n\
+            Stock --> Capacity[Capacity]\n\
+            Payment --> Funds[Funds]\n\
+            Payment --> Risk[Risk]\n\
+            Delivery --> Date[Date]\n\
+            Delivery --> Address[Address]\n";
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let mut ir = parse(source).ir;
+            ir.direction = direction;
+            let tree = layout_diagram_tree(&ir);
+            for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+                let traced = super::layout_diagram_traced_with_config(
+                    &ir,
+                    algorithm,
+                    LayoutConfig::default(),
+                );
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                assert_eq!(traced.layout.nodes.len(), 13);
+                assert_eq!(traced.layout.edges.len(), 12);
+                let quality = super::edge_labels::graph_label_attachment_quality(
+                    &ir,
+                    &traced.layout,
+                    &metrics,
+                );
+                assert_eq!(
+                    quality.0, 0,
+                    "branch captions must stay on their own connectors: {direction:?}/{algorithm:?} {quality:?}"
+                );
+                // Clearance must not replace the selected tree with a different ranking or
+                // shrink the cards. Only the spaces between unchanged tree nodes may grow.
+                for (before, after) in tree.nodes.iter().zip(&traced.layout.nodes) {
+                    assert_eq!(
+                        (before.node_index, before.rank, before.order),
+                        (after.node_index, after.rank, after.order)
+                    );
+                    assert_eq!(
+                        (before.bounds.width, before.bounds.height),
+                        (after.bounds.width, after.bounds.height)
+                    );
+                }
+                assert_eq!(
+                    traced.layout,
+                    super::layout_diagram_traced_with_config(
+                        &ir,
+                        algorithm,
+                        LayoutConfig::default(),
+                    )
+                    .layout,
+                    "refinement must be deterministic"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tree_rank_gaps_fit_edge_labels_without_expanding_plain_ranks() {
         let spacing = LayoutSpacing::default();
         let metrics = fm_core::FontMetrics::default_metrics();
@@ -42549,31 +42632,72 @@ mod tests {
 
     #[test]
     fn decision_labels_fit_between_the_sloping_sides() {
-        let metrics = fm_core::FontMetrics::default_metrics();
+        use super::{LayoutConfig, RenderItem, RenderSource, build_label_layer};
+
         for text in [
             "Ready?",
             "Does this customer have permission to approve this transaction?",
             "Does this customer have permission\nto approve this transaction?",
             "First decision condition\nSecond decision condition\nFinal condition",
         ] {
-            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-            ir.labels.push(IrLabel {
-                text: text.to_string(),
-                span: Span::default(),
-            });
-            let node = IrNode {
-                id: "A".to_string(),
-                label: Some(IrLabelId(0)),
-                shape: NodeShape::Diamond,
-                ..IrNode::default()
-            };
-            let (width, height) = compute_node_size(&ir, &node, &metrics, 0);
-            let (text_width, text_height) = metrics.estimate_dimensions(text);
-            let padded_corner = (text_width + 16.0) / width + (text_height + 16.0) / height;
-            assert!(
-                padded_corner < 1.0,
-                "{text:?}: label crosses the diamond outline ({padded_corner})"
-            );
+            for metrics in [
+                fm_core::FontMetrics::default_metrics(),
+                fm_core::FontMetrics::monospace(28.0),
+            ] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                ir.labels.push(IrLabel {
+                    text: text.to_string(),
+                    span: Span::default(),
+                });
+                ir.nodes.push(IrNode {
+                    id: "A".to_string(),
+                    label: Some(IrLabelId(0)),
+                    shape: NodeShape::Diamond,
+                    ..IrNode::default()
+                });
+                let layout = super::layout_diagram_with_config(
+                    &ir,
+                    LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                );
+                let bounds = layout.nodes[0].bounds;
+                let center = bounds.center();
+                let (labels, _) = build_label_layer(&ir, &layout, &metrics);
+                let rows: Vec<_> = labels
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Text(row) if row.source == RenderSource::Node(0) => Some(row),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    rows.iter().map(|row| row.text.as_str()).collect::<String>(),
+                    text.replace('\n', ""),
+                    "containment must not be achieved by omitting part of the label"
+                );
+                // Check the rows actually drawn, rather than the unwrapped source sentence.
+                // The same strict contour check covers both balanced prose and authored breaks.
+                for row in rows {
+                    assert_eq!(row.font_size, metrics.font_size());
+                    let half_text_width = metrics.estimate_preserved_width(
+                        &row.text,
+                        row.font_size,
+                        metrics.avg_char_width(),
+                    ) / 2.0;
+                    let padded_corner = ((row.x - center.x).abs() + half_text_width + 8.0)
+                        / (bounds.width / 2.0)
+                        + ((row.y - center.y).abs() + row.font_size / 2.0 + 8.0)
+                            / (bounds.height / 2.0);
+                    assert!(
+                        padded_corner < 1.0,
+                        "{text:?}: drawn row {:?} crosses the diamond outline ({padded_corner})",
+                        row.text
+                    );
+                }
+            }
         }
     }
 
