@@ -3122,6 +3122,20 @@ pub fn parse(input: &str) -> ParseResult {
     parse_with_mode_and_config(input, MermaidParseMode::Compat, &ParserConfig::default())
 }
 
+/// Parse Mermaid with external initialization defaults without changing the source text.
+///
+/// YAML, source initialization directives, and explicit diagram syntax take precedence over
+/// these defaults. Spans still refer to the original input; no synthetic directive is prepended.
+#[must_use]
+pub fn parse_with_mermaid_config(input: &str, defaults: &serde_json::Value) -> ParseResult {
+    parse_with_options(
+        input,
+        MermaidParseMode::Compat,
+        &ParserConfig::default(),
+        Some(defaults),
+    )
+}
+
 #[must_use]
 pub fn parse_with_mode(input: &str, parse_mode: MermaidParseMode) -> ParseResult {
     parse_with_mode_and_config(input, parse_mode, &ParserConfig::default())
@@ -3132,6 +3146,15 @@ pub fn parse_with_mode_and_config(
     input: &str,
     parse_mode: MermaidParseMode,
     config: &ParserConfig,
+) -> ParseResult {
+    parse_with_options(input, parse_mode, config, None)
+}
+
+fn parse_with_options(
+    input: &str,
+    parse_mode: MermaidParseMode,
+    config: &ParserConfig,
+    defaults: Option<&serde_json::Value>,
 ) -> ParseResult {
     if input.trim().is_empty() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Unknown);
@@ -3161,8 +3184,8 @@ pub fn parse_with_mode_and_config(
         return result;
     }
 
-    let mut result = mermaid_parser::parse_mermaid_with_detection_and_config(
-        input, detection, parse_mode, config,
+    let mut result = mermaid_parser::parse_mermaid_with_detection_config_and_init(
+        input, detection, parse_mode, config, defaults,
     );
     // The format complement (whitespace/comment/directive/quoted-literal spans) is
     // only needed for round-trip editing (`build_parse_lens`) and evidence output —
@@ -3433,8 +3456,129 @@ mod tests {
         FlowchartBatchParsePlan, FlowchartBatchParseScratch, MermaidLineEndingStyle,
         MermaidWhitespaceKind, ParserConfig, apply_parse_lens_edit, build_parse_lens,
         capture_format_complement, detect_type, normalize_identifier, normalize_identifier_cow,
-        parse, parse_with_mode,
+        parse, parse_with_mermaid_config, parse_with_mode,
     };
+
+    #[test]
+    fn external_mermaid_config_preserves_source_spans_and_source_precedence() {
+        let source = concat!(
+            "---\nconfig:\n  flowchart:\n    nodeSpacing: 70\n    direction: RL\n",
+            "  themeVariables:\n    primaryColor: '#223344'\n---\n",
+            "%%{init: {flowchart: {rankSpacing: 120, direction: 'BT'},",
+            " themeVariables: {primaryColor: '#556677'}}}%%\n",
+            "flowchart TB\n  A[Alpha] --> B[Beta]\n",
+        );
+        let defaults = serde_json::json!({
+            "flowchart": {"nodeSpacing": 40, "rankSpacing": 90, "direction": "LR"},
+            "themeVariables": {"primaryColor": "#112233", "lineColor": "#778899"}
+        });
+        let parsed = parse_with_mermaid_config(source, &defaults);
+        assert_eq!(parsed.ir.meta.node_spacing, Some(70));
+        assert_eq!(parsed.ir.meta.rank_spacing, Some(120));
+        assert_eq!(parsed.ir.meta.direction, fm_core::GraphDirection::TB);
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_direction,
+            Some(fm_core::GraphDirection::BT)
+        );
+        let variables = &parsed.ir.meta.theme_overrides.theme_variables;
+        assert_eq!(variables["primaryColor"], "#556677");
+        assert_eq!(variables["lineColor"], "#778899");
+        assert_eq!(parsed.ir.source_map(), parse(source).ir.source_map());
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn external_mermaid_config_applies_before_sequence_message_lowering() {
+        let defaults = serde_json::json!({"sequence": {"showSequenceNumbers": true}});
+        let numbered = parse_with_mermaid_config(
+            "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob->>Alice: Welcome",
+            &defaults,
+        );
+        let meta = numbered
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("sequence metadata");
+        assert_eq!(meta.autonumber_value(0), Some(1));
+        assert_eq!(meta.autonumber_value(1), Some(2));
+
+        let source_false = concat!(
+            "%%{init: {sequence: {showSequenceNumbers: false}}}%%\n",
+            "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob->>Alice: Welcome",
+        );
+        let disabled = parse_with_mermaid_config(source_false, &defaults);
+        let meta = disabled
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("sequence metadata");
+        assert_eq!(meta.autonumber_value(0), None);
+        assert_eq!(meta.autonumber_value(1), None);
+        assert_eq!(
+            disabled.ir.source_map(),
+            parse(source_false).ir.source_map()
+        );
+
+        let explicit = parse_with_mermaid_config(
+            concat!(
+                "%%{init: {sequence: {showSequenceNumbers: false}}}%%\n",
+                "sequenceDiagram\n  autonumber 7 3\n",
+                "  Alice->>Bob: Hello\n  Bob->>Alice: Welcome",
+            ),
+            &defaults,
+        );
+        let meta = explicit
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("sequence metadata");
+        assert_eq!(meta.autonumber_value(0), Some(7));
+        assert_eq!(meta.autonumber_value(1), Some(10));
+    }
+
+    #[test]
+    fn external_mermaid_config_reuses_validation_without_rewriting_input() {
+        let source = "flowchart\n A --> B";
+        assert_eq!(
+            parse_with_mermaid_config(source, &serde_json::json!({})),
+            parse(source)
+        );
+        let invalid = parse_with_mermaid_config(
+            source,
+            &serde_json::json!({"flowchart": {"rankSpacing": -12}}),
+        );
+        assert_eq!(invalid.ir.meta.rank_spacing, None);
+        assert!(!invalid.ir.meta.init.errors.is_empty());
+        assert_eq!(invalid.ir.source_map(), parse(source).ir.source_map());
+        assert!(invalid.warnings.iter().any(|warning| {
+            warning.starts_with("Runtime configuration:") && warning.contains("rankSpacing")
+        }));
+    }
+
+    #[test]
+    fn external_mermaid_config_security_mode_survives_unrelated_source_defaults() {
+        let defaults = serde_json::json!({"securityLevel": "loose"});
+        let source = concat!(
+            "%%{init: {flowchart: {nodeSpacing: 90}}}%%\n",
+            "flowchart LR\n A --> B\n click A \"//example.com\"",
+        );
+        let inherited = parse_with_mermaid_config(source, &defaults);
+        assert_eq!(
+            inherited.ir.find_node("A").unwrap().href(),
+            Some("//example.com")
+        );
+        let tightened = parse_with_mermaid_config(
+            &format!("%%{{init: {{securityLevel: 'strict'}}}}%%\n{source}"),
+            &defaults,
+        );
+        assert!(tightened.ir.find_node("A").unwrap().href().is_none());
+        assert!(
+            tightened
+                .warnings
+                .iter()
+                .any(|warning| { warning.contains("unsafe click link target blocked") })
+        );
+    }
 
     #[test]
     fn batch_plan_reuses_complete_prefix_subgraphs_exactly() {

@@ -527,6 +527,16 @@ pub fn parse_mermaid_with_detection_and_config(
     parse_mode: MermaidParseMode,
     config: &ParserConfig,
 ) -> ParseResult {
+    parse_mermaid_with_detection_config_and_init(input, detection, parse_mode, config, None)
+}
+
+pub(crate) fn parse_mermaid_with_detection_config_and_init(
+    input: &str,
+    detection: DetectedType,
+    parse_mode: MermaidParseMode,
+    config: &ParserConfig,
+    defaults: Option<&Value>,
+) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     // bd-ec1t: a fuzzy-matched header is a MIS-TYPED header, not a node. Detection has already
     // decided that; without this the statement loop interns the typo as a graph node and draws it.
@@ -550,6 +560,15 @@ pub fn parse_mermaid_with_detection_and_config(
     // Add detection warnings to builder
     for warning in &detection.warnings {
         builder.add_warning(warning.clone());
+    }
+
+    if let Some(defaults) = defaults {
+        apply_mermaid_config_value(
+            defaults,
+            "Runtime configuration",
+            Span::default(),
+            &mut builder,
+        );
     }
 
     if let Some(front_matter_payload) = front_matter_payload {
@@ -16879,7 +16898,7 @@ pub(crate) fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
         } else {
             parsed_value
         };
-        apply_mermaid_config_value(config_value, &format!("Line {line_number}"), span, builder);
+        apply_mermaid_config_value(&config_value, &format!("Line {line_number}"), span, builder);
     }
 }
 
@@ -17976,13 +17995,13 @@ fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder
             .get("config")
             .cloned()
             .unwrap_or_else(|| yaml_value.clone());
-        apply_mermaid_config_value(config_value, "Front matter", span, builder);
+        apply_mermaid_config_value(&config_value, "Front matter", span, builder);
     }
 }
 
-fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: &mut IrBuilder) {
-    parse_layout_constraint_config(&value, context, span, builder);
-    let parsed = to_init_parse(parse_mermaid_js_config_value(&value));
+fn apply_mermaid_config_value(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    parse_layout_constraint_config(value, context, span, builder);
+    let parsed = to_init_parse(parse_mermaid_js_config_value(value));
 
     if let Some(theme) = parsed.config.theme {
         builder.set_init_theme(theme);
@@ -18020,7 +18039,9 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
     if let Some(top_axis) = parsed.config.gantt_top_axis {
         builder.set_init_gantt_top_axis(top_axis);
     }
-    builder.set_init_sanitize_mode(parsed.config.sanitize_mode);
+    if value.get("securityLevel").is_some() {
+        builder.set_init_sanitize_mode(parsed.config.sanitize_mode);
+    }
 
     for warning in parsed.warnings {
         let message = format!("{context}: {}", warning.message);

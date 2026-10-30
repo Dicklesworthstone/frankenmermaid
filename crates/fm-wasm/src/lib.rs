@@ -52,6 +52,7 @@ use fm_render_svg::{
     SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -171,6 +172,7 @@ struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
     pressure: MermaidWasmPressureSignals,
+    mermaid: Value,
 }
 
 /// A source-to-layout lens for a flowchart editor.
@@ -397,8 +399,15 @@ struct DiagramGeometry {
 /// Resolve the runtime config, parse, and lay the diagram out — the step before any raster backend.
 fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<DiagramGeometry, String> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
+    build_diagram_geometry_with_overrides(input, &overrides)
+}
+
+fn build_diagram_geometry_with_overrides(
+    input: &str,
+    overrides: &RuntimeInitConfig,
+) -> Result<DiagramGeometry, String> {
     let runtime = read_runtime_config();
-    let requested_theme = requested_theme_preset(&overrides)?;
+    let requested_theme = requested_theme_preset(overrides)?;
     let effective_svg = overrides.effective_svg_overrides();
     let theme_name = overrides
         .theme
@@ -413,7 +422,7 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
         merge_canvas_config(&canvas_base, &overrides.canvas, effective_svg.padding),
         &svg,
     );
-    let parsed = parse(input);
+    let parsed = parse_for_render(input, &overrides.mermaid_defaults(&runtime.mermaid));
     let canvas = resolve_canvas_source_theme(canvas, &svg, &parsed.ir);
     let layout = fm_layout::layout_diagram_with_config(
         &parsed.ir,
@@ -464,6 +473,7 @@ impl Default for RuntimeConfig {
             svg,
             canvas,
             pressure: MermaidWasmPressureSignals::default(),
+            mermaid: Value::Null,
         }
     }
 }
@@ -479,6 +489,14 @@ struct RuntimeInitConfig {
     canvas: CanvasConfigOverrides,
     #[serde(default)]
     pressure: PressureConfigOverrides,
+    // Mermaid initialization sections belong to the shared parser, where source directives
+    // and explicit diagram syntax can override them without changing source spans.
+    theme_variables: Option<Value>,
+    flowchart: Option<Value>,
+    sequence: Option<Value>,
+    gantt: Option<Value>,
+    constraints: Option<Value>,
+    security_level: Option<Value>,
     // Top-level SVG override fields for direct JS options: { theme, responsive, fontSize, ... }
     responsive: Option<bool>,
     accessible: Option<bool>,
@@ -498,6 +516,58 @@ struct RuntimeInitConfig {
 }
 
 impl RuntimeInitConfig {
+    fn mermaid_defaults(&self, base: &Value) -> Value {
+        fn merge(base: &mut Value, overrides: &Value) {
+            if let (Some(base), Some(overrides)) = (base.as_object_mut(), overrides.as_object()) {
+                for (key, value) in overrides {
+                    merge(base.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            } else {
+                *base = overrides.clone();
+            }
+        }
+
+        let mut merged = base.clone();
+        for (key, value) in [
+            ("themeVariables", &self.theme_variables),
+            ("flowchart", &self.flowchart),
+            ("sequence", &self.sequence),
+            ("gantt", &self.gantt),
+            ("constraints", &self.constraints),
+            ("securityLevel", &self.security_level),
+        ] {
+            if let Some(value) = value {
+                if !merged.is_object() {
+                    merged = Value::Object(serde_json::Map::new());
+                }
+                if let Some(config) = merged.as_object_mut() {
+                    let target = config.entry(key).or_insert(Value::Null);
+                    if key == "flowchart"
+                        && let (Some(existing), Some(fields)) =
+                            (target.as_object_mut(), value.as_object())
+                    {
+                        // These spellings address the same field. An inherited alias must not
+                        // beat a later override merely because the parser visits it last.
+                        match (
+                            fields.contains_key("direction"),
+                            fields.contains_key("rankDir"),
+                        ) {
+                            (true, false) => {
+                                existing.remove("rankDir");
+                            }
+                            (false, true) => {
+                                existing.remove("direction");
+                            }
+                            _ => {}
+                        }
+                    }
+                    merge(target, value);
+                }
+            }
+        }
+        merged
+    }
+
     fn effective_svg_overrides(&self) -> SvgConfigOverrides {
         let mut merged = SvgConfigOverrides {
             responsive: self.responsive,
@@ -799,7 +869,10 @@ pub fn render_worker_request(request: &WorkerRenderRequest) -> WorkerRenderRespo
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
 
     let parse_start = Instant::now();
-    let parsed = parse(&request.input);
+    let parsed = parse_for_render(
+        &request.input,
+        &overrides.mermaid_defaults(&runtime.mermaid),
+    );
     let parse_ms = elapsed_ms(parse_start);
     budget_broker.record_parse(parse_ms);
 
@@ -1177,6 +1250,14 @@ where
                 T::default()
             }
         }
+    }
+}
+
+fn parse_for_render(input: &str, defaults: &Value) -> fm_parser::ParseResult {
+    if defaults.is_null() {
+        parse(input)
+    } else {
+        fm_parser::parse_with_mermaid_config(input, defaults)
     }
 }
 
@@ -1613,7 +1694,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
     let pressure = runtime.pressure.into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
     let parse_start = Instant::now();
-    let parsed = parse(input);
+    let parsed = parse_for_render(input, &runtime.mermaid);
     budget_broker.record_parse(
         parse_start
             .elapsed()
@@ -1703,14 +1784,18 @@ fn build_wasm_fnx_witness() -> Option<WasmFnxWitness> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
+    apply_runtime_init_config(&overrides).map_err(js_error)
+}
+
+fn apply_runtime_init_config(overrides: &RuntimeInitConfig) -> Result<(), String> {
     let current = read_runtime_config();
-    let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
+    let requested_theme = requested_theme_preset(overrides)?;
     let effective_svg = overrides.effective_svg_overrides();
     let theme_name = overrides
         .theme
         .as_deref()
         .or(effective_svg.theme.as_deref());
-    let svg = merge_svg_config(&current.svg, &effective_svg, theme_name).map_err(js_error)?;
+    let svg = merge_svg_config(&current.svg, &effective_svg, theme_name)?;
     let canvas_base = requested_theme.map_or_else(
         || current.canvas.clone(),
         |preset| apply_canvas_theme_preset(current.canvas.clone(), preset),
@@ -1724,6 +1809,7 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
         ),
         svg,
         pressure: merge_pressure_config(&current.pressure, &overrides.pressure),
+        mermaid: overrides.mermaid_defaults(&current.mermaid),
     };
 
     write_runtime_config(next);
@@ -1800,29 +1886,25 @@ struct PreparedSvgRender {
 }
 
 fn prepare_svg_render(input: &str, config: Option<JsValue>) -> Result<PreparedSvgRender, JsValue> {
-    let has_config = config
-        .as_ref()
-        .is_some_and(|raw| !raw.is_undefined() && !raw.is_null());
+    prepare_svg_render_with_overrides(input, &parse_js_value_or_default(config)).map_err(js_error)
+}
 
-    let (mut svg_config, pressure_report) = if has_config {
-        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
-        with_runtime_config(|runtime| {
-            let effective_svg = overrides.effective_svg_overrides();
-            let theme_name = overrides
-                .theme
-                .as_deref()
-                .or(effective_svg.theme.as_deref());
-            let svg =
-                merge_svg_config(&runtime.svg, &effective_svg, theme_name).map_err(js_error)?;
-            let pressure =
-                merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
-            Ok::<_, JsValue>((svg, pressure))
-        })?
-    } else {
-        with_runtime_config(|runtime| (runtime.svg.clone(), runtime.pressure.into_report()))
-    };
+fn prepare_svg_render_with_overrides(
+    input: &str,
+    overrides: &RuntimeInitConfig,
+) -> Result<PreparedSvgRender, String> {
+    let (mut svg_config, pressure_report, mermaid) = with_runtime_config(|runtime| {
+        let effective_svg = overrides.effective_svg_overrides();
+        let theme_name = overrides
+            .theme
+            .as_deref()
+            .or(effective_svg.theme.as_deref());
+        let svg = merge_svg_config(&runtime.svg, &effective_svg, theme_name)?;
+        let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
+        Ok::<_, String>((svg, pressure, overrides.mermaid_defaults(&runtime.mermaid)))
+    })?;
 
-    let parsed = parse(input);
+    let parsed = parse_for_render(input, &mermaid);
     let layout_config = LayoutConfig {
         font_metrics: Some(svg_config.font_metrics()),
         edge_routing: if svg_config.theme == ThemePreset::Mermaid {
@@ -2592,6 +2674,9 @@ fn parse_navigation_direction(
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// A retained Canvas renderer with initialization defaults captured at construction.
+/// Successful per-render overrides become this instance's defaults; later global `init` calls
+/// affect new renderers, while source directives apply only to the current diagram.
 pub struct Diagram {
     canvas: Option<web_sys::HtmlCanvasElement>,
     offscreen_canvas: Option<web_sys::OffscreenCanvas>,
@@ -2602,6 +2687,7 @@ pub struct Diagram {
     svg_config: SvgRenderConfig,
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
+    mermaid_config: Value,
     layout_engine: fm_layout::IncrementalLayoutEngine,
     session: fm_render_canvas::CanvasSession,
     destroyed: bool,
@@ -2654,6 +2740,7 @@ impl Diagram {
             svg_config,
             canvas_config,
             pressure_config,
+            mermaid_config: overrides.mermaid_defaults(&runtime.mermaid),
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
             session: fm_render_canvas::CanvasSession::default(),
             destroyed: false,
@@ -2748,8 +2835,9 @@ impl Diagram {
             &next_svg,
         );
         let next_renderer = merge_renderer_kind(self.renderer, overrides.renderer);
+        let next_mermaid = overrides.mermaid_defaults(&self.mermaid_config);
         let parse_start = Instant::now();
-        let parsed = parse(input);
+        let parsed = parse_for_render(input, &next_mermaid);
         let effective_canvas =
             resolve_canvas_source_theme(next_canvas.clone(), &next_svg, &parsed.ir);
         budget_broker.record_parse(
@@ -2828,6 +2916,7 @@ impl Diagram {
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
         self.pressure_config = next_pressure;
+        self.mermaid_config = next_mermaid;
 
         let output = DiagramRenderOutput::new(
             &traced_layout,
@@ -2988,13 +3077,14 @@ mod tests {
         WasmHitRegion, WebGpuPlanSummary, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, apply_ir_lens_edit, build_diagram_geometry, build_webgpu_plan,
+        apply_canvas_theme_preset, apply_ir_lens_edit, apply_runtime_init_config,
+        build_diagram_geometry, build_diagram_geometry_with_overrides, build_webgpu_plan,
         canvas_font_size_px, collect_source_spans, config_schema_json, handle_worker_message,
         hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
-        merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
-        render_deck, render_svg_js, render_worker_request, requested_theme_preset,
-        resolve_canvas_source_theme, resolve_renderer, validate_config_json,
-        validate_init_directives_js, write_runtime_config,
+        merge_renderer_kind, merge_svg_config, parse_theme_preset,
+        prepare_svg_render_with_overrides, read_runtime_config, render, render_deck, render_svg_js,
+        render_worker_request, requested_theme_preset, resolve_canvas_source_theme,
+        resolve_renderer, validate_config_json, validate_init_directives_js, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3750,6 +3840,210 @@ mod tests {
         assert_eq!(next.canvas.background, baseline.canvas.background);
         assert_eq!(next.canvas.node_fill, baseline.canvas.node_fill);
         assert_eq!(next.canvas.label_color, baseline.canvas.label_color);
+    }
+
+    #[test]
+    fn mermaid_runtime_options_change_svg_worker_and_canvas_geometry_and_paint() {
+        let _serial = config_guard();
+        let _restore = DefaultRuntimeGuard::new();
+        let source = "flowchart\n A[Alpha] --> B[Beta]\n A --> C[Gamma]";
+        let baseline = build_diagram_geometry(source, None).unwrap();
+        let config = serde_json::json!({
+            "flowchart": {"direction": "LR", "nodeSpacing": 160, "rankSpacing": 220},
+            "themeVariables": {"primaryColor": "#f08080", "background": "#102030"},
+            "fontSize": 24,
+            "semanticColors": false
+        });
+        let overrides: RuntimeInitConfig = serde_json::from_value(config.clone()).unwrap();
+        let prepared = prepare_svg_render_with_overrides(source, &overrides).unwrap();
+        let geometry = build_diagram_geometry_with_overrides(source, &overrides).unwrap();
+        let bounds = |id| {
+            geometry
+                .layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == id)
+                .unwrap()
+                .bounds
+        };
+        let (a, b, c) = (bounds("A"), bounds("B"), bounds("C"));
+        assert!(b.x - (a.x + a.width) >= 219.9);
+        assert!(c.x - (a.x + a.width) >= 219.9);
+        let (upper, lower) = if b.y < c.y { (b, c) } else { (c, b) };
+        assert!(lower.y - (upper.y + upper.height) >= 159.9);
+        assert!(a.width > baseline.layout.nodes[0].bounds.width);
+        assert_eq!(geometry.layout.nodes, prepared.traced_layout.layout.nodes);
+        assert_eq!(geometry.ir.source_map(), baseline.ir.source_map());
+
+        let svg = fm_render_svg::render_svg_with_layout(
+            &prepared.parsed.ir,
+            &prepared.traced_layout.layout,
+            &prepared.svg_config,
+        );
+        assert!(svg.contains("#f08080"));
+        assert!(svg.contains("#102030"));
+        assert!(svg.contains("font-size=\"24\""));
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 80,
+            input: source.into(),
+            config_json: Some(config.to_string()),
+        });
+        let WorkerRenderResponse::Completed {
+            svg: worker_svg, ..
+        } = response
+        else {
+            panic!("configured worker render failed: {response:?}");
+        };
+        assert_eq!(worker_svg, svg);
+
+        let mut canvas = fm_render_canvas::MockCanvas2dContext::new(1000.0, 800.0);
+        fm_render_canvas::render_to_canvas_with_layout(
+            &geometry.ir,
+            &geometry.layout,
+            &mut canvas,
+            &geometry.canvas,
+        );
+        assert!(canvas.operations().iter().any(|op| matches!(op,
+            fm_render_canvas::DrawOperation::SetFillStyle(color) if color == "#f08080"
+        )));
+        assert!(canvas.operations().iter().any(|op| matches!(op,
+            fm_render_canvas::DrawOperation::SetFont(font) if font.contains("24px")
+        )));
+        assert_eq!(geometry.canvas.background.as_deref(), Some("#102030"));
+        let next = build_diagram_geometry(source, None).unwrap();
+        assert_eq!(next.layout.nodes, baseline.layout.nodes);
+        assert_eq!(next.canvas.node_fill, baseline.canvas.node_fill);
+    }
+
+    #[test]
+    fn mermaid_runtime_options_deep_merge_and_keep_source_precedence() {
+        let _serial = config_guard();
+        let _restore = DefaultRuntimeGuard::new();
+        let initial: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+            "flowchart": {"direction": "LR", "nodeSpacing": 110, "rankSpacing": 170},
+            "themeVariables": {"primaryColor": "#112233", "lineColor": "#334455"},
+            "svg": {"fontSize": 21, "shadows": false},
+            "canvas": {"autoFit": false},
+            "pressure": {"frameBudgetMs": 200}
+        }))
+        .unwrap();
+        apply_runtime_init_config(&initial).unwrap();
+        let overrides: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+            "flowchart": {"rankSpacing": 230},
+            "themeVariables": {"lineColor": "#667788"}
+        }))
+        .unwrap();
+        let source = "flowchart\n A[Alpha] --> B[Beta]\n A --> C[Gamma]";
+        let inherited = prepare_svg_render_with_overrides(source, &overrides).unwrap();
+        assert_eq!(
+            inherited.parsed.ir.meta.direction,
+            fm_core::GraphDirection::LR
+        );
+        assert_eq!(inherited.parsed.ir.meta.node_spacing, Some(110));
+        assert_eq!(inherited.parsed.ir.meta.rank_spacing, Some(230));
+        assert_eq!(
+            inherited.parsed.ir.meta.theme_overrides.theme_variables["primaryColor"],
+            "#112233"
+        );
+        assert_eq!(
+            inherited.parsed.ir.meta.theme_overrides.theme_variables["lineColor"],
+            "#667788"
+        );
+        assert_eq!(inherited.svg_config.font_size, 21.0);
+        assert!(!inherited.svg_config.shadows);
+
+        let authored = concat!(
+            "%%{init: {flowchart: {rankSpacing: 95, direction: 'BT'},",
+            " themeVariables: {primaryColor: '#abcdef'}}}%%\n",
+            "flowchart TB\n A[Alpha] --> B[Beta]\n A --> C[Gamma]",
+        );
+        let geometry = build_diagram_geometry_with_overrides(authored, &overrides).unwrap();
+        assert_eq!(geometry.ir.meta.direction, fm_core::GraphDirection::TB);
+        assert_eq!(geometry.ir.meta.node_spacing, Some(110));
+        assert_eq!(geometry.ir.meta.rank_spacing, Some(95));
+        let a = &geometry.layout.nodes[0].bounds;
+        let b = &geometry.layout.nodes[1].bounds;
+        assert!(b.y - (a.y + a.height) >= 94.9);
+        assert_eq!(geometry.canvas.node_fill, "#abcdef");
+        assert_eq!(geometry.canvas.edge_stroke, "#667788");
+        assert!(!geometry.canvas.auto_fit);
+        assert_eq!(geometry.ir.source_map(), parse(authored).ir.source_map());
+
+        let global = render(source);
+        assert_eq!(global.svg, render_svg_js(source, None).unwrap());
+        assert_eq!(global.svg, render_deck(source, None).unwrap().svg);
+        let next = build_diagram_geometry(source, None).unwrap();
+        assert_eq!(next.ir.meta.rank_spacing, Some(170));
+        assert_eq!(next.canvas.node_fill, "#112233");
+        assert_eq!(next.canvas.edge_stroke, "#334455");
+        assert_eq!(read_runtime_config().pressure.frame_budget_ms, Some(200));
+    }
+
+    #[test]
+    fn mermaid_runtime_sequence_defaults_change_numbering_before_rendering() {
+        let _serial = config_guard();
+        let _restore = DefaultRuntimeGuard::new();
+        let initial: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+            "sequence": {"showSequenceNumbers": true}
+        }))
+        .unwrap();
+        apply_runtime_init_config(&initial).unwrap();
+        let source = "sequenceDiagram\n Alice->>Bob: Hello\n Bob->>Alice: Welcome";
+        let svg = render_svg_js(source, None).unwrap();
+        assert!(svg.contains("class=\"fm-sequence-number\">1</text>"));
+        assert!(svg.contains("class=\"fm-sequence-number\">2</text>"));
+
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 81,
+            input: source.into(),
+            config_json: Some(r#"{"sequence":{"showSequenceNumbers":false}}"#.into()),
+        });
+        let WorkerRenderResponse::Completed { svg, .. } = response else {
+            panic!("sequence worker render failed: {response:?}");
+        };
+        assert!(!svg.contains("fm-sequence-number"));
+        let source_false =
+            format!("%%{{init: {{sequence: {{showSequenceNumbers: false}}}}}}%%\n{source}");
+        assert!(
+            !render_svg_js(&source_false, None)
+                .unwrap()
+                .contains("fm-sequence-number")
+        );
+        assert!(
+            render_svg_js(source, None)
+                .unwrap()
+                .contains("class=\"fm-sequence-number\">1</text>")
+        );
+    }
+
+    #[test]
+    fn mermaid_runtime_direction_aliases_respect_the_latest_layer() {
+        let _serial = config_guard();
+        let _restore = DefaultRuntimeGuard::new();
+        let source = "flowchart\n A[First] --> B[Second]";
+        for (initial_key, override_key) in [("rankDir", "direction"), ("direction", "rankDir")] {
+            let initial: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+                "flowchart": {initial_key: "LR", "rankSpacing": 120}
+            }))
+            .unwrap();
+            apply_runtime_init_config(&initial).unwrap();
+            let overrides: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+                "flowchart": {override_key: "BT"}
+            }))
+            .unwrap();
+            let geometry = build_diagram_geometry_with_overrides(source, &overrides).unwrap();
+            assert_eq!(geometry.ir.meta.direction, fm_core::GraphDirection::BT);
+            let a = geometry.layout.nodes[0].bounds;
+            let b = geometry.layout.nodes[1].bounds;
+            assert!(a.y - (b.y + b.height) >= 119.9);
+
+            let both: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+                "flowchart": {"direction": "TB", "rankDir": "RL"}
+            }))
+            .unwrap();
+            let geometry = build_diagram_geometry_with_overrides(source, &both).unwrap();
+            assert_eq!(geometry.ir.meta.direction, fm_core::GraphDirection::RL);
+        }
     }
 
     #[test]
@@ -4719,6 +5013,22 @@ mod tests {
         CONFIG_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct DefaultRuntimeGuard(RuntimeConfig);
+
+    impl DefaultRuntimeGuard {
+        fn new() -> Self {
+            let guard = Self(read_runtime_config());
+            write_runtime_config(RuntimeConfig::default());
+            guard
+        }
+    }
+
+    impl Drop for DefaultRuntimeGuard {
+        fn drop(&mut self) {
+            write_runtime_config(self.0.clone());
+        }
     }
 
     // ── renderDeck battery (bd-cb9oi) ─────────────────────────────

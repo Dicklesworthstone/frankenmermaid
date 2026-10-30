@@ -918,8 +918,12 @@ impl IrBuilder {
 
     pub(crate) fn set_init_sequence_show_sequence_numbers(&mut self, show_numbers: bool) {
         self.ir.meta.init.config.sequence_show_sequence_numbers = Some(show_numbers);
-        if self.ir.diagram_type == DiagramType::Sequence && show_numbers {
-            self.enable_autonumber();
+        if self.ir.diagram_type == DiagramType::Sequence {
+            if show_numbers {
+                self.enable_autonumber();
+            } else {
+                self.disable_autonumber();
+            }
         }
     }
 
