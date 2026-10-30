@@ -282,11 +282,17 @@ default = []
 watch                    = ["dep:notify"]        # File watching for `fm-cli watch`
 serve                    = ["dep:tiny_http"]     # Local preview server for `fm-cli serve`
 png                      = ["dep:resvg", "dep:usvg"]  # PNG rasterization
+highs                    = ["fm-layout/highs"]   # Optional native C++ LP/MIP solver
 fnx-integration          = ["fm-layout/fnx-integration"]               # Phase-1 FNX advisory
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]    # Phase-2 directed FNX
 ```
 
 Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerly git-pinned `franken-kernel` is now consumed from crates.io (currently pinned to `0.3.1`); only the FNX feature still requires a git-pinned dependency on `franken_networkx`.
+
+`fm-layout` and `fm-render-svg` use the pure-Rust microlp solver by default. Authored
+pins, rank/order constraints, minimum edge lengths, and non-overlap constraints remain
+available without a C++ toolchain. Enable `highs` on either library or on
+`frankenmermaid-cli` to use the native HiGHS backend explicitly.
 
 ### Crates.io status
 
@@ -374,6 +380,9 @@ Parse, lay out, and render a diagram.
 # SVG output to a file
 fm-cli render input.mmd --format svg --output diagram.svg
 
+# Static SVG for librsvg, image converters, and document embedding
+fm-cli render input.mmd --format svg --portable --output diagram.svg
+
 # PNG rasterization (requires --features png)
 fm-cli render input.mmd --format png --output diagram.png
 
@@ -398,6 +407,18 @@ fm-cli render input.mmd --format svg \
 ```
 
 Render-time flags include `--parse-mode {strict|compat|recover}`, `--layout-algorithm {auto|sugiyama|force|tree|radial|timeline|gantt|sankey|kanban|grid}` (the 10 most useful general-purpose algorithms; the 6 chart-style layouts — `sequence`, `xychart`, `pie`, `quadrant`, `gitgraph`, `packet` — are auto-dispatched per diagram type and can also be selected by name in `frankenmermaid.toml`), and FNX controls (`--fnx-mode {auto|enabled|disabled}`, `--fnx-projection {undirected|directed}`, `--fnx-fallback {graceful|strict}`).
+
+Default SVG output uses browser CSS for themes and interactive effects. `--portable`
+emits explicit dimensions and colors, retaining text, links, and accessibility metadata
+while disabling browser-dependent CSS and effects. It also works with `render-batch`;
+set `portable = true` under `[svg]` in the TOML config to make it the default. Library
+callers can apply the same profile with `SvgRenderConfig::make_portable()`.
+
+PNG export uses this static profile and loads installed system fonts before rasterizing
+labels. Install a family such as DejaVu Sans in minimal containers. A text-bearing export
+with no installed fonts reports an error. Use the same font installation when comparing
+PNG snapshots across machines; SVG font selection and PNG glyph shapes depend on the
+available fonts.
 
 ### `fm-cli parse`
 
@@ -616,12 +637,32 @@ the candidate source to verify the complete requested IR before accepting it.
 | `applyParseLensInsertLineAfter(source, elementId, text)` | Insert a line using the target's indentation and line ending, then refresh the snapshot. |
 | `applyIrLensEdit(source, editedIr)` | Validate a supported IR edit and return `{ updatedSource, snapshot }`. |
 
-The semantic API supports existing node labels and edge/message labels in flowchart, sequence,
-class, state, and ER diagrams. Flowcharts also support safe permutations of independent node
-declarations through the Rust ordering lens. Label IDs are interned: editing a label changes every
-node or edge referring to that ID. Keep the rest of the IR unchanged, and use the returned snapshot
-for subsequent edits. Topology changes, stale source references, changes to relationship metadata,
-and source forms that cannot be rewritten faithfully return an error. Source-span operations remain
+The semantic API supports renaming existing node labels and edge/message labels in flowchart,
+sequence, class, state, and ER diagrams. It also attaches nonempty plain labels to existing unlabeled
+edges/messages in all five families and to bare flowchart nodes. To attach a new label, append an
+`{ text, span }` entry to `ir.labels` and set the target's previously absent `label` to that index;
+the target's `span_primary` (node) or `span` (edge) supplies the original source coordinates. An
+existing plain label ID can also be reused. For example:
+
+```ts
+const source = 'flowchart LR\nA-->B';
+const editedIr = structuredClone(parseLens(source).parsed.ir);
+const node = editedIr.nodes.find(node => node.id === 'A')!;
+node.label = editedIr.labels.length;
+editedIr.labels.push({ text: 'Start', span: node.span_primary });
+const edge = editedIr.edges[0];
+edge.label = editedIr.labels.length;
+editedIr.labels.push({ text: 'request', span: edge.span });
+const result = applyIrLensEdit(source, editedIr);
+```
+
+Flowcharts also support safe permutations of independent node declarations through the Rust
+ordering lens. Label IDs are interned: editing a label changes every node or edge referring to that
+ID. Keep the rest of the IR unchanged, and use the returned snapshot for subsequent edits.
+Topology changes, removal or rebinding of existing labels, unused appended labels, stale source
+references, changes to relationship metadata, and source forms that cannot be rewritten faithfully
+return an error. Attaching node aliases in the other four families or labels inside empty explicit
+flowchart shapes is outside this semantic API's supported forms. Source-span operations remain
 available when the editor explicitly intends to replace Mermaid syntax.
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
@@ -1071,6 +1112,8 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 - **Obstacle-aware routing** uses CGA intersection queries to detect segments that pass through node bounding boxes and re-route around them.
 
 **Phase 7 — Post-processing.** Cluster boundaries are computed to enclose their member nodes with configurable padding (default 52px), coordinates are normalized to non-negative values, and edge-length quality metrics (`total_edge_length`, `reversed_edge_total_length`) are recorded.
+
+General graph layouts with many disconnected components automatically consider a balanced arrangement of complete components. Nodes, containers, routed edges, labels, and notes move together, preserving each component's internal flow direction. Small parallel layouts and explicitly constrained diagrams retain their authored arrangement.
 
 ### Cycle strategies
 
@@ -1562,7 +1605,7 @@ The `:N` suffix sets `grid_span = N` on the node. `space` and `space:N` create e
 The class parser handles:
 
 - **Generic type parameters** — `class List~T~` and `class Map~K,V~` produce a `generics: ["T"]` field on the node, which the SVG renderer formats as `List<T>`.
-- **Three-compartment box rendering** — class name (with stereotype `<<interface>>` etc.), attributes (with `+` / `-` / `#` / `~` visibility prefixes), and methods (with parameter types and return types) get their own horizontal stripes inside the node.
+- **Three-compartment cards** — a restrained header surface separates the class name and stereotype from attributes and methods. SVG, Canvas, shared scenes, and GPU plans use the same measured row geometry and retain complete member text, visibility prefixes, generics, and return types. Explicit fills and font sizes take precedence over the default presentation.
 - **Inheritance, composition, aggregation, dependency, realization** — each with a distinct arrowhead (`<|--`, `*--`, `o--`, `..>`, `..|>`).
 - **Cardinality labels** — `Customer "1" -- "*" Order : places` produces multiplicity badges at each endpoint.
 - **Namespace blocks** — `namespace Foo { class A; class B }` groups classes into a cluster.
@@ -1613,6 +1656,12 @@ kanban
 ```
 
 `wip` triggers warning styling on the column when exceeded, `priority` maps to color, and `assigned` becomes a badge on the card.
+
+Column widths and card positions follow their measured contents. Cards align within each lane, lane frames share a common height, and named empty lanes remain visible. Long headings and multiline cards reserve space instead of overlapping neighboring content.
+
+### Timeline — measured periods and events
+
+Timeline columns reserve the width of their period, events, and section headings. Events stack according to their measured heights, preserving chronology and section grouping. Period transitions connect horizontally; event connections use the vertical faces of their nodes. Configured typography and spacing apply to the whole layout.
 
 ### Sankey — flow-weighted column layout
 
@@ -2307,6 +2356,7 @@ Yes. The parser is explicitly designed to recover and produce best-effort output
 | Use case | Format |
 |---|---|
 | Documentation / web embedding | `svg` |
+| Image converters / document embedding | `svg --portable` |
 | Static image sharing | `png` (requires `--features png`) |
 | CI logs / terminal preview | `term` or `ascii` |
 | Large interactive browser views | Canvas2D via the WASM `Diagram` class |

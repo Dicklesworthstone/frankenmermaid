@@ -5981,7 +5981,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xa5af_f127_da97_efc8;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x1201_64c4_b182_4551;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -6000,7 +6000,7 @@ mod tests {
             package_hash, EXPECTED_PACKAGE_ARTIFACT_DIGEST,
             "the committed pkg artifact set changed or is only partially rebuilt; run the canonical \
              build-wasm.sh, review all five generated files, then update this package digest and \
-             the four render digests together"
+             the six render digests together"
         );
 
         assert_package_source_matches_current_inputs();
@@ -6009,22 +6009,32 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x9976_42a0_b5da_e927,
+                0xe372_cc54_5be9_737b,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x094c_237f_ef93_2a5f,
+                0x0194_a77f_e15a_24d3,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x68a0_4950_3803_05e4,
+                0xdad3_120c_347b_d6f4,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xd983_b73c_ca10_d621,
+                0xe23e_acf7_a929_e5c6,
+            ),
+            (
+                "sankey",
+                "sankey-beta\nSolar,Grid,60\nWind,Grid,40\nGas,Grid,30\nGrid,Homes,65\nGrid,Industry,45\nGrid,Transport,20\n",
+                0x3f68_910e_63f1_f8a1,
+            ),
+            (
+                "gantt",
+                "gantt\n title Product rollout\n dateFormat YYYY-MM-DD\n axisFormat %Y-%m-%d\n tickInterval 1day\n topAxis\n section Design\n Research :a, 2026-01-01, 3d\n Prototype :b, after a, 4d\n section Engineering\n Implementation :c, after b, 5d\n Review :d, after c, 2d\n",
+                0x0615_1efd_72a3_6ad4,
             ),
         ];
 

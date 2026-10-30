@@ -954,57 +954,136 @@ mod sankey {
         widths: &[f64],
     ) {
         let mut painted = Vec::new();
-        let mut points = Vec::new();
+        let mut commands = Vec::new();
         let mut width = 0.0;
         for operation in context.operations() {
             match operation {
-                DrawOperation::BeginPath => points.clear(),
-                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::BeginPath => commands.clear(),
+                DrawOperation::MoveTo(..)
+                | DrawOperation::LineTo(..)
+                | DrawOperation::BezierCurveTo(..)
+                | DrawOperation::QuadraticCurveTo(..)
+                | DrawOperation::ArcTo(..)
+                | DrawOperation::Rect(..)
+                | DrawOperation::ClosePath => commands.push(operation.clone()),
                 DrawOperation::SetLineWidth(value) => width = *value,
-                DrawOperation::Stroke if !points.is_empty() => {
-                    painted.push((points.clone(), width))
+                DrawOperation::Stroke if !commands.is_empty() => {
+                    painted.push((commands.clone(), width))
                 }
                 _ => {}
             }
         }
         assert_eq!(layout.edges.len(), widths.len());
-        let expected_segments: usize = layout.edges.iter().map(|edge| edge.points.len() - 1).sum();
-        assert_eq!(plan.edge_segments.len(), expected_segments);
         // The parser represents Sankey flows as ArrowType::Arrow, which the existing SVG and
         // Canvas paths preserve. Changing quantities must not drop or invent those markers.
         assert_eq!(plan.arrowheads.len(), layout.edges.len());
+        let mut accounted_segments = 0;
         for (edge, expected) in layout.edges.iter().zip(widths) {
-            // Column separators are also stroked paths. Identify each flow by its full route,
-            // rather than mistaking chart furniture for an additional flow.
+            // Sankey's interior routing points are cubic controls, not polyline corners.
+            // Compare the complete Canvas command stream so a missing curve, an extra leg,
+            // or a duplicated stroke cannot pass as the same flow.
+            assert_eq!(
+                edge.points.len(),
+                4,
+                "fixture must contain forward cubic ribbons"
+            );
+            let points: [[f64; 2]; 4] = std::array::from_fn(|index| {
+                [
+                    f64::from(edge.points[index].x),
+                    f64::from(edge.points[index].y),
+                ]
+            });
+            assert!(points.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+            close(points[0][1], points[1][1]);
+            close(points[2][1], points[3][1]);
+            let local = points.map(|point| {
+                [
+                    point[0] - f64::from(layout.bounds.x),
+                    point[1] - f64::from(layout.bounds.y),
+                ]
+            });
+            let expected_commands = [
+                DrawOperation::MoveTo(local[0][0], local[0][1]),
+                DrawOperation::BezierCurveTo(
+                    local[1][0],
+                    local[1][1],
+                    local[2][0],
+                    local[2][1],
+                    local[3][0],
+                    local[3][1],
+                ),
+            ];
             let matching: Vec<_> = painted
                 .iter()
-                .filter(|(points, _)| {
-                    points.len() == edge.points.len()
-                        && points.iter().zip(&edge.points).all(|((x, y), point)| {
-                            (*x - (f64::from(point.x) - f64::from(layout.bounds.x))).abs() < 0.001
-                                && (*y - (f64::from(point.y) - f64::from(layout.bounds.y))).abs()
-                                    < 0.001
-                        })
-                })
+                .filter(|(commands, _)| commands.as_slice() == expected_commands)
                 .collect();
             assert_eq!(matching.len(), 1, "each flow must be drawn exactly once");
-            let (points, width) = matching[0];
+            let (_, width) = matching[0];
             close(*width, *expected);
-            assert_eq!(points.len(), edge.points.len());
-            for ((x, y), point) in points.iter().zip(&edge.points) {
-                close(*x, f64::from(point.x) - f64::from(layout.bounds.x));
-                close(*y, f64::from(point.y) - f64::from(layout.bounds.y));
-            }
             let segments: Vec<_> = plan
                 .edge_segments
                 .iter()
                 .filter(|segment| segment.edge_index as usize == edge.edge_index)
                 .collect();
-            assert_eq!(segments.len(), edge.points.len() - 1);
-            for (segment, endpoints) in segments.iter().zip(edge.points.windows(2)) {
+            assert!(!segments.is_empty(), "each flow needs GPU geometry");
+            accounted_segments += segments.len();
+            let start = edge.points.first().unwrap();
+            let end = edge.points.last().unwrap();
+            assert_eq!(segments[0].from, [start.x, start.y]);
+            assert_eq!(segments.last().unwrap().to, [end.x, end.y]);
+            assert!(segments.windows(2).all(|pair| pair[0].to == pair[1].from));
+
+            // Evaluate the cubic independently of the GPU's adaptive subdivision. Its vertices
+            // must lie on this curve, and its chords must stay within the promised 0.05px error.
+            let cubic = |t: f64| {
+                let u = 1.0 - t;
+                [0, 1].map(|axis| {
+                    u.powi(3) * points[0][axis]
+                        + 3.0 * u * u * t * points[1][axis]
+                        + 3.0 * u * t * t * points[2][axis]
+                        + t.powi(3) * points[3][axis]
+                })
+            };
+            for segment in &segments {
                 close(f64::from(segment.width), *expected);
-                assert_eq!(segment.from, [endpoints[0].x, endpoints[0].y]);
-                assert_eq!(segment.to, [endpoints[1].x, endpoints[1].y]);
+                // Continuity plus strictly increasing x covers the entire flow once, rejecting
+                // duplicate, reversed, overlapping, or zero-length segments without fixing a
+                // tessellation count that legitimately varies with each curve's shape.
+                assert!(segment.to[0] > segment.from[0]);
+                for vertex in [segment.from, segment.to] {
+                    let (mut low, mut high) = (0.0, 1.0);
+                    for _ in 0..32 {
+                        let middle = (low + high) / 2.0;
+                        if cubic(middle)[0] < f64::from(vertex[0]) {
+                            low = middle;
+                        } else {
+                            high = middle;
+                        }
+                    }
+                    let on_curve = cubic((low + high) / 2.0);
+                    close(f64::from(vertex[0]), on_curve[0]);
+                    close(f64::from(vertex[1]), on_curve[1]);
+                }
+            }
+            for step in 0..=128 {
+                let sample = cubic(f64::from(step) / 128.0);
+                let error = segments
+                    .iter()
+                    .map(|segment| {
+                        let from = segment.from.map(f64::from);
+                        let to = segment.to.map(f64::from);
+                        let dx = to[0] - from[0];
+                        let dy = to[1] - from[1];
+                        let t = (((sample[0] - from[0]) * dx + (sample[1] - from[1]) * dy)
+                            / (dx * dx + dy * dy))
+                            .clamp(0.0, 1.0);
+                        (sample[0] - from[0] - t * dx).hypot(sample[1] - from[1] - t * dy)
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    error <= 0.051,
+                    "GPU flow misses cubic sample {sample:?} by {error}"
+                );
             }
             let heads: Vec<_> = plan
                 .arrowheads
@@ -1012,9 +1091,14 @@ mod sankey {
                 .filter(|head| head.edge_index as usize == edge.edge_index)
                 .collect();
             assert_eq!(heads.len(), 1);
-            let end = edge.points.last().unwrap();
             assert_eq!(heads[0].position, [end.x, end.y]);
+            close(f64::from(heads[0].angle), 0.0);
         }
+        assert_eq!(
+            accounted_segments,
+            plan.edge_segments.len(),
+            "no unowned GPU flow segments"
+        );
     }
 
     #[test]

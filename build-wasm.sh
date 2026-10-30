@@ -271,7 +271,22 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # features still exclude fnx-integration. No shrink that would drop that behavior
 # was applied. 935K is the smallest whole-KiB ceiling that fits 957153, with 287
 # bytes of headroom. Correctness and artifact/source freshness gates are unchanged.
-MAX_GZIP_BYTES=$((935 * 1024))
+# Raised 935K -> 1063K on 2026-10-30 for the source refresh and default-layout improvements.
+# Independent starting-revision and feature builds used this script, nightly-2026-08-31,
+# wasm-bindgen 0.2.129, and Binaryen 125. Measured with the same gzip command below:
+#   957153 gzip / 2455470 raw  previously committed package (already behind source)
+#  1070267 gzip / 2712383 raw  unchanged starting revision 6880dc8
+#  1086740 gzip / 2763622 raw  Sankey/Gantt surfaces plus balanced flowchart labels, ade9ad2
+#  1086919 gzip / 2763398 raw  combined nested surfaces and portable backgrounds, bac250c
+#  1087579 gzip / 2764680 raw  combined connector and heading clearance, 20ae630
+# The starting source already exceeded the old ceiling by 112827 bytes. The combined visual
+# changes add 17312 gzip bytes (1.62%) over that independently rebuilt source, rather than the
+# 130426-byte difference against the stale package. A unique-key unstable Sankey sort was tried
+# on ade9ad2: raw size fell to 2762604, but gzip GREW to 1087401 (+661), so it was rejected.
+# Keep canonical -Oz --converge, LTO, one codegen unit, and immediate-abort std. 1063K is the
+# smallest whole-KiB ceiling fitting the measured result, leaving 933 bytes. Render equivalence,
+# complete package provenance, and source-freshness assertions remain unchanged.
+MAX_GZIP_BYTES=$((1063 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

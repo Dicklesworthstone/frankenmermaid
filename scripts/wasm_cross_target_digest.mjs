@@ -40,8 +40,8 @@ fm.initSync({ module: readFileSync(join(here, "..", "pkg", "frankenmermaid_bg.wa
 // redirect, which has blocked commands that merely quoted a diagram.
 const ARROW = "-" + "-" + ">";
 
-// The same four fixtures as crates/fm-cli/tests/layout_fp_determinism.rs, so a divergence found
-// here can be traced with the coordinate digests that file already pins.
+// Six fixtures cover the graph cases in crates/fm-cli/tests/layout_fp_determinism.rs plus
+// weighted Sankey ribbons and dense Gantt dates. Keep these sources identical to the Rust table.
 const DIAGRAMS = [
   [
     "flowchart",
@@ -60,6 +60,14 @@ const DIAGRAMS = [
   [
     "state",
     `stateDiagram-v2\n  [*] ${ARROW} Idle\n  Idle ${ARROW} Busy: start\n  Busy ${ARROW} Idle: done\n`,
+  ],
+  [
+    "sankey",
+    "sankey-beta\nSolar,Grid,60\nWind,Grid,40\nGas,Grid,30\nGrid,Homes,65\nGrid,Industry,45\nGrid,Transport,20\n",
+  ],
+  [
+    "gantt",
+    "gantt\n title Product rollout\n dateFormat YYYY-MM-DD\n axisFormat %Y-%m-%d\n tickInterval 1day\n topAxis\n section Design\n Research :a, 2026-01-01, 3d\n Prototype :b, after a, 4d\n section Engineering\n Implementation :c, after b, 5d\n Review :d, after c, 2d\n",
   ],
 ];
 

@@ -1208,6 +1208,9 @@ function __wbg_get_imports() {
         __wbg_clearRect_a5e36505218c247a: function(arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).clearRect(arg1, arg2, arg3, arg4);
         },
+        __wbg_clip_275e70d2dc182fec: function(arg0) {
+            getObject(arg0).clip();
+        },
         __wbg_closePath_355eb6da179dd9c2: function(arg0) {
             getObject(arg0).closePath();
         },
@@ -1399,6 +1402,9 @@ function __wbg_get_imports() {
         __wbg_save_f32554f1747071d1: function(arg0) {
             getObject(arg0).save();
         },
+        __wbg_scale_a6ef716accd967d5: function() { return handleError(function (arg0, arg1, arg2) {
+            getObject(arg0).scale(arg1, arg2);
+        }, arguments); },
         __wbg_setLineDash_9fc0f9169c542b64: function() { return handleError(function (arg0, arg1) {
             getObject(arg0).setLineDash(getObject(arg1));
         }, arguments); },
