@@ -1341,7 +1341,7 @@ fn lower_flow_ast(
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
-                builder.push_edge(f, t, *arrow, label.as_deref(), span);
+                builder.push_flow_edge((f, &from.id), (t, &to.id), *arrow, label.as_deref(), span);
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);
                 }
@@ -1546,7 +1546,7 @@ fn lower_flow_document_item(
                     add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                     add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
                 }
-                builder.push_edge(f, t, arrow, None, span);
+                builder.push_flow_edge((f, from), (t, to), arrow, None, span);
             } else {
                 builder.discard_pending_subgraph_endpoints();
             }
@@ -28107,6 +28107,78 @@ Rel_Back(db, app, "Responds")"#,
             named("flowchart TB\n  subgraph s\n    x\n  end\n  a --> s --> b\n"),
             [(None, some("s")), (some("s"), None)]
         );
+    }
+
+    #[test]
+    fn flowchart_subgraph_ends_preserve_authored_identity_when_members_match() {
+        fn assert_named_ends(input: &str, expected: &[(Option<&str>, Option<&str>)]) {
+            let ir = parse_mermaid(input).ir;
+            assert_eq!(
+                ir.nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["A"],
+                "subgraph references must not create phantom nodes: {input}"
+            );
+            let key = |id: Option<IrSubgraphId>| id.map(|id| ir.graph.subgraphs[id.0].key.as_str());
+            let actual = ir
+                .edges
+                .iter()
+                .map(|edge| {
+                    assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(0)), "{input}");
+                    assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(0)), "{input}");
+                    let (from, to) = edge.named_subgraphs();
+                    (key(from), key(to))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected,
+                "authored endpoint identity was lost: {input}"
+            );
+        }
+
+        let group = "subgraph group[Group frame]\n A[Member]\nend\n";
+        for (statement, expected) in [
+            ("A --> group", vec![(None, Some("group"))]),
+            ("group --> A", vec![(Some("group"), None)]),
+            ("group --> group", vec![(Some("group"), Some("group"))]),
+            ("A --> A", vec![(None, None)]),
+            ("A -->|inside| group", vec![(None, Some("group"))]),
+            ("group[Ignored] -->|inside| A", vec![(Some("group"), None)]),
+            (
+                "A --> group --> A",
+                vec![(None, Some("group")), (Some("group"), None)],
+            ),
+            (
+                "A & group --> A & group",
+                vec![
+                    (None, None),
+                    (None, Some("group")),
+                    (Some("group"), None),
+                    (Some("group"), Some("group")),
+                ],
+            ),
+        ] {
+            // The same authored identity must survive both fast and AST lowering, regardless
+            // of whether the subgraph has already been lowered or is a forward reference.
+            assert_named_ends(&format!("flowchart LR\n{group}{statement}\n"), &expected);
+            assert_named_ends(&format!("flowchart LR\n{statement}\n{group}"), &expected);
+        }
+
+        let nested =
+            "subgraph outer[Outer frame]\n subgraph inner[Inner frame]\n  A[Member]\n end\nend\n";
+        let statements = "outer --> inner\ninner --> outer\nouter --> outer\nA --> inner\ninner --> A\nA --> A\n";
+        let expected = [
+            (Some("outer"), Some("inner")),
+            (Some("inner"), Some("outer")),
+            (Some("outer"), Some("outer")),
+            (None, Some("inner")),
+            (Some("inner"), None),
+            (None, None),
+        ];
+        assert_named_ends(&format!("flowchart LR\n{nested}{statements}"), &expected);
+        assert_named_ends(&format!("flowchart LR\n{statements}{nested}"), &expected);
     }
 
     #[test]

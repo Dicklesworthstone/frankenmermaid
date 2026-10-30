@@ -210,7 +210,7 @@ pub struct IrBuilder {
     /// every other diagram type, so their paths pay one hash miss.
     flow_forward_subgraph_members: FxHashMap<String, String>,
     /// Flowchart only: the endpoints of the statement being lowered that NAMED a subgraph, as
-    /// (member node it resolved to, subgraph public key). `push_edge` reads them to record which
+    /// (member node it resolved to, subgraph public key). `push_flow_edge` reads them to record which
     /// ends of an edge were written to a subgraph; cleared at each statement.
     pending_subgraph_endpoints: Vec<(IrNodeId, String)>,
     /// (edge index, is the source end, subgraph public key) for every edge end that named a
@@ -2822,6 +2822,35 @@ impl IrBuilder {
         });
     }
 
+    /// Preserve which authored endpoint names a subgraph even when both resolve to the same node.
+    pub(crate) fn push_flow_edge(
+        &mut self,
+        from: (IrNodeId, &str),
+        to: (IrNodeId, &str),
+        arrow: ArrowType,
+        label: Option<&str>,
+        span: Span,
+    ) {
+        let edge_index = self.ir.edges.len();
+        for ((node, authored_key), is_source) in [(from, true), (to, false)] {
+            let authored_key = authored_key.trim();
+            if let Some((_, key)) = self
+                .pending_subgraph_endpoints
+                .iter()
+                .find(|(member, key)| *member == node && key == authored_key)
+            {
+                self.subgraph_edge_ends
+                    .push((edge_index, is_source, key.clone()));
+            }
+        }
+        // Each edge resolves its two endpoints right before this push, so what is pending belongs
+        // to THIS edge alone. Keeping it for the rest of the statement made every later edge
+        // re-match it: `G&G&…&G --> G&G&…&G` (90 x 90 edges) left ~2E^2 entries (OOM in wasm),
+        // and in `G --> b --> a` the edge `b --> a` was attached to G's border.
+        self.pending_subgraph_endpoints.clear();
+        self.push_edge(from.0, to.0, arrow, label, span);
+    }
+
     pub(crate) fn push_edge(
         &mut self,
         from: IrNodeId,
@@ -2834,20 +2863,6 @@ impl IrBuilder {
         let label_id = parsed_label
             .as_ref()
             .map(|value| self.intern_label(value, span));
-        let edge_index = self.ir.edges.len();
-        for (member, key) in &self.pending_subgraph_endpoints {
-            for (end, is_source) in [(from, true), (to, false)] {
-                if end == *member {
-                    self.subgraph_edge_ends
-                        .push((edge_index, is_source, key.clone()));
-                }
-            }
-        }
-        // Each edge resolves its two endpoints right before this push, so what is pending belongs
-        // to THIS edge alone. Keeping it for the rest of the statement made every later edge
-        // re-match it: `G&G&…&G --> G&G&…&G` (90 x 90 edges) left ~2E^2 entries (OOM in wasm),
-        // and in `G --> b --> a` the edge `b --> a` was attached to G's border.
-        self.pending_subgraph_endpoints.clear();
         self.ir.edges.push(IrEdge {
             from: IrEndpoint::Node(from),
             to: IrEndpoint::Node(to),
