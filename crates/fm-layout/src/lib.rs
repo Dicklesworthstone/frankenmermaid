@@ -13297,6 +13297,217 @@ pub fn sankey_flow_stroke_width(
     Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
 }
 
+/// Weighted inversions between a pair of Sankey columns. Shared sources and targets are
+/// junctions, not crossings. The reverse Fenwick index sums larger target positions directly,
+/// avoiding cancellation when a very small flow crosses a much larger one.
+fn sankey_column_pair_crossings(
+    links: &[(usize, usize, f64)],
+    positions: &[usize],
+) -> (f64, usize) {
+    if links.len() < 2 {
+        return (0.0, 0);
+    }
+    let mut ordered: Vec<_> = links
+        .iter()
+        .map(|&(source, target, weight)| (positions[source], positions[target], weight))
+        .collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let target_count = ordered.iter().map(|edge| edge.1).max().unwrap_or(0) + 1;
+    let mut weights = vec![0.0; target_count + 1];
+    let mut counts = vec![0_usize; target_count + 1];
+    let mut score = (0.0, 0_usize);
+    let mut start = 0;
+    while start < ordered.len() {
+        let end = start + ordered[start..].partition_point(|edge| edge.0 == ordered[start].0);
+        for &(_, target, weight) in &ordered[start..end] {
+            let mut index = target_count - target - 1;
+            while index > 0 {
+                score.0 += weight * weights[index];
+                score.1 = score.1.saturating_add(counts[index]);
+                index &= index - 1;
+            }
+        }
+        // Insert the entire source group only after querying it, so branches that leave
+        // the same card do not count as crossing one another.
+        for &(_, target, weight) in &ordered[start..end] {
+            let mut index = target_count - target;
+            while index <= target_count {
+                weights[index] += weight;
+                counts[index] += 1;
+                index += index & index.wrapping_neg();
+            }
+        }
+        start = end;
+    }
+    score
+}
+
+/// Untangle columns without changing their ranks, dimensions, or declared flow values.
+///
+/// Four forward/backward barycenter sweeps are deterministic. Each proposed column order is
+/// accepted only if the weighted crossing cost of ALL incident column pairs does not grow;
+/// improving its left side may not silently make its right side worse. Equal weighted costs
+/// prefer fewer crossings, with source declaration order breaking barycenter ties. Scoring
+/// visits each column pair at most twice per sweep, with an O(E log E) inversion count
+/// rather than enumerating every pair of links.
+fn relax_sankey_column_order(
+    ir: &MermaidDiagramIr,
+    ranks: &[usize],
+    columns: &mut BTreeMap<usize, Vec<usize>>,
+    flows: &[(usize, usize, f64)],
+) -> (usize, usize) {
+    let mut pairs = BTreeMap::<(usize, usize), Vec<(usize, usize, f64)>>::new();
+    let mut incoming = vec![Vec::new(); ir.nodes.len()];
+    let mut outgoing = vec![Vec::new(); ir.nodes.len()];
+    for &(source, target, weight) in flows {
+        if ranks[source] == ranks[target] {
+            continue;
+        }
+        let (left, right) = if ranks[source] < ranks[target] {
+            (source, target)
+        } else {
+            (target, source)
+        };
+        pairs
+            .entry((ranks[left], ranks[right]))
+            .or_default()
+            .push((left, right, weight));
+        outgoing[left].push((right, weight));
+        incoming[right].push((left, weight));
+    }
+    if pairs.is_empty() {
+        return (0, 0);
+    }
+
+    let mut positions = vec![0; ir.nodes.len()];
+    let mut column_sizes = vec![0; ir.nodes.len()];
+    for nodes in columns.values() {
+        for (position, &node) in nodes.iter().enumerate() {
+            positions[node] = position;
+            column_sizes[node] = nodes.len();
+        }
+    }
+    let pair_links: Vec<_> = pairs.values().collect();
+    let mut scores: Vec<_> = pair_links
+        .iter()
+        .map(|links| sankey_column_pair_crossings(links, &positions))
+        .collect();
+    let sum_scores = |scores: &[(f64, usize)]| {
+        scores.iter().fold((0.0, 0_usize), |sum, score| {
+            (sum.0 + score.0, sum.1.saturating_add(score.1))
+        })
+    };
+    let initial_score = sum_scores(&scores);
+
+    // Prefer the author's order when it is at least as clear as the old alphabetical
+    // order. Retain the latter as a quality floor rather than imposing a new ordering
+    // on diagrams whose names already happen to describe an uncrossed flow.
+    let mut source_positions = positions.clone();
+    for nodes in columns.values() {
+        let mut source_order = nodes.clone();
+        source_order.sort_unstable();
+        for (position, &node) in source_order.iter().enumerate() {
+            source_positions[node] = position;
+        }
+    }
+    let source_scores: Vec<_> = pair_links
+        .iter()
+        .map(|links| sankey_column_pair_crossings(links, &source_positions))
+        .collect();
+    if sum_scores(&source_scores) <= initial_score {
+        positions = source_positions;
+        scores = source_scores;
+        for nodes in columns.values_mut() {
+            nodes.sort_unstable();
+        }
+    }
+
+    let mut incident_pairs = BTreeMap::<usize, Vec<usize>>::new();
+    for (index, &(left, right)) in pairs.keys().enumerate() {
+        incident_pairs.entry(left).or_default().push(index);
+        incident_pairs.entry(right).or_default().push(index);
+    }
+    let rank_keys: Vec<_> = columns.keys().copied().collect();
+    for _ in 0..4 {
+        let mut changed = false;
+        for forward in [true, false] {
+            for step in 0..rank_keys.len() {
+                let rank = rank_keys[if forward {
+                    step
+                } else {
+                    rank_keys.len() - step - 1
+                }];
+                let Some(affected) = incident_pairs.get(&rank) else {
+                    continue;
+                };
+                let nodes = &columns[&rank];
+                if nodes.len() < 2 {
+                    continue;
+                }
+                let neighbors = if forward { &incoming } else { &outgoing };
+                let mut candidate: Vec<_> = nodes
+                    .iter()
+                    .map(|&node| {
+                        let (weighted_position, total_weight) = neighbors[node].iter().fold(
+                            (0.0, 0.0),
+                            |(sum, total), &(neighbor, weight)| {
+                                let position = (positions[neighbor] as f64 + 0.5)
+                                    / column_sizes[neighbor] as f64;
+                                (sum + position * weight, total + weight)
+                            },
+                        );
+                        let barycenter = if total_weight > 0.0 {
+                            weighted_position / total_weight
+                        } else {
+                            (positions[node] as f64 + 0.5) / nodes.len() as f64
+                        };
+                        (node, barycenter)
+                    })
+                    .collect();
+                candidate.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+                if candidate
+                    .iter()
+                    .map(|&(node, _)| node)
+                    .eq(nodes.iter().copied())
+                {
+                    continue;
+                }
+                for (position, &(node, _)) in candidate.iter().enumerate() {
+                    positions[node] = position;
+                }
+                let candidate_scores: Vec<_> = affected
+                    .iter()
+                    .map(|&index| sankey_column_pair_crossings(pair_links[index], &positions))
+                    .collect();
+                let old_score = affected.iter().fold((0.0, 0_usize), |sum, &index| {
+                    (
+                        sum.0 + scores[index].0,
+                        sum.1.saturating_add(scores[index].1),
+                    )
+                });
+                if sum_scores(&candidate_scores) <= old_score {
+                    for (&index, score) in affected.iter().zip(candidate_scores) {
+                        scores[index] = score;
+                    }
+                    *columns
+                        .get_mut(&rank)
+                        .expect("rank came from these columns") =
+                        candidate.into_iter().map(|(node, _)| node).collect();
+                    changed = true;
+                } else {
+                    for (position, &node) in nodes.iter().enumerate() {
+                        positions[node] = position;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (initial_score.1, sum_scores(&scores).1)
+}
+
 #[must_use]
 pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
     Arc::unwrap_or_clone(layout_diagram_sankey_traced(ir).layout)
@@ -13337,14 +13548,17 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .filter_map(usable_flow)
         .map(|(_, _, value)| value)
         .fold(0.0_f64, f64::max);
+    let normalized_flows: Vec<_> = ir
+        .edges
+        .iter()
+        .filter_map(usable_flow)
+        .map(|(source, target, value)| (source, target, value / widest_flow))
+        .collect();
     let mut in_flow = vec![0.0_f64; node_count];
     let mut out_flow = vec![0.0_f64; node_count];
-    if widest_flow > 0.0 {
-        for (source, target, value) in ir.edges.iter().filter_map(usable_flow) {
-            let normalized = value / widest_flow;
-            out_flow[source] += normalized;
-            in_flow[target] += normalized;
-        }
+    for &(source, target, value) in &normalized_flows {
+        out_flow[source] += value;
+        in_flow[target] += value;
     }
     let max_throughput = in_flow
         .iter()
@@ -13382,6 +13596,16 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     for nodes in nodes_by_rank.values_mut() {
         nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     }
+    let (crossings_before, crossings_after) =
+        relax_sankey_column_order(ir, &ranks, &mut nodes_by_rank, &normalized_flows);
+    push_snapshot(
+        &mut trace,
+        "sankey_crossing_minimization",
+        node_count,
+        ir.edges.len(),
+        0,
+        crossings_after,
+    );
 
     let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
@@ -13436,6 +13660,11 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
     let layout = Arc::make_mut(&mut traced.layout);
+    layout.stats.crossing_count_before_refinement = crossings_before;
+    layout.stats.crossing_count = crossings_after;
+    if let Some(snapshot) = traced.trace.snapshots.last_mut() {
+        snapshot.crossing_count = crossings_after;
+    }
     layout.extensions.bands = nodes_by_rank
         .keys()
         .copied()
@@ -31534,6 +31763,151 @@ mod tests {
         parse(include_str!("../../fm-cli/tests/golden/sankey_basic.mmd")).ir
     }
 
+    /// Independent geometric check: two links between the same pair of columns cross
+    /// when the vertical order of their endpoints reverses. Keep this quadratic oracle
+    /// small; production uses a weighted inversion count instead.
+    fn sankey_drawn_crossing_cost(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        alphabetical: bool,
+    ) -> (f64, usize) {
+        let links: Vec<_> = ir
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let source = super::endpoint_node_index(ir, edge.from)?;
+                let target = super::endpoint_node_index(ir, edge.to)?;
+                let weight = ir.labels.get(edge.label?.0)?.text.parse::<f64>().ok()?;
+                (weight.is_finite() && weight > 0.0).then_some((source, target, weight))
+            })
+            .collect();
+        let order = |a: usize, b: usize| {
+            if alphabetical {
+                ir.nodes[a].id.cmp(&ir.nodes[b].id)
+            } else {
+                layout.nodes[a]
+                    .bounds
+                    .center()
+                    .y
+                    .total_cmp(&layout.nodes[b].bounds.center().y)
+            }
+        };
+        let mut cost = (0.0, 0);
+        for (index, &(a, b, weight)) in links.iter().enumerate() {
+            for &(c, d, other_weight) in &links[index + 1..] {
+                if layout.nodes[a].rank == layout.nodes[c].rank
+                    && layout.nodes[b].rank == layout.nodes[d].rank
+                    && order(a, c) != std::cmp::Ordering::Equal
+                    && order(a, c) == order(b, d).reverse()
+                {
+                    cost.0 += weight * other_weight;
+                    cost.1 += 1;
+                }
+            }
+        }
+        cost
+    }
+
+    #[test]
+    fn sankey_flow_weighted_barycenter_untangles_crossed_bands() {
+        let ir = parse("sankey-beta\nA,D,12\nB,C,8\nC,F,8\nD,E,12\n").ir;
+        let layout = layout_diagram_sankey(&ir);
+        assert_eq!(sankey_drawn_crossing_cost(&ir, &layout, true), (192.0, 2));
+        assert_eq!(sankey_drawn_crossing_cost(&ir, &layout, false), (0.0, 0));
+        assert_eq!(layout.stats.crossing_count_before_refinement, 2);
+        assert_eq!(layout.stats.crossing_count, 0);
+        assert_eq!(layout.nodes.len(), ir.nodes.len());
+        assert_eq!(layout.edges.len(), ir.edges.len());
+        let again = layout_diagram_sankey(&ir);
+        assert_eq!(layout.nodes, again.nodes);
+        assert_eq!(layout.edges, again.edges);
+    }
+
+    #[test]
+    fn sankey_weighted_crossings_exclude_shared_junctions_and_preserve_small_flows() {
+        let positions = [0, 1, 2, 0, 1];
+        let links = [
+            (0, 4, 1.0),
+            (0, 3, 0.2),
+            (1, 4, 0.5),
+            (1, 3, 0.3),
+            (2, 3, 0.01),
+        ];
+        let score = super::sankey_column_pair_crossings(&links, &positions);
+        assert!((score.0 - 0.315).abs() < 1e-12);
+        assert_eq!(score.1, 3);
+        let tiny =
+            super::sankey_column_pair_crossings(&[(0, 4, 1e-150), (1, 3, 1e-150)], &positions);
+        assert!(tiny.0 > 0.0, "a small crossing must not cancel to zero");
+        assert_eq!(tiny.1, 1);
+        assert_eq!(super::sankey_column_pair_crossings(&[], &[]), (0.0, 0));
+    }
+
+    #[test]
+    fn sankey_relaxation_never_worsens_weighted_column_crossings() {
+        // Unequal flows on both sides of each middle column exercise the acceptance
+        // guard: a forward-only improvement may create more expensive outgoing crossings.
+        for seed in 0..24 {
+            let mut source = String::from("sankey-beta\n");
+            for (left, right) in [('A', 'B'), ('B', 'C')] {
+                for from in 0..4 {
+                    for to in 0..4 {
+                        if (seed + from * 5 + to * 7) % 4 == 0 {
+                            continue;
+                        }
+                        let flow = (seed * 13 + from * 17 + to * 11) % 29 + 1;
+                        source.push_str(&format!("{left}{from},{right}{to},{flow}\n"));
+                    }
+                }
+            }
+            let ir = parse(&source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            let before = sankey_drawn_crossing_cost(&ir, &layout, true);
+            let after = sankey_drawn_crossing_cost(&ir, &layout, false);
+            assert!(
+                after.0 <= before.0,
+                "seed {seed} traded a cheap crossing for an expensive one: {before:?} -> {after:?}"
+            );
+            assert_eq!(layout.stats.crossing_count, after.1);
+            for (index, node) in layout.nodes.iter().enumerate() {
+                for other in &layout.nodes[index + 1..] {
+                    assert!(!rects_overlap(node.bounds, other.bounds));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_crossing_ties_preserve_source_order_and_degenerate_columns_are_safe() {
+        let ir = parse("sankey-beta\nZ,Middle,10\nA,Middle,10\n").ir;
+        let layout = layout_diagram_sankey(&ir);
+        let top = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == id)
+                .unwrap()
+                .bounds
+                .y
+        };
+        assert!(top("Z") < top("A"), "equal flows retain declaration order");
+        for source in [
+            "sankey-beta\n",
+            "sankey-beta\nA,A,5\nB,B,0\n",
+            "sankey-beta\nA,B,NaN\nB,C,-2\n",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            assert_eq!(layout.stats.crossing_count, 0);
+            assert!(
+                layout
+                    .nodes
+                    .iter()
+                    .all(|node| { node.bounds.x.is_finite() && node.bounds.y.is_finite() })
+            );
+        }
+    }
+
     #[test]
     fn sankey_layout_keeps_the_basic_example_compact_and_centers_columns() {
         let ir = sankey_example_ir();
@@ -46018,9 +46392,9 @@ mod tests {
             config.clone(),
             guardrails,
         );
-        ir.nodes[5].inline_style = Some(fm_core::parse_style_string(
+        ir.nodes[5].inline_style = Some(Box::new(fm_core::parse_style_string(
             "font-size:32px;font-family:monospace",
-        ));
+        )));
         let label = ir.nodes[6].label.unwrap();
         ir.labels[label.0].text = "Different text".to_string();
         let updated = engine.layout_diagram_traced_with_config_and_guardrails(
