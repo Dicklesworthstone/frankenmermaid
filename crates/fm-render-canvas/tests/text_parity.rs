@@ -1255,7 +1255,7 @@ mod node_paragraphs {
         let region = ir.nodes[0]
             .shape
             .label_region(bounds.width, bounds.height)
-            .unwrap_or(fm_layout::LayoutRect {
+            .unwrap_or(fm_core::NodeLabelRegion {
                 x: 0.0,
                 y: 0.0,
                 width: bounds.width,
