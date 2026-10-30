@@ -6031,7 +6031,7 @@ mod tests {
         // Equal-area siblings retain the order supplied by layout rather than their IR indices.
         layout
             .clusters
-            .sort_by(|left, right| right.cluster_index.cmp(&left.cluster_index));
+            .sort_by_key(|cluster| std::cmp::Reverse(cluster.cluster_index));
         let bounds = layout.clusters[0].bounds;
         for cluster in &mut layout.clusters {
             cluster.bounds = bounds;

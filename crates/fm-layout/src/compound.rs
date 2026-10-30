@@ -803,9 +803,12 @@ mod tests {
                 let last_baseline =
                     (title_font + 2.0).max(16.0) + (lines - 1) as f32 * title_font * 1.4;
                 let header = node.bounds.y - cluster.bounds.y;
+                // SVG's default thick marker extends 9 units back at a 2.5px stroke.
+                // Its wings must clear the title, including ordinary `==>` syntax.
+                let arrow_depth = 9.0 * 2.5;
                 assert!(
-                    header + 0.01 >= last_baseline + title_font * 0.3 + 8.0,
-                    "the title descenders must clear the node fill: header={header}, font={font_size}"
+                    header + 0.01 >= last_baseline + title_font * 0.3 + arrow_depth + 4.0,
+                    "the title must clear incoming arrowheads: header={header}, font={font_size}"
                 );
                 assert!(
                     (node.bounds.center().x - cluster.bounds.center().x).abs() < 0.01,
@@ -816,9 +819,13 @@ mod tests {
                 assert!((bottom_padding - LayoutSpacing::default().cluster_padding).abs() < 0.01);
                 if font_size == 15.0 && lines == 1 {
                     let padding = LayoutSpacing::default().cluster_padding;
-                    assert_eq!(header, padding);
+                    assert!(header > padding, "the default header needs arrowhead room");
                     assert_eq!(cluster.bounds.width, node.bounds.width + 2.0 * padding);
-                    assert_eq!(cluster.bounds.height, node.bounds.height + 2.0 * padding);
+                    assert!(
+                        (cluster.bounds.height - node.bounds.height - header - padding).abs()
+                            < 0.01,
+                        "extra header clearance must not enlarge the bottom padding"
+                    );
                 }
             }
         }

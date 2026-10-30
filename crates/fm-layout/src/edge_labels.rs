@@ -51,16 +51,16 @@ pub fn edge_label_style(ir: &MermaidDiagramIr, edge_index: usize) -> BTreeMap<St
 }
 
 /// Caption footprints, not whole cluster rectangles: an internal transition may use the
-/// container's empty space, but its opaque label must never erase the container's heading.
-fn graph_cluster_caption_bounds(
+/// container's empty space, but neither its connector nor its label may erase the heading.
+pub(crate) fn graph_cluster_caption_bounds(
     ir: &MermaidDiagramIr,
-    layout: &DiagramLayout,
+    clusters: &[crate::LayoutClusterBox],
     metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutRect> {
     let mut captions = Vec::new();
     let base_font_size = (metrics.font_size() * crate::CLUSTER_FONT_SCALE).max(10.0);
     let baseline = (base_font_size + 2.0).max(16.0);
-    for cluster in &layout.clusters {
+    for cluster in clusters {
         let metadata = ir.clusters.get(cluster.cluster_index);
         let title = cluster
             .title
@@ -121,7 +121,7 @@ fn graph_cluster_caption_bounds(
         {
             include(
                 &format!("[{kind}]"),
-                base_font_size,
+                declared_font_size.unwrap_or(base_font_size),
                 baseline + base_font_size * 1.25,
                 4.0 + metrics.font_size() * 1.25,
             );
@@ -169,7 +169,7 @@ impl<'a> EdgeLabelPlacer<'a> {
             layout,
             padding,
             routes: graph_edge_label_route_obstacles(ir, layout),
-            captions: graph_cluster_caption_bounds(ir, layout, metrics),
+            captions: graph_cluster_caption_bounds(ir, &layout.clusters, metrics),
             metrics: metrics.clone(),
             plates: Vec::new(),
             containers: Arc::new(crate::composite_containers(ir, ir.nodes.len())),
@@ -208,7 +208,7 @@ impl<'a> EdgeLabelPlacer<'a> {
             layout,
             padding: self.padding,
             routes: graph_edge_label_route_obstacles(self.ir, layout),
-            captions: graph_cluster_caption_bounds(self.ir, layout, &self.metrics),
+            captions: graph_cluster_caption_bounds(self.ir, &layout.clusters, &self.metrics),
             metrics: self.metrics.clone(),
             plates: Vec::new(),
             containers: Arc::clone(&self.containers),
@@ -1678,8 +1678,8 @@ mod tests {
             font_size: 30.0,
             ..Default::default()
         });
-        let small_bounds = graph_cluster_caption_bounds(&ir, &layout, &normal)[0];
-        let large_bounds = graph_cluster_caption_bounds(&ir, &layout, &large)[0];
+        let small_bounds = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal)[0];
+        let large_bounds = graph_cluster_caption_bounds(&ir, &layout.clusters, &large)[0];
         assert!(large_bounds.width > small_bounds.width * 1.8);
         assert!(large_bounds.height > small_bounds.height * 1.8);
         ir.style_refs.push(fm_core::IrStyleRef {
@@ -1687,7 +1687,7 @@ mod tests {
             style: String::from("font-size:40px"),
             span: Span::default(),
         });
-        let styled = graph_cluster_caption_bounds(&ir, &layout, &normal)[0];
+        let styled = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal)[0];
         // SVG keeps the caption's baseline at 16px while CSS enlarges the face. Both
         // ascenders above that baseline and the second row below it need protection.
         assert!(styled.y <= -24.0);
@@ -1697,12 +1697,204 @@ mod tests {
             c4_boundary_type: Some(String::from("SYSTEM")),
             ..Default::default()
         });
-        let with_type = graph_cluster_caption_bounds(&ir, &layout, &normal);
+        let with_type = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal);
         assert_eq!(with_type.len(), 2);
-        assert!(with_type[1].y + with_type[1].height >= 38.0);
+        // Both SVG rows receive the authored 40px face, while the type keeps its
+        // original 32.875px baseline. Protect its enlarged ascenders and descenders.
+        assert!(with_type[1].y <= -7.12);
+        assert!(with_type[1].y + with_type[1].height >= 44.87);
+        assert!(with_type[1].width >= normal.estimate_preserved_width("[SYSTEM]", 40.0, 0.0));
         layout.clusters[0].title = Some(String::from("   "));
         ir.clusters.clear();
-        assert!(graph_cluster_caption_bounds(&ir, &layout, &normal).is_empty());
+        assert!(graph_cluster_caption_bounds(&ir, &layout.clusters, &normal).is_empty());
+    }
+
+    fn assert_cluster_captions_are_clear(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        metrics: &fm_core::FontMetrics,
+    ) {
+        let captions = graph_cluster_caption_bounds(ir, &layout.clusters, metrics);
+        assert!(!captions.is_empty());
+        for (edge, obstacle) in graph_edge_label_route_obstacles(ir, layout) {
+            for &caption in &captions {
+                let collides = match obstacle {
+                    EdgeLabelObstacle::Bounds(bounds) => overlap(bounds, caption),
+                    EdgeLabelObstacle::Segment(from, to) => {
+                        crate::cga_routing::segment_intersects_obstacles(from, to, &[caption], 1.0)
+                    }
+                };
+                assert!(
+                    !collides,
+                    "edge {edge} or its arrowhead crosses a heading: {obstacle:?}, {caption:?}"
+                );
+            }
+        }
+        // Check the shared painter too: a spline or rounded elbow may occupy space between
+        // route waypoints. Sample each actual curve, including the final tangent at its port.
+        for path in &layout.edges {
+            let mut commands = Vec::new();
+            let _ = crate::edge_paths::emit_diagram_edge_path(
+                ir,
+                path.edge_index,
+                &path.points,
+                |cmd| {
+                    commands.push(cmd);
+                },
+            );
+            let mut from = LayoutPoint { x: 0.0, y: 0.0 };
+            for command in commands {
+                if let crate::PathCmd::MoveTo { x, y } = command {
+                    from = LayoutPoint { x, y };
+                    continue;
+                }
+                let origin = from;
+                for step in 1..=32 {
+                    let t = step as f32 / 32.0;
+                    let u = 1.0 - t;
+                    let to = match command {
+                        crate::PathCmd::LineTo { x, y } => LayoutPoint {
+                            x: u * origin.x + t * x,
+                            y: u * origin.y + t * y,
+                        },
+                        crate::PathCmd::QuadTo { cx, cy, x, y } => LayoutPoint {
+                            x: u * u * origin.x + 2.0 * u * t * cx + t * t * x,
+                            y: u * u * origin.y + 2.0 * u * t * cy + t * t * y,
+                        },
+                        crate::PathCmd::CubicTo {
+                            c1x,
+                            c1y,
+                            c2x,
+                            c2y,
+                            x,
+                            y,
+                        } => LayoutPoint {
+                            x: u.powi(3) * origin.x
+                                + 3.0 * u * u * t * c1x
+                                + 3.0 * u * t * t * c2x
+                                + t.powi(3) * x,
+                            y: u.powi(3) * origin.y
+                                + 3.0 * u * u * t * c1y
+                                + 3.0 * u * t * t * c2y
+                                + t.powi(3) * y,
+                        },
+                        _ => panic!("unexpected connector command: {command:?}"),
+                    };
+                    assert!(
+                        !crate::cga_routing::segment_intersects_obstacles(from, to, &captions, 0.5),
+                        "painted edge {} crosses heading text: {from:?} -> {to:?}",
+                        path.edge_index
+                    );
+                    from = to;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_cluster_connectors_clear_captions_and_arrowheads() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for title in ["Persistence layer", "Persistence layer<br/>Durable data"] {
+                for arrow in ["-->", "==>"] {
+                    let source = format!(
+                        "flowchart LR\n\
+                     subgraph platform[Commerce platform]\n\
+                       direction LR\n\
+                       subgraph gateway[Public gateway]\n\
+                         Web[Web storefront] --> API[Edge API]\n\
+                       end\n\
+                       subgraph services[Application services]\n\
+                         direction {direction}\n\
+                         Orders[Order service] --> Payments[Payment service]\n\
+                         subgraph persistence[{title}]\n\
+                           Ledger[(Ledger database)]\n\
+                           Cache[(Session cache)]\n\
+                         end\n\
+                         Orders {arrow} Ledger\n\
+                         Payments {arrow} Cache\n\
+                       end\n\
+                       API --> Orders\n\
+                     end\n"
+                    );
+                    let ir = fm_parser::parse(&source).ir;
+                    assert_eq!(ir.nodes.len(), 6);
+                    assert_eq!(ir.edges.len(), 5);
+                    assert_eq!(ir.clusters.len(), 4);
+                    for metrics in [
+                        fm_core::FontMetrics::default_metrics(),
+                        fm_core::FontMetrics::monospace(24.0),
+                    ] {
+                        for routing in [crate::EdgeRouting::Orthogonal, crate::EdgeRouting::Spline]
+                        {
+                            let config = crate::LayoutConfig {
+                                font_metrics: Some(metrics.clone()),
+                                edge_routing: routing,
+                                ..Default::default()
+                            };
+                            let layout = crate::layout_diagram_with_config(&ir, config.clone());
+                            assert_eq!(layout.nodes.len(), ir.nodes.len());
+                            assert_eq!(layout.edges.len(), ir.edges.len());
+                            assert_cluster_captions_are_clear(&ir, &layout, &metrics);
+                            assert_eq!(layout, crate::layout_diagram_with_config(&ir, config));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cluster_heading_obstacles_preserve_named_boundary_ports() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let source = format!(
+                "flowchart {direction}\n\
+                 subgraph platform[Platform]\n\
+                   subgraph storage[Storage]\n\
+                     Cache[Cache] --> Ledger[Ledger]\n\
+                   end\n\
+                 end\n\
+                 Gateway[Gateway] --> storage\n\
+                 storage --> Client[Client]\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let metrics = fm_core::FontMetrics::default_metrics();
+            let layout = crate::layout_diagram(&ir);
+            assert_eq!(layout.edges.len(), 3);
+            assert_cluster_captions_are_clear(&ir, &layout, &metrics);
+            let mut boundary_ports = 0;
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let (source, target) = edge.named_subgraphs();
+                for (subgraph, port) in [
+                    (source, path.points.first().unwrap()),
+                    (target, path.points.last().unwrap()),
+                ] {
+                    let Some(cluster_id) = subgraph
+                        .and_then(|id| ir.graph.subgraph(id))
+                        .and_then(|subgraph| subgraph.cluster)
+                    else {
+                        continue;
+                    };
+                    let bounds = layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.cluster_index == cluster_id.0)
+                        .unwrap()
+                        .bounds;
+                    assert!(port.x >= bounds.x - 0.01 && port.x <= bounds.x + bounds.width + 0.01);
+                    assert!(port.y >= bounds.y - 0.01 && port.y <= bounds.y + bounds.height + 0.01);
+                    assert!(
+                        (port.x - bounds.x).abs() < 0.01
+                            || (port.x - bounds.x - bounds.width).abs() < 0.01
+                            || (port.y - bounds.y).abs() < 0.01
+                            || (port.y - bounds.y - bounds.height).abs() < 0.01,
+                        "a heading detour moved a named boundary port: {port:?}, {bounds:?}"
+                    );
+                    boundary_ports += 1;
+                }
+            }
+            assert_eq!(boundary_ports, 2);
+        }
     }
 
     #[test]

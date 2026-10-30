@@ -6179,6 +6179,12 @@ fn compute_traced_layout_with_config_and_guardrails(
             .clone()
             .unwrap_or_else(fm_core::FontMetrics::default_metrics)
     });
+    let caption_metrics = (!ir.clusters.is_empty()).then(|| {
+        config
+            .font_metrics
+            .clone()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics)
+    });
 
     let mut traced = match guarded_dispatch.selected {
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Auto => {
@@ -6260,9 +6266,12 @@ fn compute_traced_layout_with_config_and_guardrails(
     // endpoint, where the second marker is drawn exactly under the first and disappears.
     // In a flowchart or state diagram only an edge arriving where another leaves is moved: a
     // return edge drawn into the start of the node's own outgoing line read as one two-way edge.
+    let captions = caption_metrics.as_ref().map_or_else(Vec::new, |metrics| {
+        edge_labels::graph_cluster_caption_bounds(ir, &traced.layout.clusters, metrics)
+    });
     match ir.diagram_type {
         DiagramType::Class | DiagramType::Er => {
-            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false);
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false, &captions);
         }
         DiagramType::Flowchart
         | DiagramType::State
@@ -6272,7 +6281,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         | DiagramType::C4Component
         | DiagramType::C4Dynamic
         | DiagramType::C4Deployment => {
-            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true);
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true, &captions);
         }
         _ => {}
     }
@@ -6379,6 +6388,8 @@ fn refine_graph_label_spacing(
                     build_state_note_geometry(ir, &layout.nodes, &metrics);
                 extend_bounds_for_state_notes(layout);
             }
+            let captions =
+                edge_labels::graph_cluster_caption_bounds(ir, &layout.clusters, &metrics);
             spread_shared_edge_ends(
                 ir,
                 layout,
@@ -6393,6 +6404,7 @@ fn refine_graph_label_spacing(
                         | DiagramType::C4Dynamic
                         | DiagramType::C4Deployment
                 ),
+                &captions,
             );
             let quality = edge_labels::graph_label_attachment_quality(ir, layout, &metrics);
             if quality.0 < initial.0 && quality.2 <= initial.2 * 1.8 && quality < best_quality {
@@ -7527,6 +7539,7 @@ impl IncrementalLayoutEngine {
 
         // Clusters before routing, as in the full path: edges are routed around them.
         let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+        let captions = edge_labels::graph_cluster_caption_bounds(ir, &clusters, &metrics);
         let mut edges = build_edge_paths(
             ir,
             &nodes,
@@ -7536,13 +7549,14 @@ impl IncrementalLayoutEngine {
             // diagram re-route part of itself with the caller's default instead of the source's
             // request.
             edge_routing_with_source_hints(config.edge_routing, ir),
+            &captions,
         );
         // These routes were just rebuilt from the current node and cluster boxes, including
         // the source's routing mode. A second smoothing pass would cut the router's detours
         // through obstacles and turn orthogonal connectors into diagonals after an edit.
         // Keep the same route postprocessing as the full layout path in every routing mode.
         bundle_parallel_edges(ir, &mut edges);
-        separate_shared_channels(ir, &nodes, &mut edges);
+        separate_shared_channels(ir, &nodes, &mut edges, &captions);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -8708,6 +8722,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     // instead of the container (bd-9w54). Nothing between here and the old call site mutates
     // `nodes`; the cycle-collapse pass that does runs after both, exactly as it did before.
     let mut clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let captions = edge_labels::graph_cluster_caption_bounds(ir, &clusters, &metrics);
     anchor_composite_state_nodes(ir, &mut nodes, &clusters);
     let mut edges = build_edge_paths(
         ir,
@@ -8715,9 +8730,10 @@ fn layout_diagram_sugiyama_traced_with_config(
         &clusters,
         &cycle_result.highlighted_edge_indexes,
         edge_routing_with_source_hints(config.edge_routing, ir),
+        &captions,
     );
     bundle_parallel_edges(ir, &mut edges);
-    separate_shared_channels(ir, &nodes, &mut edges);
+    separate_shared_channels(ir, &nodes, &mut edges, &captions);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -9041,12 +9057,21 @@ fn layout_diagram_tree_traced_impl(
         tree_node_boxes(ir, &node_sizes, spacing, metrics)
     };
     let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
+    let captions = edge_labels::graph_cluster_caption_bounds(ir, &clusters, metrics);
     anchor_composite_state_nodes(ir, &mut nodes, &clusters);
     let edges = if clusters.is_empty() {
-        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), edge_routing)
-            .unwrap_or_else(|| build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), edge_routing))
+        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), edge_routing).unwrap_or_else(
+            || build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), edge_routing, &[]),
+        )
     } else {
-        build_edge_paths(ir, &nodes, &clusters, &BTreeSet::new(), edge_routing)
+        build_edge_paths(
+            ir,
+            &nodes,
+            &clusters,
+            &BTreeSet::new(),
+            edge_routing,
+            &captions,
+        )
     };
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -11220,7 +11245,12 @@ fn layout_diagram_sequence_traced_with_metrics(
 /// `by_role` (flowcharts and state diagrams) spreads a point only where edges both LEAVE and ENTER
 /// there — a return edge arriving where the node's own edge departs, drawn in and out on one line —
 /// and moves every end of one role together, so a fan-out keeps its shared trunk.
-fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by_role: bool) {
+fn spread_shared_edge_ends(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    by_role: bool,
+    captions: &[LayoutRect],
+) {
     /// (node, side 0=left 1=right 2=top 3=bottom, quantised x, quantised y)
     type EndKey = (usize, u8, i32, i32);
     const GAP: f32 = 14.0;
@@ -11350,6 +11380,7 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by
             let len = points.len();
             let (end, next) = if at_start { (0, 1) } else { (len - 1, len - 2) };
             let original = points[end];
+            let original_next = points[next];
             let shift = |p: &mut LayoutPoint| {
                 if vertical_side {
                     p.y += offset;
@@ -11367,6 +11398,15 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by
             };
             if len > 2 && shares {
                 shift(&mut points[next]);
+            }
+            let moved = if at_start {
+                &points[..len.min(3)]
+            } else {
+                &points[len.saturating_sub(3)..]
+            };
+            if cga_routing::polyline_intersects_obstacles(moved, captions, 2.0) {
+                points[end] = original;
+                points[next] = original_next;
             }
         }
     }
@@ -14615,7 +14655,14 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         });
     }
 
-    let edges = build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default());
+    let edges = build_edge_paths(
+        ir,
+        &nodes,
+        &[],
+        &BTreeSet::new(),
+        EdgeRouting::default(),
+        &[],
+    );
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let mut bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
@@ -16166,6 +16213,7 @@ fn finalize_specialized_layout_with_metrics(
         &BTreeSet::new(),
         horizontal_edges,
         EdgeRouting::default(),
+        &[],
     );
     let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
@@ -23474,6 +23522,7 @@ fn build_edge_paths(
     clusters: &[LayoutClusterBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     edge_routing: EdgeRouting,
+    captions: &[LayoutRect],
 ) -> Vec<LayoutEdgePath> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     build_edge_paths_with_orientation(
@@ -23483,6 +23532,7 @@ fn build_edge_paths(
         highlighted_edge_indexes,
         horizontal_ranks,
         edge_routing,
+        captions,
     )
 }
 
@@ -23563,6 +23613,7 @@ fn build_edge_paths_with_orientation(
     highlighted_edge_indexes: &BTreeSet<usize>,
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
+    captions: &[LayoutRect],
 ) -> Vec<LayoutEdgePath> {
     let edge_routing = edge_routing_with_source_hints(edge_routing, ir);
     // Track parallel edges: count edges between same (source, target) pair. The map is
@@ -23645,6 +23696,10 @@ fn build_edge_paths_with_orientation(
         .iter()
         .map(|cluster| cluster.bounds)
         .chain(nodes.iter().map(|n| n.bounds))
+        // Endpoint-containing clusters are usable routing space, but their headings are not.
+        // Keep captions after the indexed cluster/node slots so parking an endpoint or its
+        // containers below cannot remove the text footprint from the obstacle set.
+        .chain(captions.iter().copied())
         .collect();
     let self_loops = build_self_loop_paths(ir, nodes, &obstacle_bounds, horizontal_ranks);
     // A composite state's node has its cluster's box (`anchor_composite_state_nodes`), so as an
@@ -23855,6 +23910,20 @@ fn build_edge_paths_with_orientation(
                         obstacle_index.as_mut(),
                     ),
                 };
+                // Spline chamfers can cut a corner of an otherwise clear orthogonal route.
+                // Retain the safe elbows where a shortcut would enter heading text; the
+                // shared painter still rounds those elbows without leaving their corridor.
+                if matches!(edge_routing, EdgeRouting::Spline)
+                    && cga_routing::polyline_intersects_obstacles(&pts, captions, 2.0)
+                {
+                    pts = route_edge_points_with_obstacle_index(
+                        source_anchor,
+                        target_anchor,
+                        horizontal_ranks,
+                        &obstacle_bounds,
+                        obstacle_index.as_mut(),
+                    );
+                }
                 // An aligned detour leaves and enters at the faces'
                 // centres, where the edges between neighbouring ranks attach too, so its stubs
                 // ran along theirs; on a flat face it attaches part-way toward its detour instead.
@@ -25312,6 +25381,7 @@ fn separate_shared_channels(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
     edges: &mut [LayoutEdgePath],
+    captions: &[LayoutRect],
 ) {
     const TRACK_GAP: f32 = 10.0;
     const MIN_TRACK_GAP: f32 = 2.0;
@@ -25565,6 +25635,9 @@ fn separate_shared_channels(
                             } else {
                                 bend.x = candidate;
                             }
+                        }
+                        if cga_routing::polyline_intersects_obstacles(&moved, captions, 2.0) {
+                            return true;
                         }
                         for node in nodes {
                             // Composite states are also nodes. As in build_edge_paths, an
@@ -26264,7 +26337,8 @@ fn displayed_cluster_title(title: &str) -> &str {
 
 /// Extra space above the contents when a title outgrows the existing cluster padding.
 /// SVG uses this baseline and TextBuilder's 1.4 line spacing; the remaining allowance keeps
-/// descenders and the first node's opaque fill apart. Ordinary one-line defaults add nothing.
+/// descenders, incoming arrowheads and the first node's opaque fill apart. The default SVG
+/// thick arrow reaches 22.5px behind its tip, so an 8px gap put its wings on the heading.
 fn cluster_title_extra_header(title: &str, padding: f32, metrics: &fm_core::FontMetrics) -> f32 {
     let displayed = displayed_cluster_title(title);
     if displayed.trim().is_empty() {
@@ -26273,7 +26347,7 @@ fn cluster_title_extra_header(title: &str, padding: f32, metrics: &fm_core::Font
     let font_size = (metrics.font_size() * CLUSTER_FONT_SCALE).max(10.0);
     let baseline = (font_size + 2.0).max(16.0);
     let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
-    (baseline + additional_lines * font_size * 1.4 + font_size * 0.3 + 8.0 - padding).max(0.0)
+    (baseline + additional_lines * font_size * 1.4 + font_size * 0.3 + 28.0 - padding).max(0.0)
 }
 
 /// The larger of the renderer's two `cluster_font_size` factors (`0.9` full detail, `0.86` reduced).
@@ -29224,16 +29298,28 @@ mod tests {
                     (pair[0].x - pair[1].x).abs() > 0.001 && (pair[0].y - pair[1].y).abs() > 0.001
                 })
             };
-            let original =
-                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+            let original = build_edge_paths(
+                &ir,
+                &nodes,
+                &[],
+                &BTreeSet::new(),
+                EdgeRouting::Orthogonal,
+                &[],
+            );
             assert!(
                 original.iter().all(has_diagonal),
                 "the diagram default must override caller routing"
             );
 
             ir.edges[0].extras_mut().routing = Some(Routing::Orthogonal);
-            let mixed =
-                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+            let mixed = build_edge_paths(
+                &ir,
+                &nodes,
+                &[],
+                &BTreeSet::new(),
+                EdgeRouting::Orthogonal,
+                &[],
+            );
             assert!(!has_diagonal(&mixed[0]), "linear edge kept rounded bends");
             assert!(
                 has_diagonal(&mixed[1]),
@@ -29264,7 +29350,7 @@ mod tests {
             ir.meta.edge_routing = Some(Routing::Orthogonal);
             ir.edges[1].extras_mut().routing = Some(Routing::Curved);
             assert_eq!(
-                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Spline),
+                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Spline, &[]),
                 mixed
             );
             assert_eq!(
@@ -29411,15 +29497,21 @@ mod tests {
                     .collect();
                 // Route from the resulting positions, then apply the same shared postpasses
                 // as a full layout. Incremental edits must not deform those fresh paths.
+                let captions = super::edge_labels::graph_cluster_caption_bounds(
+                    &ir,
+                    &rerun.layout.clusters,
+                    &fm_core::FontMetrics::default_metrics(),
+                );
                 let mut expected = build_edge_paths(
                     &ir,
                     &rerun.layout.nodes,
                     &rerun.layout.clusters,
                     &highlighted_edges,
                     routing,
+                    &captions,
                 );
                 super::bundle_parallel_edges(&ir, &mut expected);
-                super::separate_shared_channels(&ir, &rerun.layout.nodes, &mut expected);
+                super::separate_shared_channels(&ir, &rerun.layout.nodes, &mut expected, &captions);
                 assert_eq!(
                     rerun.layout.edges, expected,
                     "incremental routing changed fresh {routing:?} geometry in {direction:?}"
@@ -32544,6 +32636,7 @@ mod tests {
             &std::collections::BTreeSet::new(),
             true,
             super::EdgeRouting::default(),
+            &[],
         );
         let skip = layout
             .edges
@@ -36675,8 +36768,14 @@ mod tests {
                 },
             })
             .collect();
-        let parallel =
-            super::build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+        let parallel = super::build_edge_paths(
+            &ir,
+            &nodes,
+            &[],
+            &BTreeSet::new(),
+            EdgeRouting::Orthogonal,
+            &[],
+        );
         let painted_height =
             ir.graph_edge_caption(0).unwrap().line_count() as f32 * 64.0 * 1.2 + 4.0;
         let first = super::edge_label_position(&parallel[0]);
@@ -38191,7 +38290,14 @@ mod tests {
             })
             .collect();
         for paths in [
-            build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal),
+            build_edge_paths(
+                &ir,
+                &nodes,
+                &[],
+                &BTreeSet::new(),
+                EdgeRouting::Orthogonal,
+                &[],
+            ),
             super::force_build_edge_paths(&ir, &nodes),
         ] {
             assert_eq!(paths.len(), 2);
@@ -38325,8 +38431,16 @@ mod tests {
                             &[],
                             &BTreeSet::new(),
                             EdgeRouting::Orthogonal,
+                            &[],
                         ),
-                        build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Spline),
+                        build_edge_paths(
+                            &ir,
+                            &nodes,
+                            &[],
+                            &BTreeSet::new(),
+                            EdgeRouting::Spline,
+                            &[],
+                        ),
                         super::force_build_edge_paths(&ir, &nodes),
                     ] {
                         assert_eq!(paths.len(), 1);
@@ -38382,7 +38496,14 @@ mod tests {
                     })
                     .collect();
                 for paths in [
-                    build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal),
+                    build_edge_paths(
+                        &ir,
+                        &nodes,
+                        &[],
+                        &BTreeSet::new(),
+                        EdgeRouting::Orthogonal,
+                        &[],
+                    ),
                     super::force_build_edge_paths(&ir, &nodes),
                 ] {
                     assert_eq!(paths.len(), ir.edges.len());
@@ -40103,11 +40224,11 @@ mod tests {
                     "fixture must expose the mixed bus"
                 );
                 let mut after = before.clone();
-                separate_shared_channels(&ir, &[], &mut after);
+                separate_shared_channels(&ir, &[], &mut after, &[]);
                 assert_shared_channel_geometry_preserved(&before, &after);
                 assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
                 let mut repeated = before.clone();
-                separate_shared_channels(&ir, &[], &mut repeated);
+                separate_shared_channels(&ir, &[], &mut repeated, &[]);
                 assert_eq!(after, repeated, "channel assignment must be deterministic");
             }
         }
@@ -40139,7 +40260,7 @@ mod tests {
                     })
                     .collect();
                 let mut after = before.clone();
-                separate_shared_channels(&ir, &[], &mut after);
+                separate_shared_channels(&ir, &[], &mut after, &[]);
                 assert_eq!(
                     after, before,
                     "a genuine bus should retain its original route"
@@ -40172,7 +40293,7 @@ mod tests {
             ];
             assert!(shared_channel_has_false_junction(&ir, &before));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(
                 after[2], before[2],
@@ -40200,7 +40321,7 @@ mod tests {
                 shared_channel_test_path(2, &[(110.0, 60.0), (190.0, 60.0)], transpose),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(after[2], before[2], "an endpoint segment cannot move");
             assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
@@ -40228,7 +40349,7 @@ mod tests {
                 })
                 .collect();
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert!(
                 !shared_channel_has_false_junction(&ir, &after),
@@ -40254,7 +40375,7 @@ mod tests {
                 ),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
             let line = |path: &LayoutEdgePath| {
@@ -40288,7 +40409,7 @@ mod tests {
                 })
                 .collect();
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_eq!(
                 after, before,
                 "zero-clearance routes need new bends, not reversed stubs"
@@ -40331,7 +40452,7 @@ mod tests {
                 transpose,
             ));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_eq!(
                 &after[..65],
                 &before[..65],
@@ -40354,7 +40475,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_channels_keep_moved_runs_and_both_stubs_out_of_nodes() {
+    fn shared_channels_keep_moved_runs_and_both_stubs_out_of_nodes_and_captions() {
         let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E[Obstacle]\n").ir;
         for transpose in [false, true] {
             for (first_target, second_target, x, y, width, height) in [
@@ -40421,19 +40542,26 @@ mod tests {
                 };
                 assert!(clear(&before), "the router's original paths must be clear");
                 let mut unprotected = before.clone();
-                separate_shared_channels(&ir, &[], &mut unprotected);
+                separate_shared_channels(&ir, &[], &mut unprotected, &[]);
                 assert!(
                     !clear(&unprotected),
                     "control must expose the node-blind nudge"
                 );
                 let mut after = before.clone();
-                separate_shared_channels(&ir, &[obstacle], &mut after);
+                separate_shared_channels(&ir, &[obstacle], &mut after, &[]);
                 assert_shared_channel_geometry_preserved(&before, &after);
                 assert!(
                     clear(&after),
                     "a displaced run or stub entered the node: {after:?}"
                 );
                 assert!(!shared_channel_has_false_junction(&ir, &after));
+                let mut with_caption = before.clone();
+                separate_shared_channels(&ir, &[], &mut with_caption, &[bounds]);
+                assert_shared_channel_geometry_preserved(&before, &with_caption);
+                assert!(
+                    clear(&with_caption),
+                    "a displaced run or stub entered heading text: {with_caption:?}"
+                );
             }
         }
     }
@@ -40480,7 +40608,7 @@ mod tests {
                 })
                 .collect();
             let mut after = before.clone();
-            separate_shared_channels(&ir, &nodes, &mut after);
+            separate_shared_channels(&ir, &nodes, &mut after, &[]);
             assert_eq!(
                 after, before,
                 "node clearance takes precedence when no track fits"
@@ -40536,9 +40664,9 @@ mod tests {
                 },
             };
             let mut expected = before.clone();
-            separate_shared_channels(&ir, &[], &mut expected);
+            separate_shared_channels(&ir, &[], &mut expected, &[]);
             let mut after = before;
-            separate_shared_channels(&ir, &[container], &mut after);
+            separate_shared_channels(&ir, &[container], &mut after, &[]);
             assert_eq!(
                 after, expected,
                 "a composite must not wall in its own tracks"
@@ -40583,7 +40711,7 @@ mod tests {
             ];
             assert!(shared_channel_has_false_junction(&ir, &before));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(
                 after[2], before[2],
@@ -40609,7 +40737,7 @@ mod tests {
                 shared_channel_test_path(4, &[(150.0, 30.0), (250.0, 30.0)], transpose),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &[], &mut after);
+            separate_shared_channels(&ir, &[], &mut after, &[]);
             assert_eq!(
                 after, before,
                 "a shared source cannot justify extending through a straight peer's target port"
@@ -40681,7 +40809,7 @@ mod tests {
                 .collect();
                 assert!(shared_channel_has_false_junction(&ir, &before));
                 let mut unprotected = before.clone();
-                separate_shared_channels(&ir, &nodes[..2], &mut unprotected);
+                separate_shared_channels(&ir, &nodes[..2], &mut unprotected, &[]);
                 let obstacle_hit = |paths: &[LayoutEdgePath]| {
                     paths.iter().any(|path| {
                         path.points.windows(2).any(|pair| {
@@ -40700,7 +40828,7 @@ mod tests {
                 );
                 assert!(!obstacle_hit(&before));
                 let mut protected = before.clone();
-                separate_shared_channels(&ir, &nodes, &mut protected);
+                separate_shared_channels(&ir, &nodes, &mut protected, &[]);
                 assert!(
                     !obstacle_hit(&protected),
                     "a new track entered an unrelated node"
@@ -40745,10 +40873,10 @@ mod tests {
                     }
                 }
                 let mut repeated = protected.clone();
-                separate_shared_channels(&ir, &nodes, &mut repeated);
+                separate_shared_channels(&ir, &nodes, &mut repeated, &[]);
                 assert_eq!(repeated, protected, "separation must be idempotent");
                 let mut deterministic = before.clone();
-                separate_shared_channels(&ir, &nodes, &mut deterministic);
+                separate_shared_channels(&ir, &nodes, &mut deterministic, &[]);
                 assert_eq!(deterministic, protected);
             }
         }
@@ -41186,6 +41314,7 @@ mod tests {
             &BTreeSet::new(),
             false,
             EdgeRouting::Orthogonal,
+            &[],
         );
         assert_eq!(paths.len(), 5);
         let ports: Vec<_> = paths
@@ -41260,6 +41389,7 @@ mod tests {
                 &BTreeSet::new(),
                 horizontal,
                 EdgeRouting::Orthogonal,
+                &[],
             );
             let force = super::force_build_edge_paths(&ir, &nodes);
             let obstacle = nodes[2].bounds;
@@ -44867,6 +44997,7 @@ mod tests {
                 &[],
                 &BTreeSet::new(),
                 EdgeRouting::default(),
+                &[],
             );
             assert_eq!(specialized, generic, "direction={direction:?}");
         }
