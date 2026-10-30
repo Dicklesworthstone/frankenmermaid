@@ -1936,6 +1936,20 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
     theme
 }
 
+/// Static consumers do not paint an SVG element's CSS background. Keep the complete viewBox,
+/// including captions outside nodes and clusters, on the same surface as a browser export.
+fn svg_background_rect(x: f32, y: f32, width: f32, height: f32, fill: &str) -> Element {
+    Element::rect()
+        .x(x)
+        .y(y)
+        .width(width)
+        .height(height)
+        .fill(fill)
+        .class("fm-background")
+        .attr("aria-hidden", "true")
+        .attr("pointer-events", "none")
+}
+
 /// Resolve visual roles before either SVG writer chooses its serialization path. The returned
 /// colors are ordinary paints, so standalone exports do not depend on CSS color-mix support.
 fn semantic_node_colors(
@@ -2216,6 +2230,16 @@ fn render_scene_document_with_ir(
             diagram_ir.diagram_type.aria_roledescription()
         });
         doc = doc.accessible(title, desc, roledescription);
+    }
+
+    if !config.embed_theme_css {
+        doc = doc.child(svg_background_rect(
+            scene.bounds.x - padding,
+            scene.bounds.y - padding - title_height,
+            width,
+            height,
+            &theme.colors.background,
+        ));
     }
 
     if let Some(title) = visible_title {
@@ -4225,10 +4249,10 @@ fn print_css(gradient_def_emitted: bool) -> String {
     --fm-text-color: #111 !important;
     background: #fff !important;
   }}
-  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
+  .fm-node text, .fm-edge-labeled text, .fm-cluster-label, .fm-cluster-type-label, .fm-diagram-title {{
     fill: #111;
   }}
-  .fm-edge-labeled > rect {{
+  .fm-edge-labeled > rect, .fm-background {{
     fill: #fff !important;
   }}
   .fm-node path, .fm-node rect, .fm-node circle, .fm-node ellipse, .fm-node polygon, .fm-node line, .fm-edge {{
@@ -5173,6 +5197,16 @@ fn render_layout_to_svg(
     let offset_x = frame.offset_x;
     let offset_y = frame.offset_y;
 
+    if !config.embed_theme_css {
+        doc = doc.child(svg_background_rect(
+            0.0,
+            0.0,
+            width,
+            height,
+            &theme.colors.background,
+        ));
+    }
+
     if let Some(xy_chart_meta) = ir
         .xy_chart_meta
         .as_ref()
@@ -5747,6 +5781,14 @@ fn render_layout_to_svg(
             .partial_cmp(&area_a)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let cluster_depths = ir.cluster_nesting_depths();
+    let authored_cluster_palette = ir
+        .meta
+        .theme_overrides
+        .theme_variables
+        .get("clusterBkg")
+        .and_then(|value| sanitize_svg_paint(value))
+        .is_some();
 
     for (_sort_idx, cluster) in sorted_clusters {
         let ir_cluster = ir.clusters.get(cluster.cluster_index);
@@ -5783,43 +5825,41 @@ fn render_layout_to_svg(
             || ir.diagram_type.as_str() == "gantt"
             || ir.diagram_type.as_str() == "kanban";
 
-        // Configure styling based on cluster type
-        let (fill_color, stroke_color, stroke_style, label_color) = if is_c4_boundary {
-            // C4 boundaries: dashed gray border, very light gray fill
-            (
-                "rgba(128,128,128,0.05)".to_string(),
-                "#888".to_string(),
-                Some("4,2"),
-                "#555".to_string(),
-            )
-        } else if is_swimlane {
-            // Swimlanes: solid subtle border, alternating translucent fill
-            (
-                "rgba(200,220,240,0.15)".to_string(),
-                "#b8c9db".to_string(),
-                None,
-                "#4a6785".to_string(),
-            )
-        } else if let Some(color) = cluster.color.as_deref().and_then(sanitize_svg_paint) {
-            let fill_color = if color == "transparent" {
-                "transparent".to_string()
-            } else {
-                color.clone()
-            };
-            let stroke_color = if color == "transparent" {
-                "#dee2e6".to_string()
-            } else {
-                color
-            };
-            (fill_color, stroke_color, None, "#6c757d".to_string())
+        let (declared_cluster_style, declared_cluster_label_style) =
+            resolve_cluster_inline_styles(ir, cluster.cluster_index);
+        let declares_cluster_fill = declared_cluster_style
+            .as_deref()
+            .is_some_and(|style| style.contains("fill:"));
+        let declared_color = cluster.color.as_deref().and_then(sanitize_svg_paint);
+        // Alternating surfaces make a nested container legible as a separate layer. Only
+        // structural depth drives this treatment; authored fills and palette variables win.
+        let nested_surface = !authored_cluster_palette
+            && !declares_cluster_fill
+            && declared_color.is_none()
+            && cluster_depths
+                .get(cluster.cluster_index)
+                .is_some_and(|depth| depth % 2 == 1);
+        let fill_color = declared_color.as_deref().unwrap_or(if nested_surface {
+            &theme.colors.background
         } else {
-            // Standard clusters: translucent fill, subtle border
-            (
-                "rgba(248,249,250,0.85)".to_string(),
-                "#dee2e6".to_string(),
-                None,
-                "#6c757d".to_string(),
-            )
+            &theme.colors.cluster_fill
+        });
+        let stroke_color = declared_color
+            .as_deref()
+            .filter(|color| *color != "transparent")
+            .unwrap_or(&theme.colors.cluster_stroke);
+        let label_color = if config.embed_theme_css {
+            "var(--fm-cluster-label-color)"
+        } else {
+            &theme.colors.text
+        };
+        let radius = if is_c4_boundary || !config.rounded_corners.is_finite() {
+            0.0
+        } else {
+            (config.rounded_corners * 1.5)
+                .max(0.0)
+                .min(cluster.bounds.width.max(0.0) * 0.5)
+                .min(cluster.bounds.height.max(0.0) * 0.5)
         };
 
         let mut rect = Element::rect()
@@ -5828,14 +5868,10 @@ fn render_layout_to_svg(
             .y(cluster.bounds.y + offset_y)
             .width(cluster.bounds.width)
             .height(cluster.bounds.height)
-            .fill(&fill_color)
-            .stroke(&stroke_color)
+            .fill(fill_color)
+            .stroke(stroke_color)
             .stroke_width(1.0)
-            .rx(if is_c4_boundary {
-                0.0
-            } else {
-                config.rounded_corners * 1.5
-            })
+            .rx(radius)
             .class("fm-cluster");
         // The author's own `classDef` names, as mermaid emits them on the cluster group (bd-6cdzy).
         // Appended right after the base class and BEFORE `fm-cluster-c4`/`fm-cluster-swimlane`, so a
@@ -5843,43 +5879,55 @@ fn render_layout_to_svg(
         for marker in cluster_user_class_markers(ir, cluster.cluster_index) {
             rect = rect.class(&marker);
         }
-        // Resolved BEFORE the theme's fill-opacity, because whether the author declared a fill
-        // decides whether that opacity applies at all.
-        let (declared_cluster_style, declared_cluster_label_style) =
-            resolve_cluster_inline_styles(ir, cluster.cluster_index);
-        // ⚠️ THE THEME'S CLUSTER FILL-OPACITY IS NOT APPLIED TO A DECLARED FILL. `0.08` exists to
-        // make an UNSTYLED container a faint tint behind its contents. Applying it to a colour the
-        // author asked for renders that colour at 8% -- `style one fill:#ff0000` came out as a
-        // barely visible pink wash, which is not what anyone means by it.
-        //
-        // Measured, and it disagreed in two directions at once:
-        //   * the CANVAS paints the same declaration at full strength, so the two backends
-        //     disagreed about a document the author styled -- the bd-lvj3 family again
-        //   * the incumbent has no cluster dimming at all: mermaid 11.15.0's only `fill-opacity`
-        //     values are `1.0`, a curve opacity and a graticule opacity
-        //
-        // So the declared case follows the canvas and the incumbent, and the undeclared case keeps
-        // the theme exactly as it was.
-        let declares_cluster_fill = declared_cluster_style
-            .as_deref()
-            .is_some_and(|style| style.contains("fill:"));
-        if config.cluster_fill_opacity < 0.999 && !declares_cluster_fill {
+        // An author's frame color, like an explicit style fill, must not be faded by the
+        // theme's optional container-opacity treatment.
+        if config.cluster_fill_opacity < 0.999 && !declares_cluster_fill && declared_color.is_none()
+        {
             rect = rect.attr_num(
                 "fill-opacity",
                 clamp_unit_interval(config.cluster_fill_opacity),
             );
         }
 
-        if let Some(dasharray) = stroke_style {
-            rect = rect.stroke_dasharray(dasharray);
+        if is_c4_boundary {
+            rect = rect.stroke_dasharray("4,2");
         }
 
-        // The author's own `style mySubgraph ...` (bd-xfmm). Applied LAST of the colour sources so
-        // a declared value wins over the theme fill/stroke set on the builder above - which is what
-        // "the author styled it" has to mean - and as a `style` ATTRIBUTE, matching how an edge's
-        // resolved style is applied a few thousand lines below.
+        // Presentation attributes lose to embedded theme selectors. Local custom properties
+        // keep both depth surfaces and named sequence-group colors operative in browsers,
+        // while the attributes above provide the identical paint for portable exports.
+        let mut cluster_style = String::new();
+        if config.embed_theme_css && (nested_surface || declared_color.is_some()) {
+            let (fill_variable, stroke_variable) = if is_c4_boundary {
+                ("--fm-cluster-c4-fill", "--fm-cluster-c4-stroke")
+            } else if is_swimlane {
+                ("--fm-cluster-swimlane-fill", "--fm-cluster-swimlane-stroke")
+            } else {
+                ("--fm-cluster-fill", "--fm-cluster-stroke")
+            };
+            let fill = if nested_surface {
+                "var(--fm-bg)"
+            } else {
+                fill_color
+            };
+            cluster_style = format!("{fill_variable}:{fill};");
+            if declared_color.is_some() {
+                cluster_style.push_str(&format!("{stroke_variable}:{stroke_color};"));
+            }
+        }
+        // The explicit per-cluster style is the last layer, independently for every channel.
+        if config.cluster_fill_opacity < 0.999
+            && (declares_cluster_fill || declared_color.is_some())
+        {
+            // The global opacity rule also outranks presentation attributes. Reset it before
+            // appending the author's own optional fill-opacity declaration.
+            cluster_style.push_str("fill-opacity:1;");
+        }
         if let Some(declared) = declared_cluster_style {
-            rect = rect.attr("style", &declared);
+            cluster_style.push_str(&declared);
+        }
+        if !cluster_style.is_empty() {
+            rect = rect.attr("style", &cluster_style);
         }
 
         if is_c4_boundary {
@@ -5915,7 +5963,8 @@ fn render_layout_to_svg(
                     .y(cluster.bounds.y + offset_y + (detail.cluster_font_size + 2.0).max(16.0))
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(detail.cluster_font_size)
-                    .fill(&label_color)
+                    .font_weight("600")
+                    .fill(label_color)
                     .class("fm-cluster-label")
                     .build();
                 // The label half of the author's `style` directive, applied here rather than to the
@@ -5957,9 +6006,13 @@ fn render_layout_to_svg(
                     + detail.cluster_font_size * 1.25)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(detail.cluster_font_size)
-                .fill(&label_color)
+                .fill(label_color)
                 .class("fm-cluster-type-label")
                 .build();
+            let text = match declared_cluster_label_style.as_deref() {
+                Some(css) => text.attr("style", css),
+                None => text,
+            };
             let text = if config.include_source_spans {
                 apply_span_metadata(text, cluster.span)
             } else {
@@ -22833,7 +22886,10 @@ mod tests {
             &SvgRenderConfig::default(),
         );
         assert!(!svg.contains("url(javascript:alert(1))"));
-        assert!(svg.contains("stroke=\"#dee2e6\""));
+        assert!(svg.contains(&format!(
+            "stroke=\"{}\"",
+            ThemeColors::default().cluster_stroke
+        )));
     }
 
     #[test]

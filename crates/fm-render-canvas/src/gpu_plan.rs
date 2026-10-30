@@ -1569,25 +1569,24 @@ impl GpuRenderPlan {
         };
         // Clusters first, so the buffer order is the draw order.
         let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
-        let mut clusters: Vec<_> = layout.clusters.iter().collect();
-        clusters.sort_by(|left, right| {
-            (right.bounds.width * right.bounds.height)
-                .total_cmp(&(left.bounds.width * left.bounds.height))
-        });
-        for cluster in clusters {
-            let (declared_fill, declared_stroke) =
-                crate::renderer::resolve_cluster_colors(ir, cluster.cluster_index);
+        let cluster_depths = ir.cluster_nesting_depths();
+        for cluster in crate::renderer::ordered_cluster_boxes(layout) {
+            let (resolved_fill, resolved_stroke) = crate::renderer::resolve_cluster_paint(
+                ir,
+                cluster,
+                config,
+                cluster_depths
+                    .get(cluster.cluster_index)
+                    .copied()
+                    .unwrap_or(0),
+            );
             let opacity = crate::renderer::resolve_cluster_opacity(ir, cluster.cluster_index)
                 .map(|value| value.clamp(0.0, 1.0) as f32)
                 .unwrap_or(1.0);
-            let fill = declared_fill
-                .as_deref()
-                .and_then(parse_paint_rgba)
+            let fill = parse_paint_rgba(&resolved_fill)
                 .or_else(|| parse_paint_rgba(&config.cluster_fill))
                 .unwrap_or(DEFAULT_CLUSTER_FILL_RGBA);
-            let stroke = declared_stroke
-                .as_deref()
-                .and_then(parse_paint_rgba)
+            let stroke = parse_paint_rgba(&resolved_stroke)
                 .or_else(|| parse_paint_rgba(&config.cluster_stroke))
                 .unwrap_or(DEFAULT_CLUSTER_STROKE_RGBA);
             let stroke_width =
@@ -3099,6 +3098,13 @@ impl GpuRenderPlan {
             let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| {
+                    let variables = &ir.meta.theme_overrides.theme_variables;
+                    variables
+                        .get("primaryTextColor")
+                        .or_else(|| variables.get("textColor"))
+                        .and_then(|paint| parse_paint_rgba(paint))
+                })
                 .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
             sink.push_left_multiline(

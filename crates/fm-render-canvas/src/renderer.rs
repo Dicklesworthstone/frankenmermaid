@@ -79,7 +79,10 @@ impl CanvasRenderConfig {
                 .get(key)
                 .and_then(|value| sanitize_canvas_paint(value))
         };
-        if let Some(color) = paint("background") {
+        if let Some(color) = variables
+            .get("background")
+            .and_then(|value| sanitize_canvas_background(value))
+        {
             self.background = Some(color);
         }
         if let Some(color) = variables
@@ -1271,58 +1274,27 @@ impl Canvas2dRenderer {
         // `standard_label_font` site) so a cluster-free diagram never formats it. Byte-identical to the
         // per-cluster `format!("{}px {}", font_size*0.9, font_family)`.
         let mut cluster_label_font: Option<String> = None;
+        let cluster_depths = ir.cluster_nesting_depths();
 
-        // Parent panels must be behind their descendants even when parser or layout order
-        // puts an inner subgraph first. Stable ordering preserves equal-size sibling order.
-        let mut clusters: Vec<_> = layout.clusters.iter().collect();
-        clusters.sort_by(|left, right| {
-            (right.bounds.width * right.bounds.height)
-                .total_cmp(&(left.bounds.width * left.bounds.height))
-        });
-        for cluster_box in clusters {
+        for cluster_box in ordered_cluster_boxes(layout) {
             let x = f64::from(cluster_box.bounds.x) + offset_x;
             let y = f64::from(cluster_box.bounds.y) + offset_y;
             let w = f64::from(cluster_box.bounds.width);
             let h = f64::from(cluster_box.bounds.height);
 
-            // Draw cluster background, honouring a declared colour (bd-lvj3).
-            //
-            // The last row of that bead's measured table: `rect rgb(255,0,0)` in a sequence diagram
-            // rendered in SVG and NOT on the canvas. The colour was never far away -- it rides on the
-            // very `LayoutClusterBox` this loop already holds, and the fill was hardcoded to the
-            // theme colour anyway.
-            //
-            // `transparent` is mapped the way fm-render-svg maps it (lib.rs:4365): the FILL goes
-            // transparent but the border falls back to a visible default, because a subgraph that
-            // asked for a transparent body still needs an edge or it stops being a grouping.
-            // The author's own `style mySubgraph fill:#f00` (bd-xfmm), resolved from the style
-            // refs rather than from the layout box. It takes precedence over `cluster_box.color`
-            // because the two come from DIFFERENT syntaxes: `color` carries a sequence `rect
-            // rgb(...)`, which is a property of the frame, while a `style` directive names this
-            // cluster explicitly. When an author does both, the one that named the target wins.
-            let (styled_fill, styled_stroke) =
-                resolve_cluster_colors(ir, cluster_box.cluster_index);
-            let styled_fill = styled_fill.as_deref().and_then(sanitize_canvas_paint);
-            let styled_stroke = styled_stroke.as_deref().and_then(sanitize_canvas_paint);
-
-            let declared = cluster_box.color.as_deref().and_then(sanitize_canvas_paint);
-            let (fill, stroke) = if let Some(styled) = styled_fill.as_deref() {
-                // A declared stroke is honoured; without one the fill doubles as the border, which
-                // is what the `rect`/cluster path above already does for a declared colour.
-                (styled, styled_stroke.as_deref().unwrap_or(styled))
-            } else if let Some(styled) = styled_stroke.as_deref() {
-                // Stroke alone: keep the theme fill rather than painting the body a border colour.
-                (self.config.cluster_fill.as_str(), styled)
-            } else {
-                match declared.as_deref() {
-                    Some("transparent") => ("transparent", self.config.cluster_stroke.as_str()),
-                    Some(color) => (color, color),
-                    None => (
-                        self.config.cluster_fill.as_str(),
-                        self.config.cluster_stroke.as_str(),
-                    ),
-                }
-            };
+            let (fill, stroke) = resolve_cluster_paint(
+                ir,
+                cluster_box,
+                &self.config,
+                cluster_depths
+                    .get(cluster_box.cluster_index)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            let is_c4_boundary = ir
+                .clusters
+                .get(cluster_box.cluster_index)
+                .is_some_and(|cluster| cluster.c4_boundary_type.is_some());
             // OPACITY wraps the whole cluster — box and title — as `opacity` does on an SVG
             // element. `globalAlpha` is canvas STATE, so it is restored at the end of the
             // iteration; left set, it would fade every node drawn inside this subgraph, which are
@@ -1331,8 +1303,8 @@ impl Canvas2dRenderer {
             if let Some(alpha) = cluster_opacity {
                 ctx.set_global_alpha(alpha);
             }
-            ctx.set_fill_style(fill);
-            ctx.set_stroke_style(stroke);
+            ctx.set_fill_style(&fill);
+            ctx.set_stroke_style(&stroke);
             // The border WIDTH and DASH were the two channels this surface still discarded: the
             // width was hardcoded to 1.0 and no dash was ever set, while the SVG arm emits both
             // (`stroke-width:5px`, `stroke-dasharray:9 4`). `unwrap_or(1.0)` keeps the previous
@@ -1342,15 +1314,12 @@ impl Canvas2dRenderer {
             );
             // Set only when declared and cleared after the stroke, because `lineDash` is canvas
             // STATE — a dashed cluster would otherwise dash every shape drawn after it.
-            let cluster_dash = resolve_cluster_dash_array(ir, cluster_box.cluster_index);
+            let cluster_dash = resolve_cluster_dash_array(ir, cluster_box.cluster_index)
+                .or_else(|| is_c4_boundary.then(|| vec![4.0, 2.0]));
             if let Some(ref pattern) = cluster_dash {
                 ctx.set_line_dash(pattern);
             }
 
-            let is_c4_boundary = ir
-                .clusters
-                .get(cluster_box.cluster_index)
-                .is_some_and(|cluster| cluster.c4_boundary_type.is_some());
             trace_rounded_rect(
                 ctx,
                 x,
@@ -4075,6 +4044,15 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
     }
 }
 
+/// Mermaid's background `none` means a transparent surface, not a Canvas fillStyle keyword.
+fn sanitize_canvas_background(value: &str) -> Option<String> {
+    sanitize_canvas_paint(if value.trim().eq_ignore_ascii_case("none") {
+        "transparent"
+    } else {
+        value
+    })
+}
+
 #[inline]
 /// `pub(crate)` so `gpu_plan` can carry the SAME width the Canvas2D pass strokes with. Forking this
 /// mapping was the alternative and a worse one: a duplicated helper drifts silently, and then the
@@ -4239,6 +4217,67 @@ pub(crate) fn resolve_cluster_colors(
     let merged = merged_cluster_style(ir, cluster_index);
 
     (merged.get("fill").cloned(), merged.get("stroke").cloned())
+}
+
+/// Paint outer frames first so opaque nested surfaces cannot cover their children.
+/// Stable sorting preserves the supplied order of equal-area sibling frames.
+pub(crate) fn ordered_cluster_boxes(layout: &DiagramLayout) -> Vec<&fm_layout::LayoutClusterBox> {
+    let mut clusters: Vec<_> = layout.clusters.iter().collect();
+    clusters.sort_by(|left, right| {
+        let left_area = left.bounds.width * left.bounds.height;
+        let right_area = right.bounds.width * right.bounds.height;
+        right_area.total_cmp(&left_area)
+    });
+    clusters
+}
+
+/// Resolve the same nested group surfaces for Canvas2D and GPU plans.
+///
+/// Depth alternates only the unstyled surface. Authored theme fills apply uniformly, while
+/// frame colors and explicit styles keep independent fill/stroke precedence just as in SVG.
+pub(crate) fn resolve_cluster_paint(
+    ir: &MermaidDiagramIr,
+    cluster: &fm_layout::LayoutClusterBox,
+    config: &CanvasRenderConfig,
+    depth: usize,
+) -> (String, String) {
+    let variables = &ir.meta.theme_overrides.theme_variables;
+    let themed_fill = variables
+        .get("clusterBkg")
+        .and_then(|paint| sanitize_canvas_paint(paint));
+    let background = variables
+        .get("background")
+        .and_then(|paint| sanitize_canvas_background(paint))
+        .or_else(|| {
+            config
+                .background
+                .as_deref()
+                .and_then(sanitize_canvas_background)
+        });
+    let base_fill = themed_fill.as_deref().unwrap_or_else(|| {
+        if depth % 2 == 1 {
+            background.as_deref().unwrap_or("#ffffff")
+        } else {
+            &config.cluster_fill
+        }
+    });
+    let themed_stroke = variables
+        .get("clusterBorder")
+        .and_then(|paint| sanitize_canvas_paint(paint));
+    let base_stroke = themed_stroke.as_deref().unwrap_or(&config.cluster_stroke);
+    let frame_color = cluster.color.as_deref().and_then(sanitize_canvas_paint);
+    let (styled_fill, styled_stroke) = resolve_cluster_colors(ir, cluster.cluster_index);
+    let fill = styled_fill
+        .as_deref()
+        .and_then(sanitize_canvas_paint)
+        .or_else(|| frame_color.clone())
+        .unwrap_or_else(|| base_fill.to_owned());
+    let stroke = styled_stroke
+        .as_deref()
+        .and_then(sanitize_canvas_paint)
+        .or_else(|| frame_color.filter(|color| color != "transparent"))
+        .unwrap_or_else(|| base_stroke.to_owned());
+    (fill, stroke)
 }
 
 /// The merged `linkStyle`/inline declaration for one edge.
@@ -5879,6 +5918,291 @@ mod tests {
             canvas.font_metrics().estimate_dimensions("First\nSecond"),
             svg.font_metrics().estimate_dimensions("First\nSecond")
         );
+    }
+
+    #[test]
+    fn nested_cluster_surfaces_match_canvas_and_gpu_in_light_and_dark_themes() {
+        let mut ir = fm_parser::parse(
+            "flowchart TD\n subgraph outer[Outer]\n subgraph middle[Middle]\n\
+             subgraph inner[Inner]\n A[Service]\n end\n end\n end\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 3);
+        // A caller may supply child-first frames. Rendering must still put parents behind them.
+        layout.clusters.sort_by(|left, right| {
+            (left.bounds.width * left.bounds.height)
+                .total_cmp(&(right.bounds.width * right.bounds.height))
+        });
+        for (background, fill, stroke, text, declared_background, nested_fill) in [
+            ("#ffffff", "#f1f5f9", "#cbd5e1", "#1e293b", None, "#ffffff"),
+            ("#0f172a", "#1e293b", "#475569", "#f8fafc", None, "#0f172a"),
+            (
+                "#0f172a",
+                "#1e293b",
+                "#475569",
+                "#f8fafc",
+                Some("url(https://example.com/paint.svg)"),
+                "#0f172a",
+            ),
+            (
+                "#0f172a",
+                "#1e293b",
+                "#475569",
+                "#f8fafc",
+                Some(" NoNe "),
+                "transparent",
+            ),
+        ] {
+            // An invalid authored paint must not erase the configured dark background.
+            if let Some(paint) = declared_background {
+                ir.meta
+                    .theme_overrides
+                    .theme_variables
+                    .insert("background".into(), paint.into());
+            }
+            let config = CanvasRenderConfig {
+                background: Some(background.into()),
+                cluster_fill: fill.into(),
+                cluster_stroke: stroke.into(),
+                label_color: text.into(),
+                ..Default::default()
+            };
+            let mut adapted_config = config.clone();
+            adapted_config.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
+            assert_eq!(adapted_config.background.as_deref(), Some(nested_fill));
+            let mut renderer = Canvas2dRenderer::new(config.clone());
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            assert_eq!(
+                renderer.draw_clusters(&layout, &ir, &mut context, 0.0, 0.0),
+                3
+            );
+            let (painted, captions) = record_gantt_canvas_paint(context.operations());
+            assert_eq!(painted.len(), 3);
+            assert_eq!(
+                captions
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["Outer", "Middle", "Inner"]
+            );
+            assert!(captions.iter().all(|row| row.paint.fill == text));
+            assert_eq!(
+                painted
+                    .iter()
+                    .map(|shape| shape.paint.fill.as_str())
+                    .collect::<Vec<_>>(),
+                [fill, nested_fill, fill]
+            );
+            assert!(painted.iter().all(|shape| shape.paint.stroke == stroke));
+            assert!(context.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::ArcTo(_, _, _, _, radius) if *radius == 12.0)
+            }));
+
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(plan.cluster_instances.len(), 3);
+            for (instance, shape) in plan.cluster_instances.iter().zip(&painted) {
+                assert_eq!(
+                    instance.fill,
+                    crate::gpu_plan::parse_paint_rgba(&shape.paint.fill).unwrap()
+                );
+                assert_eq!(
+                    instance.stroke,
+                    crate::gpu_plan::parse_paint_rgba(stroke).unwrap()
+                );
+            }
+            let title_quads: Vec<_> = plan
+                .text_quads
+                .iter()
+                .filter(|quad| {
+                    plan.text_runs[quad.run_index as usize].source
+                        == crate::gpu_plan::GpuTextSource::Cluster
+                })
+                .collect();
+            assert!(!title_quads.is_empty());
+            assert!(
+                title_quads
+                    .iter()
+                    .all(|quad| { quad.color == crate::gpu_plan::parse_paint_rgba(text).unwrap() })
+            );
+        }
+
+        // Equal-area siblings retain the order supplied by layout rather than their IR indices.
+        layout
+            .clusters
+            .sort_by(|left, right| right.cluster_index.cmp(&left.cluster_index));
+        let bounds = layout.clusters[0].bounds;
+        for cluster in &mut layout.clusters {
+            cluster.bounds = bounds;
+        }
+        assert_eq!(
+            ordered_cluster_boxes(&layout)
+                .iter()
+                .map(|cluster| cluster.cluster_index)
+                .collect::<Vec<_>>(),
+            layout
+                .clusters
+                .iter()
+                .map(|cluster| cluster.cluster_index)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cluster_styles_override_each_paint_channel_without_erasing_frame_colors() {
+        let mut ir = fm_parser::parse(
+            "flowchart TD\n subgraph outer[Outer]\n subgraph inner[Inner]\n A[Service]\n\
+             end\n end\n style outer fill:#fee2e2\n style inner stroke:#dc2626,color:#e0f2fe\n",
+        )
+        .ir;
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("clusterBkg".into(), "#dbeafe".into());
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("clusterBorder".into(), "#2563eb".into());
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("textColor".into(), "#f8fafc".into());
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("primaryTextColor".into(), "#e2e8f0".into());
+        let mut layout = layout_diagram(&ir);
+        let config = CanvasRenderConfig::default();
+        let depths = ir.cluster_nesting_depths();
+        let outer = layout
+            .clusters
+            .iter()
+            .find(|cluster| depths[cluster.cluster_index] == 0)
+            .unwrap();
+        assert_eq!(
+            resolve_cluster_paint(&ir, outer, &config, 0),
+            ("#fee2e2".into(), "#2563eb".into())
+        );
+        let inner = layout
+            .clusters
+            .iter_mut()
+            .find(|cluster| depths[cluster.cluster_index] == 1)
+            .unwrap();
+        assert_eq!(
+            resolve_cluster_paint(&ir, inner, &config, 1),
+            ("#dbeafe".into(), "#dc2626".into())
+        );
+        inner.color = Some("#fef3c7".into());
+        assert_eq!(
+            resolve_cluster_paint(&ir, inner, &config, 1),
+            ("#fef3c7".into(), "#dc2626".into())
+        );
+        inner.color = Some("url(https://example.com/paint.svg)".into());
+        assert_eq!(
+            resolve_cluster_paint(&ir, inner, &config, 1),
+            ("#dbeafe".into(), "#dc2626".into())
+        );
+
+        let plan = crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert_eq!(
+            plan.cluster_instances[0].fill,
+            crate::gpu_plan::parse_paint_rgba("#fee2e2").unwrap()
+        );
+        assert_eq!(
+            plan.cluster_instances[1].fill,
+            crate::gpu_plan::parse_paint_rgba("#dbeafe").unwrap()
+        );
+        let assert_title_colors = |plan: &crate::gpu_plan::GpuRenderPlan, outer_color: &str| {
+            let title_quads: Vec<_> = plan
+                .text_quads
+                .iter()
+                .filter(|quad| {
+                    plan.text_runs[quad.run_index as usize].source
+                        == crate::gpu_plan::GpuTextSource::Cluster
+                })
+                .collect();
+            assert!(!title_quads.is_empty());
+            for quad in title_quads {
+                let cluster_index = plan.text_runs[quad.run_index as usize].node_index as usize;
+                let expected = if depths[cluster_index] == 0 {
+                    outer_color
+                } else {
+                    "#e0f2fe"
+                };
+                assert_eq!(
+                    quad.color,
+                    crate::gpu_plan::parse_paint_rgba(expected).unwrap()
+                );
+            }
+        };
+        // GPU plans can be built directly with the default config, before theme adaptation.
+        // The primary theme text wins over textColor, and an explicit cluster color wins over both.
+        assert_title_colors(&plan, "#e2e8f0");
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .remove("primaryTextColor");
+        let plan = crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert_title_colors(&plan, "#f8fafc");
+
+        // Canvas accepts HSL frame colors that the GPU paint parser cannot yet convert.
+        // Preserve configured dark surfaces for those channels instead of using light constants.
+        ir.meta.theme_overrides.theme_variables.remove("clusterBkg");
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .remove("clusterBorder");
+        for cluster in &mut layout.clusters {
+            cluster.color = Some("hsl(220, 20%, 30%)".into());
+        }
+        let dark_config = CanvasRenderConfig {
+            cluster_fill: "#1e293b".into(),
+            cluster_stroke: "#475569".into(),
+            ..Default::default()
+        };
+        let plan =
+            crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &dark_config);
+        assert_eq!(
+            plan.cluster_instances[0].stroke,
+            crate::gpu_plan::parse_paint_rgba(&dark_config.cluster_stroke).unwrap()
+        );
+        assert_eq!(
+            plan.cluster_instances[1].fill,
+            crate::gpu_plan::parse_paint_rgba(&dark_config.cluster_fill).unwrap()
+        );
+    }
+
+    #[test]
+    fn c4_cluster_boundaries_keep_square_dashed_frames_and_readable_type_labels() {
+        let ir = fm_parser::parse(
+            "C4Context\n System_Boundary(platform, \"Platform\") {\n System(api, \"API\")\n }\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 1);
+        let config = CanvasRenderConfig {
+            cluster_fill: "#1e293b".into(),
+            cluster_stroke: "#475569".into(),
+            label_color: "#f8fafc".into(),
+            ..Default::default()
+        };
+        let mut renderer = Canvas2dRenderer::new(config);
+        let mut context = MockCanvas2dContext::new(800.0, 600.0);
+        renderer.draw_clusters(&layout, &ir, &mut context, 0.0, 0.0);
+        let (painted, text) = record_gantt_canvas_paint(context.operations());
+        assert_eq!(painted[0].paint.dash, [4.0, 2.0]);
+        assert_eq!(painted[0].paint.fill, "#1e293b");
+        assert!(
+            text.iter()
+                .any(|row| row.text == "[SYSTEM]" && row.paint.fill == "#f8fafc")
+        );
+        assert!(context.operations().iter().all(|operation| {
+            !matches!(operation, DrawOperation::ArcTo(_, _, _, _, radius) if *radius > 0.0)
+        }));
+        assert!(context.operations().iter().any(|operation| {
+            matches!(operation, DrawOperation::SetLineDash(dash) if dash.is_empty())
+        }));
     }
 
     #[test]

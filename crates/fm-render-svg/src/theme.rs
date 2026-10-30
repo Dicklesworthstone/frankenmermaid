@@ -341,10 +341,14 @@ impl ThemeColors {
 
     /// Apply theme variables mapping from standard Mermaid configs.
     pub fn apply_overrides(&mut self, vars: &std::collections::BTreeMap<String, String>) {
-        if let Some(color) = vars
-            .get("background")
-            .and_then(|value| crate::sanitize_svg_paint(value))
-        {
+        if let Some(color) = vars.get("background").and_then(|value| {
+            // `none` means no surface; normalize it to a color usable in CSS and SVG.
+            crate::sanitize_svg_paint(if value.trim().eq_ignore_ascii_case("none") {
+                "transparent"
+            } else {
+                value
+            })
+        }) {
             self.background = color;
         }
         if let Some(color) = vars
@@ -609,10 +613,10 @@ marker#arrow-end path,marker#arrow-filled path,marker#arrow-circle path,marker#a
 .fm-edge:hover~marker#arrow-end path,.fm-edge:hover~marker#arrow-filled path,.fm-edge:hover~marker#arrow-circle path,.fm-edge:hover~marker#arrow-diamond path{fill:var(--fm-accent-1)}
 marker#arrow-open path{stroke:var(--fm-edge-muted);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
 marker#arrow-cross path{stroke:var(--fm-edge-color);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
-.fm-cluster{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:none}
+.fm-cluster{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1}
 .fm-cluster-label{fill:var(--fm-cluster-label-color);font-weight:600}
-.fm-cluster-c4{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke);stroke-dasharray:none}
-.fm-cluster-swimlane{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke);stroke-dasharray:none}
+.fm-cluster-c4{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke)}
+.fm-cluster-swimlane{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke)}
 .fm-label{fill:var(--fm-text-color)}
 @media (prefers-reduced-motion:reduce){.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon,.fm-edge{transition:none;transform:none}}
 .fm-node:focus-visible{outline:2px solid var(--fm-accent-1);outline-offset:3px}",
@@ -970,7 +974,12 @@ mod tests {
             css_rule(&with_shadows, ".fm-cluster"),
             css_rule(&without_shadows, ".fm-cluster")
         );
-        assert!(css_rule(&with_shadows, ".fm-cluster").contains("stroke-dasharray:none"));
+        for selector in [".fm-cluster", ".fm-cluster-c4", ".fm-cluster-swimlane"] {
+            let rule = css_rule(&with_shadows, selector);
+            assert!(!rule.contains("stroke-dasharray:"));
+            assert!(!rule.contains("rx:"));
+            assert!(!rule.contains("ry:"));
+        }
         for css in [&with_shadows, &without_shadows] {
             assert!(css.contains("--fm-edge-label-border:none"));
             assert!(!css.contains("backdrop-filter"));

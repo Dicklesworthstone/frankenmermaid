@@ -10099,7 +10099,12 @@ impl MermaidDiagramIr {
             let mut depth = current
                 .and_then(|index| depths.get(index).copied().flatten().map(|d| (index, d)))
                 .map_or(0, |(index, depth)| {
-                    depth + usize::from(subgraphs[index].cluster.is_some_and(|id| id.0 < result.len()))
+                    depth
+                        + usize::from(
+                            subgraphs[index]
+                                .cluster
+                                .is_some_and(|id| id.0 < result.len()),
+                        )
                 });
             while let Some(index) = chain.pop() {
                 active[index] = false;
@@ -16526,20 +16531,16 @@ mod tests {
     fn cluster_nesting_depths_follow_parents_independent_of_storage_order() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.clusters = vec![IrCluster::default(); 4];
-        ir.graph.subgraphs = [
-            (Some(2), Some(2)),
-            (None, Some(0)),
-            (Some(1), Some(1)),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (parent, cluster))| IrSubgraph {
-            id: IrSubgraphId(index),
-            parent: parent.map(IrSubgraphId),
-            cluster: cluster.map(IrClusterId),
-            ..Default::default()
-        })
-        .collect();
+        ir.graph.subgraphs = [(Some(2), Some(2)), (None, Some(0)), (Some(1), Some(1))]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (parent, cluster))| IrSubgraph {
+                id: IrSubgraphId(index),
+                parent: parent.map(IrSubgraphId),
+                cluster: cluster.map(IrClusterId),
+                ..Default::default()
+            })
+            .collect();
 
         assert_eq!(ir.cluster_nesting_depths(), vec![0, 1, 2, 0]);
         ir.graph.subgraphs.clear();
@@ -16567,9 +16568,11 @@ mod tests {
         .collect();
 
         assert_eq!(ir.cluster_nesting_depths(), vec![0; 3]);
-        assert!(MermaidDiagramIr::empty(DiagramType::Flowchart)
-            .cluster_nesting_depths()
-            .is_empty());
+        assert!(
+            MermaidDiagramIr::empty(DiagramType::Flowchart)
+                .cluster_nesting_depths()
+                .is_empty()
+        );
     }
 
     fn subgraph_members_recursive_sort_reference(

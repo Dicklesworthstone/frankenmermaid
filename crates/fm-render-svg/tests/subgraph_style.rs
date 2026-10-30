@@ -87,17 +87,23 @@ fn a_node_style_still_applies() {
 /// `fill-opacity` values are `1.0`, a curve opacity and a graticule opacity.
 #[test]
 fn a_declared_cluster_fill_is_not_dimmed_by_the_theme_opacity() {
-    let svg = fm_render_svg::render_svg(&fm_parser::parse(STYLED).ir);
+    let svg = fm_render_svg::render_svg_with_config(
+        &fm_parser::parse(STYLED).ir,
+        &fm_render_svg::SvgRenderConfig {
+            cluster_fill_opacity: 0.08,
+            ..Default::default()
+        },
+    );
 
     let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
     assert!(
         rect.contains("fill:#ff0000"),
         "the declared cluster fill did not reach the rect: {rect}"
     );
+    assert!(!rect.contains("fill-opacity=\"0.08\""), "{rect}");
     assert!(
-        !rect.contains("fill-opacity"),
-        "the declared cluster fill was dimmed by the theme's cluster fill-opacity, so the author's \
-         colour renders at 8%: {rect}"
+        rect.contains("fill-opacity:1"),
+        "the explicit fill must also override the embedded theme's opacity rule: {rect}"
     );
 }
 
@@ -107,8 +113,12 @@ fn a_declared_cluster_fill_is_not_dimmed_by_the_theme_opacity() {
 /// deliberate and applies whenever the author has not asked for something else.
 #[test]
 fn an_undeclared_cluster_keeps_the_theme_fill_opacity() {
-    let svg = fm_render_svg::render_svg(
+    let svg = fm_render_svg::render_svg_with_config(
         &fm_parser::parse("flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n").ir,
+        &fm_render_svg::SvgRenderConfig {
+            cluster_fill_opacity: 0.08,
+            ..Default::default()
+        },
     );
 
     let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
@@ -126,11 +136,15 @@ fn an_undeclared_cluster_keeps_the_theme_fill_opacity() {
 /// it.
 #[test]
 fn a_declared_cluster_stroke_alone_keeps_the_fill_opacity() {
-    let svg = fm_render_svg::render_svg(
+    let svg = fm_render_svg::render_svg_with_config(
         &fm_parser::parse(
             "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  style one stroke:#00ff00\n",
         )
         .ir,
+        &fm_render_svg::SvgRenderConfig {
+            cluster_fill_opacity: 0.08,
+            ..Default::default()
+        },
     );
 
     let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
@@ -263,4 +277,250 @@ fn a_shape_only_style_leaves_the_label_alone() {
         !label.contains("style="),
         "a fill-only subgraph style put an inline style on the label: {label}"
     );
+}
+
+const NESTED: &str = "flowchart LR\n\
+    subgraph outer[Platform]\n\
+      A[Gateway]\n\
+      subgraph inner[Services]\n\
+        B[Application]\n\
+        subgraph storage[Persistence]\n\
+          C[(Database)]\n\
+        end\n\
+      end\n\
+      A --> B --> C\n\
+    end\n";
+
+fn frame<'a>(svg: &'a str, ir: &fm_core::MermaidDiagramIr, key: &str) -> &'a str {
+    let index = ir
+        .graph
+        .first_subgraph_by_key(key)
+        .expect("named subgraph")
+        .cluster
+        .expect("framed subgraph")
+        .0;
+    element_containing(svg, "<rect", &format!("id=\"fm-cluster-{index}\""))
+}
+
+#[test]
+fn nested_frames_alternate_theme_surfaces_in_browser_and_portable_svg() {
+    use fm_render_svg::{SvgRenderConfig, ThemeColors, ThemePreset, render_svg_with_config};
+
+    let ir = fm_parser::parse(NESTED).ir;
+    for theme in [ThemePreset::Default, ThemePreset::Dark, ThemePreset::Forest] {
+        let colors = ThemeColors::from_preset(theme);
+        for portable in [false, true] {
+            let mut config = SvgRenderConfig {
+                theme,
+                ..Default::default()
+            };
+            if portable {
+                config.make_portable();
+            }
+            let svg = render_svg_with_config(&ir, &config);
+            assert_eq!(svg, render_svg_with_config(&ir, &config));
+            for (key, expected) in [
+                ("outer", colors.cluster_fill.as_str()),
+                ("inner", colors.background.as_str()),
+                ("storage", colors.cluster_fill.as_str()),
+            ] {
+                let rect = frame(&svg, &ir, key);
+                assert!(rect.contains(&format!("fill=\"{expected}\"")), "{rect}");
+                assert!(rect.contains(&format!("stroke=\"{}\"", colors.cluster_stroke)));
+                assert!(rect.contains("rx=\"12\""), "{rect}");
+                assert_eq!(
+                    rect.contains("--fm-cluster-fill:var(--fm-bg)"),
+                    key == "inner" && !portable,
+                    "the embedded CSS must actually use the nested surface: {rect}"
+                );
+            }
+            let label = element_containing(&svg, "<text", "fm-cluster-label");
+            assert!(label.contains("font-weight=\"600\""));
+            if portable {
+                assert!(label.contains(&format!("fill=\"{}\"", colors.text)));
+            }
+        }
+    }
+}
+
+#[test]
+fn authored_cluster_palette_and_individual_styles_keep_precedence_over_depth() {
+    use fm_render_svg::{SvgRenderConfig, render_svg_with_config};
+
+    let mut ir = fm_parser::parse(&format!(
+        "{NESTED}\nstyle inner fill:#c7f9cc,stroke:#225533,fill-opacity:0.7,color:#123456"
+    ))
+    .ir;
+    ir.meta
+        .theme_overrides
+        .theme_variables
+        .insert("clusterBkg".into(), "#fff4d0".into());
+    ir.meta
+        .theme_overrides
+        .theme_variables
+        .insert("clusterBorder".into(), "#b45309".into());
+    for embed_theme_css in [false, true] {
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                embed_theme_css,
+                cluster_fill_opacity: 0.2,
+                ..Default::default()
+            },
+        );
+        for key in ["outer", "storage"] {
+            let rect = frame(&svg, &ir, key);
+            assert!(rect.contains("fill=\"#fff4d0\""));
+            assert!(rect.contains("stroke=\"#b45309\""));
+            assert!(rect.contains("fill-opacity=\"0.20\""), "{rect}");
+        }
+        let inner = frame(&svg, &ir, "inner");
+        for declaration in ["fill:#c7f9cc", "stroke:#225533", "fill-opacity:0.7"] {
+            assert!(inner.contains(declaration), "{inner}");
+        }
+        assert!(!inner.contains("fill-opacity=\"0.20\""));
+        assert!(!inner.contains("var(--fm-bg)"));
+        let label = element_containing(&svg, "<text", "fill:#123456");
+        assert!(label.contains("fm-cluster-label"));
+    }
+
+    // A palette override also applies to an otherwise unstyled nested frame.
+    let mut plain = fm_parser::parse(NESTED).ir;
+    plain.meta.theme_overrides = ir.meta.theme_overrides;
+    let svg = render_svg_with_config(&plain, &SvgRenderConfig::default());
+    let inner = frame(&svg, &plain, "inner");
+    assert!(inner.contains("fill=\"#fff4d0\""));
+    assert!(!inner.contains("var(--fm-bg)"));
+}
+
+#[test]
+fn sequence_group_colors_reach_the_embedded_css_without_theme_opacity() {
+    use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
+
+    let ir = fm_parser::parse(
+        "sequenceDiagram\nbox aqua Backend\nparticipant A\nparticipant B\nend\nA->>B: Query",
+    )
+    .ir;
+    let mut layout = fm_layout::layout_diagram(&ir);
+    assert_eq!(layout.clusters.len(), 1);
+    for color in ["aqua", "transparent"] {
+        layout.clusters[0].color = Some(color.to_string());
+        for embed_theme_css in [false, true] {
+            let svg = render_svg_with_layout(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    embed_theme_css,
+                    cluster_fill_opacity: 0.08,
+                    ..Default::default()
+                },
+            );
+            let rect = element_containing(&svg, "<rect", "fm-cluster");
+            assert!(rect.contains(&format!("fill=\"{color}\"")));
+            assert!(!rect.contains("fill-opacity=\"0.08\""));
+            assert!(rect.contains("fill-opacity:1"));
+            if embed_theme_css {
+                assert!(
+                    rect.contains(&format!("--fm-cluster-fill:{color}")),
+                    "{rect}"
+                );
+            }
+            if color == "transparent" {
+                assert!(rect.contains("stroke=\"#cbd5e1\""));
+            }
+        }
+    }
+}
+
+#[test]
+fn dark_c4_boundaries_keep_readable_type_captions_and_explicit_frame_geometry() {
+    use fm_render_svg::{SvgRenderConfig, ThemeColors, ThemePreset, render_svg_with_config};
+
+    let ir = fm_parser::parse(
+        "C4Container\nSystem_Boundary(sys, \"System\") {\nContainer(app, \"App\", \"Rust\", \"Handles requests\")\n}",
+    )
+    .ir;
+    for embed_theme_css in [false, true] {
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                theme: ThemePreset::Dark,
+                embed_theme_css,
+                ..Default::default()
+            },
+        );
+        let rect = element_containing(&svg, "<rect", "fm-cluster-c4");
+        assert!(rect.contains("rx=\"0\""));
+        assert!(rect.contains("stroke-dasharray=\"4,2\""));
+        let label = element_containing(&svg, "<text", "fm-cluster-type-label");
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let expected = if embed_theme_css {
+            "var(--fm-cluster-label-color)"
+        } else {
+            colors.text.as_str()
+        };
+        assert!(label.contains(&format!("fill=\"{expected}\"")), "{label}");
+    }
+}
+
+#[test]
+fn portable_background_covers_the_viewbox_before_content_in_both_backends() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    fn attribute<'a>(tag: &'a str, name: &str) -> &'a str {
+        tag.split_once(&format!("{name}=\""))
+            .expect("attribute exists")
+            .1
+            .split_once('"')
+            .expect("attribute closes")
+            .0
+    }
+
+    for source in [
+        "---\ntitle: Deployment overview\n---\nflowchart LR\nA --> B",
+        "pie\ntitle Revenue\n\"Subscriptions\" : 75\n\"Services\" : 25",
+        "xychart-beta\nx-axis [Jan, Feb, Mar]\ny-axis 0 --> 100\nbar [30, 75, 55]",
+    ] {
+        let mut ir = fm_parser::parse(source).ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for paint in ["#0f172a", "#102030", "transparent", "none"] {
+                ir.meta
+                    .theme_overrides
+                    .theme_variables
+                    .insert("background".into(), paint.into());
+                let mut config = SvgRenderConfig {
+                    backend,
+                    theme: fm_render_svg::ThemePreset::Dark,
+                    ..Default::default()
+                };
+                config.make_portable();
+                let svg = render_svg_with_config(&ir, &config);
+                let background = element_containing(&svg, "<rect", "fm-background");
+                let expected = if paint == "none" {
+                    "transparent"
+                } else {
+                    paint
+                };
+                assert_eq!(attribute(background, "fill"), expected);
+                assert_eq!(attribute(background, "pointer-events"), "none");
+                assert_eq!(attribute(background, "aria-hidden"), "true");
+                let root = element_containing(&svg, "<svg", "viewBox");
+                let viewbox: Vec<f32> = attribute(root, "viewBox")
+                    .split_whitespace()
+                    .map(|value| value.parse().expect("finite viewBox coordinate"))
+                    .collect();
+                for (index, name) in ["x", "y", "width", "height"].iter().enumerate() {
+                    let actual: f32 = attribute(background, name).parse().expect("coordinate");
+                    assert!(
+                        (actual - viewbox[index]).abs() <= 0.01,
+                        "{backend:?} {name}: {background} must match the viewBox at SVG's 2dp precision"
+                    );
+                }
+                assert!(
+                    svg.find(background).unwrap() < svg.find("<text ").unwrap(),
+                    "the surface must sit behind all visible text, including the title"
+                );
+            }
+        }
+    }
 }
