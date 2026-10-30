@@ -1,4 +1,4 @@
-//! Compound (cluster-aware) placement for the layered and tree layouts.
+//! Compound (cluster-aware) placement for the layered, tree, and force layouts.
 //!
 //! The flat layered pipeline ranks and orders every node of a diagram together and then draws each
 //! cluster as the box around wherever its members happened to land. Nothing keeps a cluster's
@@ -20,13 +20,14 @@ use fm_core::{
 use crate::{
     LayoutConfig, LayoutNodeBox, LayoutRect, LayoutSpacing, LayoutTrace, build_cluster_boxes,
     cluster_bounds_for_content, cycle_preparation, endpoint_node_index, first_framed_descendants,
-    flat_placement, tree_node_boxes,
+    flat_placement, force_node_boxes, tree_node_boxes,
 };
 
 #[derive(Clone, Copy)]
 enum FlatLayout {
     Layered,
     Tree,
+    Force,
 }
 
 /// Node boxes for `ir` placed cluster by cluster, or `None` when the flat pipeline should run.
@@ -60,6 +61,17 @@ pub(crate) fn compound_tree_node_boxes(
     metrics: &fm_core::FontMetrics,
 ) -> Option<Vec<LayoutNodeBox>> {
     compound_node_boxes_with_layout(ir, node_sizes, config, spacing, metrics, FlatLayout::Tree)
+}
+
+/// Preserve force placement at every level while treating a complete group as one particle.
+pub(crate) fn compound_force_node_boxes(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    config: &LayoutConfig,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> Option<Vec<LayoutNodeBox>> {
+    compound_node_boxes_with_layout(ir, node_sizes, config, spacing, metrics, FlatLayout::Force)
 }
 
 fn compound_node_boxes_with_layout(
@@ -284,6 +296,9 @@ fn flat_boxes(
 ) -> Vec<LayoutNodeBox> {
     if matches!(layout, FlatLayout::Tree) {
         return tree_node_boxes(ir, node_sizes, spacing, metrics);
+    }
+    if matches!(layout, FlatLayout::Force) {
+        return force_node_boxes(ir, node_sizes, spacing, &mut LayoutTrace::default());
     }
     let (node_priority, cycle_result) = cycle_preparation(ir, config);
     let (_, _, nodes) = flat_placement(
