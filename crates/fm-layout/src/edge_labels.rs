@@ -220,6 +220,7 @@ impl<'a> EdgeLabelPlacer<'a> {
     /// The returned plate can extend outside the original layout; include it in render bounds.
     pub fn place(&mut self, path: &LayoutEdgePath, width: f32, height: f32) -> LayoutPoint {
         let mut foreign_routes = Vec::new();
+        let mut shared_corridors = Vec::new();
         for &(edge_index, obstacle) in &self.routes {
             match obstacle {
                 EdgeLabelObstacle::Bounds(_) => foreign_routes.push(obstacle),
@@ -231,13 +232,15 @@ impl<'a> EdgeLabelPlacer<'a> {
                             .copied()
                             .unwrap_or(1.5))
                         / 2.0;
-                    append_foreign_route_obstacles_with_tolerance(
+                    if append_foreign_route_obstacles_with_tolerance(
                         path,
                         from,
                         to,
                         tolerance,
                         &mut foreign_routes,
-                    );
+                    ) {
+                        shared_corridors.push((from, to, tolerance));
+                    }
                 }
                 EdgeLabelObstacle::Segment(_, _) => {}
             }
@@ -259,7 +262,7 @@ impl<'a> EdgeLabelPlacer<'a> {
             ignored_nodes.sort_unstable();
             ignored_nodes.dedup();
         }
-        let obstacles: Vec<_> = self
+        let mut obstacles: Vec<_> = self
             .layout
             .nodes
             .iter()
@@ -275,35 +278,63 @@ impl<'a> EdgeLabelPlacer<'a> {
             .chain(self.plates.iter().copied().map(EdgeLabelObstacle::Bounds))
             .chain(foreign_routes.iter().copied())
             .collect();
-        let center = closest_clear_route_position(
-            path,
-            edge_label_position(path),
-            width,
-            height,
-            &obstacles,
-        )
-        .or_else(|| {
-            closest_clear_touching_route_position(
-                path,
-                edge_label_position(path),
-                width,
-                height,
-                &obstacles,
-                self.layout.bounds,
-            )
-        })
-        .unwrap_or_else(|| {
-            closest_clear_route_neighborhood(
-                path,
-                width,
-                height,
-                self.layout,
-                self.padding,
-                &self.plates,
-                &foreign_routes,
-                &ignored_nodes,
-            )
-        });
+        let anchor = edge_label_position(path);
+        // A label on a shared trunk can describe several branches equally well. Prefer a
+        // clear part belonging only to this connector, including a plate touching its side.
+        // Fully coincident routes have no such slot; skip the additional interval searches.
+        let distinct_center = if !shared_corridors.is_empty()
+            && route_may_have_distinct_span(path, &shared_corridors)
+        {
+            let distinct_anchor = distinct_branch_anchor(path, anchor, &shared_corridors);
+            let ordinary_obstacles = obstacles.len();
+            obstacles.extend(
+                shared_corridors
+                    .iter()
+                    .map(|&(from, to, _)| EdgeLabelObstacle::Segment(from, to)),
+            );
+            let center =
+                closest_clear_route_position(path, distinct_anchor, width, height, &obstacles)
+                    .or_else(|| {
+                        closest_clear_touching_route_position(
+                            path,
+                            distinct_anchor,
+                            width,
+                            height,
+                            &obstacles,
+                            self.layout.bounds,
+                        )
+                    });
+            obstacles.truncate(ordinary_obstacles);
+            center
+        } else {
+            None
+        };
+        // Short branches and coincident parallel routes still need their complete captions.
+        // Retain the existing shared-corridor fallback when no distinct plate can fit.
+        let center = distinct_center
+            .or_else(|| closest_clear_route_position(path, anchor, width, height, &obstacles))
+            .or_else(|| {
+                closest_clear_touching_route_position(
+                    path,
+                    anchor,
+                    width,
+                    height,
+                    &obstacles,
+                    self.layout.bounds,
+                )
+            })
+            .unwrap_or_else(|| {
+                closest_clear_route_neighborhood(
+                    path,
+                    width,
+                    height,
+                    self.layout,
+                    self.padding,
+                    &self.plates,
+                    &foreign_routes,
+                    &ignored_nodes,
+                )
+            });
         self.plates.push(LayoutRect {
             x: center.x - width / 2.0,
             y: center.y - height / 2.0,
@@ -360,12 +391,12 @@ fn append_foreign_route_obstacles_with_tolerance(
     to: LayoutPoint,
     tolerance: f32,
     obstacles: &mut Vec<EdgeLabelObstacle>,
-) {
+) -> bool {
     let dx = to.x - from.x;
     let dy = to.y - from.y;
     let length_squared = dx * dx + dy * dy;
     if length_squared <= f32::EPSILON {
-        return;
+        return false;
     }
     let mut shared = Vec::new();
     for pair in path.points.windows(2) {
@@ -375,6 +406,7 @@ fn append_foreign_route_obstacles_with_tolerance(
             shared.push((a.min(b).max(0.0), a.max(b).min(1.0)));
         }
     }
+    let has_shared_corridor = !shared.is_empty();
     shared.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     let point = |t| LayoutPoint {
         x: dx.mul_add(t, from.x),
@@ -389,6 +421,59 @@ fn append_foreign_route_obstacles_with_tolerance(
     }
     if cursor < 1.0 {
         obstacles.push(EdgeLabelObstacle::Segment(point(cursor), to));
+    }
+    has_shared_corridor
+}
+
+/// Cheaply rule out routes whose every span is completely covered by another connector.
+/// Several shorter corridors may also cover a span; the exact interval search handles that
+/// less common case. This avoids repeating those searches for fully coincident parallel edges.
+fn route_may_have_distinct_span(
+    path: &LayoutEdgePath,
+    shared_corridors: &[(LayoutPoint, LayoutPoint, f32)],
+) -> bool {
+    path.points.windows(2).any(|pair| {
+        let (from, to) = (pair[0], pair[1]);
+        let (dx, dy) = (to.x - from.x, to.y - from.y);
+        let length_squared = dx * dx + dy * dy;
+        length_squared > f32::EPSILON
+            && !shared_corridors.iter().any(|&(a, b, tolerance)| {
+                if !edge_label_routes_share_corridor(from, to, a, b, tolerance) {
+                    return false;
+                }
+                let start = (a.x - from.x) * dx + (a.y - from.y) * dy;
+                let end = (b.x - from.x) * dx + (b.y - from.y) * dy;
+                start.min(end) <= 0.0 && start.max(end) >= length_squared
+            })
+    })
+}
+
+/// A split's target and a join's source identify the individual branch. Favor that end
+/// before a clear stretch of the trunk can consume a neighboring branch's caption space.
+fn distinct_branch_anchor(
+    path: &LayoutEdgePath,
+    midpoint: LayoutPoint,
+    shared_corridors: &[(LayoutPoint, LayoutPoint, f32)],
+) -> LayoutPoint {
+    let (Some(&start), Some(&end)) = (path.points.first(), path.points.last()) else {
+        return midpoint;
+    };
+    let is_shared = |point: LayoutPoint| {
+        shared_corridors.iter().any(|&(from, to, tolerance)| {
+            let (dx, dy) = (to.x - from.x, to.y - from.y);
+            let length_squared = dx * dx + dy * dy;
+            let along = (point.x - from.x) * dx + (point.y - from.y) * dy;
+            let cross = (point.x - from.x) * dy - (point.y - from.y) * dx;
+            length_squared > f32::EPSILON
+                && along >= 0.0
+                && along <= length_squared
+                && cross * cross <= tolerance * tolerance * length_squared
+        })
+    };
+    match (is_shared(start), is_shared(end)) {
+        (true, false) => end,
+        (false, true) => start,
+        _ => midpoint,
     }
 }
 
@@ -1435,6 +1520,231 @@ mod tests {
             layout.bounds,
             "available corridor must not add whitespace"
         );
+    }
+
+    #[test]
+    fn branch_captions_prefer_distinct_segments_in_every_direction() {
+        for direction in 0..4 {
+            let orient = |point: LayoutPoint| match direction {
+                0 => point,
+                1 => LayoutPoint {
+                    x: point.x,
+                    y: -point.y,
+                },
+                2 => LayoutPoint {
+                    x: point.y,
+                    y: point.x,
+                },
+                _ => LayoutPoint {
+                    x: -point.y,
+                    y: point.x,
+                },
+            };
+            for incoming in [false, true] {
+                let mut source = String::from("flowchart TD\n");
+                for index in 0..4 {
+                    source.push_str(&if incoming {
+                        format!("B{index} -->|Branch {index}| A\n")
+                    } else {
+                        format!("A -->|Branch {index}| B{index}\n")
+                    });
+                }
+                let ir = fm_parser::parse(&source).ir;
+                let mut layout = frame();
+                layout.bounds = LayoutRect {
+                    x: -1320.0,
+                    y: -1320.0,
+                    width: 2640.0,
+                    height: 2640.0,
+                };
+                for index in 0..4 {
+                    let x = index as f32 * 400.0;
+                    let mut path = route(&[(600.0, 0.0), (600.0, 600.0), (x, 600.0), (x, 1000.0)]);
+                    path.edge_index = index;
+                    for point in &mut path.points {
+                        *point = orient(*point);
+                    }
+                    if incoming {
+                        path.points.reverse();
+                    }
+                    layout.edges.push(path);
+                }
+                let mut placer = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+                let mut repeat = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+                let mut plates = Vec::new();
+                for path in &layout.edges {
+                    let center = placer.place(path, 220.0, 24.0);
+                    assert_eq!(center, repeat.place(path, 220.0, 24.0));
+                    let plate = LayoutRect {
+                        x: center.x - 110.0,
+                        y: center.y - 12.0,
+                        width: 220.0,
+                        height: 24.0,
+                    };
+                    assert!(edge_label_route_distance_squared(path, plate) < 0.0001);
+                    for other in &layout.edges {
+                        if other.edge_index != path.edge_index {
+                            assert!(
+                                edge_label_route_distance_squared(other, plate) >= 1.0,
+                                "direction={direction} incoming={incoming}: caption {} also touches branch {}: {plate:?}",
+                                path.edge_index,
+                                other.edge_index
+                            );
+                        }
+                    }
+                    assert!(plates.iter().all(|&previous| !overlap(previous, plate)));
+                    plates.push(plate);
+                }
+                assert_eq!(placer.bounds(), layout.bounds);
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_branch_caption_can_touch_its_side_without_hiding_a_shared_trunk() {
+        let ir = fm_parser::parse("flowchart TD\nA -->|Left| B\nA -->|Right| C").ir;
+        let mut layout = frame();
+        layout.bounds.width = 900.0;
+        layout.bounds.height = 600.0;
+        layout.edges = vec![
+            route(&[(0.0, 0.0), (0.0, 200.0), (400.0, 200.0), (400.0, 500.0)]),
+            route(&[(0.0, 0.0), (0.0, 200.0), (800.0, 200.0), (800.0, 500.0)]),
+        ];
+        layout.edges[1].edge_index = 1;
+        let obstacle = LayoutRect {
+            x: 405.0,
+            y: 220.0,
+            width: 160.0,
+            height: 260.0,
+        };
+        layout.nodes.push(LayoutNodeBox {
+            node_index: 0,
+            node_id: String::from("beside-branch"),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: obstacle,
+        });
+        let center = EdgeLabelPlacer::new(&ir, &layout, 0.0).place(&layout.edges[0], 160.0, 20.0);
+        let plate = LayoutRect {
+            x: center.x - 80.0,
+            y: center.y - 10.0,
+            width: 160.0,
+            height: 20.0,
+        };
+        assert!((plate.x + plate.width - 400.0).abs() < 0.001);
+        assert!(plate.y > 200.0);
+        assert!(!overlap(plate, obstacle));
+        assert!(edge_label_route_distance_squared(&layout.edges[0], plate) < 0.0001);
+        assert!(edge_label_route_distance_squared(&layout.edges[1], plate) >= 1.0);
+    }
+
+    #[test]
+    fn short_branches_and_coincident_parallel_routes_keep_clear_attached_captions() {
+        let ir = fm_parser::parse(
+            "flowchart LR\nA -->|First full caption| B\nA -->|Second full caption| B",
+        )
+        .ir;
+        for short_branch in [false, true] {
+            for offset in [0.0, 0.8] {
+                let mut layout = frame();
+                layout.bounds.width = 800.0;
+                layout.bounds.height = 200.0;
+                for index in 0..2 {
+                    let y = 100.0 + index as f32 * offset;
+                    let mut path = route(&[(20.0, y), (780.0, y)]);
+                    path.edge_index = index;
+                    if short_branch {
+                        path.points.push(LayoutPoint {
+                            x: 780.0,
+                            y: y + if index == 0 { 8.0 } else { -8.0 },
+                        });
+                    }
+                    layout.edges.push(path);
+                }
+                let mut placer = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+                let mut repeat = EdgeLabelPlacer::new(&ir, &layout, 0.0);
+                let mut plates = Vec::new();
+                for path in &layout.edges {
+                    let center = placer.place(path, 180.0, 24.0);
+                    assert_eq!(center, repeat.place(path, 180.0, 24.0));
+                    assert_eq!(center.y, path.points[0].y);
+                    let plate = LayoutRect {
+                        x: center.x - 90.0,
+                        y: center.y - 12.0,
+                        width: 180.0,
+                        height: 24.0,
+                    };
+                    assert!(edge_label_route_distance_squared(path, plate) < 0.0001);
+                    assert!(plates.iter().all(|&previous| !overlap(previous, plate)));
+                    plates.push(plate);
+                }
+                assert_eq!(placer.bounds(), layout.bounds);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_review_captions_identify_their_own_branches() {
+        let source = "flowchart TD\n\
+            Request[Review request]\n\
+            Request -->|Identity and access verification| Access[Access]\n\
+            Request -->|Inventory and capacity validation| Stock[Stock]\n\
+            Request -->|Payment and fraud assessment| Payment[Payment]\n\
+            Request -->|Scheduling and delivery planning| Delivery[Delivery]\n\
+            Access --> User[User]\nAccess --> Role[Role]\n\
+            Stock --> Item[Item]\nStock --> Capacity[Capacity]\n\
+            Payment --> Funds[Funds]\nPayment --> Risk[Risk]\n\
+            Delivery --> Date[Date]\nDelivery --> Address[Address]\n";
+        for direction in [fm_core::GraphDirection::TB, fm_core::GraphDirection::BT] {
+            for algorithm in [crate::LayoutAlgorithm::Auto, crate::LayoutAlgorithm::Tree] {
+                let mut ir = fm_parser::parse(source).ir;
+                ir.direction = direction;
+                let layout = crate::layout_diagram_traced_with_config(
+                    &ir,
+                    algorithm,
+                    crate::LayoutConfig::default(),
+                )
+                .layout;
+                let scene = crate::build_render_scene(&ir, &layout);
+                let plates = scene_plates(&scene);
+                assert_eq!(plates.len(), 4);
+                assert_eq!(scene, crate::build_render_scene(&ir, &layout));
+                for (position, &(index, plate)) in plates.iter().enumerate() {
+                    let path = layout
+                        .edges
+                        .iter()
+                        .find(|path| path.edge_index == index)
+                        .unwrap();
+                    assert!(edge_label_route_distance_squared(path, plate) < 0.0001);
+                    for other in &layout.edges {
+                        if other.edge_index != index {
+                            assert!(
+                                edge_label_route_distance_squared(other, plate) >= 1.0,
+                                "{algorithm:?} {direction:?}: caption {index} also annotates branch {}: {plate:?}",
+                                other.edge_index
+                            );
+                        }
+                    }
+                    assert!(layout.nodes.iter().all(|node| !overlap(plate, node.bounds)));
+                    assert!(
+                        plates[position + 1..]
+                            .iter()
+                            .all(|(_, other)| !overlap(plate, *other))
+                    );
+                    let rows = scene_edge_rows(&scene, index);
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(
+                        rows[0].text,
+                        ir.graph_edge_caption(index)
+                            .unwrap()
+                            .lines()
+                            .next()
+                            .unwrap()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
