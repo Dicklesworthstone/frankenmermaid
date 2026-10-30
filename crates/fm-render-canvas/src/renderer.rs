@@ -961,7 +961,12 @@ impl Canvas2dRenderer {
                     self.render_path_item(path, ctx, offset_x, offset_y, stats);
                 }
                 RenderItem::Text(text) => {
-                    self.render_text_item(text, ctx, offset_x, offset_y, stats);
+                    let font_weight = match group.id.as_deref() {
+                        Some(id) if id.starts_with("fm-cluster-caption-") => "600 ",
+                        Some(id) if id.starts_with("fm-cluster-type-caption-") => "400 ",
+                        _ => "",
+                    };
+                    self.render_text_item(text, ctx, offset_x, offset_y, stats, font_weight);
                 }
             }
         }
@@ -1139,9 +1144,13 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
         stats: &mut SceneRenderStats,
+        font_weight: &str,
     ) {
         self.apply_fill(ctx, &text.fill);
-        ctx.set_font(&format!("{}px {}", text.font_size, self.config.font_family));
+        ctx.set_font(&format!(
+            "{font_weight}{}px {}",
+            text.font_size, self.config.font_family
+        ));
         ctx.set_text_align(match text.align {
             IrTextAlign::Start => TextAlign::Left,
             IrTextAlign::Middle => TextAlign::Center,
@@ -1269,10 +1278,8 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
 
-        // The cluster label font is a pure function of `config` (invariant across clusters), so format it
-        // once and reuse it — the prior canvas font-hoist campaign missed this site. Lazy (like the
-        // `standard_label_font` site) so a cluster-free diagram never formats it. Byte-identical to the
-        // per-cluster `format!("{}px {}", font_size*0.9, font_family)`.
+        // Reuse one buffer while composing each caption's resolved font. Cluster styles may
+        // change any component, and a C4 subtitle has a different default weight from its title.
         let mut cluster_label_font: Option<String> = None;
         let cluster_depths = ir.cluster_nesting_depths();
 
@@ -1368,16 +1375,17 @@ impl Canvas2dRenderer {
         offset: (f64, f64),
         cluster_label_font: &mut Option<String>,
     ) {
-        let title_text = cluster_box.title.as_deref().or_else(|| {
-            ir.clusters
-                .get(cluster_box.cluster_index)
-                .and_then(|ir_cluster| ir_cluster.title)
-                .and_then(|title_id| ir.labels.get(title_id.0))
-                .map(|label| label.text.as_str())
-        });
-        let Some(title_text) = title_text else {
+        use std::fmt::Write as _;
+
+        let caption = fm_layout::cluster_caption::ClusterCaptionLayout::new(
+            ir,
+            cluster_box.cluster_index,
+            cluster_box.title.as_deref(),
+            &self.config.font_metrics(),
+        );
+        if caption.rows.is_empty() {
             return;
-        };
+        }
         let x = f64::from(cluster_box.bounds.x) + offset.0;
         let y = f64::from(cluster_box.bounds.y) + offset.1;
         let declared_title_color = resolve_cluster_text_color(ir, cluster_box.cluster_index);
@@ -1385,30 +1393,30 @@ impl Canvas2dRenderer {
             .as_deref()
             .and_then(sanitize_canvas_paint);
         ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
-        ctx.set_font(cluster_label_font.get_or_insert_with(|| {
-            format!(
-                "600 {}px {}",
-                self.config.font_size * 0.9,
-                self.config.font_family
-            )
-        }));
         ctx.set_text_align(TextAlign::Left);
-        ctx.set_text_baseline(TextBaseline::Top);
-        ctx.fill_text(title_text, x + 8.0, y + 4.0);
-        self.draw_calls += 1;
-
-        // C4 boundary types are the second row of a captioned boundary, so a boundary
-        // without a title must not gain a bracketed type floating on its own.
-        if let Some(boundary_type) = ir
-            .clusters
-            .get(cluster_box.cluster_index)
-            .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
-            .filter(|value| !value.is_empty())
-        {
+        ctx.set_text_baseline(TextBaseline::Alphabetic);
+        let font = cluster_label_font.get_or_insert_with(String::new);
+        for row in &caption.rows {
+            font.clear();
+            if let Some(style) = caption.font_style {
+                font.push_str(style);
+                font.push(' ');
+            }
+            let _ = write!(
+                font,
+                "{} {}px {}",
+                caption.row_weight(row),
+                caption.font_size,
+                caption
+                    .font_family
+                    .as_deref()
+                    .unwrap_or(&self.config.font_family),
+            );
+            ctx.set_font(font);
             ctx.fill_text(
-                &format!("[{boundary_type}]"),
-                x + 8.0,
-                y + 4.0 + self.config.font_size * 1.25,
+                &row.text,
+                x + f64::from(fm_layout::cluster_caption::CAPTION_INSET),
+                y + f64::from(row.baseline),
             );
             self.draw_calls += 1;
         }
@@ -6203,6 +6211,128 @@ mod tests {
         assert!(context.operations().iter().any(|operation| {
             matches!(operation, DrawOperation::SetLineDash(dash) if dash.is_empty())
         }));
+    }
+
+    #[test]
+    fn cluster_captions_share_rows_fonts_and_baselines_across_canvas_scene_and_gpu() {
+        fn scene_captions<'a>(group: &'a RenderGroup, text: &mut Vec<&'a RenderText>) {
+            for child in &group.children {
+                match child {
+                    RenderItem::Group(group) => scene_captions(group, text),
+                    RenderItem::Text(row) if matches!(row.source, RenderSource::Cluster(_)) => {
+                        text.push(row);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for (title, authored_font, c4_type) in [
+            ("Platform", false, false),
+            ("Payments\nRisk review", false, false),
+            ("Identity and permissions", true, false),
+            ("Payments\nRisk review", true, true),
+        ] {
+            let mut ir = fm_parser::parse(
+                "flowchart TB\n subgraph platform[Platform]\n A[Authenticate] --> B[Authorize]\n end\n",
+            )
+            .ir;
+            let title_id = ir.clusters[0].title.unwrap();
+            ir.labels[title_id.0].text = title.to_owned();
+            if c4_type {
+                ir.clusters[0].c4_boundary_type = Some(String::from("SYSTEM"));
+            }
+            if authored_font {
+                ir.style_refs.push(fm_core::IrStyleRef {
+                    target: fm_core::IrStyleTarget::Cluster(0),
+                    style: String::from(
+                        "font-size:40px;font-family:monospace;font-weight:700;font-style:italic",
+                    ),
+                    span: fm_core::Span::default(),
+                });
+            }
+            let config = CanvasRenderConfig::default();
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let frame = layout.clusters[0].bounds;
+            let mut renderer = Canvas2dRenderer::new(config.clone());
+            let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+            renderer.draw_clusters(&layout, &ir, &mut context, 0.0, 0.0);
+            let (_, painted) = record_gantt_canvas_paint(context.operations());
+            let mut expected: Vec<&str> = title.lines().collect();
+            if c4_type {
+                expected.push("[SYSTEM]");
+            }
+            assert_eq!(
+                painted.len(),
+                expected.len(),
+                "all caption rows are painted"
+            );
+            let font_size = if authored_font { 40.0_f64 } else { 13.5 };
+            let mut baseline = frame.y as f64 + (font_size + 2.0).max(16.0);
+            for (row, expected) in painted.iter().zip(&expected) {
+                assert_eq!(row.text, *expected);
+                assert!((row.x - frame.x as f64 - 8.0).abs() < 0.001);
+                assert!((row.y - baseline).abs() < 0.001);
+                assert_eq!(row.paint.baseline, TextBaseline::Alphabetic);
+                if authored_font {
+                    assert_eq!(row.paint.font, "italic 700 40px monospace");
+                } else {
+                    assert!(row.paint.font.starts_with("600 13.5px "));
+                }
+                assert!(row.y - font_size >= frame.y as f64);
+                for node in &layout.nodes {
+                    assert!(row.y + font_size * 0.3 < node.bounds.y as f64);
+                }
+                baseline += font_size * 1.4;
+                if c4_type && *expected == "Risk review" {
+                    baseline -= font_size * 0.15;
+                }
+            }
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            let mut scene_rows = Vec::new();
+            scene_captions(&scene.root, &mut scene_rows);
+            assert_eq!(scene_rows.len(), painted.len());
+            for (scene_row, canvas_row) in scene_rows.iter().zip(&painted) {
+                assert_eq!(scene_row.text, canvas_row.text);
+                assert_eq!(scene_row.baseline, IrTextBaseline::Alphabetic);
+                assert!((f64::from(scene_row.font_size) - font_size).abs() < 0.001);
+                assert!((f64::from(scene_row.x) - canvas_row.x).abs() < 0.001);
+                assert!((f64::from(scene_row.y) - canvas_row.y).abs() < 0.001);
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Cluster)
+                .collect();
+            assert_eq!(runs.len(), painted.len());
+            for (run, row) in runs.iter().zip(&painted) {
+                assert_eq!(run.quad_count as usize, row.text.chars().count());
+                let first = &plan.text_quads[run.first_quad as usize];
+                assert!((f64::from(first.half_extent[1]) * 2.0 - font_size).abs() < 0.001);
+                let baseline = f64::from(first.center[1])
+                    + f64::from(crate::gpu_plan::GLYPH_BASELINE_RATIO - 0.5) * font_size;
+                assert!((baseline - row.y).abs() < 0.001);
+                for glyph in row.text.chars() {
+                    assert!(plan.glyph_atlas.cell(glyph).is_some());
+                }
+            }
+            if authored_font {
+                assert!(
+                    plan.glyph_atlas.cell_px >= 80,
+                    "large headings need a sharp atlas"
+                );
+            }
+            assert_eq!(ir.labels[title_id.0].text, title);
+        }
     }
 
     #[test]

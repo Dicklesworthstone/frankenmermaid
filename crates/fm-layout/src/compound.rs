@@ -14,13 +14,13 @@
 
 use fm_core::{
     DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrGraphNode, IrNode, IrNodeId,
-    IrSubgraph, IrSubgraphId, MermaidDiagramIr,
+    IrStyleTarget, IrSubgraph, IrSubgraphId, MermaidDiagramIr,
 };
 
 use crate::{
-    LayoutConfig, LayoutNodeBox, LayoutRect, LayoutSpacing, LayoutTrace, build_cluster_boxes,
-    cluster_bounds_for_content, cycle_preparation, endpoint_node_index, first_framed_descendants,
-    flat_placement, force_node_boxes, tree_node_boxes,
+    ClusterCaptionLayout, LayoutConfig, LayoutNodeBox, LayoutRect, LayoutSpacing, LayoutTrace,
+    build_cluster_boxes, cluster_bounds_for_content, cycle_preparation, endpoint_node_index,
+    first_framed_descendants, flat_placement, force_node_boxes, tree_node_boxes,
 };
 
 #[derive(Clone, Copy)]
@@ -203,15 +203,13 @@ fn place(
                 .map_or(subgraph.title, |cluster| cluster.title)
                 .and_then(|label| ir.labels.get(label.0))
                 .map(|label| label.text.as_str());
-            let boundary_type = cluster.and_then(|cluster| cluster.c4_boundary_type.as_deref());
-            let bounds = cluster_bounds_for_content(
-                content,
-                children,
+            let caption = ClusterCaptionLayout::new(
+                ir,
+                subgraph.cluster.map_or(usize::MAX, |id| id.0),
                 title,
-                boundary_type,
-                spacing,
                 metrics,
             );
+            let bounds = cluster_bounds_for_content(content, children, &caption, spacing);
             PlacedCluster {
                 members,
                 boxes,
@@ -460,6 +458,22 @@ fn cluster_sub_ir(
             id: IrClusterId(new),
             members: remap_members(&ir.clusters[old].members),
             ..ir.clusters[old].clone()
+        })
+        .collect();
+    // A descendant's authored caption font must survive recursive placement. Otherwise its
+    // compound slot is measured with the default heading and the final styled frame spills
+    // into the next group. Node sizes already come from the original IR's measured sizes.
+    sub.style_refs = ir
+        .style_refs
+        .iter()
+        .filter_map(|style| {
+            let IrStyleTarget::Cluster(old) = style.target else {
+                return None;
+            };
+            lookup(&cluster_index, old).map(|new| fm_core::IrStyleRef {
+                target: IrStyleTarget::Cluster(new),
+                ..style.clone()
+            })
         })
         .collect();
     (sub, members)

@@ -23,6 +23,7 @@ pub mod fnx_ordering;
 
 pub mod adapton;
 mod cga_routing;
+pub mod cluster_caption;
 mod compound;
 pub mod edge_labels;
 pub mod edge_paths;
@@ -37,6 +38,7 @@ mod tree_view;
 mod treemap;
 mod venn;
 mod wardley;
+use cluster_caption::{ClusterCaptionLayout, ClusterCaptionRowKind};
 use event_model::layout_diagram_event_model_traced;
 use ishikawa::layout_diagram_ishikawa_traced;
 pub use pie::{PieChartLayout, PieLegendEntry, PieSliceLayout, PieTextBlock};
@@ -5864,30 +5866,57 @@ fn build_label_layer(
     }
 
     for cluster in &layout.clusters {
-        let Some(title) = ir
-            .clusters
-            .get(cluster.cluster_index)
-            .and_then(|cluster_ir| cluster_ir.title)
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .map(|label| label.text.as_str())
-            .or(cluster.title.as_deref())
-        else {
+        let caption =
+            ClusterCaptionLayout::new(ir, cluster.cluster_index, cluster.title.as_deref(), metrics);
+        if caption.rows.is_empty() {
             continue;
-        };
-
-        layer.children.push(RenderItem::Text(RenderText {
-            source: RenderSource::Cluster(cluster.cluster_index),
-            text: title.to_owned(),
-            x: cluster.bounds.x + 10.0,
-            y: cluster.bounds.y + 8.0,
-            font_size: 12.0,
-            align: TextAlign::Start,
-            baseline: TextBaseline::Top,
-            fill: FillStyle::Solid {
-                color: String::from("#64748b"),
-                opacity: 1.0,
-            },
-        }));
+        }
+        let source = RenderSource::Cluster(cluster.cluster_index);
+        let mut title_group = RenderGroup::new(Some(format!(
+            "fm-cluster-caption-{}",
+            cluster.cluster_index
+        )))
+        .with_source(source);
+        let mut type_group = RenderGroup::new(Some(format!(
+            "fm-cluster-type-caption-{}",
+            cluster.cluster_index
+        )))
+        .with_source(source);
+        let mut color = String::from("#1e293b");
+        for style in &ir.style_refs {
+            if style.target == fm_core::IrStyleTarget::Cluster(cluster.cluster_index)
+                && let Some(declared) = fm_core::parse_style_string(&style.style)
+                    .properties
+                    .get("color")
+                    .and_then(|value| scene_paint(value))
+            {
+                color = declared;
+            }
+        }
+        for row in caption.rows {
+            let text = RenderItem::Text(RenderText {
+                source,
+                text: row.text,
+                x: cluster.bounds.x + cluster_caption::CAPTION_INSET,
+                y: cluster.bounds.y + row.baseline,
+                font_size: caption.font_size,
+                align: TextAlign::Start,
+                baseline: TextBaseline::Alphabetic,
+                fill: FillStyle::Solid {
+                    color: color.clone(),
+                    opacity: 1.0,
+                },
+            });
+            if row.kind == ClusterCaptionRowKind::BoundaryType {
+                type_group.children.push(text);
+            } else {
+                title_group.children.push(text);
+            }
+        }
+        if !type_group.children.is_empty() {
+            title_group.children.push(RenderItem::Group(type_group));
+        }
+        layer.children.push(RenderItem::Group(title_group));
     }
 
     let bounds = edge_labels
@@ -10459,7 +10488,7 @@ fn layout_diagram_timeline_traced_with_metrics(
             column_by_node[node_index] = column_index;
         }
     }
-    for cluster in &ir.clusters {
+    for (cluster_index, cluster) in ir.clusters.iter().enumerate() {
         let mut first = usize::MAX;
         let mut last = 0;
         for member in &cluster.members {
@@ -10471,10 +10500,7 @@ fn layout_diagram_timeline_traced_with_metrics(
         if first == usize::MAX {
             continue;
         }
-        let title_width = cluster
-            .title
-            .and_then(|label| ir.labels.get(label.0))
-            .map_or(0.0, |label| cluster_title_width(&label.text, metrics));
+        let title_width = ClusterCaptionLayout::new(ir, cluster_index, None, metrics).width;
         let reserved_width = column_widths[first..=last].iter().sum::<f32>()
             + (last - first) as f32 * column_gap
             + 2.0 * spacing.cluster_padding;
@@ -15142,10 +15168,11 @@ fn layout_diagram_kanban_traced(
     let lane_header = if columns_are_declared_lanes {
         ir.clusters
             .iter()
-            .filter_map(|cluster| cluster.title.and_then(|label| ir.labels.get(label.0)))
-            .map(|label| {
+            .enumerate()
+            .map(|(cluster_index, _)| {
                 spacing.cluster_padding
-                    + cluster_title_extra_header(&label.text, spacing.cluster_padding, metrics)
+                    + ClusterCaptionLayout::new(ir, cluster_index, None, metrics)
+                        .extra_header(spacing.cluster_padding)
             })
             .fold(spacing.cluster_padding, f32::max)
     } else {
@@ -15160,12 +15187,7 @@ fn layout_diagram_kanban_traced(
             .map(|index| node_sizes[*index].0)
             .fold(if journey { 0.0 } else { 144.0 }, f32::max);
         if columns_are_declared_lanes {
-            let title_width = ir
-                .clusters
-                .get(rank)
-                .and_then(|cluster| cluster.title)
-                .and_then(|label| ir.labels.get(label.0))
-                .map_or(0.0, |label| cluster_title_width(&label.text, metrics));
+            let title_width = ClusterCaptionLayout::new(ir, rank, None, metrics).width;
             column_width = column_width.max(title_width - 2.0 * spacing.cluster_padding);
         }
         let content_left = column_left
@@ -26575,10 +26597,8 @@ fn extend_bounds_for_state_notes(layout: &mut DiagramLayout) {
 fn cluster_bounds_for_content(
     content: LayoutRect,
     children: impl Iterator<Item = LayoutRect>,
-    title: Option<&str>,
-    c4_boundary_type: Option<&str>,
+    caption: &ClusterCaptionLayout,
     spacing: LayoutSpacing,
-    metrics: &fm_core::FontMetrics,
 ) -> LayoutRect {
     const HEADER_CLEARANCE: f32 = 28.0;
     const NESTING_INSET: f32 = 16.0;
@@ -26586,7 +26606,11 @@ fn cluster_bounds_for_content(
     // C4's extra caption height below is measured relative to the configured padding. A nested
     // frame must reserve that same base before the extra is applied, or increasing padding can
     // cancel the caption clearance and move the child back over the second text row.
-    let nested_header_padding = if c4_boundary_type.is_some_and(|kind| !kind.is_empty()) {
+    let nested_header_padding = if caption
+        .rows
+        .iter()
+        .any(|row| row.kind == ClusterCaptionRowKind::BoundaryType)
+    {
         spacing.cluster_padding.max(HEADER_CLEARANCE)
     } else {
         HEADER_CLEARANCE
@@ -26603,18 +26627,9 @@ fn cluster_bounds_for_content(
         max_y = max_y.max(child.y + child.height + NESTING_INSET - spacing.cluster_padding);
     }
 
-    // C4 draws the bracketed boundary type below its title. It must occupy header space in
-    // both the compound slot and final frame; otherwise the first opaque card covers that row.
-    let c4_caption = c4_boundary_type
-        .filter(|kind| !kind.is_empty())
-        .map(|kind| format!("{}\n[{kind}]", title.unwrap_or_default()));
-    let caption = c4_caption.as_deref().or(title);
     let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-    let title_width = caption.map_or(0.0, |text| cluster_title_width(text, metrics));
-    let extra_header = caption.map_or(0.0, |text| {
-        cluster_title_extra_header(text, spacing.cluster_padding, metrics)
-    });
-    let width = contents_width.max(title_width);
+    let extra_header = caption.extra_header(spacing.cluster_padding);
+    let width = contents_width.max(caption.width);
     LayoutRect {
         // Widen around the contents: extending only the right border would move a title-wide
         // frame out of the slot the parent reserved for it and into the next node or cluster.
@@ -26758,6 +26773,7 @@ fn build_cluster_boxes(
             .into_iter()
             .filter_map(|id| final_boxes.get(id.0).and_then(Option::as_ref))
             .map(|cluster| cluster.bounds);
+        let caption = ClusterCaptionLayout::new(ir, cluster_index, title.as_deref(), metrics);
         let bounds = cluster_bounds_for_content(
             LayoutRect {
                 x: min_x,
@@ -26766,10 +26782,8 @@ fn build_cluster_boxes(
                 height: max_y - min_y,
             },
             children,
-            title.as_deref(),
-            cluster.c4_boundary_type.as_deref(),
+            &caption,
             spacing,
-            metrics,
         );
 
         let box_obj = LayoutClusterBox {
@@ -26784,70 +26798,6 @@ fn build_cluster_boxes(
 
     final_boxes.into_iter().flatten().collect()
 }
-
-/// Width a cluster box needs so its title fits inside it (bd-tm5p).
-///
-/// Mirrors `fm-render-svg`'s cluster-label geometry: the text starts at `bounds.x + 8.0`, so the same
-/// 8px is mirrored on the right. The label renders at `detail.cluster_font_size`, which is
-/// `config.font_size * 0.9` at full detail and `* 0.86` at reduced detail — NOT the node font size —
-/// so the estimate is scaled to the larger of those, because under-sizing is what lets the title
-/// escape while over-sizing only adds padding. Semibold titles need more room than the plain
-/// preset: the browser's 54px "Very long title" measures 432.875px against its 326.7px estimate.
-fn cluster_title_width(title: &str, metrics: &fm_core::FontMetrics) -> f32 {
-    if title.trim().is_empty() {
-        return 0.0;
-    }
-    // Swimlane/section clusters render with their prefix stripped, so measure the displayed text.
-    let displayed = displayed_cluster_title(title);
-    let font_size = metrics.font_size();
-    let average = metrics.avg_char_width();
-    let text_width = displayed
-        .lines()
-        .map(|line| {
-            let measured = metrics.estimate_width(line);
-            // Match SVG's preserved wide-glyph allowance, including narrow presets and m/w.
-            let wide_allowance: f32 = line
-                .chars()
-                .map(
-                    |character| match fm_core::CharWidthClass::classify(character) {
-                        fm_core::CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
-                        fm_core::CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
-                        _ => 0.0,
-                    },
-                )
-                .sum();
-            (measured * 1.4).max((measured + wide_allowance) * 1.125)
-        })
-        .fold(0.0_f32, f32::max)
-        * ((font_size * CLUSTER_FONT_SCALE).max(10.0) / font_size);
-    16.0 + text_width
-}
-
-fn displayed_cluster_title(title: &str) -> &str {
-    title
-        .strip_prefix("swimlane:")
-        .or_else(|| title.strip_prefix("section "))
-        .unwrap_or(title)
-}
-
-/// Extra space above the contents when a title outgrows the existing cluster padding.
-/// SVG uses this baseline and TextBuilder's 1.4 line spacing; the remaining allowance keeps
-/// descenders, incoming arrowheads and the first node's opaque fill apart. The default SVG
-/// thick arrow reaches 22.5px behind its tip, so an 8px gap put its wings on the heading.
-fn cluster_title_extra_header(title: &str, padding: f32, metrics: &fm_core::FontMetrics) -> f32 {
-    let displayed = displayed_cluster_title(title);
-    if displayed.trim().is_empty() {
-        return 0.0;
-    }
-    let font_size = (metrics.font_size() * CLUSTER_FONT_SCALE).max(10.0);
-    let baseline = (font_size + 2.0).max(16.0);
-    let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
-    (baseline + additional_lines * font_size * 1.4 + font_size * 0.3 + 28.0 - padding).max(0.0)
-}
-
-/// The larger of the renderer's two `cluster_font_size` factors (`0.9` full detail, `0.86` reduced).
-/// Sizing to the larger one is the direction that over-sizes rather than lets the title spill.
-const CLUSTER_FONT_SCALE: f32 = 0.9;
 
 fn build_state_cluster_dividers(
     ir: &MermaidDiagramIr,
@@ -33898,7 +33848,7 @@ mod tests {
         let next_lane = layout.clusters[1].bounds;
         assert!(next_lane.x - lane.x - lane.width >= spacing.rank_spacing - 0.001);
         assert!(first.x - lane.x >= spacing.cluster_padding - 0.001);
-        let header_size = metrics.font_size() * super::CLUSTER_FONT_SCALE;
+        let header_size = metrics.font_size() * 0.9;
         let header_bottom = lane.y + (header_size + 2.0).max(16.0) + header_size * 1.4;
         assert!(first.y > header_bottom + header_size * 0.3);
         assert!((first.y - layout.nodes[2].bounds.y).abs() < 0.001);
@@ -33992,15 +33942,22 @@ mod tests {
                 matches!(item, RenderItem::Text(text) if text.source == RenderSource::Node(*source))
             }));
         }
+        fn count_label(group: &super::RenderGroup, name: &str) -> usize {
+            group
+                .children
+                .iter()
+                .map(|item| match item {
+                    RenderItem::Text(text) => usize::from(text.text == name),
+                    RenderItem::Group(group) => count_label(group, name),
+                    RenderItem::Path(_) => 0,
+                })
+                .sum()
+        }
         for name in [
             "Outer", "Inner", "A", "B", "C", "D", "Finished", "ready", "parallel",
         ] {
             assert_eq!(
-                labels
-                    .children
-                    .iter()
-                    .filter(|item| { matches!(item, RenderItem::Text(text) if text.text == name) })
-                    .count(),
+                count_label(labels, name),
                 1,
                 "the visible label {name} must survive exactly once",
             );
@@ -41387,7 +41344,13 @@ mod tests {
     fn cluster_heading_width_fits_measured_default_semibold_text() {
         let title =
             "A deliberately long subgraph title that is much wider than its single child node";
-        let width = super::cluster_title_width(title, &fm_core::FontMetrics::default_metrics());
+        let width = super::ClusterCaptionLayout::new(
+            &MermaidDiagramIr::empty(DiagramType::Flowchart),
+            0,
+            Some(title),
+            &fm_core::FontMetrics::default_metrics(),
+        )
+        .width;
         // Chromium measured this complete default 13.5px, weight-600 heading at 601.78125px.
         // Leave the same 8px inset on each side as the renderer; the old estimate was 477.09px.
         assert!(

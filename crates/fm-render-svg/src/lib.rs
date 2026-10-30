@@ -2481,6 +2481,20 @@ fn render_scene_group(
             rendered = rendered.attr("font-weight", "600");
         }
         if matches!(child, RenderItem::Text(_))
+            && matches!(group.source, RenderSource::Cluster(_))
+            && let Some(id) = group.id.as_deref()
+        {
+            if id.starts_with("fm-cluster-caption-") {
+                rendered = rendered
+                    .attr("font-weight", "600")
+                    .class("fm-cluster-label");
+            } else if id.starts_with("fm-cluster-type-caption-") {
+                rendered = rendered
+                    .attr("font-weight", "400")
+                    .class("fm-cluster-type-label");
+            }
+        }
+        if matches!(child, RenderItem::Text(_))
             && let Some(typography) = &treemap_typography
         {
             // Size, color and opacity already belong to the measured scene. Attach only
@@ -2968,6 +2982,36 @@ fn render_scene_text(
                 // value without multiplying it by another fill-opacity on the text.
                 elem = elem.fill_opacity(1.0);
             }
+        }
+    }
+    if let Some(ir) = ir
+        && let RenderSource::Cluster(index) = text.source
+    {
+        let caption = fm_layout::cluster_caption::ClusterCaptionLayout::with_default_font_size(
+            ir,
+            index,
+            None,
+            &config.font_metrics(),
+            text.font_size,
+        );
+        let theme = resolve_theme(Some(ir), config);
+        elem = elem.fill(&theme.colors.text).attr("xml:space", "preserve");
+        if let Some(family) = caption.font_family.as_deref() {
+            elem = elem.attr("font-family", family);
+        }
+        if let Some(weight) = caption.font_weight {
+            elem = elem.attr("font-weight", weight);
+        }
+        if let Some(style) = caption.font_style {
+            elem = elem.attr("font-style", style);
+        }
+        if let Some(style) = resolve_cluster_inline_styles(ir, index).1 {
+            let style = if style.contains("font-size:") {
+                measured_card_font_style(Some(&style), text.font_size)
+            } else {
+                style
+            };
+            elem = elem.attr("style", &style);
         }
     }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
@@ -5789,6 +5833,7 @@ fn render_layout_to_svg(
         .get("clusterBkg")
         .and_then(|value| sanitize_svg_paint(value))
         .is_some();
+    let cluster_metrics = config.font_metrics();
 
     for (_sort_idx, cluster) in sorted_clusters {
         let ir_cluster = ir.clusters.get(cluster.cluster_index);
@@ -5942,83 +5987,52 @@ fn render_layout_to_svg(
 
         doc = doc.child(rect);
 
-        // Cluster label if present
-        if detail.show_cluster_labels && !title_text.is_empty() {
-            // The C4 branch that used to live here stripped `System_Boundary` / `Container_Boundary`
-            // / `Enterprise_Boundary` / `Deployment_Node` and surrounding punctuation back out of
-            // the title. It was cleaning up a title the parser stopped producing at bd-039t, and it
-            // could only ever run when `is_c4_boundary` was true — which, as the note above records,
-            // it never was. A C4 boundary's title is now simply the author's label, like any other.
-            let display_title = if is_swimlane && title_text.starts_with("swimlane:") {
-                title_text.trim_start_matches("swimlane:").to_string()
-            } else if is_swimlane && title_text.starts_with("section ") {
-                title_text.trim_start_matches("section ").to_string()
-            } else {
-                title_text.to_string()
-            };
-
-            if !display_title.is_empty() {
-                let text = TextBuilder::new(&display_title)
-                    .x(cluster.bounds.x + offset_x + 8.0)
-                    .y(cluster.bounds.y + offset_y + (detail.cluster_font_size + 2.0).max(16.0))
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(detail.cluster_font_size)
-                    .font_weight("600")
+        if detail.show_cluster_labels {
+            let caption = fm_layout::cluster_caption::ClusterCaptionLayout::with_default_font_size(
+                ir,
+                cluster.cluster_index,
+                Some(title_text),
+                &cluster_metrics,
+                detail.cluster_font_size,
+            );
+            for row in &caption.rows {
+                let class = match row.kind {
+                    fm_layout::cluster_caption::ClusterCaptionRowKind::Title => "fm-cluster-label",
+                    fm_layout::cluster_caption::ClusterCaptionRowKind::BoundaryType => {
+                        "fm-cluster-type-label"
+                    }
+                };
+                let mut text = TextBuilder::new(&row.text)
+                    .x(cluster.bounds.x + offset_x + fm_layout::cluster_caption::CAPTION_INSET)
+                    .y(cluster.bounds.y + offset_y + row.baseline)
+                    .font_family_unless_embedded_css(
+                        caption
+                            .font_family
+                            .as_deref()
+                            .unwrap_or(&config.font_family),
+                        config.embed_theme_css && caption.font_family.is_none(),
+                    )
+                    .font_size(caption.font_size)
+                    .font_weight(caption.row_weight(row))
                     .fill(label_color)
-                    .class("fm-cluster-label")
+                    .class(class)
                     .build();
-                // The label half of the author's `style` directive, applied here rather than to the
-                // rect. Inline `style` beats both the `fill` attribute above and the
-                // `.fm-cluster-label` rule, so a declared `color` wins over the theme exactly as a
-                // declared `fill` wins on the shape.
-                let text = match declared_cluster_label_style.as_deref() {
-                    Some(css) => text.attr("style", css),
-                    None => text,
-                };
-                let text = if config.include_source_spans {
-                    apply_span_metadata(text, cluster.span)
-                } else {
-                    text
-                };
+                if let Some(style) = caption.font_style {
+                    text = text.attr("font-style", style);
+                }
+                if let Some(css) = declared_cluster_label_style.as_deref() {
+                    let style = if css.contains("font-size:") {
+                        measured_card_font_style(Some(css), caption.font_size)
+                    } else {
+                        css.to_owned()
+                    };
+                    text = text.attr("style", &style);
+                }
+                if config.include_source_spans {
+                    text = apply_span_metadata(text, cluster.span);
+                }
                 doc = doc.child(text);
             }
-        }
-
-        // THE BOUNDARY TYPE ROW, which mermaid draws and we did not.
-        //
-        // `drawInsideBoundary` rewrites the stored type to `"[" + type + "]"` and `drawBoundary`
-        // draws it through the same text helper as the label, one row below. The brackets are added
-        // HERE rather than stored in the IR so the IR keeps mermaid's own token — see
-        // `IrCluster::c4_boundary_type`.
-        //
-        // Drawn whenever the type exists, matching mermaid's `t.type && t.type.text !== ""`. It is
-        // gated on `show_cluster_labels` for the same reason the label above is: a detail level that
-        // suppresses cluster captions should not leave a bracketed type floating alone.
-        if detail.show_cluster_labels
-            && let Some(boundary_type) = c4_boundary_type
-            && !boundary_type.is_empty()
-        {
-            let text = TextBuilder::new(&format!("[{boundary_type}]"))
-                .x(cluster.bounds.x + offset_x + 8.0)
-                .y(cluster.bounds.y
-                    + offset_y
-                    + (detail.cluster_font_size + 2.0).max(16.0)
-                    + detail.cluster_font_size * 1.25)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(detail.cluster_font_size)
-                .fill(label_color)
-                .class("fm-cluster-type-label")
-                .build();
-            let text = match declared_cluster_label_style.as_deref() {
-                Some(css) => text.attr("style", css),
-                None => text,
-            };
-            let text = if config.include_source_spans {
-                apply_span_metadata(text, cluster.span)
-            } else {
-                text
-            };
-            doc = doc.child(text);
         }
     }
 
@@ -22592,6 +22606,69 @@ mod tests {
         let svg = render_svg(&ir);
         assert!(svg.contains("class=\"fm-cluster\""));
         assert!(svg.contains("class=\"fm-cluster-label\""));
+    }
+
+    #[test]
+    fn cluster_caption_rows_use_measured_fonts_in_both_svg_backends() {
+        fn text_tag<'a>(svg: &'a str, text: &str) -> &'a str {
+            let end = svg.find(&format!(">{text}</text>")).expect("caption text");
+            let start = svg[..end].rfind("<text").expect("caption element");
+            &svg[start..end]
+        }
+        fn attribute<'a>(tag: &'a str, name: &str) -> &'a str {
+            tag.split_once(&format!("{name}=\""))
+                .expect("caption attribute")
+                .1
+                .split('"')
+                .next()
+                .unwrap()
+        }
+        for (declared_size, measured_size) in [("40px", 40.0_f32), ("9999px", 13.5)] {
+            let mut ir = create_ir_with_cluster("Payments\nRisk review");
+            ir.clusters[0].c4_boundary_type = Some(String::from("SYSTEM"));
+            ir.style_refs.push(fm_core::IrStyleRef {
+                target: fm_core::IrStyleTarget::Cluster(0),
+                style: format!(
+                    "font-size:{declared_size};font-family:monospace;font-weight:700;font-style:italic;color:#123456"
+                ),
+                span: Span::default(),
+            });
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let svg = render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend,
+                        embed_theme_css: false,
+                        ..Default::default()
+                    },
+                );
+                let tags: Vec<_> = ["Payments", "Risk review", "[SYSTEM]"]
+                    .iter()
+                    .map(|text| text_tag(&svg, text))
+                    .collect();
+                let mut positions = Vec::new();
+                for tag in tags {
+                    assert_eq!(
+                        attribute(tag, "font-size").parse::<f32>().unwrap(),
+                        measured_size
+                    );
+                    assert_eq!(attribute(tag, "font-family"), "monospace");
+                    let style = attribute(tag, "style");
+                    assert!(style.contains("font-weight:700"));
+                    assert!(style.contains("font-style:italic"));
+                    assert!(style.contains("fill:#123456"));
+                    assert!(style.contains(&format!("font-size:{measured_size}px!important")));
+                    positions.push((
+                        attribute(tag, "x").parse::<f32>().unwrap(),
+                        attribute(tag, "y").parse::<f32>().unwrap(),
+                    ));
+                }
+                assert!((positions[1].0 - positions[0].0).abs() < 0.01);
+                assert!((positions[2].0 - positions[0].0).abs() < 0.01);
+                assert!((positions[1].1 - positions[0].1 - measured_size * 1.4).abs() < 0.02);
+                assert!((positions[2].1 - positions[1].1 - measured_size * 1.25).abs() < 0.02);
+            }
+        }
     }
 
     #[test]

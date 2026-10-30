@@ -1219,26 +1219,6 @@ fn clip_segments_around_labels(
     visible
 }
 
-/// A cluster's title, resolved the same way the Canvas2D pass resolves it (bd-dh6cy).
-///
-/// Two sources, in the raster path's order: the layout box carries one for diagram types that place
-/// it there, and otherwise it comes from the IR cluster's label id. Duplicating that order rather
-/// than picking one is what keeps the two surfaces titling the same subgraphs — reading only
-/// `LayoutClusterBox::title` would silently drop every flowchart subgraph, whose title lives in the
-/// IR.
-fn cluster_title<'a>(
-    ir: &'a MermaidDiagramIr,
-    cluster: &'a fm_layout::LayoutClusterBox,
-) -> Option<&'a str> {
-    cluster.title.as_deref().or_else(|| {
-        ir.clusters
-            .get(cluster.cluster_index)
-            .and_then(|ir_cluster| ir_cluster.title)
-            .and_then(|title_id| ir.labels.get(title_id.0))
-            .map(|label| label.text.as_str())
-    })
-}
-
 /// Which collection a [`GpuTextRun`]'s index refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuTextSource {
@@ -2769,6 +2749,18 @@ impl GpuRenderPlan {
             .iter()
             .map(|edge| edge_label_caption(ir, edge))
             .collect();
+        let cluster_captions: Vec<_> = layout
+            .clusters
+            .iter()
+            .map(|cluster| {
+                fm_layout::cluster_caption::ClusterCaptionLayout::new(
+                    ir,
+                    cluster.cluster_index,
+                    cluster.title.as_deref(),
+                    &metrics,
+                )
+            })
+            .collect();
 
         // ⚠️ THE ATLAS MUST GROW WITH THE LARGEST LABEL, or this renders BLURRY rather than wrong --
         // a failure that survives review because the geometry is right and only the raster is soft.
@@ -2799,6 +2791,12 @@ impl GpuRenderPlan {
                     .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
             )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
+            .chain(
+                cluster_captions
+                    .iter()
+                    .filter(|caption| !caption.rows.is_empty())
+                    .map(|caption| caption.font_size),
+            )
             .chain(
                 layout
                     .extensions
@@ -2870,7 +2868,7 @@ impl GpuRenderPlan {
                     .chain(requirement_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
                     .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
                     .chain(layout.extensions.sequence_messages.iter().map(|message| message.text.as_str()))
-                    .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
+                    .chain(cluster_captions.iter().flat_map(|caption| caption.rows.iter().map(|row| row.text.as_str())))
                     .chain(edge_captions.iter().flatten().flat_map(fm_core::GraphEdgeCaption::lines))
                     // CARDINALITIES GO IN THE ATLAS TOO. Same trap: a `1` that never reached the
                     // atlas emits no quad and the run vanishes without an error anywhere.
@@ -3089,12 +3087,10 @@ impl GpuRenderPlan {
             );
         }
 
-        // Cluster titles use the Canvas2D top-left inset and 90% label font. They share the
-        // configured advances and square glyph cells with node text.
-        for cluster in &layout.clusters {
-            let Some(title) = cluster_title(ir, cluster) else {
-                continue;
-            };
+        // Preserve every measured caption row, including C4 type subtitles. The single-face
+        // atlas still uses the configured family/weight; size and alphabetic baselines match
+        // Canvas2D/SVG, and authored larger faces receive appropriately sized atlas cells.
+        for (cluster, caption) in layout.clusters.iter().zip(&cluster_captions) {
             let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
@@ -3107,15 +3103,20 @@ impl GpuRenderPlan {
                 })
                 .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
-            sink.push_left_multiline(
-                title,
-                (cluster.bounds.x + 8.0, cluster.bounds.y + 4.0),
-                font_px * 0.9,
-                metrics.line_height_px() * 0.9,
-                colour,
-                GpuTextSource::Cluster,
-                cluster.cluster_index,
-            );
+            for row in &caption.rows {
+                sink.push_left(
+                    &row.text,
+                    (
+                        cluster.bounds.x + fm_layout::cluster_caption::CAPTION_INSET,
+                        cluster.bounds.y + row.baseline
+                            - (GLYPH_BASELINE_RATIO - 0.5) * caption.font_size,
+                    ),
+                    caption.font_size,
+                    colour,
+                    GpuTextSource::Cluster,
+                    cluster.cluster_index,
+                );
+            }
         }
 
         // EDGE LABELS AND CARDINALITIES (bd-qj46q, bd-2ogh5). `draw_edges` emits a fill_text for a

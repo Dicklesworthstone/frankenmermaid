@@ -58,74 +58,14 @@ pub(crate) fn graph_cluster_caption_bounds(
     metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutRect> {
     let mut captions = Vec::new();
-    let base_font_size = (metrics.font_size() * crate::CLUSTER_FONT_SCALE).max(10.0);
-    let baseline = (base_font_size + 2.0).max(16.0);
     for cluster in clusters {
-        let metadata = ir.clusters.get(cluster.cluster_index);
-        let title = cluster
-            .title
-            .as_deref()
-            .or_else(|| {
-                metadata
-                    .and_then(|cluster| cluster.title)
-                    .and_then(|label| ir.labels.get(label.0))
-                    .map(|label| label.text.as_str())
-            })
-            .unwrap_or_default();
-        let mut declared_font_size = None;
-        for style in &ir.style_refs {
-            if style.target == IrStyleTarget::Cluster(cluster.cluster_index)
-                && let Some(size) = fm_core::parse_style_string(&style.style)
-                    .properties
-                    .get("font-size")
-                    .and_then(|size| size.trim().trim_end_matches("px").parse::<f32>().ok())
-                    .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
-            {
-                declared_font_size = Some(size);
-            }
-        }
-        let mut include = |text: &str, font_size: f32, svg_baseline: f32, canvas_top: f32| {
-            let displayed = crate::displayed_cluster_title(text);
-            if displayed.trim().is_empty() {
-                return;
-            }
-            // Reuse the same proportional/wide-glyph allowance that sizes the frame. That
-            // helper scales a node font to the cluster face; undo the scale for an authored
-            // caption font. The shared scene's 12px face must fit even with a smaller preset.
-            let caption_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
-                font_size: font_size.max(12.0) / crate::CLUSTER_FONT_SCALE,
-                ..metrics.config().clone()
-            });
-            let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
-            let top = (svg_baseline - font_size).min(canvas_top).min(8.0);
-            let bottom = (svg_baseline + additional_lines * font_size * 1.4 + font_size * 0.3)
-                .max(canvas_top + (additional_lines + 1.0) * base_font_size * 1.2)
-                .max(8.0 + (additional_lines + 1.0) * 12.0 * 1.2);
-            captions.push(LayoutRect {
-                x: cluster.bounds.x + 8.0,
-                y: cluster.bounds.y + top,
-                // Shared scene captions start two pixels farther right than SVG/Canvas.
-                width: crate::cluster_title_width(displayed, &caption_metrics) - 16.0 + 2.0,
-                height: bottom - top,
-            });
-        };
-        include(
-            title,
-            declared_font_size.unwrap_or(base_font_size),
-            baseline,
-            4.0,
+        let caption = crate::ClusterCaptionLayout::new(
+            ir,
+            cluster.cluster_index,
+            cluster.title.as_deref(),
+            metrics,
         );
-        if let Some(kind) = metadata
-            .and_then(|cluster| cluster.c4_boundary_type.as_deref())
-            .filter(|kind| !kind.is_empty())
-        {
-            include(
-                &format!("[{kind}]"),
-                declared_font_size.unwrap_or(base_font_size),
-                baseline + base_font_size * 1.25,
-                4.0 + metrics.font_size() * 1.25,
-            );
-        }
+        captions.extend(caption.obstacles(cluster.bounds));
     }
     captions
 }
@@ -1997,23 +1937,26 @@ mod tests {
             style: String::from("font-size:40px"),
             span: Span::default(),
         });
-        let styled = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal)[0];
-        // SVG keeps the caption's baseline at 16px while CSS enlarges the face. Both
-        // ascenders above that baseline and the second row below it need protection.
-        assert!(styled.y <= -24.0);
-        assert!(styled.y + styled.height >= 83.99);
-        assert!(styled.width > large_bounds.width);
+        let styled = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal);
+        // Every surface now moves the baseline with an authored font size. Protect both
+        // complete rows inside the header instead of reserving text above the frame.
+        assert_eq!(styled.len(), 2);
+        assert!(styled[0].y >= 0.0);
+        assert!(styled[0].y + styled[0].height >= 54.0);
+        assert!(styled[1].y >= styled[0].y + styled[0].height);
+        assert!(styled[1].y + styled[1].height >= 110.0);
+        assert!(styled[0].width > large_bounds.width);
         ir.clusters.push(fm_core::IrCluster {
             c4_boundary_type: Some(String::from("SYSTEM")),
             ..Default::default()
         });
         let with_type = graph_cluster_caption_bounds(&ir, &layout.clusters, &normal);
-        assert_eq!(with_type.len(), 2);
-        // Both SVG rows receive the authored 40px face, while the type keeps its
-        // original 32.875px baseline. Protect its enlarged ascenders and descenders.
-        assert!(with_type[1].y <= -7.12);
-        assert!(with_type[1].y + with_type[1].height >= 44.87);
-        assert!(with_type[1].width >= normal.estimate_preserved_width("[SYSTEM]", 40.0, 0.0));
+        assert_eq!(with_type.len(), 3);
+        // The type follows the second title row; it no longer overlaps that row because
+        // of a hard-coded single-line title baseline.
+        assert!(with_type[2].y > with_type[1].y);
+        assert!(with_type[2].y + with_type[2].height >= 160.0);
+        assert!(with_type[2].width >= normal.estimate_preserved_width("[SYSTEM]", 40.0, 0.0));
         layout.clusters[0].title = Some(String::from("   "));
         ir.clusters.clear();
         assert!(graph_cluster_caption_bounds(&ir, &layout.clusters, &normal).is_empty());
