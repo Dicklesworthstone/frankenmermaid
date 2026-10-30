@@ -2143,7 +2143,7 @@ pub enum NodeShape {
     BlockArrowY,
 }
 
-/// Theme-derived default paints for a flowchart shape with a recognizable role.
+/// Theme-derived default paints for a diagram node with a recognizable role.
 ///
 /// Renderers apply these as fallbacks independently for each paint channel. Authored fills,
 /// borders, and theme-variable overrides take precedence; hollow shape details stay hollow.
@@ -2182,10 +2182,68 @@ pub fn semantic_shape_style(
         NodeShape::Cloud => 1,
         _ => return None,
     };
+    readable_accent_style(base_fill, base_stroke, text, &accents[accent_index])
+}
+
+/// Give each Sankey node a theme-derived identity that its outgoing ribbons can share.
+///
+/// Unlike ordinary flowchart nodes, Sankey nodes are categories of a measured flow. Coloring
+/// those categories makes split and merged quantities traceable across the chart. The stable
+/// IR index selects the accent, independent of layout order or the chosen rendering backend.
+/// These paints are defaults: renderers retain explicit node styles and theme variables.
+#[must_use]
+pub fn sankey_node_style(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    base_fill: &str,
+    base_stroke: &str,
+    text: &str,
+    accents: &[String; 8],
+) -> Option<NodeShapeStyle> {
+    if ir.diagram_type != DiagramType::Sankey || node_index >= ir.nodes.len() {
+        return None;
+    }
+    readable_accent_style(
+        base_fill,
+        base_stroke,
+        text,
+        &accents[node_index % accents.len()],
+    )
+}
+
+/// Resolve a Sankey ribbon's source category, including edges attached through named ports.
+///
+/// Every outgoing ribbon from a node keeps the same hue. Edge styles and an authored global
+/// line color take precedence at the renderer; other diagram families keep their normal paint.
+#[must_use]
+pub fn sankey_edge_color<'a>(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    accents: &'a [String; 8],
+) -> Option<&'a str> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let source = ir
+        .edges
+        .get(edge_index)?
+        .from
+        .resolved_node_id(&ir.ports)?
+        .0;
+    ir.nodes.get(source)?;
+    Some(&accents[source % accents.len()])
+}
+
+fn readable_accent_style(
+    base_fill: &str,
+    base_stroke: &str,
+    text: &str,
+    accent: &str,
+) -> Option<NodeShapeStyle> {
     let base_fill = mindmap::hex_rgb(base_fill)?;
     let base_stroke = mindmap::hex_rgb(base_stroke)?;
     let text = mindmap::hex_rgb(text)?;
-    let accent = mindmap::hex_rgb(&accents[accent_index])?;
+    let accent = mindmap::hex_rgb(accent)?;
     let text_luminance = shape_color_luminance(text);
     let fill = (0..=14)
         .rev()
@@ -9506,11 +9564,7 @@ impl MermaidDiagramIr {
 
     /// Measure the widest authored row for one IR label.
     #[must_use]
-    pub fn label_multiline_width(
-        &self,
-        label_id: IrLabelId,
-        metrics: &FontMetrics,
-    ) -> Option<f32> {
+    pub fn label_multiline_width(&self, label_id: IrLabelId, metrics: &FontMetrics) -> Option<f32> {
         self.labels
             .get(label_id.0)
             .map(|label| metrics.estimate_multiline_width(&label.text))
@@ -11146,9 +11200,12 @@ mod tests {
             id: "A".into(),
             label: Some(label),
             inline_style: Some(Box::new(IrInlineStyle {
-                properties: [("font-size".into(), "30px".into()), ("font-family".into(), "monospace".into())]
-                    .into_iter()
-                    .collect(),
+                properties: [
+                    ("font-size".into(), "30px".into()),
+                    ("font-family".into(), "monospace".into()),
+                ]
+                .into_iter()
+                .collect(),
             })),
             ..Default::default()
         });
@@ -11972,6 +12029,112 @@ mod tests {
             .is_none(),
             "a low-contrast custom palette must not receive a misleading semantic restyle"
         );
+    }
+
+    #[test]
+    fn sankey_colors_follow_source_categories_and_resolve_ports() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        ir.nodes = (0..10)
+            .map(|index| IrNode {
+                id: format!("category-{index}"),
+                ..IrNode::default()
+            })
+            .collect();
+        ir.ports.push(IrPort {
+            node: IrNodeId(1),
+            ..IrPort::default()
+        });
+        ir.edges = [
+            IrEndpoint::Node(IrNodeId(0)),
+            IrEndpoint::Node(IrNodeId(0)),
+            IrEndpoint::Port(IrPortId(0)),
+            IrEndpoint::Node(IrNodeId(8)),
+        ]
+        .map(|from| IrEdge {
+            from,
+            to: IrEndpoint::Node(IrNodeId(9)),
+            ..IrEdge::default()
+        })
+        .to_vec();
+        assert_eq!(
+            super::sankey_edge_color(&ir, 0, &accents),
+            Some(accents[0].as_str())
+        );
+        assert_eq!(
+            super::sankey_edge_color(&ir, 1, &accents),
+            Some(accents[0].as_str())
+        );
+        assert_eq!(
+            super::sankey_edge_color(&ir, 2, &accents),
+            Some(accents[1].as_str())
+        );
+        assert_eq!(
+            super::sankey_edge_color(&ir, 3, &accents),
+            Some(accents[0].as_str())
+        );
+        let first = super::sankey_node_style(&ir, 0, "#f8fafc", "#7c8da5", "#1e293b", &accents);
+        let next = super::sankey_node_style(&ir, 1, "#f8fafc", "#7c8da5", "#1e293b", &accents);
+        assert!(first.is_some());
+        assert_ne!(first, next);
+        assert_eq!(
+            first,
+            super::sankey_node_style(&ir, 8, "#f8fafc", "#7c8da5", "#1e293b", &accents)
+        );
+    }
+
+    #[test]
+    fn sankey_node_tints_keep_text_and_outlines_readable_on_light_and_dark_surfaces() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        ir.nodes.resize_with(8, IrNode::default);
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        for (fill, stroke, text) in [
+            ("#f8fafc", "#7c8da5", "#1e293b"),
+            ("#1e293b", "#64748b", "#f8fafc"),
+        ] {
+            for index in 0..8 {
+                let style = super::sankey_node_style(&ir, index, fill, stroke, text, &accents)
+                    .expect("standard light and dark themes have readable category paints");
+                let luminance = |paint: &str| {
+                    super::shape_color_luminance(super::mindmap::hex_rgb(paint).unwrap())
+                };
+                assert!(
+                    super::shape_color_contrast(luminance(text), luminance(&style.fill)) >= 4.5
+                );
+                assert!(
+                    super::shape_color_contrast(luminance(&style.stroke), luminance(&style.fill))
+                        >= 3.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_colors_leave_other_families_and_invalid_endpoints_alone() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        ir.nodes.push(IrNode::default());
+        ir.edges = [
+            IrEndpoint::Unresolved,
+            IrEndpoint::Node(IrNodeId(1)),
+            IrEndpoint::Port(IrPortId(0)),
+        ]
+        .map(|from| IrEdge {
+            from,
+            ..IrEdge::default()
+        })
+        .to_vec();
+        for index in 0..=ir.edges.len() {
+            assert!(super::sankey_edge_color(&ir, index, &accents).is_none());
+        }
+        assert!(super::sankey_node_style(&ir, 1, "#fff", "#000", "#000", &accents).is_none());
+        assert!(
+            super::sankey_node_style(&ir, 0, "var(--surface)", "#000", "#000", &accents).is_none()
+        );
+        ir.edges[0].from = IrEndpoint::Node(IrNodeId(0));
+        ir.diagram_type = DiagramType::Flowchart;
+        assert!(super::sankey_edge_color(&ir, 0, &accents).is_none());
+        assert!(super::sankey_node_style(&ir, 0, "#fff", "#000", "#000", &accents).is_none());
     }
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {

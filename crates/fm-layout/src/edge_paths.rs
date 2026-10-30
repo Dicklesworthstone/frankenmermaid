@@ -88,6 +88,12 @@ pub fn emit_diagram_edge_path<F>(
 where
     F: FnMut(PathCmd),
 {
+    if ir.diagram_type == DiagramType::Sankey
+        && edge_routing_hint(ir, edge_index) != Some(MermaidEdgeRoutingHint::Orthogonal)
+        && is_forward_sankey_ribbon(points)
+    {
+        return emit_sankey_ribbon(points, emit);
+    }
     emit_path_with_smoothing(edge_uses_smoothed_path(ir, edge_index), points, emit)
 }
 
@@ -101,7 +107,51 @@ pub fn emit_edge_path<F>(
 where
     F: FnMut(PathCmd),
 {
+    if diagram_type == DiagramType::Sankey && is_forward_sankey_ribbon(points) {
+        return emit_sankey_ribbon(points, emit);
+    }
     emit_path_with_smoothing(uses_smoothed_edge_paths(diagram_type), points, emit)
+}
+
+fn is_forward_sankey_ribbon(points: &[LayoutPoint]) -> bool {
+    points.len() == 4
+        && points
+            .iter()
+            .all(|point| point.x.is_finite() && point.y.is_finite())
+        && points[0].x < points[1].x
+        && points[1].x < points[2].x
+        && points[2].x < points[3].x
+        && points[1].x == (points[3].x - points[0].x).mul_add(0.45, points[0].x)
+        && points[2].x == (points[3].x - points[0].x).mul_add(0.55, points[0].x)
+        && points[0].y == points[1].y
+        && points[2].y == points[3].y
+}
+
+/// The two interior routing points are horizontal-tangent cubic controls, not corners of
+/// a shared Manhattan bus. Their convex hull stays inside the empty inter-column corridor.
+fn emit_sankey_ribbon<F>(points: &[LayoutPoint], mut emit: F) -> Option<PathEndpoints>
+where
+    F: FnMut(PathCmd),
+{
+    let mut endpoints = EndpointTracker::default();
+    for command in [
+        PathCmd::MoveTo {
+            x: points[0].x,
+            y: points[0].y,
+        },
+        PathCmd::CubicTo {
+            c1x: points[1].x,
+            c1y: points[1].y,
+            c2x: points[2].x,
+            c2y: points[2].y,
+            x: points[3].x,
+            y: points[3].y,
+        },
+    ] {
+        endpoints.observe(command);
+        emit(command);
+    }
+    endpoints.endpoints
 }
 
 fn emit_path_with_smoothing<F>(
@@ -570,6 +620,59 @@ mod tests {
                     .all(|command| matches!(command, PathCmd::LineTo { .. }))
             );
         }
+    }
+
+    #[test]
+    fn sankey_ribbons_have_bounded_cubic_geometry_and_horizontal_tangents() {
+        let points = [(10.0, 20.0), (38.8, 20.0), (45.2, 100.0), (74.0, 100.0)];
+        let (commands, endpoints) = route(&points, DiagramType::Sankey);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[1],
+            PathCmd::CubicTo {
+                c1x: 38.8,
+                c1y: 20.0,
+                c2x: 45.2,
+                c2y: 100.0,
+                x: 74.0,
+                y: 100.0,
+            }
+        );
+        let endpoints = endpoints.unwrap();
+        assert_eq!(endpoints.start.point, LayoutPoint { x: 10.0, y: 20.0 });
+        assert_eq!(endpoints.end.point, LayoutPoint { x: 74.0, y: 100.0 });
+        assert!(endpoints.start.tangent.x > 0.0 && endpoints.end.tangent.x > 0.0);
+        assert_eq!(endpoints.start.tangent.y, 0.0);
+        assert_eq!(endpoints.end.tangent.y, 0.0);
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        ir.meta.edge_routing = Some(MermaidEdgeRoutingHint::Orthogonal);
+        let points: Vec<_> = points
+            .into_iter()
+            .map(|(x, y)| LayoutPoint { x, y })
+            .collect();
+        let mut linear = Vec::new();
+        let _ = emit_diagram_edge_path(&ir, 0, &points, |command| linear.push(command));
+        assert_eq!(linear.len(), 4, "an authored step curve keeps its corners");
+        assert!(
+            linear[1..]
+                .iter()
+                .all(|command| matches!(command, PathCmd::LineTo { .. }))
+        );
+    }
+
+    #[test]
+    fn sankey_manhattan_obstacle_routes_stay_linear() {
+        let points = [(10.0, 20.0), (42.0, 20.0), (42.0, 100.0), (74.0, 100.0)];
+        let (commands, endpoints) = route(&points, DiagramType::Sankey);
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0], PathCmd::MoveTo { x: 10.0, y: 20.0 });
+        for (command, &(x, y)) in commands[1..].iter().zip(&points[1..]) {
+            assert_eq!(*command, PathCmd::LineTo { x, y });
+        }
+        let endpoints = endpoints.unwrap();
+        assert_eq!(endpoints.start.point, LayoutPoint { x: 10.0, y: 20.0 });
+        assert_eq!(endpoints.end.point, LayoutPoint { x: 74.0, y: 100.0 });
     }
 
     #[test]

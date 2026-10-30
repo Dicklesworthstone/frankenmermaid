@@ -137,19 +137,25 @@ fn corresponding_cells_share_a_column_across_rows() {
 #[test]
 fn every_drawn_cell_falls_inside_the_entity_box() {
     let ops = operations(SKEW);
-    // The entity box is the widest rect drawn; an ER diagram of one entity has no larger one.
-    let (bx, _by, bw, _bh) = ops
+    // This fixture has one entity. Measure its actual outline, including rounded corners;
+    // compartment separators and header tints remain inside that same box.
+    let (bx, right) = ops
         .iter()
         .filter_map(|op| match op {
-            // The entity box is a path `rect`, not a `stroke_rect` — read off the operation
-            // stream rather than assumed, after two guesses about which primitive draws it.
-            DrawOperation::Rect(x, y, w, h)
-            | DrawOperation::StrokeRect(x, y, w, h)
-            | DrawOperation::FillRect(x, y, w, h) => Some((*x, *y, *w, *h)),
+            DrawOperation::Rect(x, _, w, _)
+            | DrawOperation::StrokeRect(x, _, w, _)
+            | DrawOperation::FillRect(x, _, w, _) => Some([*x, *x + *w]),
+            DrawOperation::MoveTo(x, _)
+            | DrawOperation::LineTo(x, _)
+            | DrawOperation::ArcTo(x, _, _, _, _) => Some([*x, *x]),
             _ => None,
         })
-        .max_by(|a, b| a.2.total_cmp(&b.2))
-        .expect("no entity rect was drawn");
+        .flatten()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(left, right), x| {
+            (left.min(x), right.max(x))
+        });
+    assert!(bx.is_finite() && right > bx, "no entity outline was drawn");
+    let bw = right - bx;
     let all = texts(SKEW);
 
     let cells = ["verylongtypename", "a", "t", "verylongattributename", "PK"];

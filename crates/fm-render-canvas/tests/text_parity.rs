@@ -186,16 +186,26 @@ fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
     let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
     renderer.render(&layout, &ir, &mut context);
     let operations = context.operations();
-    let (_, top, _, height) = operations
+    let (top, bottom) = operations
         .iter()
         .filter_map(|operation| match operation {
-            DrawOperation::Rect(x, y, width, height)
-            | DrawOperation::StrokeRect(x, y, width, height)
-            | DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
+            DrawOperation::Rect(_, y, _, height)
+            | DrawOperation::StrokeRect(_, y, _, height)
+            | DrawOperation::FillRect(_, y, _, height) => Some([*y, *y + *height]),
+            DrawOperation::MoveTo(_, y)
+            | DrawOperation::LineTo(_, y)
+            | DrawOperation::ArcTo(_, y, _, _, _) => Some([*y, *y]),
             _ => None,
         })
-        .max_by(|left, right| left.2.total_cmp(&right.2))
-        .expect("requirement box must be drawn");
+        .flatten()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(top, bottom), y| {
+            (top.min(y), bottom.max(y))
+        });
+    assert!(
+        top.is_finite() && bottom > top,
+        "requirement box must be drawn"
+    );
+    let height = bottom - top;
 
     let mut previous_bottom = top;
     for expected in [

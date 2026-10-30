@@ -3839,8 +3839,9 @@ fn build_gantt_render_scene(
             metrics,
         );
     }
+    let axis_label_rows = gantt_axis_label_rows(layout, metrics);
     for axis in &layout.extensions.gantt_axis_rows {
-        for tick in &layout.extensions.axis_ticks {
+        for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
             axes.children.push(scene_line(
                 LayoutPoint {
                     x: tick.position,
@@ -3861,6 +3862,10 @@ fn build_gantt_render_scene(
                     height: 14.0,
                 },
             );
+            include_packing_bounds(
+                &mut bounds,
+                gantt_axis_label_bounds(tick, *axis, axis_label_rows[index], metrics),
+            );
             append_gantt_scene_text(
                 &mut axes,
                 &mut bounds,
@@ -3868,8 +3873,8 @@ fn build_gantt_render_scene(
                     source: RenderSource::Diagram,
                     text: tick.label.clone(),
                     x: tick.position + 3.0,
-                    y: axis.y,
-                    font_size: font_size * 0.72,
+                    y: gantt_axis_label_baseline(*axis, axis_label_rows[index], metrics),
+                    font_size: gantt_axis_font_size(metrics),
                     align: TextAlign::Start,
                     baseline: TextBaseline::Alphabetic,
                     fill: FillStyle::Solid {
@@ -5096,6 +5101,7 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
 fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
     let mut layer =
         RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
+    let sankey_widest = sankey_widest_flow(ir);
 
     for edge in &layout.edges {
         // A `~~~` link has done its work in the layout and is never drawn.
@@ -5163,6 +5169,12 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     _ => {}
                 }
             }
+        }
+
+        if let Some(width) =
+            sankey_flow_stroke_width(ir, ir.edges.get(edge.edge_index), sankey_widest)
+        {
+            stroke.width = width;
         }
 
         layer.children.push(RenderItem::Path(RenderPath {
@@ -6181,7 +6193,14 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .unwrap_or(&fm_core::FontMetrics::default_metrics()),
             config.spacing,
         ),
-        LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
+        LayoutAlgorithm::Gantt => layout_diagram_gantt_traced_with_metrics(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
+        ),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
         LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(
@@ -11695,16 +11714,47 @@ pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    if let Some(gantt_meta) = ir.gantt_meta.as_ref().filter(|meta| !meta.tasks.is_empty()) {
-        return layout_diagram_gantt_from_meta(ir, gantt_meta);
-    }
-
-    layout_diagram_gantt_fallback(ir)
+    layout_diagram_gantt_traced_with_metrics(
+        ir,
+        &fm_core::FontMetrics::default_metrics(),
+        LayoutSpacing::default(),
+    )
 }
 
-fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
+fn layout_diagram_gantt_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
+    if let Some(gantt_meta) = ir.gantt_meta.as_ref().filter(|meta| !meta.tasks.is_empty()) {
+        return layout_diagram_gantt_from_meta(ir, gantt_meta, metrics, spacing);
+    }
+
+    layout_diagram_gantt_fallback(ir, metrics, spacing)
+}
+
+fn gantt_section_padding(metrics: &fm_core::FontMetrics) -> f32 {
+    metrics.font_size().mul_add(1.1, 7.0).max(24.0)
+}
+
+fn gantt_row_gap(node_sizes: &[(f32, f32)], spacing: LayoutSpacing) -> f32 {
+    let tallest_task = node_sizes
+        .iter()
+        .map(|&(_, height)| height)
+        .fold(0.0, f32::max);
+    spacing
+        .node_spacing
+        .mul_add(0.72, 24.0)
+        .max(tallest_task + 6.0)
+}
+
+fn layout_diagram_gantt_fallback(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut node_sizes = compute_node_sizes(ir, metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(&mut trace, "gantt_layout", node_count, ir.edges.len(), 0, 0);
 
@@ -11751,13 +11801,14 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
         .map(|(slot, hint)| (hint, slot))
         .collect();
 
-    let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
 
     let col_gap = spacing.rank_spacing + 144.0;
-    let row_gap = spacing.node_spacing.mul_add(0.72, 24.0);
+    let row_gap = gantt_row_gap(&node_sizes, spacing);
+    let section_padding = gantt_section_padding(metrics);
+    let section_gap = (section_padding * 2.0 + 8.0).max(56.0);
     let mut section_base_y = 0.0_f32;
 
     for (section_index, (_section, nodes)) in section_to_nodes.iter().enumerate() {
@@ -11770,10 +11821,10 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
             rank_by_node[*node_index] = slot;
             order_by_node[*node_index] = row_index + section_index * 128;
         }
-        section_base_y += (nodes.len().max(1) as f32).mul_add(row_gap, 56.0);
+        section_base_y += (nodes.len().max(1) as f32).mul_add(row_gap, section_gap);
     }
 
-    let mut traced = finalize_specialized_layout(
+    let mut traced = finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -11781,6 +11832,8 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
         centers,
         trace,
         true,
+        spacing,
+        metrics,
     );
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
     let layout = Arc::make_mut(&mut traced.layout);
@@ -11798,7 +11851,7 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, section_padding)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: section.clone(),
@@ -11806,19 +11859,23 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
             })
         })
         .collect();
-    let gantt_metrics = fm_core::FontMetrics::default_metrics();
-    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, &gantt_metrics);
+    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, metrics);
     // A label placed outside its bar sits outside the node boxes `compute_bounds` measured, so the
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
-    layout_gantt_axis_rows(layout, false);
+    layout_gantt_axis_rows(layout, false, metrics);
     traced
 }
 
-fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMeta) -> TracedLayout {
+fn layout_diagram_gantt_from_meta(
+    ir: &MermaidDiagramIr,
+    gantt_meta: &IrGanttMeta,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut node_sizes = compute_node_sizes(ir, metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(&mut trace, "gantt_layout", node_count, ir.edges.len(), 0, 0);
 
@@ -11827,10 +11884,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         size.1 = size.1.max(40.0);
     }
 
-    let spacing = LayoutSpacing::default();
     let base_col_width = 48.0_f32;
-    let row_gap = spacing.node_spacing.mul_add(0.72, 24.0);
-    let section_gap = 56.0_f32;
+    let row_gap = gantt_row_gap(&node_sizes, spacing);
+    let section_padding = gantt_section_padding(metrics);
+    let section_gap = (section_padding * 2.0 + 8.0).max(56.0);
 
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
@@ -12071,7 +12128,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         .zip(node_sizes.first())
         .map(|(&(center_x, _), &(width, _))| center_x - width / 2.0);
 
-    let mut traced = finalize_specialized_layout(
+    let mut traced = finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -12079,6 +12136,8 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         centers,
         trace,
         true,
+        spacing,
+        metrics,
     );
 
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
@@ -12145,11 +12204,16 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     if axis_ticks.is_empty() {
         axis_ticks.push(tick_at(min_start_day));
     }
+    if gantt_meta.tick_interval.is_none() {
+        // The default is a readable scale, not one overlapping ISO string per day.
+        // An authored interval remains exact; dense labels then use additional rows.
+        axis_ticks = readable_gantt_axis_ticks(axis_ticks, tick_at(max_end_day), metrics);
+    }
     layout.extensions.axis_ticks = axis_ticks;
     layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(&section_idx, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, section_padding)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: gantt_meta
@@ -12160,13 +12224,12 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             })
         })
         .collect();
-    let gantt_metrics = fm_core::FontMetrics::default_metrics();
-    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, &gantt_metrics);
+    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, metrics);
     // A label placed outside its bar sits outside the node boxes `compute_bounds` measured, so the
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
-    layout_gantt_axis_rows(layout, gantt_meta.top_axis);
+    layout_gantt_axis_rows(layout, gantt_meta.top_axis, metrics);
     traced
 }
 
@@ -12262,45 +12325,208 @@ fn extend_bounds_for_gantt_labels(layout: &mut DiagramLayout) {
     layout.bounds.width = max_x - min_x;
 }
 
+const GANTT_AXIS_LABEL_GAP: f32 = 12.0;
+
+fn gantt_axis_font_size(metrics: &fm_core::FontMetrics) -> f32 {
+    (metrics.font_size() * 0.72).max(8.0)
+}
+
+fn gantt_axis_label_width(tick: &LayoutAxisTick, metrics: &fm_core::FontMetrics) -> f32 {
+    metrics.estimate_preserved_width(&tick.label, gantt_axis_font_size(metrics), 0.0)
+}
+
+/// Keep an even default cadence with enough room for complete date labels. The first and
+/// last dates always survive; close endpoint pairs are handled by the shared label-row placer.
+fn readable_gantt_axis_ticks(
+    ticks: Vec<LayoutAxisTick>,
+    last: LayoutAxisTick,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutAxisTick> {
+    let widest = ticks
+        .iter()
+        .chain(std::iter::once(&last))
+        .map(|tick| gantt_axis_label_width(tick, metrics))
+        .fold(0.0, f32::max);
+    let pitch = ticks
+        .windows(2)
+        .map(|pair| pair[1].position - pair[0].position)
+        .filter(|gap| gap.is_finite() && *gap > 0.0)
+        .fold(f32::INFINITY, f32::min);
+    let stride = ((widest + GANTT_AXIS_LABEL_GAP) / pitch)
+        .ceil()
+        .max(1.0)
+        .min(ticks.len().max(1) as f32) as usize;
+    let mut selected: Vec<_> = ticks.into_iter().step_by(stride).collect();
+    if let Some(selected_last) = selected.last_mut()
+        && selected_last.position == last.position
+    {
+        // Distinct dates can round to one f32 coordinate over very long schedules.
+        // Preserve the exact endpoint label even when its position already exists.
+        *selected_last = last;
+        return selected;
+    }
+    while selected.len() > 1
+        && selected.last().is_some_and(|tick| {
+            last.position - tick.position
+                < gantt_axis_label_width(tick, metrics) + GANTT_AXIS_LABEL_GAP
+        })
+    {
+        selected.pop();
+    }
+    selected.push(last);
+    selected
+}
+
+/// Assign collision-free label rows to Gantt ticks, preserving every selected date.
+///
+/// The result follows `axis_ticks` order, even for a caller-supplied unsorted tick list.
+/// Ordinary auto-spaced axes use row zero. Close endpoints and explicitly dense intervals
+/// reuse the first row whose previous label leaves 12px clear; at most one row per tick
+/// is allocated. The layout's calendar tick generator is independently capped at 4096 ticks.
+#[must_use]
+pub fn gantt_axis_label_rows(layout: &DiagramLayout, metrics: &fm_core::FontMetrics) -> Vec<usize> {
+    let ticks = &layout.extensions.axis_ticks;
+    let mut indices: Vec<_> = (0..ticks.len()).collect();
+    indices.sort_by(|&a, &b| {
+        ticks[a]
+            .position
+            .total_cmp(&ticks[b].position)
+            .then(a.cmp(&b))
+    });
+    let mut rows = vec![0; ticks.len()];
+    let mut right_edges = Vec::<f32>::new();
+    for index in indices {
+        let tick = &ticks[index];
+        if tick.label.is_empty() {
+            continue;
+        }
+        let left = tick.position + 3.0;
+        let right = left + gantt_axis_label_width(tick, metrics);
+        let row = right_edges
+            .iter()
+            .position(|&edge| edge + GANTT_AXIS_LABEL_GAP <= left)
+            .unwrap_or(right_edges.len());
+        if row == right_edges.len() {
+            right_edges.push(right);
+        } else {
+            right_edges[row] = right;
+        }
+        rows[index] = row;
+    }
+    rows
+}
+
+/// Alphabetic baseline for a Gantt tick label in its assigned row.
+///
+/// Tick marks retain `axis.y + 4..16`. Additional bottom rows start below those marks;
+/// additional top rows grow upward. A row's height is the tick face's configured line height,
+/// with a 4px minimum between conservative ink bounds. All graphical backends use this same
+/// calculation.
+#[must_use]
+pub fn gantt_axis_label_baseline(
+    axis: LayoutGanttAxisRow,
+    row: usize,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    let font_size = gantt_axis_font_size(metrics);
+    let line_height = (font_size * metrics.config().line_height).max(font_size * 1.3 + 4.0);
+    match (axis.placement, row) {
+        (_, 0) => axis.y,
+        (LayoutGanttAxisPlacement::Bottom, _) => axis.y + 16.0 + row as f32 * line_height,
+        (LayoutGanttAxisPlacement::Top, _) => axis.y - row as f32 * line_height,
+    }
+}
+
+/// Conservative ink bounds for the complete date label, in layout coordinates.
+#[must_use]
+pub fn gantt_axis_label_bounds(
+    tick: &LayoutAxisTick,
+    axis: LayoutGanttAxisRow,
+    row: usize,
+    metrics: &fm_core::FontMetrics,
+) -> LayoutRect {
+    let font_size = gantt_axis_font_size(metrics);
+    LayoutRect {
+        x: tick.position + 3.0,
+        y: gantt_axis_label_baseline(axis, row, metrics) - font_size,
+        width: gantt_axis_label_width(tick, metrics),
+        height: font_size * 1.3,
+    }
+}
+
 /// Publish Gantt axis baselines after task geometry and horizontal label extents are final.
 ///
 /// Mermaid 11.15 always appends the bottom grid. `gantt.topAxis` adds a second grid above the task
 /// rows; it does not relocate the first one. The coordinates belong here because renderers must not
 /// infer chart extents independently and disagree about whether `+12` or `-12` is inside the SVG.
-fn layout_gantt_axis_rows(layout: &mut DiagramLayout, top_axis: bool) {
+fn layout_gantt_axis_rows(
+    layout: &mut DiagramLayout,
+    top_axis: bool,
+    metrics: &fm_core::FontMetrics,
+) {
     let Some(first) = layout.nodes.first() else {
         return;
     };
-    let (task_top, task_bottom) = layout.nodes.iter().fold(
-        (first.bounds.y, first.bounds.y + first.bounds.height),
-        |(top, bottom), node| {
-            (
-                top.min(node.bounds.y),
-                bottom.max(node.bounds.y + node.bounds.height),
-            )
-        },
-    );
-
-    // The pinned reference puts the top baseline immediately above the first task row and the
-    // bottom baseline immediately below the last. Reserve the lower tick depth in bounds so neither
-    // the canvas nor SVG clips the unconditional bottom labels.
-    let bottom_y = task_bottom + 4.0;
-    let required_bottom = bottom_y + 16.0;
-    let current_bottom = layout.bounds.y + layout.bounds.height;
-    if required_bottom > current_bottom {
-        layout.bounds.height = required_bottom - layout.bounds.y;
+    let mut content_top = first.bounds.y;
+    let mut content_bottom = first.bounds.y + first.bounds.height;
+    let mut section_left = f32::INFINITY;
+    let mut section_right = f32::NEG_INFINITY;
+    for band in &layout.extensions.bands {
+        section_left = section_left.min(band.bounds.x);
+        section_right = section_right.max(band.bounds.x + band.bounds.width);
+    }
+    // One shared schedule span makes the sections read as horizontal rows and aligns their
+    // headings. The bars retain their exact start dates and durations inside those rows.
+    for band in &layout.extensions.bands {
+        let caption_width =
+            metrics.estimate_preserved_width(&band.label, metrics.font_size() * 0.85, 0.0);
+        section_right = section_right.max(section_left + caption_width + 12.0);
+    }
+    for band in &mut layout.extensions.bands {
+        band.bounds.x = section_left;
+        band.bounds.width = section_right - section_left;
+    }
+    let mut bounds = Some(layout.bounds);
+    for rect in layout
+        .nodes
+        .iter()
+        .map(|node| node.bounds)
+        .chain(layout.extensions.bands.iter().map(|band| band.bounds))
+    {
+        content_top = content_top.min(rect.y);
+        content_bottom = content_bottom.max(rect.y + rect.height);
+        include_packing_bounds(&mut bounds, rect);
     }
 
     layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
         placement: LayoutGanttAxisPlacement::Bottom,
-        y: bottom_y,
+        y: content_bottom + gantt_axis_font_size(metrics) + 12.0,
     });
     if top_axis {
         layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
             placement: LayoutGanttAxisPlacement::Top,
-            y: task_top - 8.0,
+            y: content_top - 16.0_f32.max(gantt_axis_font_size(metrics) * 0.3) - 12.0,
         });
     }
+    let label_rows = gantt_axis_label_rows(layout, metrics);
+    for axis in &layout.extensions.gantt_axis_rows {
+        for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+            include_packing_bounds(
+                &mut bounds,
+                gantt_axis_label_bounds(tick, *axis, label_rows[index], metrics),
+            );
+            include_packing_bounds(
+                &mut bounds,
+                LayoutRect {
+                    x: tick.position - 1.0,
+                    y: axis.y + 3.0,
+                    width: 2.0,
+                    height: 14.0,
+                },
+            );
+        }
+    }
+    layout.bounds = bounds.unwrap_or(layout.bounds);
 }
 
 #[must_use]
@@ -13290,11 +13516,117 @@ pub fn sankey_flow_stroke_width(
     edge: Option<&fm_core::IrEdge>,
     widest: Option<f32>,
 ) -> Option<f32> {
-    const MIN_WIDTH: f32 = 1.5;
-    const MAX_WIDTH: f32 = 24.0;
     let widest = widest?;
     let value = sankey_flow_value(ir, edge?)?;
-    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
+    Some(((value / widest) * SANKEY_MAX_RIBBON_WIDTH).max(SANKEY_MIN_RIBBON_WIDTH))
+}
+
+const SANKEY_MIN_RIBBON_WIDTH: f32 = 1.5;
+const SANKEY_MAX_RIBBON_WIDTH: f32 = 24.0;
+const SANKEY_RIBBON_GAP: f32 = 8.0;
+const SANKEY_PORT_PADDING: f32 = 12.0;
+
+/// Give adjacent-column flows separate, width-aware slots on both sides of each card.
+///
+/// A generic Manhattan bus obscures quantities where ribbons merge before reaching a node.
+/// Sorting slots by the opposite endpoint keeps the order selected by crossing minimization;
+/// the four control points describe a bounded horizontal-tangent ribbon curve. Feedback,
+/// self-loops and skipped columns retain the obstacle-aware generic route.
+fn route_sankey_ribbons(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+    let mut nodes = vec![None; ir.nodes.len()];
+    for node in &layout.nodes {
+        if let Some(slot) = nodes.get_mut(node.node_index) {
+            *slot = Some((node.bounds, node.rank));
+        }
+    }
+    let mut outgoing = vec![Vec::<(usize, f32, f32)>::new(); nodes.len()];
+    let mut incoming = vec![Vec::<(usize, f32, f32)>::new(); nodes.len()];
+    let widest = sankey_widest_flow(ir);
+    for edge_path in &layout.edges {
+        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+            continue;
+        };
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        let (Some(Some((source_box, source_rank))), Some(Some((target_box, target_rank)))) =
+            (nodes.get(source), nodes.get(target))
+        else {
+            continue;
+        };
+        if source_rank.checked_add(1) != Some(*target_rank)
+            || source_box.x + source_box.width >= target_box.x
+            || edge_path.bundled
+        {
+            continue;
+        }
+        let Some(width) = sankey_flow_stroke_width(ir, Some(edge), widest) else {
+            continue;
+        };
+        outgoing[source].push((edge_path.edge_index, target_box.center().y, width));
+        incoming[target].push((edge_path.edge_index, source_box.center().y, width));
+    }
+
+    let place_slots = |groups: &mut [Vec<(usize, f32, f32)>], source_side: bool| {
+        let mut ports = vec![None; ir.edges.len()];
+        for (node_index, links) in groups.iter_mut().enumerate() {
+            let Some((bounds, _)) = nodes[node_index] else {
+                continue;
+            };
+            links.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
+            let height = links.iter().map(|link| link.2).sum::<f32>()
+                + links.len().saturating_sub(1) as f32 * SANKEY_RIBBON_GAP;
+            let mut cursor = bounds.center().y - height * 0.5;
+            for &(edge_index, _, width) in links.iter() {
+                ports[edge_index] = Some(LayoutPoint {
+                    x: if source_side {
+                        bounds.x + bounds.width
+                    } else {
+                        bounds.x
+                    },
+                    y: cursor + width * 0.5,
+                });
+                cursor += width + SANKEY_RIBBON_GAP;
+            }
+        }
+        ports
+    };
+    let sources = place_slots(&mut outgoing, true);
+    let targets = place_slots(&mut incoming, false);
+    for edge in &mut layout.edges {
+        let (Some(start), Some(end)) = (sources[edge.edge_index], targets[edge.edge_index]) else {
+            continue;
+        };
+        let (control_start_x, control_end_x) = if edge_paths::edge_routing_hint(ir, edge.edge_index)
+            == Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)
+        {
+            let middle_x = f32::midpoint(start.x, end.x);
+            (middle_x, middle_x)
+        } else {
+            // Distinct canonical controls identify these intentional curves without confusing
+            // a generic H/V/H obstacle-avoidance route with a ribbon at render time.
+            let gap = end.x - start.x;
+            (gap.mul_add(0.45, start.x), gap.mul_add(0.55, start.x))
+        };
+        edge.points = smallvec![
+            start,
+            LayoutPoint {
+                x: control_start_x,
+                y: start.y
+            },
+            LayoutPoint {
+                x: control_end_x,
+                y: end.y
+            },
+            end,
+        ];
+    }
+    let (total, reversed) = compute_edge_length_metrics(&layout.edges);
+    layout.stats.total_edge_length = total;
+    layout.stats.reversed_edge_total_length = reversed;
 }
 
 /// Weighted inversions between a pair of Sankey columns. Shared sources and targets are
@@ -13556,9 +13888,31 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .collect();
     let mut in_flow = vec![0.0_f64; node_count];
     let mut out_flow = vec![0.0_f64; node_count];
+    let mut in_ribbons = vec![(0.0_f32, 0_usize); node_count];
+    let mut out_ribbons = vec![(0.0_f32, 0_usize); node_count];
     for &(source, target, value) in &normalized_flows {
         out_flow[source] += value;
         in_flow[target] += value;
+    }
+    // Reserve the widths that the shared painter and port router will actually use. The
+    // f64 throughput normalization also accepts values outside the renderer's f32 range;
+    // letting those values set this scale would undersize ports for the remaining ribbons.
+    let widest_ribbon = sankey_widest_flow(ir);
+    for edge in &ir.edges {
+        let (Some(source), Some(target), Some(width)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+            sankey_flow_stroke_width(ir, Some(edge), widest_ribbon),
+        ) else {
+            continue;
+        };
+        if source == target || source >= node_count || target >= node_count {
+            continue;
+        }
+        out_ribbons[source].0 += width;
+        out_ribbons[source].1 += 1;
+        in_ribbons[target].0 += width;
+        in_ribbons[target].1 += 1;
     }
     let max_throughput = in_flow
         .iter()
@@ -13586,6 +13940,13 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .1
             .max(label_height + 24.0)
             .max(relative_flow * MAX_FLOW_HEIGHT);
+        for (widths, count) in [in_ribbons[node_index], out_ribbons[node_index]] {
+            size.1 = size.1.max(
+                widths
+                    + count.saturating_sub(1) as f32 * SANKEY_RIBBON_GAP
+                    + 2.0 * SANKEY_PORT_PADDING,
+            );
+        }
     }
 
     let ranks = layered_ranks(ir);
@@ -13660,6 +14021,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
     let layout = Arc::make_mut(&mut traced.layout);
+    route_sankey_ribbons(ir, layout);
     layout.stats.crossing_count_before_refinement = crossings_before;
     layout.stats.crossing_count = crossings_after;
     if let Some(snapshot) = traced.trace.snapshots.last_mut() {
@@ -30921,6 +31283,7 @@ mod tests {
             });
         }
         ir.gantt_meta = Some(IrGanttMeta {
+            tick_interval: Some(fm_core::GanttTickInterval::Day),
             sections: vec![IrGanttSection {
                 name: "Core".to_string(),
             }],
@@ -31033,12 +31396,234 @@ mod tests {
             .collect()
     }
 
+    const GANTT_READABILITY_SOURCE: &str = "gantt\n\
+        dateFormat YYYY-MM-DD\n\
+        section Design\n\
+        Research :a, 2026-01-01, 3d\n\
+        Prototype :b, after a, 4d\n\
+        section Engineering\n\
+        Implementation :c, after b, 5d\n\
+        Review :d, after c, 2d\n";
+
+    fn assert_gantt_axis_labels_are_clear(layout: &DiagramLayout, metrics: &fm_core::FontMetrics) {
+        let rows = super::gantt_axis_label_rows(layout, metrics);
+        let mut label_rects = Vec::new();
+        for axis in &layout.extensions.gantt_axis_rows {
+            for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+                let rect = super::gantt_axis_label_bounds(tick, *axis, rows[index], metrics);
+                assert!(
+                    rect.x >= layout.bounds.x - 0.01
+                        && rect.y >= layout.bounds.y - 0.01
+                        && rect.x + rect.width <= layout.bounds.x + layout.bounds.width + 0.01
+                        && rect.y + rect.height <= layout.bounds.y + layout.bounds.height + 0.01,
+                    "complete date {} is clipped: {rect:?} outside {:?}",
+                    tick.label,
+                    layout.bounds
+                );
+                for other in &label_rects {
+                    assert!(
+                        !rects_overlap(rect, *other),
+                        "date {} collides with another axis label: {rect:?}, {other:?}",
+                        tick.label
+                    );
+                }
+                for content in layout
+                    .nodes
+                    .iter()
+                    .map(|node| node.bounds)
+                    .chain(layout.extensions.bands.iter().map(|band| band.bounds))
+                {
+                    assert!(
+                        !rects_overlap(rect, content),
+                        "date {} collides with chart content: {rect:?}, {content:?}",
+                        tick.label
+                    );
+                }
+                label_rects.push(rect);
+            }
+        }
+    }
+
+    #[test]
+    fn gantt_default_axis_adapts_without_moving_task_dates() {
+        let mut ir = parse(GANTT_READABILITY_SOURCE).ir;
+        let layout = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let labels = tick_labels(&layout);
+        assert!(labels.len() < 15, "default ISO dates need room to be read");
+        assert_eq!(labels.first().unwrap(), "2026-01-01");
+        assert_eq!(labels.last().unwrap(), "2026-01-15");
+        assert!(
+            super::gantt_axis_label_rows(&layout, &metrics)
+                .iter()
+                .all(|&row| row == 0),
+            "ordinary schedules should fit in one label row"
+        );
+        assert_gantt_axis_labels_are_clear(&layout, &metrics);
+        assert_eq!(layout.extensions.bands.len(), 2);
+        assert_eq!(
+            layout.extensions.bands[0].bounds.x,
+            layout.extensions.bands[1].bounds.x
+        );
+        assert_eq!(
+            layout.extensions.bands[0].bounds.width,
+            layout.extensions.bands[1].bounds.width
+        );
+        for (node, days) in layout.nodes.iter().zip([3.0, 4.0, 5.0, 2.0]) {
+            assert_eq!(node.bounds.width, days * 48.0);
+        }
+        let repeated = layout_diagram(&ir);
+        assert_eq!(layout.nodes, repeated.nodes);
+        assert_eq!(layout.extensions, repeated.extensions);
+
+        ir.gantt_meta.as_mut().unwrap().tick_interval = Some(fm_core::GanttTickInterval::Day);
+        let daily = layout_diagram(&ir);
+        assert_eq!(daily.extensions.axis_ticks.len(), 15);
+        assert_eq!(
+            layout.nodes, daily.nodes,
+            "tick density cannot change task dates"
+        );
+        assert_eq!(layout.edges, daily.edges, "dependencies must stay anchored");
+        assert_eq!(
+            layout.extensions.gantt_day_axis,
+            daily.extensions.gantt_day_axis
+        );
+        assert_eq!(layout.extensions.bands, daily.extensions.bands);
+    }
+
+    #[test]
+    fn gantt_default_axis_keeps_the_exact_end_label_at_rounded_positions() {
+        let ticks = vec![
+            super::LayoutAxisTick {
+                label: "First day".into(),
+                position: 0.0,
+            },
+            super::LayoutAxisTick {
+                label: "Penultimate day".into(),
+                position: 1_000_000_000.0,
+            },
+        ];
+        let endpoint = super::LayoutAxisTick {
+            label: "Exact chart end".into(),
+            position: 1_000_000_000.0,
+        };
+        let selected = super::readable_gantt_axis_ticks(
+            ticks,
+            endpoint.clone(),
+            &fm_core::FontMetrics::default_metrics(),
+        );
+        assert_eq!(selected.first().unwrap().label, "First day");
+        assert_eq!(selected.last(), Some(&endpoint));
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn gantt_dense_authored_axis_retains_every_date_in_clear_rows() {
+        let mut ir = parse(GANTT_READABILITY_SOURCE).ir;
+        let meta = ir.gantt_meta.as_mut().unwrap();
+        meta.tick_interval = Some(fm_core::GanttTickInterval::Day);
+        meta.top_axis = true;
+        let layout = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        assert_eq!(
+            tick_labels(&layout),
+            (1..=15)
+                .map(|day| format!("2026-01-{day:02}"))
+                .collect::<Vec<_>>()
+        );
+        for pair in layout.extensions.axis_ticks.windows(2) {
+            assert_eq!(pair[1].position - pair[0].position, 48.0);
+        }
+        assert!(super::gantt_axis_label_rows(&layout, &metrics).contains(&1));
+        assert_gantt_axis_labels_are_clear(&layout, &metrics);
+    }
+
+    #[test]
+    fn gantt_one_day_endpoints_remain_legible_at_configured_font_sizes() {
+        for font_size in [9.0, 15.0, 36.0] {
+            for line_height in [1.0, 1.5] {
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size,
+                    line_height,
+                    ..Default::default()
+                });
+                let mut ir = parse("gantt\nOnly :a,2026-01-01,1d\n").ir;
+                ir.gantt_meta.as_mut().unwrap().top_axis = true;
+                let layout = super::layout_diagram_with_config(
+                    &ir,
+                    super::LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(tick_labels(&layout), ["2026-01-01", "2026-01-02"]);
+                assert_eq!(layout.nodes[0].bounds.width, 48.0);
+                let rows = super::gantt_axis_label_rows(&layout, &metrics);
+                assert_ne!(rows[0], rows[1], "close endpoints need separate rows");
+                assert_gantt_axis_labels_are_clear(&layout, &metrics);
+            }
+        }
+    }
+
+    #[test]
+    fn gantt_configured_typography_keeps_section_headings_and_tasks_clear() {
+        let mut ir = parse(GANTT_READABILITY_SOURCE).ir;
+        ir.gantt_meta.as_mut().unwrap().sections[1].name =
+            "Engineering, release preparation, and final operational readiness".into();
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 36.0,
+            ..Default::default()
+        });
+        let config = super::LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let layout = super::layout_diagram_with_config(&ir, config.clone());
+        assert_gantt_axis_labels_are_clear(&layout, &metrics);
+        for (index, node) in layout.nodes.iter().enumerate() {
+            for other in &layout.nodes[index + 1..] {
+                assert!(!rects_overlap(node.bounds, other.bounds));
+            }
+        }
+        for band in &layout.extensions.bands {
+            let heading_size = metrics.font_size() * 0.85;
+            let heading = LayoutRect {
+                x: band.bounds.x + 6.0,
+                y: band.bounds.y + metrics.font_size() * 0.9 - heading_size,
+                width: metrics.estimate_preserved_width(&band.label, heading_size, 0.0),
+                height: heading_size * 1.3,
+            };
+            assert!(heading.x + heading.width <= band.bounds.x + band.bounds.width);
+            for node in &layout.nodes {
+                assert!(
+                    !rects_overlap(heading, node.bounds),
+                    "section title overlaps a task"
+                );
+            }
+        }
+        ir.gantt_meta.as_mut().unwrap().tick_interval = Some(fm_core::GanttTickInterval::Day);
+        let daily = super::layout_diagram_with_config(&ir, config);
+        assert_eq!(layout.nodes, daily.nodes);
+        assert_eq!(
+            layout.extensions.gantt_day_axis,
+            daily.extensions.gantt_day_axis
+        );
+        assert_gantt_axis_labels_are_clear(&daily, &metrics);
+    }
+
     /// `axisFormat` is read here or nowhere (bd-w3pw): the tick label is built in layout, not in any
     /// renderer. Before bd-trsd drew the axis there was no label to format, so the directive could
     /// only ever have been asserted against a struct field.
     #[test]
     fn gantt_axis_format_rewrites_every_tick_label() {
-        let formatted = gantt_axis_probe("2026-01-01", 3, Some("%m/%d"), None, None);
+        let formatted = gantt_axis_probe(
+            "2026-01-01",
+            3,
+            Some("%m/%d"),
+            Some(fm_core::GanttTickInterval::Day),
+            None,
+        );
         // ⚠️ ONE MORE TICK THAN BEFORE, and it is the chart's END BOUNDARY (bd-pqp2f). The
         // axis used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end,
         // measured on gantt_basic where it draws 2026-01-08 and we drew through 2026-01-07.
@@ -31050,7 +31635,13 @@ mod tests {
 
         // Control: the SAME geometry with no directive keeps the ISO label, so the assertion above
         // is about the directive and not about some unconditional relabelling.
-        let plain = gantt_axis_probe("2026-01-01", 3, None, None, None);
+        let plain = gantt_axis_probe(
+            "2026-01-01",
+            3,
+            None,
+            Some(fm_core::GanttTickInterval::Day),
+            None,
+        );
         assert_eq!(
             tick_labels(&plain),
             vec!["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"],
@@ -31059,7 +31650,7 @@ mod tests {
         assert_eq!(
             formatted.extensions.axis_ticks.len(),
             plain.extensions.axis_ticks.len(),
-            "axisFormat changes label text only, never tick density"
+            "axisFormat must preserve an explicitly authored tick interval"
         );
         for (formatted_tick, plain_tick) in formatted
             .extensions
@@ -31099,8 +31690,7 @@ mod tests {
         );
     }
 
-    /// `tickInterval` is the density directive: without it a year-long chart gets 365 overlapping
-    /// daily ticks, which is the state bd-trsd's fix shipped and the reason mermaid has the knob.
+    /// `tickInterval` keeps authored calendar boundaries exact, independent of default density.
     #[test]
     fn gantt_tick_interval_thins_the_axis_to_period_starts() {
         // 2026-01-01 + 90 days spans January, February and March.
@@ -31133,8 +31723,14 @@ mod tests {
             "monthly ticks must sit on their real days, got {positions:?}"
         );
 
-        // Non-vacuity: the same span with no directive is still one tick per day.
-        let daily = gantt_axis_probe("2026-01-01", 90, None, None, None);
+        // Non-vacuity: explicitly requesting daily ticks retains every day in the same span.
+        let daily = gantt_axis_probe(
+            "2026-01-01",
+            90,
+            None,
+            Some(fm_core::GanttTickInterval::Day),
+            None,
+        );
         // 90 occupied days plus the end boundary (bd-pqp2f).
         assert_eq!(daily.extensions.axis_ticks.len(), 91);
 
@@ -31202,6 +31798,7 @@ mod tests {
             });
         }
         ir.gantt_meta = Some(IrGanttMeta {
+            tick_interval: Some(fm_core::GanttTickInterval::Day),
             sections: vec![
                 IrGanttSection {
                     name: "Planning".to_string(),
@@ -31761,6 +32358,211 @@ mod tests {
 
     fn sankey_example_ir() -> MermaidDiagramIr {
         parse(include_str!("../../fm-cli/tests/golden/sankey_basic.mmd")).ir
+    }
+
+    #[test]
+    fn sankey_split_and_merge_ribbons_have_separate_width_aware_ports() {
+        let ir = parse(
+            "sankey-beta\nSolar,Grid,60\nWind,Grid,40\nGas,Grid,30\n\
+             Grid,Homes,65\nGrid,Industry,45\nGrid,Transport,20\n",
+        )
+        .ir;
+        let layout = layout_diagram_sankey(&ir);
+        let widest = super::sankey_widest_flow(&ir);
+        assert_eq!(layout.edges.len(), ir.edges.len());
+        for node in &layout.nodes {
+            for source_side in [true, false] {
+                let mut slots = Vec::new();
+                for edge_path in &layout.edges {
+                    let edge = &ir.edges[edge_path.edge_index];
+                    let endpoint = if source_side { edge.from } else { edge.to };
+                    if endpoint != IrEndpoint::Node(IrNodeId(node.node_index)) {
+                        continue;
+                    }
+                    let point = if source_side {
+                        edge_path.points[0]
+                    } else {
+                        *edge_path.points.last().unwrap()
+                    };
+                    let width = super::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap();
+                    let expected_x = if source_side {
+                        node.bounds.x + node.bounds.width
+                    } else {
+                        node.bounds.x
+                    };
+                    assert_eq!(point.x, expected_x);
+                    assert!(point.y - width * 0.5 >= node.bounds.y + 12.0 - 0.001);
+                    assert!(
+                        point.y + width * 0.5 <= node.bounds.y + node.bounds.height - 12.0 + 0.001
+                    );
+                    slots.push((point.y - width * 0.5, point.y + width * 0.5));
+                }
+                slots.sort_by(|left, right| left.0.total_cmp(&right.0));
+                for pair in slots.windows(2) {
+                    assert!(
+                        pair[1].0 - pair[0].1 >= 8.0 - 0.001,
+                        "quantity ribbons overlap at a junction: {pair:?}"
+                    );
+                }
+            }
+        }
+        for path in &layout.edges {
+            let mut commands = Vec::new();
+            let _ = super::edge_paths::emit_diagram_edge_path(
+                &ir,
+                path.edge_index,
+                &path.points,
+                |command| commands.push(command),
+            );
+            assert!(matches!(
+                commands.as_slice(),
+                [
+                    super::PathCmd::MoveTo { .. },
+                    super::PathCmd::CubicTo { .. }
+                ]
+            ));
+            assert!(path.points.windows(2).all(|pair| pair[0].x <= pair[1].x));
+        }
+        assert_eq!(layout, layout_diagram_sankey(&ir));
+    }
+
+    #[test]
+    fn sankey_authored_orthogonal_ribbons_keep_manhattan_segments() {
+        let mut ir = parse("sankey-beta\nA,Hub,10\nB,Hub,5\nHub,C,15\n").ir;
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        let layout = layout_diagram_sankey(&ir);
+        for path in &layout.edges {
+            assert_eq!(path.points.len(), 4);
+            assert_eq!(path.points[1].x, path.points[2].x);
+            assert!(
+                path.points
+                    .windows(2)
+                    .all(|pair| { pair[0].x == pair[1].x || pair[0].y == pair[1].y })
+            );
+            let mut commands = Vec::new();
+            let _ = super::edge_paths::emit_diagram_edge_path(
+                &ir,
+                path.edge_index,
+                &path.points,
+                |command| commands.push(command),
+            );
+            assert!(commands.len() >= 2);
+            assert!(
+                commands[1..]
+                    .iter()
+                    .all(|command| { matches!(command, super::PathCmd::LineTo { .. }) })
+            );
+        }
+    }
+
+    #[test]
+    fn sankey_high_degree_cards_reserve_space_for_every_quantity_ribbon() {
+        let mut source = String::from("sankey-beta\n");
+        for index in 0..16 {
+            source.push_str(&format!("Source,Destination{index},1\n"));
+        }
+        let ir = parse(&source).ir;
+        let layout = layout_diagram_sankey(&ir);
+        let source = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source")
+            .unwrap();
+        assert!(source.bounds.height >= 16.0 * 24.0 + 15.0 * 8.0 + 24.0);
+        let mut ports: Vec<_> = layout.edges.iter().map(|edge| edge.points[0].y).collect();
+        ports.sort_by(f32::total_cmp);
+        assert_eq!(ports.len(), 16);
+        for pair in ports.windows(2) {
+            assert!(pair[1] - pair[0] >= 32.0 - 0.001);
+        }
+        assert!(ports[0] - 12.0 >= source.bounds.y);
+        assert!(ports[15] + 12.0 <= source.bounds.y + source.bounds.height);
+        assert!(
+            layout
+                .nodes
+                .iter()
+                .all(|node| node.bounds.width.is_finite() && node.bounds.height.is_finite())
+        );
+    }
+
+    #[test]
+    fn sankey_extreme_independent_flows_cannot_undersize_visible_ribbon_ports() {
+        let mut source = String::from("sankey-beta\nHuge,Other,1e300\n");
+        for index in 0..16 {
+            source.push_str(&format!("Source,Destination{index},1\n"));
+        }
+        let ir = parse(&source).ir;
+        let layout = layout_diagram_sankey(&ir);
+        let card = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source")
+            .unwrap();
+        let widest = super::sankey_widest_flow(&ir);
+        let mut painted_slots = Vec::new();
+        for path in &layout.edges {
+            let edge = &ir.edges[path.edge_index];
+            if edge.from != IrEndpoint::Node(IrNodeId(card.node_index)) {
+                continue;
+            }
+            let width = super::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap();
+            assert_eq!(width, 24.0);
+            let center = path.points[0];
+            assert_eq!(center.x, card.bounds.x + card.bounds.width);
+            assert!(center.y - width * 0.5 >= card.bounds.y + 12.0 - 0.001);
+            assert!(center.y + width * 0.5 <= card.bounds.y + card.bounds.height - 12.0 + 0.001);
+            painted_slots.push((center.y - width * 0.5, center.y + width * 0.5));
+        }
+        assert_eq!(painted_slots.len(), 16);
+        painted_slots.sort_by(|left, right| left.0.total_cmp(&right.0));
+        for pair in painted_slots.windows(2) {
+            assert!(pair[1].0 - pair[0].1 >= 8.0 - 0.001);
+        }
+    }
+
+    #[test]
+    fn sankey_skipped_columns_keep_their_obstacle_aware_routes() {
+        let ir = parse("sankey-beta\nA,B,10\nB,C,10\nA,C,2\n").ir;
+        let layout = layout_diagram_sankey(&ir);
+        let generic = super::build_edge_paths_with_orientation(
+            &ir,
+            &layout.nodes,
+            &[],
+            &std::collections::BTreeSet::new(),
+            true,
+            super::EdgeRouting::default(),
+        );
+        let skip = layout
+            .edges
+            .iter()
+            .find(|edge| edge.edge_index == 2)
+            .unwrap();
+        assert_eq!(
+            skip.points,
+            generic
+                .iter()
+                .find(|edge| edge.edge_index == 2)
+                .unwrap()
+                .points
+        );
+        assert_eq!(layout.edges.len(), 3, "long flows must remain present");
+        let mut commands = Vec::new();
+        let endpoints = super::edge_paths::emit_diagram_edge_path(
+            &ir,
+            skip.edge_index,
+            &skip.points,
+            |command| commands.push(command),
+        )
+        .unwrap();
+        assert_eq!(endpoints.start.point, skip.points[0]);
+        assert_eq!(endpoints.end.point, *skip.points.last().unwrap());
+        assert!(commands.len() >= 2);
+        assert!(
+            commands[1..]
+                .iter()
+                .all(|command| { matches!(command, super::PathCmd::LineTo { .. }) }),
+            "a long obstacle-aware route must not become an unrelated cubic"
+        );
     }
 
     /// Independent geometric check: two links between the same pair of columns cross
@@ -32981,13 +33783,17 @@ mod tests {
             gantt_scene_paths(axes).len(),
             layout.extensions.axis_ticks.len() * 2
         );
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let axis_label_rows = super::gantt_axis_label_rows(&layout, &metrics);
         for axis in &layout.extensions.gantt_axis_rows {
-            for tick in &layout.extensions.axis_ticks {
+            for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+                let expected_y =
+                    super::gantt_axis_label_baseline(*axis, axis_label_rows[index], &metrics);
                 assert!(
                     axes.children
                         .iter()
                         .any(|item| matches!(item, RenderItem::Text(text)
-                    if text.text == tick.label && text.x == tick.position + 3.0 && text.y == axis.y
+                    if text.text == tick.label && text.x == tick.position + 3.0 && text.y == expected_y
                         && text.baseline == TextBaseline::Alphabetic))
                 );
             }

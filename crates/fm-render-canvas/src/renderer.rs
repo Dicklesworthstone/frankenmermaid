@@ -5,7 +5,7 @@
 use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
 use crate::shapes::{
     draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
-    draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape,
+    draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape, trace_rounded_rect,
 };
 use crate::viewport::{Viewport, fit_to_viewport};
 use fm_core::{ArrowType, DiagramType, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, NodeShape};
@@ -27,6 +27,9 @@ pub struct CanvasRenderConfig {
     pub line_height: f64,
     /// Padding around the diagram.
     pub padding: f64,
+    /// Corner radius for rounded nodes. Ordinary cards use 55% of this radius and
+    /// subgraph panels use 150%, matching the SVG renderer's visual hierarchy.
+    pub rounded_corners: f64,
     /// Optional document background. `None` keeps a standalone canvas transparent.
     /// Browser theme adapters supply the theme's background so text stays readable on any host.
     pub background: Option<String>,
@@ -137,7 +140,8 @@ impl Default for CanvasRenderConfig {
             ),
             font_size: 15.0,
             line_height: 1.5,
-            padding: 28.0,
+            padding: 24.0,
+            rounded_corners: 8.0,
             background: None,
             node_fill: String::from("#f8fafc"),
             node_stroke: String::from("#7c8da5"),
@@ -601,9 +605,8 @@ impl Canvas2dRenderer {
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
-        self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
-        // Timeline bands tint the whole section frame. Keep the same background submission
-        // order as the GPU, then paint its one cluster caption above the tint.
+        self.draw_bands(layout, ir, ctx, offset_x, offset_y);
+        // Paint each timeline section caption above every background, in the same order as GPU.
         if ir.diagram_type == DiagramType::Timeline {
             let mut cluster_label_font = None;
             for cluster_box in &layout.clusters {
@@ -1269,7 +1272,14 @@ impl Canvas2dRenderer {
         // per-cluster `format!("{}px {}", font_size*0.9, font_family)`.
         let mut cluster_label_font: Option<String> = None;
 
-        for cluster_box in &layout.clusters {
+        // Parent panels must be behind their descendants even when parser or layout order
+        // puts an inner subgraph first. Stable ordering preserves equal-size sibling order.
+        let mut clusters: Vec<_> = layout.clusters.iter().collect();
+        clusters.sort_by(|left, right| {
+            (right.bounds.width * right.bounds.height)
+                .total_cmp(&(left.bounds.width * left.bounds.height))
+        });
+        for cluster_box in clusters {
             let x = f64::from(cluster_box.bounds.x) + offset_x;
             let y = f64::from(cluster_box.bounds.y) + offset_y;
             let w = f64::from(cluster_box.bounds.width);
@@ -1337,19 +1347,22 @@ impl Canvas2dRenderer {
                 ctx.set_line_dash(pattern);
             }
 
-            ctx.begin_path();
-            // Rounded rectangle for cluster
-            let r = 4.0;
-            ctx.move_to(x + r, y);
-            ctx.line_to(x + w - r, y);
-            ctx.arc_to(x + w, y, x + w, y + r, r);
-            ctx.line_to(x + w, y + h - r);
-            ctx.arc_to(x + w, y + h, x + w - r, y + h, r);
-            ctx.line_to(x + r, y + h);
-            ctx.arc_to(x, y + h, x, y + h - r, r);
-            ctx.line_to(x, y + r);
-            ctx.arc_to(x, y, x + r, y, r);
-            ctx.close_path();
+            let is_c4_boundary = ir
+                .clusters
+                .get(cluster_box.cluster_index)
+                .is_some_and(|cluster| cluster.c4_boundary_type.is_some());
+            trace_rounded_rect(
+                ctx,
+                x,
+                y,
+                w,
+                h,
+                if is_c4_boundary {
+                    0.0
+                } else {
+                    self.config.rounded_corners * 1.5
+                },
+            );
             ctx.fill();
             ctx.stroke();
             if cluster_dash.is_some() {
@@ -1405,7 +1418,7 @@ impl Canvas2dRenderer {
         ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
         ctx.set_font(cluster_label_font.get_or_insert_with(|| {
             format!(
-                "{}px {}",
+                "600 {}px {}",
                 self.config.font_size * 0.9,
                 self.config.font_family
             )
@@ -1962,109 +1975,93 @@ impl Canvas2dRenderer {
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
-        diagram_type: fm_core::DiagramType,
+        ir: &MermaidDiagramIr,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
     ) {
         use fm_layout::LayoutBandKind;
-        // Invariant section-label font, formatted once and reused across bands (lazy so a band-free
-        // diagram never formats it). Byte-identical to the per-band
-        // `format!("bold {}px {}", font_size*0.85, font_family)`.
+        let diagram_type = ir.diagram_type;
+        let gantt = diagram_type == DiagramType::Gantt;
         let mut section_label_font: Option<String> = None;
-        for band in &layout.extensions.bands {
+        for (index, band) in layout.extensions.bands.iter().enumerate() {
+            // The timeline's cluster already supplies this exact background, including all
+            // authored style channels. An opaque duplicate would cover those declarations.
+            if band_has_cluster_background(diagram_type, layout, band) {
+                continue;
+            }
             let x = f64::from(band.bounds.x) + offset_x;
             let y = f64::from(band.bounds.y) + offset_y;
             let w = f64::from(band.bounds.width);
             let h = f64::from(band.bounds.height);
 
-            match band.kind {
-                LayoutBandKind::Lane => {
-                    // Sequence lifeline: dashed vertical center line.
-                    let cx = x + w / 2.0;
-                    ctx.set_stroke_style(&self.config.node_stroke);
-                    ctx.set_line_width(1.0);
-                    ctx.set_line_dash(&[6.0, 4.0]);
-                    ctx.begin_path();
-                    ctx.move_to(cx, y);
-                    ctx.line_to(cx, y + h);
-                    ctx.stroke();
-                    ctx.set_line_dash(&[]);
-                    self.draw_calls += 1;
+            if diagram_type == DiagramType::Sequence && band.kind == LayoutBandKind::Lane {
+                // Only sequence lanes represent lifelines; journey and branch lanes are panels.
+                let cx = x + w / 2.0;
+                ctx.set_stroke_style(&self.config.node_stroke);
+                ctx.set_line_width(1.0);
+                ctx.set_line_dash(&[6.0, 4.0]);
+                ctx.begin_path();
+                ctx.move_to(cx, y);
+                ctx.line_to(cx, y + h);
+                ctx.stroke();
+                ctx.set_line_dash(&[]);
+                self.draw_calls += 1;
+                continue;
+            }
 
-                    // A NAMED lane also draws its name (bd-rk14).
-                    //
-                    // This arm drew geometry and no text, while the Section arm below drew its
-                    // label — so a gitGraph branch band reached the canvas as a bare dashed line
-                    // and the branch name appeared nowhere. Measured: the layout carries
-                    // [(Lane,"main"), (Lane,"dev")] and the canvas drew only "commit_1"/"commit_2".
-                    //
-                    // NOT the same cause as the box-content drops in this bead, which is why it was
-                    // held back rather than lumped in with them: those needed new node arms, this is
-                    // a missing label inside a band arm that already existed. It is the canvas twin
-                    // of bd-u3fo.
-                    //
-                    // ⚠️ A NON-EMPTY LABEL IS NOT ENOUGH TO TELL THESE APART. I first gated on that
-                    // alone, assuming sequence lifelines were unlabelled — they are NOT: a lifeline
-                    // band carries its participant's name, so that version drew `Alice` a THIRD
-                    // time and `canvas_mirrors_sequence_participant_headers` failed on
-                    // `count("Alice") == 2`. The existing control caught the wrong assumption.
-                    //
-                    // `LayoutBandKind::Lane` is overloaded — sequence lifelines AND named lanes
-                    // (gitGraph branches, journey lanes) share it — so the discriminator has to come
-                    // from outside the band. A distinct kind in fm-layout would be the better fix;
-                    // that file is under another agent's exclusive lease, so this gates on the
-                    // diagram type instead, which is what actually decides the meaning: in a
-                    // sequence diagram a Lane IS a lifeline and its name is already drawn as a
-                    // head/foot header.
-                    if !band.label.is_empty()
-                        && !matches!(diagram_type, DiagramType::Sequence | DiagramType::Journey)
-                    {
-                        ctx.set_fill_style(&self.config.label_color);
-                        ctx.set_font(section_label_font.get_or_insert_with(|| {
-                            format!(
-                                "bold {}px {}",
-                                self.config.font_size * 0.85,
-                                self.config.font_family
-                            )
-                        }));
-                        ctx.set_text_align(TextAlign::Left);
-                        ctx.set_text_baseline(TextBaseline::Top);
-                        ctx.fill_text(&band.label, x + 4.0, y + 2.0);
-                        self.draw_calls += 1;
-                    }
-                }
-                LayoutBandKind::Section => {
-                    // Gantt section: light background band.
-                    ctx.set_fill_style("rgba(226,232,240,0.3)");
-                    ctx.fill_rect(x, y, w, h);
-                    // Timeline sections have a titled cluster at these same bounds. The band
-                    // supplies decoration; its metadata is retained for terminal rendering.
-                    if !band.label.is_empty() && diagram_type != DiagramType::Timeline {
-                        ctx.set_fill_style(&self.config.label_color);
-                        ctx.set_font(section_label_font.get_or_insert_with(|| {
-                            format!(
-                                "bold {}px {}",
-                                self.config.font_size * 0.85,
-                                self.config.font_family
-                            )
-                        }));
-                        ctx.set_text_align(TextAlign::Left);
-                        ctx.set_text_baseline(TextBaseline::Top);
-                        ctx.fill_text(&band.label, x + 4.0, y + 2.0);
-                    }
-                    self.draw_calls += 1;
-                }
-                LayoutBandKind::Column => {
-                    // Kanban column: subtle vertical separator.
-                    ctx.set_stroke_style("rgba(148,163,184,0.4)");
-                    ctx.set_line_width(1.0);
-                    ctx.begin_path();
-                    ctx.move_to(x + w, y);
-                    ctx.line_to(x + w, y + h);
-                    ctx.stroke();
-                    self.draw_calls += 1;
-                }
+            ctx.set_fill_style(if gantt && !index.is_multiple_of(2) {
+                &self.config.node_fill
+            } else {
+                &self.config.cluster_fill
+            });
+            ctx.set_stroke_style(&self.config.cluster_stroke);
+            ctx.set_line_width(if gantt { 0.75 } else { 1.0 });
+            ctx.set_line_dash(&[]);
+            trace_rounded_rect(
+                ctx,
+                x,
+                y,
+                w,
+                h,
+                if gantt {
+                    4.0
+                } else {
+                    self.config.rounded_corners.max(4.0)
+                },
+            );
+            ctx.fill();
+            ctx.stroke();
+            self.draw_calls += 2;
+
+            let repeated_caption = (diagram_type == DiagramType::Journey
+                && band.kind == LayoutBandKind::Lane)
+                || (diagram_type == DiagramType::Timeline && band.kind == LayoutBandKind::Section);
+            if !band.label.is_empty() && !repeated_caption {
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_font(section_label_font.get_or_insert_with(|| {
+                    format!(
+                        "600 {}px {}",
+                        if gantt {
+                            self.config.font_size * 0.85
+                        } else {
+                            (self.config.font_size * 0.82).max(8.0)
+                        },
+                        self.config.font_family
+                    )
+                }));
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Alphabetic);
+                ctx.fill_text(
+                    &band.label,
+                    x + if gantt { 6.0 } else { 8.0 },
+                    y + if gantt {
+                        self.config.font_size * 0.9
+                    } else {
+                        16.0
+                    },
+                );
+                self.draw_calls += 1;
             }
         }
     }
@@ -2211,6 +2208,8 @@ impl Canvas2dRenderer {
             return;
         }
         let mut tick_font: Option<String> = None;
+        let metrics = self.config.font_metrics();
+        let label_rows = fm_layout::gantt_axis_label_rows(layout, &metrics);
         // Gantt publishes its axis baselines from layout: the bottom row is always present and
         // `topAxis` appends a second row. Other diagram types retain their existing generic axis.
         let axis_rows: Vec<f64> = if layout.extensions.gantt_axis_rows.is_empty() {
@@ -2223,8 +2222,8 @@ impl Canvas2dRenderer {
                 .map(|axis| f64::from(axis.y) + offset_y)
                 .collect()
         };
-        for y in axis_rows {
-            for tick in &layout.extensions.axis_ticks {
+        for (axis_index, y) in axis_rows.into_iter().enumerate() {
+            for (tick_index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
                 if tick.label.is_empty() {
                     continue;
                 }
@@ -2255,13 +2254,24 @@ impl Canvas2dRenderer {
                 ctx.set_font(tick_font.get_or_insert_with(|| {
                     format!(
                         "{}px {}",
-                        self.config.font_size * 0.72,
+                        (self.config.font_size * 0.72).max(8.0),
                         self.config.font_family
                     )
                 }));
                 // `x + 3.0`, as the SVG writes it: the label sits just right of its tick mark rather
                 // than centred on it.
-                ctx.fill_text(&tick.label, tick_x + 3.0, y);
+                let label_y = layout
+                    .extensions
+                    .gantt_axis_rows
+                    .get(axis_index)
+                    .map_or(y, |axis| {
+                        f64::from(fm_layout::gantt_axis_label_baseline(
+                            *axis,
+                            label_rows[tick_index],
+                            &metrics,
+                        )) + offset_y
+                    });
+                ctx.fill_text(&tick.label, tick_x + 3.0, label_y);
                 self.draw_calls += 2;
             }
         }
@@ -2713,6 +2723,33 @@ impl Canvas2dRenderer {
     }
 
     /// Draw all edges.
+    /// Mask the connector with a quiet, rounded plate matching the SVG edge-label surface.
+    /// A standalone transparent canvas keeps its configured node surface as the safe fallback.
+    fn fill_edge_label_background<C: Canvas2dContext>(
+        &self,
+        ctx: &mut C,
+        center_x: f64,
+        center_y: f64,
+        width: f64,
+        height: f64,
+    ) {
+        let background = self
+            .config
+            .background
+            .as_deref()
+            .and_then(sanitize_canvas_paint);
+        ctx.set_fill_style(background.as_deref().unwrap_or(&self.config.node_fill));
+        trace_rounded_rect(
+            ctx,
+            center_x - width / 2.0,
+            center_y - height / 2.0,
+            width,
+            height,
+            4.0,
+        );
+        ctx.fill();
+    }
+
     fn draw_edges<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -2769,7 +2806,8 @@ impl Canvas2dRenderer {
             // bead landed. The colour is resolved ONCE here and threaded through the path, the UML
             // markers and the arrowheads below — an edge whose line obeyed the author while its
             // arrowhead kept the theme colour would be a worse bug than the one being fixed.
-            let (declared_stroke, declared_width) = resolve_edge_style(ir, edge_path.edge_index);
+            let (declared_stroke, declared_width) =
+                resolve_edge_style_with_defaults(ir, edge_path.edge_index, &self.config);
             // The LABEL colour of this edge, resolved once for the same reason the stroke is: the
             // three label sites in this loop (the `|text|` label, its wrapped continuation lines,
             // and the `"1" --> "many"` secondary labels) all draw text belonging to THIS edge, so
@@ -3019,8 +3057,7 @@ impl Canvas2dRenderer {
                         || measure_graph_edge_caption(&caption, ctx, &self.config, font),
                         |label| (label.width, label.height, label.line_height),
                     );
-                    ctx.set_fill_style(&self.config.node_fill);
-                    ctx.fill_rect(lx - width / 2.0, ly - height / 2.0, width, height);
+                    self.fill_edge_label_background(ctx, lx, ly, width, height);
                     self.draw_calls += 1;
                     ctx.set_fill_style(edge_label_fill);
                     ctx.set_text_align(TextAlign::Center);
@@ -3046,13 +3083,7 @@ impl Canvas2dRenderer {
                     );
                     let label_height = planned.map_or(line_height + 4.0, |label| label.height);
 
-                    ctx.set_fill_style(&self.config.node_fill);
-                    ctx.fill_rect(
-                        lx - label_width / 2.0,
-                        ly - label_height / 2.0,
-                        label_width,
-                        label_height,
-                    );
+                    self.fill_edge_label_background(ctx, lx, ly, label_width, label_height);
                     self.draw_calls += 1;
 
                     ctx.set_fill_style(edge_label_fill);
@@ -3087,13 +3118,7 @@ impl Canvas2dRenderer {
                     let total_height = lines.len() as f64 * line_height;
                     let label_height = planned.map_or(total_height + 4.0, |label| label.height);
 
-                    ctx.set_fill_style(&self.config.node_fill);
-                    ctx.fill_rect(
-                        lx - label_width / 2.0,
-                        ly - label_height / 2.0,
-                        label_width,
-                        label_height,
-                    );
+                    self.fill_edge_label_background(ctx, lx, ly, label_width, label_height);
                     self.draw_calls += 1;
 
                     // Label text
@@ -3313,6 +3338,7 @@ impl Canvas2dRenderer {
                     fill.as_deref().unwrap_or(&self.config.node_fill),
                     stroke.as_deref().unwrap_or(&self.config.node_stroke),
                     stroke_width,
+                    self.config.rounded_corners,
                 );
             }
             if is_state_terminal {
@@ -4114,6 +4140,19 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
 ///
 /// Returns `None` per channel when nothing was declared, so the caller keeps the theme colour
 /// and the arrow-derived width from `legacy_edge_stroke` instead of a value invented here.
+pub(crate) fn band_has_cluster_background(
+    diagram_type: DiagramType,
+    layout: &DiagramLayout,
+    band: &fm_layout::LayoutBand,
+) -> bool {
+    diagram_type == DiagramType::Timeline
+        && band.kind == fm_layout::LayoutBandKind::Section
+        && layout
+            .clusters
+            .iter()
+            .any(|cluster| cluster.bounds == band.bounds)
+}
+
 /// A cluster's declared fill and stroke from `style mySubgraph fill:#f00` (bd-xfmm).
 ///
 /// bd-xfmm could only WARN about a subgraph style, because `IrStyleTarget` had no `Cluster`
@@ -4263,6 +4302,26 @@ pub(crate) fn resolve_edge_style(
     (merged.get("stroke").cloned(), width)
 }
 
+/// Authored strokes win over theme variables and category colors. Sharing this resolution
+/// keeps a raster preview and a GPU plan faithful to the same Sankey source category.
+pub(crate) fn resolve_edge_style_with_defaults(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    config: &CanvasRenderConfig,
+) -> (Option<String>, Option<f64>) {
+    let (stroke, width) = resolve_edge_style(ir, edge_index);
+    let stroke = stroke
+        .or_else(|| {
+            ir.meta
+                .theme_overrides
+                .theme_variables
+                .get("lineColor")
+                .and_then(|value| sanitize_canvas_paint(value))
+        })
+        .or_else(|| fm_core::sankey_edge_color(ir, edge_index, &config.accents).map(str::to_owned));
+    (stroke, width)
+}
+
 /// Parse a CSS `stroke-width` declaration into a device width.
 ///
 /// `2px` and a bare `2` must both parse, because both are valid in a mermaid `style` directive.
@@ -4360,6 +4419,30 @@ pub(crate) fn resolve_node_colors_with_defaults(
         return (
             fill.or_else(|| fm_layout::journey_score_fill(ir, node_index).map(str::to_owned)),
             stroke,
+        );
+    }
+    if ir.diagram_type == DiagramType::Sankey {
+        let role = fm_core::sankey_node_style(
+            ir,
+            node_index,
+            &config.node_fill,
+            &config.node_stroke,
+            &config.label_color,
+            &config.accents,
+        );
+        let variables = &ir.meta.theme_overrides.theme_variables;
+        let theme_fill = variables
+            .get("primaryColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        let theme_stroke = variables
+            .get("primaryBorderColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        return (
+            fill.or(theme_fill)
+                .or_else(|| role.as_ref().map(|role| role.fill.clone())),
+            stroke
+                .or(theme_stroke)
+                .or_else(|| role.map(|role| role.stroke)),
         );
     }
     if config.semantic_colors
@@ -5925,6 +6008,301 @@ mod tests {
     }
 
     #[test]
+    fn canvas_cards_use_configured_corners_without_changing_authored_shape_semantics() {
+        let ir = fm_parser::parse("flowchart LR\nA[Entry]\nB(Worker)\nC([Done])\nD{Ready?}").ir;
+        let layout = layout_diagram(&ir);
+        for (radius, card_radius, rounded_radius) in [(8.0, 4.4, 8.0), (12.0, 6.6, 12.0)] {
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+                rounded_corners: radius,
+                ..Default::default()
+            });
+            assert_eq!(
+                renderer.draw_nodes(&layout, &ir, &mut context, 0.0, 0.0, &mut 0),
+                4
+            );
+            let radii: Vec<_> = context
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::ArcTo(_, _, _, _, radius) => Some(*radius),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                radii.len(),
+                12,
+                "two cards and one stadium have four corners each"
+            );
+            assert!(
+                radii[..4]
+                    .iter()
+                    .all(|value| (*value - card_radius).abs() < 0.001)
+            );
+            assert!(
+                radii[4..8]
+                    .iter()
+                    .all(|value| (*value - rounded_radius).abs() < 0.001)
+            );
+            let stadium = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "C")
+                .unwrap();
+            assert!(
+                radii[8..].iter().all(|value| {
+                    (*value - f64::from(stadium.bounds.height) / 2.0).abs() < 0.001
+                })
+            );
+            let (fills, text) = record_gantt_canvas_paint(context.operations());
+            assert_eq!(fills.len(), 4);
+            assert_eq!(fills[3].vertices, 4, "decision diamonds remain four-sided");
+            assert_eq!(text.len(), 4, "rounding must not remove labels");
+        }
+    }
+
+    #[test]
+    fn nested_canvas_panels_paint_outer_first_and_share_configured_corner_geometry() {
+        let ir = fm_parser::parse(
+            "flowchart TB\nsubgraph outer[Platform]\nsubgraph inner[Workers]\nA --> B\nend\nend\n\
+             style outer fill:#f1f5f9\nstyle inner fill:#e0e7ff",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 2);
+        layout.clusters.sort_by(|left, right| {
+            (left.bounds.width * left.bounds.height)
+                .total_cmp(&(right.bounds.width * right.bounds.height))
+        });
+        for (radius, expected_radius) in [(8.0, 12.0), (0.0, 0.0), (12.0, 18.0)] {
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+                rounded_corners: radius,
+                ..Default::default()
+            });
+            assert_eq!(
+                renderer.draw_clusters(&layout, &ir, &mut context, 0.0, 0.0),
+                2
+            );
+            let (fills, labels) = record_gantt_canvas_paint(context.operations());
+            assert_eq!(
+                fills[0].paint.fill, "#f1f5f9",
+                "outer panel must be behind its child"
+            );
+            assert_eq!(fills[1].paint.fill, "#e0e7ff");
+            assert!(
+                fills[0].bounds[2] * fills[0].bounds[3] > fills[1].bounds[2] * fills[1].bounds[3]
+            );
+            assert!(
+                labels
+                    .iter()
+                    .all(|label| label.paint.font.starts_with("600 "))
+            );
+            let radii: Vec<_> = context
+                .operations()
+                .iter()
+                .filter_map(|operation| {
+                    if let DrawOperation::ArcTo(_, _, _, _, radius) = operation {
+                        Some(*radius)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if radius == 0.0 {
+                assert!(
+                    radii.is_empty(),
+                    "square panel override must reach the geometry"
+                );
+            } else {
+                assert_eq!(radii.len(), 8);
+                assert!(
+                    radii
+                        .iter()
+                        .all(|value| (*value - expected_radius).abs() < 0.001)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_edge_plates_use_the_document_surface_with_soft_corners() {
+        let ir = fm_parser::parse("flowchart LR\nA -->|Approved| B").ir;
+        let layout = layout_diagram(&ir);
+        let mut context = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+            background: Some("#ffffff".to_owned()),
+            node_fill: "#e0e7ff".to_owned(),
+            ..Default::default()
+        });
+        renderer.draw_edges(&layout, &ir, &mut context, 0.0, 0.0, &mut 0);
+        let (fills, labels) = record_gantt_canvas_paint(context.operations());
+        let plate = fills.last().expect("edge caption needs a backing plate");
+        assert_eq!(plate.paint.fill, "#ffffff");
+        let label = labels
+            .iter()
+            .find(|label| label.text == "Approved")
+            .unwrap();
+        assert!(label.x > plate.bounds[0] && label.x < plate.bounds[0] + plate.bounds[2]);
+        assert!(label.y > plate.bounds[1] && label.y < plate.bounds[1] + plate.bounds[3]);
+        assert_eq!(context.operations().iter().filter(|operation| {
+            matches!(operation, DrawOperation::ArcTo(_, _, _, _, radius) if (*radius - 4.0).abs() < 0.001)
+        }).count(), 4);
+    }
+
+    #[test]
+    fn sankey_source_colors_reach_raster_ribbons_nodes_and_gpu_markers() {
+        let ir =
+            fm_parser::parse("sankey-beta\nSource,Review,100\nSource,Queue,50\nReview,Done,80").ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        for preset in [
+            fm_render_svg::ThemePreset::Default,
+            fm_render_svg::ThemePreset::Dark,
+        ] {
+            let colors = fm_render_svg::ThemeColors::from_preset(preset);
+            let config = CanvasRenderConfig {
+                background: Some(colors.background),
+                node_fill: colors.node_fill,
+                node_stroke: colors.node_stroke,
+                edge_stroke: colors.edge,
+                label_color: colors.text,
+                accents: colors.accents,
+                ..Default::default()
+            };
+            let mut context = MockCanvas2dContext::new(1000.0, 700.0);
+            Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut context);
+            let mut stroke = String::new();
+            let mut width = 0.0;
+            let mut ribbon_colors = Vec::new();
+            for operation in context.operations() {
+                match operation {
+                    DrawOperation::SetStrokeStyle(value) => stroke.clone_from(value),
+                    DrawOperation::SetLineWidth(value) => width = *value,
+                    DrawOperation::Stroke if width > 2.0 => ribbon_colors.push(stroke.clone()),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                ribbon_colors,
+                [
+                    config.accents[0].clone(),
+                    config.accents[0].clone(),
+                    config.accents[1].clone()
+                ]
+            );
+            let (fills, labels) = record_gantt_canvas_paint(context.operations());
+            assert!(
+                labels.iter().any(|label| label.text == "150"),
+                "flow totals remain visible"
+            );
+            for plan in [
+                crate::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                crate::GpuRenderPlan::from_layout_and_scene_with_config(
+                    &ir, &layout, &scene, &config,
+                ),
+            ] {
+                for segment in &plan.edge_segments {
+                    let color =
+                        crate::parse_paint_rgba(&ribbon_colors[segment.edge_index as usize])
+                            .unwrap();
+                    assert_eq!(segment.color, color);
+                    assert!(
+                        plan.arrowheads
+                            .iter()
+                            .filter(|marker| marker.edge_index == segment.edge_index)
+                            .all(|marker| { marker.color == color && marker.fill == color }),
+                        "a ribbon tip must keep its source hue"
+                    );
+                }
+                assert_eq!(plan.arrowheads.len(), ir.edges.len());
+                assert!(!plan.text_quads.is_empty());
+                assert!(
+                    plan.text_quads.iter().all(|quad| {
+                        quad.color == crate::parse_paint_rgba(&config.label_color).unwrap()
+                    }),
+                    "category names and totals must remain readable on dark surfaces"
+                );
+                for node in &plan.node_instances {
+                    let role = fm_core::sankey_node_style(
+                        &ir,
+                        node.node_index as usize,
+                        &config.node_fill,
+                        &config.node_stroke,
+                        &config.label_color,
+                        &config.accents,
+                    )
+                    .unwrap();
+                    assert_eq!(node.fill, crate::parse_paint_rgba(&role.fill).unwrap());
+                    assert!(
+                        fills.iter().any(|fill| fill.paint.fill == role.fill),
+                        "raster node lost its category surface"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_palette_preserves_author_paint_and_source_theme_precedence() {
+        let mut ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,50").ir;
+        ir.meta.theme_overrides.theme_variables.extend([
+            ("primaryColor".to_owned(), "#ddeeff".to_owned()),
+            ("primaryBorderColor".to_owned(), "#335577".to_owned()),
+            ("lineColor".to_owned(), "#2468ac".to_owned()),
+        ]);
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+            "fill".to_owned(),
+            "#cc8844".to_owned(),
+        )])));
+        ir.edges[1].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+            ("stroke".to_owned(), "#992244".to_owned()),
+            ("stroke-width".to_owned(), "7px".to_owned()),
+        ])));
+        let config = CanvasRenderConfig::default();
+        assert_eq!(
+            resolve_node_colors_with_defaults(&ir, 0, &config),
+            (Some("#cc8844".to_owned()), Some("#335577".to_owned()))
+        );
+        assert_eq!(
+            resolve_node_colors_with_defaults(&ir, 1, &config),
+            (Some("#ddeeff".to_owned()), Some("#335577".to_owned()))
+        );
+        assert_eq!(
+            resolve_edge_style_with_defaults(&ir, 0, &config),
+            (Some("#2468ac".to_owned()), None)
+        );
+        assert_eq!(
+            resolve_edge_style_with_defaults(&ir, 1, &config),
+            (Some("#992244".to_owned()), Some(7.0))
+        );
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let plan =
+            crate::GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config);
+        for segment in &plan.edge_segments {
+            let expected = if segment.edge_index == 0 {
+                "#2468ac"
+            } else {
+                "#992244"
+            };
+            assert_eq!(segment.color, crate::parse_paint_rgba(expected).unwrap());
+            if segment.edge_index == 1 {
+                assert_eq!(segment.width, 7.0);
+            }
+        }
+        for node in &plan.node_instances {
+            let expected = if node.node_index == 0 {
+                "#cc8844"
+            } else {
+                "#ddeeff"
+            };
+            assert_eq!(node.fill, crate::parse_paint_rgba(expected).unwrap());
+            assert_eq!(node.stroke, crate::parse_paint_rgba("#335577").unwrap());
+        }
+    }
+
+    #[test]
     fn mindmap_defaults_follow_branches_and_preserve_author_channels() {
         let mut ir = fm_parser::parse(
             "mindmap\n  root((Root))\n    A[Research]\n      Child[Child]\n    B[Design]\n    Plain\n",
@@ -6742,14 +7120,8 @@ mod tests {
             .find(|node| node.node_index == 0)
             .expect("expected node 0 to be present in layout");
 
-        let (rect_x, rect_y) = ctx
-            .operations()
-            .iter()
-            .find_map(|op| match op {
-                DrawOperation::Rect(x, y, _w, _h) => Some((*x, *y)),
-                _ => None,
-            })
-            .expect("expected a Rect operation for node box");
+        let (fills, _) = record_gantt_canvas_paint(ctx.operations());
+        let [rect_x, rect_y, _, _] = fills.first().expect("node box must be painted").bounds;
 
         let expected_x = f64::from(node_box.bounds.x - layout.bounds.x);
         let expected_y = f64::from(node_box.bounds.y - layout.bounds.y);
@@ -6782,14 +7154,8 @@ mod tests {
             .find(|node| node.node_index == 0)
             .expect("expected node 0 to be present in layout");
 
-        let (rect_x, rect_y) = ctx
-            .operations()
-            .iter()
-            .find_map(|op| match op {
-                DrawOperation::Rect(x, y, _w, _h) => Some((*x, *y)),
-                _ => None,
-            })
-            .expect("expected a Rect operation for node box");
+        let (fills, _) = record_gantt_canvas_paint(ctx.operations());
+        let [rect_x, rect_y, _, _] = fills.first().expect("node box must be painted").bounds;
 
         let expected_x = f64::from(node_box.bounds.x - layout.bounds.x) + config.padding;
         let expected_y = f64::from(node_box.bounds.y - layout.bounds.y) + config.padding;
@@ -8715,14 +9081,7 @@ mod tests {
 
         let _result = renderer.render(&layout, &ir, &mut ctx);
 
-        let label_background_width = ctx
-            .operations()
-            .iter()
-            .find_map(|operation| match operation {
-                DrawOperation::FillRect(_, _, width, _) if *width > 40.0 => Some(*width),
-                _ => None,
-            })
-            .expect("expected edge label background rectangle");
+        let label_background_width = drawn_edge_plate(&ctx, "Wide label text").2;
 
         let expected_width = "Wide label text".len() as f64
             * (CanvasRenderConfig::default().font_size * 0.85 * 0.57)
@@ -8800,14 +9159,55 @@ mod tests {
             .iter()
             .position(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == label))
             .unwrap_or_else(|| panic!("edge label {label} was not drawn"));
-        ctx.operations()[..text_index]
+        painted_plate_before(ctx.operations(), text_index)
+    }
+
+    fn painted_plate_before(
+        operations: &[DrawOperation],
+        text_index: usize,
+    ) -> (f64, f64, f64, f64) {
+        let fill_index = operations[..text_index]
             .iter()
-            .rev()
-            .find_map(|op| match op {
-                DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
-                _ => None,
+            .rposition(|operation| {
+                matches!(operation, DrawOperation::Fill | DrawOperation::FillRect(..))
             })
-            .expect("edge text needs its backing plate")
+            .expect("edge text needs its backing plate");
+        if let DrawOperation::FillRect(x, y, width, height) = operations[fill_index] {
+            return (x, y, width, height);
+        }
+        let path_start = operations[..fill_index]
+            .iter()
+            .rposition(|operation| matches!(operation, DrawOperation::BeginPath))
+            .expect("filled plate must start a path");
+        let mut points = Vec::new();
+        for operation in &operations[path_start..fill_index] {
+            match operation {
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::ArcTo(x1, y1, x2, y2, _) => points.extend([(*x1, *y1), (*x2, *y2)]),
+                DrawOperation::Rect(x, y, width, height) => {
+                    points.extend([(*x, *y), (*x + *width, *y + *height)])
+                }
+                _ => {}
+            }
+        }
+        assert!(!points.is_empty(), "plate must have measurable geometry");
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (min_x, min_y, max_x - min_x, max_y - min_y)
     }
 
     const CYCLIC_STATE_LABEL_REPRO: &str = concat!(
@@ -8976,27 +9376,21 @@ mod tests {
                 assert_eq!(renderer.render(&layout, &ir, &mut context).edges_drawn, 12);
                 let frame = renderer.edge_label_layout.as_ref().unwrap().bounds;
                 let mut canvas = Vec::new();
-                let mut latest_plate = None;
-                for op in context.operations() {
+                for (op_index, op) in context.operations().iter().enumerate() {
                     match op {
-                        DrawOperation::FillRect(x, y, width, height) => {
-                            latest_plate = Some(LayoutRect {
-                                x: *x as f32 + frame.x,
-                                y: *y as f32 + frame.y,
-                                width: *width as f32,
-                                height: *height as f32,
-                            })
-                        }
                         DrawOperation::FillText(text, _, _)
                             if ir.edges.iter().any(|edge| {
                                 edge.label.is_some_and(|id| ir.labels[id.0].text == *text)
                             }) =>
                         {
-                            canvas.push(
-                                latest_plate
-                                    .take()
-                                    .expect("whole caption has one backing plate"),
-                            );
+                            let (x, y, width, height) =
+                                painted_plate_before(context.operations(), op_index);
+                            canvas.push(LayoutRect {
+                                x: x as f32 + frame.x,
+                                y: y as f32 + frame.y,
+                                width: width as f32,
+                                height: height as f32,
+                            });
                         }
                         _ => {}
                     }
@@ -9492,7 +9886,15 @@ mod tests {
         assert!(renderer.edge_label_layout.as_ref().unwrap().labels[0].is_some());
         let (_, _, width, height) = drawn_edge_plate(&ctx, "[gRPC]");
         assert!((width - 6.0 * 64.0 * 0.57 - 8.0).abs() < 0.001);
-        assert!(height >= 64.0 * 1.2 + 4.0);
+        let planned = renderer.edge_label_layout.as_ref().unwrap().labels[0]
+            .as_ref()
+            .unwrap();
+        assert!(planned.height >= 64.0 * 1.2 + 4.0);
+        assert!(
+            (height - planned.height).abs() < 1e-6,
+            "painted height {height} differs from planned height {}",
+            planned.height
+        );
 
         for bundled in [true, false] {
             layout.edges[0].bundled = bundled;
@@ -10422,6 +10824,256 @@ mod tests {
             offset_x.abs() < 40.0,
             "label x offset {offset_x} is not a plausible auto-fit offset"
         );
+    }
+
+    #[test]
+    fn dense_gantt_axis_dates_stay_readable_in_canvas_and_gpu() {
+        for source in [
+            "%%{init: {'gantt': {'topAxis': true}}}%%\ngantt\n tickInterval 1day\n dateFormat YYYY-MM-DD\n Task :a,2026-01-01,14d\n",
+            "%%{init: {'gantt': {'topAxis': true}}}%%\ngantt\n dateFormat YYYY-MM-DD\n Task :a,2026-01-01,1d\n",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            for font_size in [9.0, 15.0, 24.0] {
+                let mut config = CanvasRenderConfig {
+                    font_size,
+                    line_height: 1.8,
+                    auto_fit: false,
+                    padding: 0.0,
+                    ..Default::default()
+                };
+                if font_size == 24.0 {
+                    config.font_family = "monospace".to_owned();
+                    config.label_color = "#f8fafc".to_owned();
+                    config.edge_stroke = "#94a3b8".to_owned();
+                }
+                let metrics = config.font_metrics();
+                let layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                );
+                let ticks = &layout.extensions.axis_ticks;
+                let rows = fm_layout::gantt_axis_label_rows(&layout, &metrics);
+                assert!(ticks.len() >= 2);
+                assert!(
+                    rows.iter().any(|&row| row > 0),
+                    "fixture needs crowded dates"
+                );
+                assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+
+                let mut ctx = MockCanvas2dContext::new(2000.0, 1200.0);
+                crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+                let (_, painted) = record_gantt_canvas_paint(ctx.operations());
+                let labels: Vec<_> = painted
+                    .iter()
+                    .filter(|label| ticks.iter().any(|tick| tick.label == label.text))
+                    .collect();
+                let plan = crate::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+                let runs: Vec<_> = plan
+                    .text_runs
+                    .iter()
+                    .filter(|run| run.source == crate::GpuTextSource::AxisTick)
+                    .collect();
+                assert_eq!(labels.len(), ticks.len() * 2);
+                assert_eq!(runs.len(), labels.len());
+                assert_eq!(plan.axis_tick_segments.len(), labels.len());
+                let tick_font_size = (font_size * 0.72).max(8.0);
+                let text_color = crate::gpu_plan::parse_paint_rgba(&config.label_color).unwrap();
+                let stroke_color = crate::gpu_plan::parse_paint_rgba(&config.edge_stroke).unwrap();
+
+                for (axis_index, axis) in layout.extensions.gantt_axis_rows.iter().enumerate() {
+                    let mut ink_bounds = Vec::new();
+                    for (tick_index, tick) in ticks.iter().enumerate() {
+                        let index = axis_index * ticks.len() + tick_index;
+                        let label = labels[index];
+                        let label_x = label.x + f64::from(layout.bounds.x);
+                        let label_y = label.y + f64::from(layout.bounds.y);
+                        let expected_y =
+                            fm_layout::gantt_axis_label_baseline(*axis, rows[tick_index], &metrics);
+                        assert_eq!(label.text, tick.label);
+                        assert_eq!(label.paint.baseline, TextBaseline::Alphabetic);
+                        assert_eq!(label.paint.align, TextAlign::Left);
+                        assert_eq!(label.paint.fill, config.label_color);
+                        assert!(
+                            label
+                                .paint
+                                .font
+                                .starts_with(&format!("{tick_font_size}px "))
+                        );
+                        assert!((label_x - f64::from(tick.position) - 3.0).abs() < 0.01);
+                        assert!((label_y - f64::from(expected_y)).abs() < 0.01);
+
+                        let width = f64::from(metrics.estimate_preserved_width(
+                            &tick.label,
+                            tick_font_size as f32,
+                            0.0,
+                        ));
+                        let bounds = [
+                            label_x,
+                            label_y - tick_font_size,
+                            width,
+                            tick_font_size * 1.3,
+                        ];
+                        assert!(bounds[0] >= f64::from(layout.bounds.x) - 0.01);
+                        assert!(bounds[1] >= f64::from(layout.bounds.y) - 0.01);
+                        assert!(
+                            bounds[0] + bounds[2]
+                                <= f64::from(layout.bounds.x + layout.bounds.width) + 0.01
+                        );
+                        assert!(
+                            bounds[1] + bounds[3]
+                                <= f64::from(layout.bounds.y + layout.bounds.height) + 0.01
+                        );
+                        ink_bounds.push(bounds);
+
+                        let run = runs[index];
+                        assert_eq!(run.node_index as usize, tick_index);
+                        assert!(run.quad_count > 0);
+                        for quad in
+                            &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize]
+                        {
+                            let baseline = f64::from(quad.center[1])
+                                + f64::from(crate::gpu_plan::GLYPH_BASELINE_RATIO - 0.5)
+                                    * tick_font_size;
+                            assert!((baseline - label_y).abs() < 0.01);
+                            assert_eq!(quad.color, text_color);
+                        }
+                        let mark = &plan.axis_tick_segments[index];
+                        assert_eq!(mark.from, [tick.position, axis.y + 4.0]);
+                        assert_eq!(mark.to, [tick.position, axis.y + 16.0]);
+                        assert_eq!(mark.color, stroke_color);
+                    }
+                    for (index, a) in ink_bounds.iter().enumerate() {
+                        for b in &ink_bounds[index + 1..] {
+                            assert!(
+                                a[0] + a[2] <= b[0] + 0.01
+                                    || b[0] + b[2] <= a[0] + 0.01
+                                    || a[1] + a[3] <= b[1] + 0.01
+                                    || b[1] + b[3] <= a[1] + 0.01,
+                                "painted date labels overlap: {a:?} and {b:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_and_gpu_bands_use_authored_dark_surfaces_and_keep_true_lifelines() {
+        for source in [
+            "gantt\n dateFormat YYYY-MM-DD\n section Planning\n Design :a,2026-01-01,3d\n section Delivery\n Build :b,after a,4d\n",
+            "journey\n section Discover\n Research: 5: Ada\n Review: 4: Ada\n",
+            "gitGraph\n commit\n branch develop\n checkout develop\n commit\n",
+            "sankey-beta\nSource,Process,5\nProcess,Output,5\n",
+            "sequenceDiagram\n Alice->>Bob: Hello\n",
+        ] {
+            let mut authored = String::from(
+                "%%{init: {'themeVariables': {'clusterBkg': '#172554', 'clusterBorder': '#64748b', 'primaryColor': '#0f172a', 'primaryBorderColor': '#94a3b8', 'primaryTextColor': '#f8fafc'}}}%%\n",
+            );
+            authored.push_str(source);
+            let ir = fm_parser::parse(&authored).ir;
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            assert!(!layout.extensions.bands.is_empty());
+            let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+            crate::render_to_canvas_with_layout(&ir, &layout, &mut context, &config);
+            let (fills, labels) = record_gantt_canvas_paint(context.operations());
+            let plan = crate::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let color = |paint| crate::gpu_plan::parse_paint_rgba(paint).unwrap();
+
+            if ir.diagram_type == DiagramType::Sequence {
+                assert!(plan.band_section_instances.is_empty());
+                assert_eq!(plan.band_lane_segments.len(), layout.extensions.bands.len());
+                for (band, line) in layout.extensions.bands.iter().zip(&plan.band_lane_segments) {
+                    assert_eq!(
+                        line.from,
+                        [band.bounds.x + band.bounds.width / 2.0, band.bounds.y]
+                    );
+                    assert_eq!(line.to, [line.from[0], band.bounds.y + band.bounds.height]);
+                    assert_eq!(line.color, color("#94a3b8"));
+                    assert_eq!(line.dash, [6.0, 4.0]);
+                    assert_eq!(line.width, 1.0);
+                }
+                assert_eq!(
+                    labels.iter().filter(|label| label.text == "Alice").count(),
+                    1,
+                    "an unmirrored actor is drawn once without a duplicate lifeline caption"
+                );
+                continue;
+            }
+
+            assert!(plan.band_lane_segments.is_empty());
+            assert!(plan.band_column_segments.is_empty());
+            assert_eq!(
+                plan.band_section_instances.len(),
+                layout.extensions.bands.len()
+            );
+            for (index, band) in layout.extensions.bands.iter().enumerate() {
+                let panel = &plan.band_section_instances[index];
+                let expected_fill =
+                    if ir.diagram_type == DiagramType::Gantt && !index.is_multiple_of(2) {
+                        "#0f172a"
+                    } else {
+                        "#172554"
+                    };
+                assert_eq!(panel.fill, color(expected_fill));
+                assert_eq!(panel.stroke, color("#64748b"));
+                assert_eq!(
+                    panel.center,
+                    [band.bounds.center().x, band.bounds.center().y]
+                );
+                assert_eq!(
+                    panel.half_extent,
+                    [band.bounds.width / 2.0, band.bounds.height / 2.0]
+                );
+                let painted = fills
+                    .iter()
+                    .find(|fill| {
+                        fill.paint.fill == expected_fill
+                            && (fill.bounds[0] + f64::from(layout.bounds.x - band.bounds.x)).abs()
+                                < 0.01
+                            && (fill.bounds[1] + f64::from(layout.bounds.y - band.bounds.y)).abs()
+                                < 0.01
+                            && (fill.bounds[2] - f64::from(band.bounds.width)).abs() < 0.01
+                            && (fill.bounds[3] - f64::from(band.bounds.height)).abs() < 0.01
+                    })
+                    .expect("the complete panel rectangle must reach the raster surface");
+                assert_eq!(painted.paint.stroke, "#64748b");
+                assert!(painted.paint.dash.is_empty());
+                assert_eq!(painted.paint.alpha, 1.0);
+                assert_eq!(painted.paint.line_width, f64::from(panel.stroke_width));
+
+                if !band.label.is_empty() && ir.diagram_type != DiagramType::Journey {
+                    let caption = labels
+                        .iter()
+                        .find(|label| label.text == band.label)
+                        .unwrap();
+                    assert!(caption.paint.font.starts_with("600 "));
+                    assert_eq!(caption.paint.fill, "#f8fafc");
+                    assert_eq!(caption.paint.baseline, TextBaseline::Alphabetic);
+                    let run = plan
+                        .text_runs
+                        .iter()
+                        .find(|run| {
+                            run.source == crate::GpuTextSource::Band
+                                && run.node_index as usize == index
+                        })
+                        .unwrap();
+                    assert!(run.quad_count > 0);
+                    assert_eq!(
+                        plan.text_quads[run.first_quad as usize].color,
+                        color("#f8fafc")
+                    );
+                }
+            }
+        }
     }
 
     /// A state note's text state is SET, not inherited (bd-4n5j2).

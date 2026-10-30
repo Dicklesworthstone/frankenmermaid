@@ -78,10 +78,17 @@ fn the_axis_does_not_overshoot_the_end() {
         !labels.iter().any(|label| label == "2026-01-09"),
         "the axis ran past the chart's end boundary: {labels:?}"
     );
+    assert!(
+        labels
+            .iter()
+            .all(|label| { label.as_str() >= "2026-01-01" && label.as_str() <= "2026-01-08" })
+    );
+    assert!(labels.windows(2).all(|pair| pair[0] < pair[1]));
+    let daily = axis_labels(&CHAIN.replacen("gantt\n", "gantt\n  tickInterval 1day\n", 1));
     assert_eq!(
-        labels.len(),
+        daily.len(),
         8,
-        "Jan 1 through Jan 8 inclusive is eight ticks: {labels:?}"
+        "an authored daily interval retains all eight dates through the end: {daily:?}"
     );
 }
 

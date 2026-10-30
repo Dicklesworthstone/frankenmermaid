@@ -1938,33 +1938,45 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
 
 /// Resolve visual roles before either SVG writer chooses its serialization path. The returned
 /// colors are ordinary paints, so standalone exports do not depend on CSS color-mix support.
-fn flowchart_shape_colors(
+fn semantic_node_colors(
     ir: &MermaidDiagramIr,
+    node_index: usize,
     shape: fm_core::NodeShape,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) -> Option<fm_core::NodeShapeStyle> {
-    if !config.semantic_colors || ir.diagram_type != DiagramType::Flowchart {
-        return None;
-    }
-    let preset = ir
-        .meta
-        .theme_overrides
-        .theme
-        .as_deref()
-        .and_then(|name| name.parse::<ThemePreset>().ok())
-        .unwrap_or(config.theme);
-    if !matches!(preset, ThemePreset::Default | ThemePreset::Dark) {
-        return None;
-    }
-    let mut style = fm_core::semantic_shape_style(
-        ir.diagram_type,
-        shape,
-        &colors.node_fill,
-        &colors.node_stroke,
-        &colors.text,
-        &colors.accents,
-    )?;
+    let mut style = if ir.diagram_type == DiagramType::Sankey {
+        fm_core::sankey_node_style(
+            ir,
+            node_index,
+            &colors.node_fill,
+            &colors.node_stroke,
+            &colors.text,
+            &colors.accents,
+        )?
+    } else {
+        if !config.semantic_colors || ir.diagram_type != DiagramType::Flowchart {
+            return None;
+        }
+        let preset = ir
+            .meta
+            .theme_overrides
+            .theme
+            .as_deref()
+            .and_then(|name| name.parse::<ThemePreset>().ok())
+            .unwrap_or(config.theme);
+        if !matches!(preset, ThemePreset::Default | ThemePreset::Dark) {
+            return None;
+        }
+        fm_core::semantic_shape_style(
+            ir.diagram_type,
+            shape,
+            &colors.node_fill,
+            &colors.node_stroke,
+            &colors.text,
+            &colors.accents,
+        )?
+    };
     let variables = &ir.meta.theme_overrides.theme_variables;
     if variables
         .get("primaryColor")
@@ -1988,6 +2000,77 @@ fn semantic_node_css(colors: &fm_core::NodeShapeStyle) -> String {
         "--fm-node-fill:{};--fm-node-stroke:{}",
         colors.fill, colors.stroke
     )
+}
+
+const SANKEY_MARKER_URLS: [&str; 8] = [
+    "url(#fm-sankey-arrow-0)",
+    "url(#fm-sankey-arrow-1)",
+    "url(#fm-sankey-arrow-2)",
+    "url(#fm-sankey-arrow-3)",
+    "url(#fm-sankey-arrow-4)",
+    "url(#fm-sankey-arrow-5)",
+    "url(#fm-sankey-arrow-6)",
+    "url(#fm-sankey-arrow-7)",
+];
+
+/// A ribbon keeps its source category's hue. A declared line color replaces that encoding.
+fn sankey_edge_color<'a>(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    colors: &'a ThemeColors,
+) -> Option<&'a str> {
+    if ir.diagram_type != DiagramType::Sankey
+        || ir
+            .meta
+            .theme_overrides
+            .theme_variables
+            .get("lineColor")
+            .and_then(|paint| sanitize_svg_paint(paint))
+            .is_some()
+        || fm_layout::edge_labels::edge_label_style(ir, edge_index)
+            .get("stroke")
+            .and_then(|paint| sanitize_svg_paint(paint))
+            .is_some()
+    {
+        return None;
+    }
+    fm_core::sankey_edge_color(ir, edge_index, &colors.accents)
+}
+
+fn sankey_marker_index(color: &str, colors: &ThemeColors) -> usize {
+    colors
+        .accents
+        .iter()
+        .position(|accent| accent == color)
+        .expect("Sankey source color belongs to the theme's categorical palette")
+}
+
+/// Markers use explicit paints so source hues survive both embedded CSS and portable exports.
+fn sankey_marker_defs(ir: &MermaidDiagramIr, colors: &ThemeColors) -> String {
+    if ir.diagram_type != DiagramType::Sankey {
+        return String::new();
+    }
+    let mut used = [false; 8];
+    for (index, edge) in ir.edges.iter().enumerate() {
+        if edge.arrow == fm_core::ArrowType::Arrow
+            && let Some(color) = sankey_edge_color(ir, index, colors)
+        {
+            used[sankey_marker_index(color, colors)] = true;
+        }
+    }
+    let mut defs = String::new();
+    for (index, used) in used.into_iter().enumerate() {
+        if used {
+            ArrowheadMarker::standard(&format!("fm-sankey-arrow-{index}"), &colors.accents[index])
+                .to_element()
+                .attr("markerUnits", "userSpaceOnUse")
+                .attr("viewBox", "0 0 8 7")
+                .attr_num("markerWidth", 32.0)
+                .attr_num("markerHeight", 28.0)
+                .write_to_string(&mut defs);
+        }
+    }
+    defs
 }
 
 /// Drop one exact stylesheet range, retaining its end marker. Marker pairs deliberately sit on
@@ -2232,13 +2315,16 @@ fn render_scene_document_with_ir(
     };
     // See the twin site in the main renderer: ER cardinality markers ride alongside the mask-driven
     // arrowhead defs rather than inside the mask.
-    let er_markers = ir
+    let mut supplemental_markers = ir
         .map(|d| er_marker_defs_body(d, edge_color))
         .unwrap_or_default();
-    defs = defs.raw_markers(if er_markers.is_empty() {
+    if let Some(ir) = ir {
+        supplemental_markers.push_str(&sankey_marker_defs(ir, &theme.colors));
+    }
+    defs = defs.raw_markers(if supplemental_markers.is_empty() {
         arrow_markers
     } else {
-        Cow::Owned(format!("{arrow_markers}{er_markers}"))
+        Cow::Owned(format!("{arrow_markers}{supplemental_markers}"))
     });
 
     let mut clip_defs = Vec::new();
@@ -2345,8 +2431,31 @@ fn render_scene_group(
 
     let treemap_typography =
         ir.and_then(|ir| resolve_treemap_scene_typography(ir, group.id.as_deref()));
-    for child in &group.children {
+    let furniture_theme = matches!(
+        group.id.as_deref(),
+        Some("gantt-sections" | "sequence-lifelines")
+    )
+    .then(|| resolve_theme(ir, config));
+    for (index, child) in group.children.iter().enumerate() {
         let mut rendered = render_scene_item(child, config, ir, clip_defs, clip_id_counter);
+        if matches!(child, RenderItem::Path(_))
+            && let Some(theme) = &furniture_theme
+        {
+            rendered = if group.id.as_deref() == Some("gantt-sections") {
+                rendered
+                    .fill(section_panel_fill(&theme.colors, index))
+                    .fill_opacity(1.0)
+                    .stroke(&theme.colors.cluster_stroke)
+                    .stroke_width(0.75)
+            } else {
+                rendered.stroke(&theme.colors.node_stroke).stroke_width(1.0)
+            };
+        }
+        if group.id.as_deref() == Some("gantt-labels")
+            && matches!(child, RenderItem::Text(text) if text.source == RenderSource::Diagram)
+        {
+            rendered = rendered.attr("font-weight", "600");
+        }
         if matches!(child, RenderItem::Text(_))
             && let Some(typography) = &treemap_typography
         {
@@ -2423,6 +2532,39 @@ fn render_scene_item(
         }
         RenderItem::Path(path) => {
             let mut element = render_scene_path(path, config.include_source_spans, ir);
+            if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Sankey) {
+                let theme = resolve_theme(Some(ir), config);
+                match path.source {
+                    RenderSource::Node(index) => {
+                        if let Some(style) = semantic_node_colors(
+                            ir,
+                            index,
+                            ir.nodes
+                                .get(index)
+                                .map_or(NodeShape::Rect, |node| node.shape),
+                            config,
+                            &theme.colors,
+                        ) {
+                            element = element.fill(&style.fill).stroke(&style.stroke);
+                        }
+                    }
+                    RenderSource::Edge(index) if path.stroke.is_some() => {
+                        let color = sankey_edge_color(ir, index, &theme.colors);
+                        element = element.stroke(color.unwrap_or(&theme.colors.edge));
+                        if let Some(color) = color
+                            && path.marker_end == MarkerKind::Arrow
+                        {
+                            element = element.marker_end(
+                                SANKEY_MARKER_URLS[sankey_marker_index(color, &theme.colors)],
+                            );
+                        }
+                        if let Some(style) = resolve_edge_inline_style(ir, index) {
+                            element = element.attr("style", &style);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Pie) {
                 let theme = resolve_theme(Some(ir), config);
                 if path.fill.is_some()
@@ -2443,7 +2585,9 @@ fn render_scene_item(
         }
         RenderItem::Text(text) => {
             let element = render_scene_text(text, config, ir);
-            if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Pie) {
+            if let Some(ir) =
+                ir.filter(|ir| matches!(ir.diagram_type, DiagramType::Pie | DiagramType::Sankey))
+            {
                 element.fill(&resolve_theme(Some(ir), config).colors.text)
             } else {
                 element
@@ -4680,6 +4824,27 @@ fn svg_geometry(
         frame.offset_x -= left;
         frame.offset_y -= top;
     }
+    if ir.diagram_type == DiagramType::Gantt && !layout.extensions.axis_ticks.is_empty() {
+        let metrics = gantt_axis_font_metrics(config);
+        let rows = fm_layout::gantt_axis_label_rows(layout, &metrics);
+        let (mut left, mut top) = (0.0_f32, 0.0_f32);
+        let (mut right, mut bottom) = (frame.viewbox_width, frame.viewbox_height);
+        for axis in &layout.extensions.gantt_axis_rows {
+            for (tick, row) in layout.extensions.axis_ticks.iter().zip(&rows) {
+                let bounds = fm_layout::gantt_axis_label_bounds(tick, *axis, *row, &metrics);
+                let x = bounds.x + frame.offset_x;
+                let y = bounds.y + frame.offset_y;
+                left = left.min(x - padding);
+                top = top.min(y - padding - title_height);
+                right = right.max(x + bounds.width + padding);
+                bottom = bottom.max(y + bounds.height + padding);
+            }
+        }
+        frame.viewbox_width = right - left;
+        frame.viewbox_height = bottom - top;
+        frame.offset_x -= left;
+        frame.offset_y -= top;
+    }
     SvgGeometry {
         frame,
         detail,
@@ -4838,11 +5003,12 @@ fn render_layout_to_svg(
     // reason is now the second one alone, which was always the load-bearing half: these defs are
     // emitted only for the shapes the diagram references, so there is nothing for the mask's strip
     // pass to prune. Folding them in would buy no stripping and cost four more bits.
-    let er_markers = er_marker_defs_body(ir, edge_color);
-    defs = defs.raw_markers(if er_markers.is_empty() {
+    let mut supplemental_markers = er_marker_defs_body(ir, edge_color);
+    supplemental_markers.push_str(&sankey_marker_defs(ir, &theme.colors));
+    defs = defs.raw_markers(if supplemental_markers.is_empty() {
         arrow_markers
     } else {
-        Cow::Owned(format!("{arrow_markers}{er_markers}"))
+        Cow::Owned(format!("{arrow_markers}{supplemental_markers}"))
     });
 
     // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
@@ -5169,6 +5335,11 @@ fn render_layout_to_svg(
         );
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
+            if ir.diagram_type == DiagramType::Sequence && band.kind == LayoutBandKind::Lane {
+                render_sequence_lifeline(band, offset_x, offset_y, &theme.colors)
+                    .write_to_string(&mut bands_svg);
+                continue;
+            }
             // A timeline section already has its caption on the cluster frame. Keep its
             // background band, but do not overprint a second caption in the same header.
             let suppress_section_label = ir.diagram_type == fm_core::DiagramType::Timeline
@@ -5246,6 +5417,7 @@ fn render_layout_to_svg(
                 &mut ticks_svg,
                 label,
                 tick.position + offset_x,
+                tick_y,
                 tick_y,
                 config,
                 &theme.colors,
@@ -5662,7 +5834,7 @@ fn render_layout_to_svg(
             .rx(if is_c4_boundary {
                 0.0
             } else {
-                config.rounded_corners
+                config.rounded_corners * 1.5
             })
             .class("fm-cluster");
         // The author's own `classDef` names, as mermaid emits them on the cluster group (bd-6cdzy).
@@ -6777,6 +6949,43 @@ fn write_treemap_text_into(
     out.push_str("</text>");
 }
 
+fn render_sequence_lifeline(
+    band: &LayoutBand,
+    offset_x: f32,
+    offset_y: f32,
+    colors: &ThemeColors,
+) -> Element {
+    let x = band.bounds.center().x + offset_x;
+    Element::group().class("fm-band fm-band-lane").child(
+        Element::line()
+            .x1(x)
+            .y1(band.bounds.y + offset_y)
+            .x2(x)
+            .y2(band.bounds.y + band.bounds.height + offset_y)
+            .stroke(&colors.node_stroke)
+            .stroke_width(1.0)
+            .stroke_dasharray("6,4")
+            .class("fm-sequence-lifeline"),
+    )
+}
+
+fn layout_band_class(kind: LayoutBandKind) -> &'static str {
+    match kind {
+        LayoutBandKind::Section => "fm-band fm-band-section",
+        LayoutBandKind::Lane => "fm-band fm-band-lane",
+        LayoutBandKind::Column => "fm-band fm-band-column",
+    }
+}
+
+/// Alternate theme surfaces rather than cycling unrelated pastel colors behind a schedule.
+fn section_panel_fill(colors: &ThemeColors, index: usize) -> &str {
+    if index.is_multiple_of(2) {
+        &colors.cluster_fill
+    } else {
+        &colors.node_fill
+    }
+}
+
 fn write_layout_band_into(
     out: &mut String,
     band: &LayoutBand,
@@ -6791,21 +7000,8 @@ fn write_layout_band_into(
     } else {
         &colors.text
     };
-    let (fill, stroke, class_name) = match band.kind {
-        LayoutBandKind::Section => (
-            "rgba(191,219,254,0.18)",
-            "#bfd7ff",
-            "fm-band fm-band-section",
-        ),
-        LayoutBandKind::Lane => ("rgba(196,181,253,0.14)", "#c4b5fd", "fm-band fm-band-lane"),
-        LayoutBandKind::Column => (
-            "rgba(254,240,138,0.16)",
-            "#fde68a",
-            "fm-band fm-band-column",
-        ),
-    };
     out.push_str("<g class=\"");
-    out.push_str(class_name);
+    out.push_str(layout_band_class(band.kind));
     out.push_str("\"><rect x=\"");
     let _ = write_number_into(out, band.bounds.x + offset_x);
     out.push_str("\" y=\"");
@@ -6817,14 +7013,10 @@ fn write_layout_band_into(
     out.push_str("\" rx=\"");
     let _ = write_number_into(out, config.rounded_corners.max(4.0));
     out.push_str("\" fill=\"");
-    let _ = write_escaped_attr(out, fill);
+    let _ = write_escaped_attr(out, &colors.cluster_fill);
     out.push_str("\" stroke=\"");
-    let _ = write_escaped_attr(out, stroke);
-    out.push_str("\" stroke-width=\"1\" stroke-dasharray=\"6,4\" fill-opacity=\"");
-    let _ = write_number_into(out, 0.8);
-    out.push_str("\" stroke-opacity=\"");
-    let _ = write_number_into(out, 0.9);
-    out.push_str("\"/>");
+    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    out.push_str("\" stroke-width=\"1\"/>");
     if !band.label.is_empty() {
         // A journey/gantt/kanban diagram puts a LABEL on every lane/section/column band (289 per
         // 300-task journey render), so this is a per-item hot path, not the "rare" case it once was.
@@ -6845,6 +7037,7 @@ fn write_layout_band_into(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
+                .font_weight("600")
                 .fill(text_color)
                 .class("fm-band-label")
                 .build()
@@ -6865,7 +7058,7 @@ fn write_layout_band_into(
                 out,
                 clamp_font_size(config.font_size * 0.82, config.min_font_size),
             );
-            out.push_str("\" fill=\"");
+            out.push_str("\" font-weight=\"600\" fill=\"");
             let _ = write_escaped_attr(out, text_color);
             out.push_str("\" class=\"fm-band-label\">");
             let _ = write_escaped_text(out, &band.label);
@@ -6885,33 +7078,16 @@ fn render_layout_band(
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) -> Element {
-    let (fill, stroke, class_name) = match band.kind {
-        LayoutBandKind::Section => (
-            "rgba(191,219,254,0.18)",
-            "#bfd7ff",
-            "fm-band fm-band-section",
-        ),
-        LayoutBandKind::Lane => ("rgba(196,181,253,0.14)", "#c4b5fd", "fm-band fm-band-lane"),
-        LayoutBandKind::Column => (
-            "rgba(254,240,138,0.16)",
-            "#fde68a",
-            "fm-band fm-band-column",
-        ),
-    };
-
-    let mut group = Element::group().class(class_name);
+    let mut group = Element::group().class(layout_band_class(band.kind));
     let rect = Element::rect()
         .x(band.bounds.x + offset_x)
         .y(band.bounds.y + offset_y)
         .width(band.bounds.width)
         .height(band.bounds.height)
         .rx(config.rounded_corners.max(4.0))
-        .fill(fill)
-        .stroke(stroke)
-        .stroke_width(1.0)
-        .stroke_dasharray("6,4")
-        .fill_opacity(0.8)
-        .stroke_opacity(0.9);
+        .fill(&colors.cluster_fill)
+        .stroke(&colors.cluster_stroke)
+        .stroke_width(1.0);
     group = group.child(rect);
 
     if !band.label.is_empty() {
@@ -6924,6 +7100,7 @@ fn render_layout_band(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
+                .font_weight("600")
                 .fill(if config.embed_theme_css {
                     "var(--fm-text-color, #4a5568)"
                 } else {
@@ -6937,6 +7114,15 @@ fn render_layout_band(
     group
 }
 
+fn gantt_axis_font_metrics(config: &SvgRenderConfig) -> fm_core::FontMetrics {
+    let metrics = config.font_metrics();
+    let mut axis_config = metrics.config().clone();
+    // The shared layout helper scales the base face by 0.72. Respect an authored SVG minimum
+    // before measuring rows and the export frame, using the same face as the tick writer.
+    axis_config.font_size = config.font_size.max(config.min_font_size / 0.72);
+    fm_core::FontMetrics::new(axis_config)
+}
+
 /// Stream an axis tick (`<g class="fm-axis-tick"><line/><text>label</text></g>`) directly into `out`,
 /// byte-identical to [`render_layout_axis_tick`]'s `Element`. The `<line>` and `<text>` attrs replicate
 /// that builder's call order; float attrs go through `write_number_into`. The label `<text>` mirrors
@@ -6948,6 +7134,7 @@ fn write_layout_axis_tick_into(
     label: &str,
     x: f32,
     y: f32,
+    label_y: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) {
@@ -6975,7 +7162,7 @@ fn write_layout_axis_tick_into(
     out.push_str("\" stroke-width=\"1\"/><text x=\"");
     let _ = write_number_into(out, x + 3.0);
     out.push_str("\" y=\"");
-    let _ = write_number_into(out, y);
+    let _ = write_number_into(out, label_y);
     out.push_str("\" text-anchor=\"start\"");
     if !config.embed_theme_css {
         out.push_str(" font-family=\"");
@@ -7001,6 +7188,7 @@ fn render_layout_axis_tick(
     label: &str,
     x: f32,
     y: f32,
+    label_y: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) -> Element {
@@ -7021,7 +7209,7 @@ fn render_layout_axis_tick(
     group.child(
         TextBuilder::new(label)
             .x(x + 3.0)
-            .y(y)
+            .y(label_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.72,
@@ -7709,8 +7897,8 @@ fn render_gantt_svg(
     if let Some(title) = diagram_title(ir, None) {
         doc = doc.child(
             TextBuilder::new(title)
-                .x(layout.bounds.width / 2.0 + offset_x)
-                .y(offset_y + config.font_size + 4.0)
+                .x(layout.bounds.x + layout.bounds.width / 2.0 + offset_x)
+                .y(config.padding + config.font_size + 4.0)
                 .anchor(TextAnchor::Middle)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
@@ -7721,7 +7909,7 @@ fn render_gantt_svg(
         );
     }
 
-    // Section background bands (alternating fills).
+    // Section background bands alternate quiet surfaces from the active theme.
     //
     // This loop read `layout.clusters`, which is EMPTY on the gantt path — `build_cluster_boxes`
     // builds from `ir.clusters` and a gantt has none — so it ran zero times and no section band or
@@ -7731,17 +7919,16 @@ fn render_gantt_svg(
     // `band.label` rather than `gantt_meta.sections[idx]` also fixes a latent mispairing: the bands
     // are collected from a map keyed by section NAME, so their order is not the declaration order
     // the old index lookup assumed.
-    let section_fills = ["#f0f4ff", "#fff8f0", "#f0fff4", "#fff0f8"];
     for (band_idx, band) in layout.extensions.bands.iter().enumerate() {
-        let fill = section_fills[band_idx % section_fills.len()];
         doc = doc.child(
             Element::rect()
                 .x(band.bounds.x + offset_x)
                 .y(band.bounds.y + offset_y)
                 .width(band.bounds.width)
                 .height(band.bounds.height)
-                .fill(fill)
-                .attr("fill-opacity", "0.5")
+                .fill(section_panel_fill(&theme.colors, band_idx))
+                .stroke(&theme.colors.cluster_stroke)
+                .stroke_width(0.75)
                 .rx(4.0)
                 .class("fm-gantt-section-bg"),
         );
@@ -7776,6 +7963,8 @@ fn render_gantt_svg(
     // second one. Keeping the rows here rather than deriving `bounds.y +/- 12` lets SVG and canvas
     // consume the same geometry and prevents a renderer-only axis from being clipped by its bounds.
     if !layout.extensions.axis_ticks.is_empty() {
+        let metrics = gantt_axis_font_metrics(config);
+        let label_rows = fm_layout::gantt_axis_label_rows(layout, &metrics);
         for axis in &layout.extensions.gantt_axis_rows {
             let mut ticks_svg = String::new();
             let class = match axis.placement {
@@ -7785,12 +7974,13 @@ fn render_gantt_svg(
             ticks_svg.push_str("<g class=\"");
             ticks_svg.push_str(class);
             ticks_svg.push_str("\">");
-            for tick in &layout.extensions.axis_ticks {
+            for (tick, row) in layout.extensions.axis_ticks.iter().zip(&label_rows) {
                 write_layout_axis_tick_into(
                     &mut ticks_svg,
                     tick.label.as_str(),
                     tick.position + offset_x,
                     axis.y + offset_y,
+                    fm_layout::gantt_axis_label_baseline(*axis, *row, &metrics) + offset_y,
                     config,
                     &theme.colors,
                 );
@@ -10747,7 +10937,7 @@ fn render_node_into(
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
-    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
+    let semantic_colors = semantic_node_colors(ir, node_box.node_index, shape, config, colors);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
@@ -11347,7 +11537,7 @@ fn render_node(
             node_typography_config(ir, node_box.node_index, detail.node_font_size, config)
         });
     let config = styled_config.as_ref().unwrap_or(config);
-    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
+    let semantic_colors = semantic_node_colors(ir, node_box.node_index, shape, config, colors);
     let flowchart_colors = semantic_colors.as_ref().map(|style| {
         let mut palette = colors.clone();
         palette.node_fill = if config.embed_theme_css {
@@ -14811,8 +15001,9 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
 fn uses_smoothed_layout_edge_path(ir: &MermaidDiagramIr, edge_index: usize) -> bool {
     // The layout-driven SVG backend has always smoothed its connectors, including specialized
     // diagram dependencies. Preserve that default while honoring an explicitly linear/step edge.
-    fm_layout::edge_paths::edge_routing_hint(ir, edge_index)
-        != Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)
+    ir.diagram_type != DiagramType::Sankey
+        && fm_layout::edge_paths::edge_routing_hint(ir, edge_index)
+            != Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)
 }
 
 fn layout_edge_path(
@@ -14821,6 +15012,44 @@ fn layout_edge_path(
     offset_x: f32,
     offset_y: f32,
 ) -> String {
+    if ir.diagram_type == DiagramType::Sankey {
+        let mut commands = Vec::new();
+        let translate = |x: &mut f32, y: &mut f32| {
+            *x += offset_x;
+            *y += offset_y;
+        };
+        // Recognize canonical ribbon controls before translation can round their coordinates.
+        // Canvas, GPU and the shared scene also emit paths in the original layout space.
+        let _ = fm_layout::edge_paths::emit_diagram_edge_path(
+            ir,
+            edge_path.edge_index,
+            &edge_path.points,
+            |mut command| {
+                match &mut command {
+                    PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => translate(x, y),
+                    PathCmd::CubicTo {
+                        c1x,
+                        c1y,
+                        c2x,
+                        c2y,
+                        x,
+                        y,
+                    } => {
+                        translate(c1x, c1y);
+                        translate(c2x, c2y);
+                        translate(x, y);
+                    }
+                    PathCmd::QuadTo { cx, cy, x, y } => {
+                        translate(cx, cy);
+                        translate(x, y);
+                    }
+                    PathCmd::Close => {}
+                }
+                commands.push(command);
+            },
+        );
+        return path_cmds_to_d(&commands);
+    }
     if !uses_smoothed_layout_edge_path(ir, edge_path.edge_index) {
         let mut path = PathBuilder::new();
         for (index, point) in edge_path.points.iter().enumerate() {
@@ -15550,6 +15779,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         .map(|index| &sequence_messages[index]);
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
+    let sankey_color = sankey_edge_color(ir, edge_index, colors);
     // The second marker of a relation marked at BOTH ends (bd-f9t0r); `None` on every other edge.
     let co_arrow = ir_edge.and_then(fm_core::IrEdge::co_arrow);
     let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
@@ -15744,6 +15974,14 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     } else {
         edge_visuals(arrow)
     };
+    let base_color = sankey_color.unwrap_or(base_color);
+    let marker_end = if arrow == ArrowType::Arrow && !is_back_edge {
+        sankey_color.map_or(marker_end, |color| {
+            Some(SANKEY_MARKER_URLS[sankey_marker_index(color, colors)])
+        })
+    } else {
+        marker_end
+    };
 
     // BOTH ENDS MARKED (bd-f9t0r): the co-arrow contributes the TARGET-end marker, read from the
     // same `edge_visuals` mapping. `.or()` and not a plain assignment — a co-arrow fills the empty
@@ -15896,6 +16134,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     if let Some((label_text, lx, ly)) = &edge_label {
         let label_str = label_text.as_ref();
         if config.embed_theme_css
+            && sankey_color.is_none()
             && sequence_message.is_none()
             && config.a11y.aria_labels
             && config.a11y.keyboard_nav
@@ -15958,6 +16197,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // `raw_svg` element cannot take `.attr()`/`.id()`).
     let mut elem = if arrow == ArrowType::Arrow
         && !is_back_edge
+        && sankey_color.is_none()
         && config.embed_theme_css
         && !config.animations_enabled
         && animation_class.is_none()
@@ -15998,8 +16238,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             elem = elem.class(animation);
         }
 
-        // Apply inline style from linkStyle directives if present.
-        if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
+        // Source color is a semantic default; an authored link style remains the final layer.
+        let inline_style = match (sankey_color, resolve_edge_inline_style(ir, edge_index)) {
+            (Some(color), Some(author)) => Some(format!("stroke:{color};{author}")),
+            (Some(color), None) => Some(format!("stroke:{color}")),
+            (None, author) => author,
+        };
+        if let Some(inline_style) = inline_style {
             let merged_style = animation_style.as_ref().map_or_else(
                 || inline_style.clone(),
                 |extra| format!("{inline_style};{extra}"),
@@ -16357,6 +16602,12 @@ fn render_edge_body_into(
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
     // `~~~` placed the nodes during layout; drawing it would show the connection the author hid.
     if arrow == ArrowType::Invisible {
+        return;
+    }
+    // Sankey's category-colored ribbons and canonical curves are serialized together. Generic
+    // fast fragments carry neither the per-source paint nor its matching marker reference.
+    if ir.diagram_type == DiagramType::Sankey {
+        render_edge(edge_path, context).write_to_string(out);
         return;
     }
     let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
@@ -18763,7 +19014,7 @@ mod tests {
                     .write_to_string(&mut built);
                     assert_eq!(streamed, built, "{preset:?} {shape:?} fast={permit_fast}");
                 }
-                if let Some(role) = flowchart_shape_colors(&ir, shape, &config, &colors) {
+                if let Some(role) = semantic_node_colors(&ir, 0, shape, &config, &colors) {
                     assert!(streamed.contains("fm-node-semantic"));
                     assert!(streamed.contains(&format!("--fm-node-fill:{}", role.fill)));
                     assert!(streamed.contains(&format!("--fm-node-stroke:{}", role.stroke)));
@@ -18791,7 +19042,7 @@ mod tests {
                 NodeShape::DoubleCircle,
             ] {
                 let ir = create_ir_with_single_node("N0", shape);
-                let role = flowchart_shape_colors(&ir, shape, &config, &colors)
+                let role = semantic_node_colors(&ir, 0, shape, &config, &colors)
                     .expect("this shape has a semantic role");
                 let svg = render_svg_with_config(&ir, &config);
                 let node = svg
@@ -18862,7 +19113,7 @@ mod tests {
                 animations_enabled,
                 ..SvgRenderConfig::default()
             };
-            let role = flowchart_shape_colors(&ir, NodeShape::Diamond, &config, &colors)
+            let role = semantic_node_colors(&ir, 0, NodeShape::Diamond, &config, &colors)
                 .expect("decision role");
             let svg = render_svg_with_config(&ir, &config);
             let node = svg
@@ -19868,7 +20119,6 @@ mod tests {
             DiagramType::Class,
             DiagramType::Sequence,
             DiagramType::Gantt,
-            DiagramType::Sankey,
         ] {
             let (mut ir, mut edge) = single_edge_fixture(ArrowType::Arrow);
             ir.diagram_type = family;
@@ -19884,6 +20134,47 @@ mod tests {
                     "{family:?}/{point_count}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn svg_sankey_translation_preserves_ribbon_curves_and_obstacle_routes() {
+        let (mut ir, mut edge) = single_edge_fixture(ArrowType::Arrow);
+        ir.diagram_type = DiagramType::Sankey;
+        for (offset_x, offset_y) in [(0.0, 0.0), (24.0, 24.0), (0.1, -1.3)] {
+            // The 0.1px translation changes f32 rounding if controls are recognized after it.
+            edge.points = [(10.0, 20.0), (38.8, 20.0), (45.2, 100.0), (74.0, 100.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let expected_curve = PathBuilder::new()
+                .move_to(10.0 + offset_x, 20.0 + offset_y)
+                .curve_to(
+                    38.8 + offset_x,
+                    20.0 + offset_y,
+                    45.2 + offset_x,
+                    100.0 + offset_y,
+                    74.0 + offset_x,
+                    100.0 + offset_y,
+                )
+                .build();
+            assert_eq!(
+                layout_edge_path(&ir, &edge, offset_x, offset_y),
+                expected_curve
+            );
+
+            edge.points[1].x = 42.0;
+            edge.points[2].x = 42.0;
+            let expected_route = PathBuilder::new()
+                .move_to(10.0 + offset_x, 20.0 + offset_y)
+                .line_to(42.0 + offset_x, 20.0 + offset_y)
+                .line_to(42.0 + offset_x, 100.0 + offset_y)
+                .line_to(74.0 + offset_x, 100.0 + offset_y)
+                .build();
+            assert_eq!(
+                layout_edge_path(&ir, &edge, offset_x, offset_y),
+                expected_route
+            );
         }
     }
 
@@ -22834,6 +23125,147 @@ mod tests {
         }
     }
 
+    #[test]
+    fn layout_band_panels_follow_theme_and_keep_headings_distinct() {
+        let band = LayoutBand {
+            kind: LayoutBandKind::Column,
+            label: "Implementation".into(),
+            bounds: fm_layout::LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 180.0,
+                height: 140.0,
+            },
+        };
+        for theme in [ThemePreset::Default, ThemePreset::Dark, ThemePreset::Forest] {
+            let colors = ThemeColors::from_preset(theme);
+            for embed_theme_css in [true, false] {
+                let config = SvgRenderConfig {
+                    theme,
+                    embed_theme_css,
+                    ..SvgRenderConfig::default()
+                };
+                let mut svg = String::new();
+                write_layout_band_into(&mut svg, &band, 0.0, 0.0, &config, &colors);
+                assert!(svg.contains(&format!("fill=\"{}\"", colors.cluster_fill)));
+                assert!(svg.contains(&format!("stroke=\"{}\"", colors.cluster_stroke)));
+                assert!(!svg.contains("stroke-dasharray"));
+                assert!(svg.contains("font-weight=\"600\""));
+                assert!(svg.contains(">Implementation</text>"));
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_lifelines_are_single_themed_strokes_in_both_backends() {
+        let ir =
+            fm_parser::parse("sequenceDiagram\nAlice->>Bob: Request\nBob-->>Alice: Response").ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.bands.len(), 2);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                for embed_theme_css in [true, false] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        theme,
+                        embed_theme_css,
+                        ..SvgRenderConfig::default()
+                    };
+                    let colors = ThemeColors::from_preset(theme);
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    let groups: Vec<_> = if backend == SvgBackend::LegacyLayout {
+                        svg.split("<g class=\"fm-band fm-band-lane\">")
+                            .skip(1)
+                            .map(|tail| tail.split("</g>").next().unwrap())
+                            .collect()
+                    } else {
+                        vec![
+                            svg.split("id=\"sequence-lifelines\"")
+                                .nth(1)
+                                .unwrap()
+                                .split("</g>")
+                                .next()
+                                .unwrap(),
+                        ]
+                    };
+                    let lifelines = groups.join("");
+                    let primitive = if backend == SvgBackend::LegacyLayout {
+                        "<line "
+                    } else {
+                        "<path "
+                    };
+                    assert_eq!(lifelines.matches(primitive).count(), 2);
+                    assert!(!lifelines.contains("<rect"));
+                    assert_eq!(
+                        lifelines
+                            .matches(&format!("stroke=\"{}\"", colors.node_stroke))
+                            .count(),
+                        2
+                    );
+                    assert_eq!(lifelines.matches("stroke-width=\"1\"").count(), 2);
+                    assert_eq!(lifelines.matches("stroke-dasharray=").count(), 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gantt_panels_use_theme_surfaces_and_preserve_custom_colors() {
+        let source = "gantt\n  dateFormat YYYY-MM-DD\n  section Plan\n  Design :a, 2026-01-01, 3d\n  section Build\n  Implement :b, 2026-01-04, 4d\n";
+        let mut ir = fm_parser::parse(source).ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.bands.len(), 2);
+        for custom in [false, true] {
+            if custom {
+                ir.meta.theme_overrides.theme_variables.extend([
+                    ("clusterBkg".into(), "#203040".into()),
+                    ("clusterBorder".into(), "#718293".into()),
+                    ("primaryColor".into(), "#304050".into()),
+                ]);
+            }
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                    for embed_theme_css in [true, false] {
+                        let config = SvgRenderConfig {
+                            backend,
+                            theme,
+                            embed_theme_css,
+                            ..SvgRenderConfig::default()
+                        };
+                        let colors = resolve_theme(Some(&ir), &config).colors;
+                        let svg = render_svg_with_layout(&ir, &layout, &config);
+                        let panels: Vec<_> = if backend == SvgBackend::LegacyLayout {
+                            svg.split('<')
+                                .filter(|tag| tag.contains("class=\"fm-gantt-section-bg\""))
+                                .collect()
+                        } else {
+                            svg.split("id=\"gantt-sections\"")
+                                .nth(1)
+                                .unwrap()
+                                .split("</g>")
+                                .next()
+                                .unwrap()
+                                .split('<')
+                                .filter(|tag| tag.starts_with("path "))
+                                .collect()
+                        };
+                        assert_eq!(panels.len(), 2);
+                        for (index, panel) in panels.iter().enumerate() {
+                            assert!(panel.contains(&format!(
+                                "fill=\"{}\"",
+                                section_panel_fill(&colors, index)
+                            )));
+                            assert!(
+                                panel.contains(&format!("stroke=\"{}\"", colors.cluster_stroke))
+                            );
+                            assert!(!panel.contains("stroke-dasharray"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The streamed axis-tick fragment (`write_layout_axis_tick_into`) must be byte-identical to the
     /// `Element` slow path (`render_layout_axis_tick`) — including an XML-special label and both the
     /// embedded-CSS (no font-family) and attribute-driven (font-family present) configs.
@@ -22847,9 +23279,17 @@ mod tests {
             for label in ["2026-02-01", "a<b>&c"] {
                 let mut streamed = String::new();
                 let colors = resolve_theme(None, &config).colors;
-                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config, &colors);
+                write_layout_axis_tick_into(
+                    &mut streamed,
+                    label,
+                    42.5,
+                    17.0,
+                    17.0,
+                    &config,
+                    &colors,
+                );
                 let mut slow = String::new();
-                render_layout_axis_tick(label, 42.5, 17.0, &config, &colors)
+                render_layout_axis_tick(label, 42.5, 17.0, 17.0, &config, &colors)
                     .write_to_string(&mut slow);
                 assert_eq!(streamed, slow, "embed {embed} label {label:?}");
             }
@@ -24588,7 +25028,7 @@ marker#arrow-open path {
     /// row cannot be drawn across the chart it annotates.
     #[test]
     fn gantt_draws_a_time_axis_and_named_section_bands() {
-        let src = "gantt\n  title Roadmap\n  dateFormat YYYY-MM-DD\n  section Core\n  \
+        let src = "gantt\n  title Roadmap\n  dateFormat YYYY-MM-DD\n  tickInterval 1day\n  section Core\n  \
                    Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d";
         let parsed = fm_parser::parse(src);
         let layout = fm_layout::layout_diagram_gantt(&parsed.ir);
@@ -24730,6 +25170,172 @@ marker#arrow-open path {
             layout.extensions.axis_ticks.len() * 2,
             "both reference grid rows carry every date label"
         );
+    }
+
+    #[test]
+    fn gantt_dense_axes_keep_every_date_clear_and_inside_the_export() {
+        let ir = fm_parser::parse(
+            "%%{init: {'gantt': {'topAxis': true}} }%%\ngantt\n  title Product rollout\n  \
+             dateFormat YYYY-MM-DD\n  tickInterval 1day\n  section Delivery\n  \
+             Implementation :a, 2026-01-01, 14d\n",
+        )
+        .ir;
+        // Reuse the same layout at larger export fonts. Export geometry must include the final
+        // rendered labels even when a caller did not recompute the schedule's layout first.
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.axis_ticks.len(), 15);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        fn attr(element: &str, name: &str) -> f32 {
+            element
+                .split(&format!("{name}=\""))
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing {name} in {element}"))
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for font_size in [15.0, 27.0] {
+                let config = SvgRenderConfig {
+                    backend,
+                    font_size,
+                    ..SvgRenderConfig::default()
+                };
+                let metrics = config.font_metrics();
+                let svg = render_svg_with_layout(&ir, &layout, &config);
+                let viewbox: Vec<f32> = svg
+                    .split("viewBox=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|value| value.parse().unwrap())
+                    .collect();
+                let dates: Vec<_> = svg
+                    .split("<text ")
+                    .skip(1)
+                    .filter_map(|tail| {
+                        let (opening, text) = tail.split_once('>')?;
+                        let label = text.split('<').next()?;
+                        if !label.starts_with("2026-") {
+                            return None;
+                        }
+                        let size = attr(opening, "font-size");
+                        Some((
+                            label,
+                            fm_layout::LayoutRect {
+                                x: attr(opening, "x"),
+                                y: attr(opening, "y") - size,
+                                width: metrics.estimate_preserved_width(label, size, 0.0),
+                                height: size * 1.3,
+                            },
+                        ))
+                    })
+                    .collect();
+                assert_eq!(dates.len(), 30, "{backend:?} font={font_size}");
+                for endpoint in ["2026-01-01", "2026-01-15"] {
+                    assert_eq!(
+                        dates.iter().filter(|(label, _)| *label == endpoint).count(),
+                        2
+                    );
+                }
+                for (index, (label, bounds)) in dates.iter().enumerate() {
+                    assert!(
+                        bounds.x >= viewbox[0] - 0.02
+                            && bounds.y >= viewbox[1] - 0.02
+                            && bounds.x + bounds.width <= viewbox[0] + viewbox[2] + 0.02
+                            && bounds.y + bounds.height <= viewbox[1] + viewbox[3] + 0.02,
+                        "{backend:?} font={font_size}: {label} is outside the export"
+                    );
+                    for (other_label, other) in &dates[index + 1..] {
+                        assert!(
+                            bounds.x + bounds.width <= other.x + 0.02
+                                || other.x + other.width <= bounds.x + 0.02
+                                || bounds.y + bounds.height <= other.y + 0.02
+                                || other.y + other.height <= bounds.y + 0.02,
+                            "{backend:?} font={font_size}: {label} overlaps {other_label}"
+                        );
+                    }
+                }
+                let title = svg
+                    .split("<text ")
+                    .find(|tail| {
+                        tail.split_once('>')
+                            .is_some_and(|(_, text)| text.starts_with("Product rollout<"))
+                    })
+                    .unwrap()
+                    .split('>')
+                    .next()
+                    .unwrap();
+                let title_bottom = attr(title, "y") + attr(title, "font-size") * 0.3;
+                let axis_top = dates
+                    .iter()
+                    .map(|(_, bounds)| bounds.y)
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    title_bottom < axis_top,
+                    "title overlaps top dates: {backend:?}"
+                );
+                if backend == SvgBackend::LegacyLayout {
+                    let frame = svg_frame(&ir, &layout, &config);
+                    for (index, group) in
+                        svg.split("<g class=\"fm-axis-tick\">").skip(1).enumerate()
+                    {
+                        let line = group.split('>').next().unwrap();
+                        let axis = layout.extensions.gantt_axis_rows[index / 15];
+                        assert!((attr(line, "y1") - axis.y - frame.offset_y - 4.0).abs() < 0.02);
+                        assert!((attr(line, "y2") - axis.y - frame.offset_y - 16.0).abs() < 0.02);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gantt_default_axis_is_readable_and_authored_minimum_fonts_fit() {
+        let ir = fm_parser::parse(
+            "gantt\n  dateFormat YYYY-MM-DD\n  Implementation :a, 2026-01-01, 14d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert!(layout.extensions.axis_ticks.len() < 15);
+        assert_eq!(
+            layout.extensions.axis_ticks.first().unwrap().label,
+            "2026-01-01"
+        );
+        assert_eq!(
+            layout.extensions.axis_ticks.last().unwrap().label,
+            "2026-01-15"
+        );
+        let config = SvgRenderConfig {
+            min_font_size: 24.0,
+            ..SvgRenderConfig::default()
+        };
+        let metrics = gantt_axis_font_metrics(&config);
+        let rows = fm_layout::gantt_axis_label_rows(&layout, &metrics);
+        let frame = svg_frame(&ir, &layout, &config);
+        assert!(rows.iter().any(|&row| row > 0));
+        for axis in &layout.extensions.gantt_axis_rows {
+            for (tick, row) in layout.extensions.axis_ticks.iter().zip(rows.iter()) {
+                let bounds = fm_layout::gantt_axis_label_bounds(tick, *axis, *row, &metrics);
+                assert!(bounds.x + frame.offset_x >= config.padding - 0.02);
+                assert!(bounds.y + frame.offset_y >= config.padding - 0.02);
+                assert!(
+                    bounds.x + bounds.width + frame.offset_x + config.padding
+                        <= frame.viewbox_width + 0.02
+                );
+                assert!(
+                    bounds.y + bounds.height + frame.offset_y + config.padding
+                        <= frame.viewbox_height + 0.02
+                );
+            }
+        }
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        assert!(svg.contains("font-size=\"24\""));
     }
 
     /// Control for the bd-trsd fix. A timeline is the diagram type that reaches BOTH generic loops
@@ -26855,7 +27461,9 @@ marker#arrow-open path {
             svg.split("<marker")
                 .filter_map(|fragment| fragment.split_once('>'))
                 .map(|(tag, _)| tag)
-                .find(|tag| tag.contains("id=\"arrow-end\""))
+                .find(|tag| {
+                    tag.contains("id=\"arrow-end\"") || tag.contains("id=\"fm-sankey-arrow-")
+                })
                 .expect("a real Sankey ribbon must retain its direction marker")
         }
         let ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,50\nA,D,10").ir;
@@ -26867,14 +27475,17 @@ marker#arrow-open path {
                 ..SvgRenderConfig::default()
             };
             let svg = render_svg_with_layout(&ir, &layout, &config);
-            let widths = path_stroke_widths(&svg);
-            for width in ["24", "12", "2.40"] {
-                assert!(widths.iter().any(|actual| actual == width));
-            }
             for output in [
                 svg,
                 render_scene_document_with_ir(&scene, &config, Some(&ir)),
             ] {
+                let widths = path_stroke_widths(&output);
+                for width in ["24", "12", "2.40"] {
+                    assert!(
+                        widths.iter().any(|actual| actual == width),
+                        "both SVG backends must preserve quantity widths: {widths:?}"
+                    );
+                }
                 let marker = end_marker(&output);
                 assert!(marker.contains("markerUnits=\"userSpaceOnUse\""));
                 assert!(marker.contains("viewBox=\"0 0 8 7\""));
@@ -26900,6 +27511,120 @@ marker#arrow-open path {
         assert!(marker.contains("markerUnits=\"strokeWidth\""));
         assert!(marker.contains("markerWidth=\"8\""));
         assert!(marker.contains("markerHeight=\"7\""));
+    }
+
+    #[test]
+    fn sankey_sources_keep_matching_node_ribbon_and_arrow_hues_across_backends() {
+        let ir = fm_parser::parse("sankey-beta\nA,M,100\nA,N,50\nB,M,25\nM,Z,125\nN,Z,50").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                for embed_theme_css in [true, false] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        theme,
+                        embed_theme_css,
+                        ..SvgRenderConfig::default()
+                    };
+                    let colors = ThemeColors::from_preset(theme);
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+                    let mut observed = Vec::new();
+                    for edge_index in 0..3 {
+                        let id = if backend == SvgBackend::LegacyLayout {
+                            format!("data-fm-edge-id=\"{edge_index}\"")
+                        } else {
+                            format!("data-fm-source-index=\"{edge_index}\"")
+                        };
+                        let path = svg
+                            .split("<path ")
+                            .filter_map(|tail| tail.split_once('>').map(|(tag, _)| tag))
+                            .find(|tag| {
+                                tag.contains(&id)
+                                    && (backend == SvgBackend::LegacyLayout
+                                        || tag.contains("data-fm-source-kind=\"edge\""))
+                            })
+                            .expect("each quantity ribbon must still be drawn");
+                        let source = ir.edges[edge_index]
+                            .from
+                            .resolved_node_id(&ir.ports)
+                            .unwrap()
+                            .0;
+                        let color = &colors.accents[source % colors.accents.len()];
+                        assert!(
+                            path.contains(&format!("stroke:{color}"))
+                                || path.contains(&format!("stroke=\"{color}\"")),
+                            "ribbon {edge_index} lost source color: {path}"
+                        );
+                        let marker = path
+                            .split("marker-end=\"url(#")
+                            .nth(1)
+                            .unwrap()
+                            .split(')')
+                            .next()
+                            .unwrap();
+                        let definition = svg
+                            .split("<marker ")
+                            .find(|tag| tag.starts_with(&format!("id=\"{marker}\"")))
+                            .unwrap()
+                            .split("</marker>")
+                            .next()
+                            .unwrap();
+                        assert!(definition.contains(&format!("fill=\"{color}\"")));
+                        observed.push(color.clone());
+                    }
+                    assert_eq!(observed[0], observed[1], "one source must keep one hue");
+                    assert_ne!(
+                        observed[0], observed[2],
+                        "distinct sources must be traceable"
+                    );
+                    let style = fm_core::sankey_node_style(
+                        &ir,
+                        0,
+                        &colors.node_fill,
+                        &colors.node_stroke,
+                        &colors.text,
+                        &colors.accents,
+                    )
+                    .unwrap();
+                    assert!(svg.contains(&style.fill));
+                    assert!(svg.contains(&style.stroke));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_palette_preserves_authored_node_and_edge_paints() {
+        let mut ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,50").ir;
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:#fafafa,stroke:#112233,color:#445566",
+        )));
+        ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string("stroke:#9b1c20")));
+        ir.meta.theme_overrides.theme_variables.extend([
+            ("lineColor".into(), "#246789".into()),
+            ("primaryColor".into(), "#f0f3fa".into()),
+            ("primaryBorderColor".into(), "#123789".into()),
+        ]);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [true, false] {
+                let config = SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    ..SvgRenderConfig::default()
+                };
+                let svg = render_svg_with_config(&ir, &config);
+                for authored in [
+                    "#fafafa", "#112233", "#445566", "#9b1c20", "#246789", "#f0f3fa", "#123789",
+                ] {
+                    assert!(
+                        svg.contains(authored),
+                        "{backend:?} lost authored paint {authored}"
+                    );
+                }
+                assert!(!svg.contains("fm-sankey-arrow-"));
+            }
+        }
     }
 
     /// Ribbon widths are proportional to flow value, and stay so after hoisting the normaliser.

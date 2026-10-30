@@ -153,9 +153,9 @@ pub const AXIS_TICK_STROKE_WIDTH: f32 = 1.0;
 /// Axis labels use 72% of the default text size, matching `draw_axis_ticks`.
 pub const AXIS_TICK_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.72;
 
-/// Gantt section bands use the Canvas2D pass's translucent slate fill and no border.
-pub const BAND_SECTION_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.3];
-pub const BAND_SECTION_STROKE_RGBA: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// Panel fallbacks use the same quiet surfaces as the Canvas2D theme.
+pub const BAND_SECTION_FILL_RGBA: [f32; 4] = DEFAULT_CLUSTER_FILL_RGBA;
+pub const BAND_SECTION_STROKE_RGBA: [f32; 4] = DEFAULT_CLUSTER_STROKE_RGBA;
 pub const BAND_STROKE_WIDTH: f32 = 1.0;
 pub const BAND_LANE_DASH: [f32; 2] = [6.0, 4.0];
 pub const BAND_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
@@ -1382,13 +1382,11 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
-    /// Layout bands emitted by journey, gantt, kanban, gitgraph, and sequence layouts.
-    ///
-    /// The raster source has three primitive kinds, retained in separate buffers so the future
-    /// encoder can submit the rect, lane, and separator pipelines without pretending they are IR
-    /// edges or nodes. They all precede axis ticks, matching `draw_bands`.
+    /// Sequence lifelines. Other lane kinds use the panel buffer below.
     pub band_lane_segments: Vec<GpuEdgeSegment>,
+    /// Solid section, lane and column panels. `node_index` refers to the layout band.
     pub band_section_instances: Vec<GpuNodeInstance>,
+    /// Reserved separator buffer for callers constructing plans directly.
     pub band_column_segments: Vec<GpuEdgeSegment>,
     /// Colored treemap tiles in parent-before-child order, followed by overflow-detail swatches.
     /// `node_index` refers to the treemap metadata arena for both kinds of rectangle.
@@ -1540,6 +1538,14 @@ impl GpuRenderPlan {
         layout: &DiagramLayout,
         config: &crate::CanvasRenderConfig,
     ) -> Self {
+        let effective_config = if ir.meta.theme_overrides.theme_variables.is_empty() {
+            Cow::Borrowed(config)
+        } else {
+            let mut effective = config.clone();
+            effective.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
+            Cow::Owned(effective)
+        };
+        let config = effective_config.as_ref();
         let metrics = config.font_metrics();
         let font_px = metrics.font_size();
         let font_scale = font_px / DEFAULT_FONT_SIZE_PX;
@@ -1563,7 +1569,12 @@ impl GpuRenderPlan {
         };
         // Clusters first, so the buffer order is the draw order.
         let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
-        for cluster in &layout.clusters {
+        let mut clusters: Vec<_> = layout.clusters.iter().collect();
+        clusters.sort_by(|left, right| {
+            (right.bounds.width * right.bounds.height)
+                .total_cmp(&(left.bounds.width * left.bounds.height))
+        });
+        for cluster in clusters {
             let (declared_fill, declared_stroke) =
                 crate::renderer::resolve_cluster_colors(ir, cluster.cluster_index);
             let opacity = crate::renderer::resolve_cluster_opacity(ir, cluster.cluster_index)
@@ -1572,10 +1583,12 @@ impl GpuRenderPlan {
             let fill = declared_fill
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.cluster_fill))
                 .unwrap_or(DEFAULT_CLUSTER_FILL_RGBA);
             let stroke = declared_stroke
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.cluster_stroke))
                 .unwrap_or(DEFAULT_CLUSTER_STROKE_RGBA);
             let stroke_width =
                 crate::renderer::resolve_cluster_stroke_width(ir, cluster.cluster_index)
@@ -1710,53 +1723,48 @@ impl GpuRenderPlan {
 
         let mut band_lane_segments = Vec::new();
         let mut band_section_instances = Vec::new();
-        let mut band_column_segments = Vec::new();
+        let band_column_segments = Vec::new();
+        let gantt_bands = ir.diagram_type == fm_core::DiagramType::Gantt;
         for (band_index, band) in layout.extensions.bands.iter().enumerate() {
-            match band.kind {
-                fm_layout::LayoutBandKind::Lane => {
-                    let center_x = band.bounds.x + (band.bounds.width * 0.5);
-                    band_lane_segments.push(GpuEdgeSegment {
-                        from: [center_x, band.bounds.y],
-                        to: [center_x, band.bounds.y + band.bounds.height],
-                        edge_index: NO_EDGE_INDEX,
-                        color: DEFAULT_NODE_STROKE_RGBA,
-                        dash_phase: 0.0,
-                        dash: BAND_LANE_DASH,
-                        width: BAND_STROKE_WIDTH,
-                    });
-                }
-                fm_layout::LayoutBandKind::Section => {
-                    band_section_instances.push(GpuNodeInstance {
-                        center: [
-                            band.bounds.x + (band.bounds.width * 0.5),
-                            band.bounds.y + (band.bounds.height * 0.5),
-                        ],
-                        half_extent: [band.bounds.width * 0.5, band.bounds.height * 0.5],
-                        fill: BAND_SECTION_FILL_RGBA,
-                        stroke: BAND_SECTION_STROKE_RGBA,
-                        stroke_width: BAND_STROKE_WIDTH,
-                        shape: GpuNodeShape::Rect as u32,
-                        node_index: u32::try_from(band_index).unwrap_or(u32::MAX),
-                    });
-                }
-                fm_layout::LayoutBandKind::Column => {
-                    let right = band.bounds.x + band.bounds.width;
-                    band_column_segments.push(GpuEdgeSegment {
-                        from: [right, band.bounds.y],
-                        to: [right, band.bounds.y + band.bounds.height],
-                        edge_index: NO_EDGE_INDEX,
-                        color: [
-                            DEFAULT_NODE_STROKE_RGBA[0],
-                            DEFAULT_NODE_STROKE_RGBA[1],
-                            DEFAULT_NODE_STROKE_RGBA[2],
-                            0.4,
-                        ],
-                        dash_phase: 0.0,
-                        dash: [0.0, 0.0],
-                        width: BAND_STROKE_WIDTH,
-                    });
-                }
+            if crate::renderer::band_has_cluster_background(ir.diagram_type, layout, band) {
+                continue;
             }
+            if ir.diagram_type == fm_core::DiagramType::Sequence
+                && band.kind == fm_layout::LayoutBandKind::Lane
+            {
+                let center_x = band.bounds.x + (band.bounds.width * 0.5);
+                band_lane_segments.push(GpuEdgeSegment {
+                    from: [center_x, band.bounds.y],
+                    to: [center_x, band.bounds.y + band.bounds.height],
+                    edge_index: NO_EDGE_INDEX,
+                    color: parse_paint_rgba(&config.node_stroke)
+                        .unwrap_or(DEFAULT_NODE_STROKE_RGBA),
+                    dash_phase: 0.0,
+                    dash: BAND_LANE_DASH,
+                    width: BAND_STROKE_WIDTH,
+                });
+                continue;
+            }
+            let fill = if gantt_bands && !band_index.is_multiple_of(2) {
+                &config.node_fill
+            } else {
+                &config.cluster_fill
+            };
+            // This existing node buffer carries every panel kind; only true lifelines use
+            // the edge buffer. Keeping panels together preserves background submission order.
+            band_section_instances.push(GpuNodeInstance {
+                center: [
+                    band.bounds.x + (band.bounds.width * 0.5),
+                    band.bounds.y + (band.bounds.height * 0.5),
+                ],
+                half_extent: [band.bounds.width * 0.5, band.bounds.height * 0.5],
+                fill: parse_paint_rgba(fill).unwrap_or(BAND_SECTION_FILL_RGBA),
+                stroke: parse_paint_rgba(&config.cluster_stroke)
+                    .unwrap_or(BAND_SECTION_STROKE_RGBA),
+                stroke_width: if gantt_bands { 0.75 } else { BAND_STROKE_WIDTH },
+                shape: GpuNodeShape::RoundedRect as u32,
+                node_index: u32::try_from(band_index).unwrap_or(u32::MAX),
+            });
         }
 
         // AXIS TICKS (bd-adabx). The same extension drives the gantt date row and xychart
@@ -1773,6 +1781,8 @@ impl GpuRenderPlan {
                 .collect()
         };
         let mut axis_tick_segments = Vec::new();
+        let axis_label_rows = fm_layout::gantt_axis_label_rows(layout, &metrics);
+        let axis_stroke = parse_paint_rgba(&config.edge_stroke).unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
         for &axis_y in &axis_rows {
             for tick in &layout.extensions.axis_ticks {
                 if tick.label.is_empty() {
@@ -1782,7 +1792,7 @@ impl GpuRenderPlan {
                     from: [tick.position, axis_y + 4.0],
                     to: [tick.position, axis_y + 16.0],
                     edge_index: NO_EDGE_INDEX,
-                    color: DEFAULT_EDGE_STROKE_RGBA,
+                    color: axis_stroke,
                     dash_phase: 0.0,
                     dash: [0.0, 0.0],
                     width: AXIS_TICK_STROKE_WIDTH,
@@ -2059,6 +2069,7 @@ impl GpuRenderPlan {
             fm_core::DiagramType::Flowchart
                 | fm_core::DiagramType::Mindmap
                 | fm_core::DiagramType::Journey
+                | fm_core::DiagramType::Sankey
         )
         .then_some(config);
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
@@ -2190,10 +2201,11 @@ impl GpuRenderPlan {
             // Canvas2D render cannot disagree about what the author declared. A declared width
             // overrides the arrow-derived one exactly as it does in `draw_edges`.
             let (declared_stroke, declared_width) =
-                crate::renderer::resolve_edge_style(ir, edge.edge_index);
+                crate::renderer::resolve_edge_style_with_defaults(ir, edge.edge_index, config);
             let color = declared_stroke
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.edge_stroke))
                 .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
             let width = declared_width.map_or(width, |declared| declared as f32);
 
@@ -2958,6 +2970,7 @@ impl GpuRenderPlan {
             )
             .as_deref()
             .and_then(parse_paint_rgba)
+            .or_else(|| parse_paint_rgba(&config.label_color))
             .unwrap_or(DEFAULT_LABEL_RGBA);
             let node_metrics = node_metrics.as_ref();
             let mut node_sink = TextSink {
@@ -3086,6 +3099,7 @@ impl GpuRenderPlan {
             let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
             sink.push_left_multiline(
                 title,
@@ -3122,6 +3136,7 @@ impl GpuRenderPlan {
             let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
             if let Some(message) = layout.extensions.sequence_message(edge.edge_index) {
@@ -3294,45 +3309,66 @@ impl GpuRenderPlan {
         }
 
         // AXIS LABELS (bd-adabx). `draw_axis_ticks` places each label three units to the right of
-        // its own tick at the axis baseline. Axis ticks are not nodes, so their extension index is
+        // its own tick, with shared collision-free rows for Gantt dates. Axis ticks are not nodes,
+        // so their extension index is
         // preserved in the run discriminator rather than borrowing an unrelated node index.
-        for &axis_y in &axis_rows {
-            let axis_font_px = AXIS_TICK_FONT_SIZE_PX * font_scale;
-            let center_y = axis_y - (GLYPH_BASELINE_RATIO - 0.5) * axis_font_px;
+        for (axis_index, &axis_y) in axis_rows.iter().enumerate() {
+            let axis_font_px = (AXIS_TICK_FONT_SIZE_PX * font_scale).max(8.0);
             for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
                 if tick.label.is_empty() {
                     continue;
                 }
+                let baseline =
+                    layout
+                        .extensions
+                        .gantt_axis_rows
+                        .get(axis_index)
+                        .map_or(axis_y, |axis| {
+                            fm_layout::gantt_axis_label_baseline(
+                                *axis,
+                                axis_label_rows[index],
+                                &metrics,
+                            )
+                        });
+                let center_y = baseline - (GLYPH_BASELINE_RATIO - 0.5) * axis_font_px;
                 sink.push_left(
                     tick.label.as_str(),
                     (tick.position + 3.0, center_y),
                     axis_font_px,
-                    DEFAULT_LABEL_RGBA,
+                    parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA),
                     GpuTextSource::AxisTick,
                     index,
                 );
             }
         }
 
-        // BAND LABELS (bd-adabx). This follows the raster branch exactly: sections and named
-        // non-sequence lanes label themselves; timeline sections are named by their cluster
-        // titles, while columns and sequence lifelines do not carry captions.
+        // BAND LABELS. Repeat the raster's caption policy and alphabetic baseline, keeping
+        // journey/timeline section names and sequence participant names on their own headers.
         for (index, band) in layout.extensions.bands.iter().enumerate() {
-            let draw_label = (matches!(band.kind, fm_layout::LayoutBandKind::Section)
-                && ir.diagram_type != fm_core::DiagramType::Timeline)
-                || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
-                    && !matches!(
+            let draw_label = !((band.kind == fm_layout::LayoutBandKind::Section
+                && ir.diagram_type == fm_core::DiagramType::Timeline)
+                || (band.kind == fm_layout::LayoutBandKind::Lane
+                    && matches!(
                         ir.diagram_type,
                         fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey
-                    ));
+                    )));
             if !draw_label || band.label.is_empty() {
                 continue;
             }
+            let label_font_px = if gantt_bands {
+                BAND_LABEL_FONT_SIZE_PX * font_scale
+            } else {
+                (font_px * 0.82).max(8.0)
+            };
+            let baseline = band.bounds.y + if gantt_bands { font_px * 0.9 } else { 16.0 };
             sink.push_left(
                 band.label.as_str(),
-                (band.bounds.x + 4.0, band.bounds.y + 2.0),
-                BAND_LABEL_FONT_SIZE_PX * font_scale,
-                DEFAULT_LABEL_RGBA,
+                (
+                    band.bounds.x + if gantt_bands { 6.0 } else { 8.0 },
+                    baseline - (GLYPH_BASELINE_RATIO - 0.5) * label_font_px,
+                ),
+                label_font_px,
+                parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA),
                 GpuTextSource::Band,
                 index,
             );
@@ -3551,6 +3587,31 @@ impl GpuRenderPlan {
             fm_core::DiagramType::XyChart | fm_core::DiagramType::QuadrantChart
         ) {
             plan.arrowheads = scene_marker_instances(&scene.root);
+            if ir.diagram_type == fm_core::DiagramType::Sankey {
+                // The shared scene supplies endpoint geometry; source-category paint belongs
+                // to the resolved renderer palette, just as it does on the ribbon itself.
+                let mut edge_colors = vec![None; ir.edges.len()];
+                for segment in &plan.edge_segments {
+                    if let Some(color) = edge_colors.get_mut(segment.edge_index as usize) {
+                        *color = Some(segment.color);
+                    }
+                }
+                for marker in &mut plan.arrowheads {
+                    if let Some(color) = edge_colors
+                        .get(marker.edge_index as usize)
+                        .copied()
+                        .flatten()
+                    {
+                        marker.color = color;
+                        if marker.kind != GpuMarkerKind::Circle as u32
+                            && marker.kind != GpuMarkerKind::DiamondOpen as u32
+                            && marker.kind != GpuMarkerKind::TriangleOpen as u32
+                        {
+                            marker.fill = color;
+                        }
+                    }
+                }
+            }
         }
         plan
     }
@@ -7502,6 +7563,8 @@ mod tests {
         assert_eq!(plan.axis_tick_segments.len(), ticks.len());
         assert_eq!(layout.extensions.gantt_axis_rows.len(), 1);
         let expected_y = layout.extensions.gantt_axis_rows[0].y;
+        let metrics = crate::CanvasRenderConfig::default().font_metrics();
+        let label_rows = fm_layout::gantt_axis_label_rows(&layout, &metrics);
         for ((tick_index, tick), segment) in ticks.iter().zip(&plan.axis_tick_segments) {
             assert_eq!(segment.from, [tick.position, expected_y + 4.0]);
             assert_eq!(segment.to, [tick.position, expected_y + 16.0]);
@@ -7536,7 +7599,12 @@ mod tests {
             );
             let baseline = first_quad.center[1]
                 + (super::GLYPH_BASELINE_RATIO - 0.5) * super::AXIS_TICK_FONT_SIZE_PX;
-            assert!((baseline - expected_y).abs() < 0.01);
+            let label_y = fm_layout::gantt_axis_label_baseline(
+                layout.extensions.gantt_axis_rows[0],
+                label_rows[*tick_index],
+                &metrics,
+            );
+            assert!((baseline - label_y).abs() < 0.01);
         }
     }
 
@@ -7570,10 +7638,9 @@ mod tests {
             &layout,
             &crate::CanvasRenderConfig::default(),
         );
-        assert_eq!(
-            plan.band_section_instances.len(),
-            3,
-            "keep the section backgrounds"
+        assert!(
+            plan.band_section_instances.is_empty(),
+            "the section clusters already supply these exact backgrounds"
         );
         assert!(
             !plan
@@ -7637,18 +7704,6 @@ mod tests {
                             if text == "Discovery" || text == "Delivery")
                     })
                     .expect("timeline section caption");
-                let tints: Vec<_> = operations
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, operation)| {
-                        matches!(operation, crate::DrawOperation::FillRect(..)).then_some(index)
-                    })
-                    .collect();
-                assert_eq!(tints.len(), layout.extensions.bands.len());
-                assert!(
-                    tints.iter().all(|&index| index < first_caption),
-                    "all section tints must precede the visible captions"
-                );
                 let last_cluster_fill = operations
                     .iter()
                     .enumerate()
@@ -7658,8 +7713,8 @@ mod tests {
                     .nth(layout.clusters.len() - 1)
                     .expect("cluster backgrounds");
                 assert!(
-                    last_cluster_fill < tints[0],
-                    "cluster backgrounds must precede band tints, matching GPU submission"
+                    last_cluster_fill < first_caption,
+                    "section backgrounds must precede their visible captions"
                 );
             }
         }
@@ -7741,7 +7796,9 @@ mod tests {
 
             let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
             match kind {
-                fm_layout::LayoutBandKind::Lane => {
+                fm_layout::LayoutBandKind::Lane
+                    if ir.diagram_type == fm_core::DiagramType::Sequence =>
+                {
                     assert_eq!(plan.band_lane_segments.len(), bands.len());
                     for ((_, band), segment) in bands.iter().zip(&plan.band_lane_segments) {
                         let center_x = band.bounds.x + (band.bounds.width * 0.5);
@@ -7750,7 +7807,7 @@ mod tests {
                         assert_eq!(segment.dash, super::BAND_LANE_DASH);
                     }
                 }
-                fm_layout::LayoutBandKind::Section => {
+                _ => {
                     assert_eq!(plan.band_section_instances.len(), bands.len());
                     for ((band_index, band), instance) in
                         bands.iter().zip(&plan.band_section_instances)
@@ -7766,18 +7823,19 @@ mod tests {
                             instance.node_index,
                             u32::try_from(*band_index).unwrap_or(u32::MAX)
                         );
-                        assert_eq!(instance.fill, super::BAND_SECTION_FILL_RGBA);
+                        let expected_fill = if ir.diagram_type == fm_core::DiagramType::Gantt
+                            && !band_index.is_multiple_of(2)
+                        {
+                            super::DEFAULT_NODE_FILL_RGBA
+                        } else {
+                            super::BAND_SECTION_FILL_RGBA
+                        };
+                        assert_eq!(instance.fill, expected_fill);
                         assert_eq!(instance.stroke, super::BAND_SECTION_STROKE_RGBA);
+                        assert_eq!(instance.shape, super::GpuNodeShape::RoundedRect as u32);
                     }
-                }
-                fm_layout::LayoutBandKind::Column => {
-                    assert_eq!(plan.band_column_segments.len(), bands.len());
-                    for ((_, band), segment) in bands.iter().zip(&plan.band_column_segments) {
-                        let right = band.bounds.x + band.bounds.width;
-                        assert_eq!(segment.from, [right, band.bounds.y]);
-                        assert_eq!(segment.to, [right, band.bounds.y + band.bounds.height]);
-                        assert_eq!(segment.color[3], 0.4);
-                    }
+                    assert!(plan.band_lane_segments.is_empty());
+                    assert!(plan.band_column_segments.is_empty());
                 }
             }
 

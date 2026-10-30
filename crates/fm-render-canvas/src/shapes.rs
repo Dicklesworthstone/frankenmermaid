@@ -19,6 +19,7 @@ pub fn draw_shape<C: Canvas2dContext>(
     fill: &str,
     stroke: &str,
     stroke_width: f64,
+    rounded_corners: f64,
 ) {
     ctx.set_fill_style(fill);
     ctx.set_stroke_style(stroke);
@@ -62,8 +63,8 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::TaggedDocument => draw_tagged_document(ctx, x, y, width, height),
         NodeShape::BowTieRect => draw_bow_tie_rect(ctx, x, y, width, height),
         NodeShape::Hourglass => draw_hourglass(ctx, x, y, width, height),
-        NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
-        NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
+        NodeShape::Rect => draw_rect(ctx, x, y, width, height, rounded_corners * 0.55),
+        NodeShape::Rounded => draw_rect(ctx, x, y, width, height, rounded_corners),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
         NodeShape::Diamond => draw_diamond(ctx, x, y, width, height),
         NodeShape::Hexagon => draw_hexagon(ctx, x, y, width, height),
@@ -126,8 +127,31 @@ fn draw_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64, ra
 
 /// Draw a rounded rectangle.
 fn draw_rounded_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0);
+    trace_rounded_rect(ctx, x, y, w, h, r);
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Build the same bounded rounded outline for nodes, containers and label plates.
+/// Painting is left to the caller so a label can mask a connector without gaining a border.
+pub(crate) fn trace_rounded_rect<C: Canvas2dContext>(
+    ctx: &mut C,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    radius: f64,
+) {
+    let r = if radius.is_finite() {
+        radius.max(0.0).min(w.max(0.0) / 2.0).min(h.max(0.0) / 2.0)
+    } else {
+        0.0
+    };
     ctx.begin_path();
+    if r == 0.0 {
+        ctx.rect(x, y, w, h);
+        return;
+    }
     ctx.move_to(x + r, y);
     ctx.line_to(x + w - r, y);
     ctx.arc_to(x + w, y, x + w, y + r, r);
@@ -138,8 +162,6 @@ fn draw_rounded_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h:
     ctx.line_to(x, y + r);
     ctx.arc_to(x, y, x + r, y, r);
     ctx.close_path();
-    ctx.fill();
-    ctx.stroke();
 }
 
 /// Draw a stadium (pill) shape.
@@ -1203,6 +1225,7 @@ mod tests {
             "rgba(20,40,60,0.5)",
             "#123456",
             2.5,
+            8.0,
         );
         ctx.operations().to_vec()
     }
@@ -1522,8 +1545,36 @@ mod tests {
             "#fff",
             "#333",
             1.5,
+            8.0,
         );
         assert!(ctx.operation_count() > 0);
+    }
+
+    #[test]
+    fn rounded_outlines_clamp_to_small_bounds_and_reject_invalid_radii() {
+        let mut context = MockCanvas2dContext::new(100.0, 100.0);
+        trace_rounded_rect(&mut context, 10.0, 20.0, 10.0, 6.0, 100.0);
+        assert_eq!(
+            context
+                .operations()
+                .iter()
+                .filter(|operation| {
+                    matches!(operation, DrawOperation::ArcTo(_, _, _, _, radius) if *radius == 3.0)
+                })
+                .count(),
+            4
+        );
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut context = MockCanvas2dContext::new(100.0, 100.0);
+            trace_rounded_rect(&mut context, 10.0, 20.0, 10.0, 6.0, radius);
+            assert_eq!(
+                context.operations(),
+                &[
+                    DrawOperation::BeginPath,
+                    DrawOperation::Rect(10.0, 20.0, 10.0, 6.0),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -1539,6 +1590,7 @@ mod tests {
             "#fff",
             "#333",
             1.5,
+            8.0,
         );
         assert!(ctx.operation_count() > 0);
     }
@@ -1556,6 +1608,7 @@ mod tests {
             "#fff",
             "#333",
             1.5,
+            8.0,
         );
         assert!(ctx.operation_count() > 0);
     }

@@ -609,7 +609,7 @@ marker#arrow-end path,marker#arrow-filled path,marker#arrow-circle path,marker#a
 .fm-edge:hover~marker#arrow-end path,.fm-edge:hover~marker#arrow-filled path,.fm-edge:hover~marker#arrow-circle path,.fm-edge:hover~marker#arrow-diamond path{fill:var(--fm-accent-1)}
 marker#arrow-open path{stroke:var(--fm-edge-muted);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
 marker#arrow-cross path{stroke:var(--fm-edge-color);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
-.fm-cluster{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:none;rx:12;ry:12}
+.fm-cluster{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:none}
 .fm-cluster-label{fill:var(--fm-cluster-label-color);font-weight:600}
 .fm-cluster-c4{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke);stroke-dasharray:none}
 .fm-cluster-swimlane{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke);stroke-dasharray:none}

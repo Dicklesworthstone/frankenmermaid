@@ -410,7 +410,7 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
         |preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset),
     );
     let canvas = align_canvas_typography_with_svg(
-        merge_canvas_config(&canvas_base, &overrides.canvas),
+        merge_canvas_config(&canvas_base, &overrides.canvas, effective_svg.padding),
         &svg,
     );
     let parsed = parse(input);
@@ -1320,6 +1320,7 @@ fn merge_svg_config(
 fn merge_canvas_config(
     base: &CanvasRenderConfig,
     overrides: &CanvasConfigOverrides,
+    shared_padding: Option<f32>,
 ) -> CanvasRenderConfig {
     let mut merged = base.clone();
 
@@ -1329,7 +1330,13 @@ fn merge_canvas_config(
     {
         merged.font_size = value;
     }
-    if let Some(value) = overrides.padding
+    // Shared padding applies to SVG export and the raster viewport. An explicit canvas
+    // margin remains more specific, and an unrelated update preserves the previous margin.
+    let padding = overrides
+        .padding
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .or(shared_padding.map(f64::from));
+    if let Some(value) = padding
         && value.is_finite()
         && value >= 0.0
     {
@@ -1395,6 +1402,7 @@ fn align_canvas_typography_with_svg(
     canvas.font_family.clone_from(&svg.font_family);
     canvas.font_size = f64::from(svg.font_size);
     canvas.line_height = f64::from(svg.line_height);
+    canvas.rounded_corners = f64::from(svg.rounded_corners);
     canvas.semantic_colors =
         svg.semantic_colors && matches!(svg.theme, ThemePreset::Default | ThemePreset::Dark);
     // The gantt today date rides along with the typography rather than being plumbed separately,
@@ -1711,7 +1719,7 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let next = RuntimeConfig {
         renderer: merge_renderer_kind(current.renderer, overrides.renderer),
         canvas: align_canvas_typography_with_svg(
-            merge_canvas_config(&canvas_base, &overrides.canvas),
+            merge_canvas_config(&canvas_base, &overrides.canvas, effective_svg.padding),
             &svg,
         ),
         svg,
@@ -2630,7 +2638,7 @@ impl Diagram {
             .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
             .unwrap_or_else(|| runtime.canvas.clone());
         let canvas_config = align_canvas_typography_with_svg(
-            merge_canvas_config(&canvas_base, &overrides.canvas),
+            merge_canvas_config(&canvas_base, &overrides.canvas, effective_svg.padding),
             &svg_config,
         );
         let pressure_config = merge_pressure_config(&runtime.pressure, &overrides.pressure);
@@ -2736,7 +2744,7 @@ impl Diagram {
             |preset| apply_canvas_theme_preset(self.canvas_config.clone(), preset),
         );
         let next_canvas = align_canvas_typography_with_svg(
-            merge_canvas_config(&canvas_base, &overrides.canvas),
+            merge_canvas_config(&canvas_base, &overrides.canvas, effective_svg.padding),
             &next_svg,
         );
         let next_renderer = merge_renderer_kind(self.renderer, overrides.renderer);
@@ -4354,7 +4362,7 @@ mod tests {
         let themed_base = preset
             .map(|value| apply_canvas_theme_preset(base_canvas, value))
             .expect("theme override should be present");
-        let merged = merge_canvas_config(&themed_base, &overrides.canvas);
+        let merged = merge_canvas_config(&themed_base, &overrides.canvas, None);
 
         assert_eq!(merged.node_fill, "#1e293b");
         assert_eq!(merged.label_color, "#f8fafc");
@@ -4401,6 +4409,11 @@ mod tests {
         let runtime = RuntimeConfig::default();
         assert_eq!(runtime.canvas.font_family, runtime.svg.font_family);
         assert_eq!(runtime.canvas.font_size, f64::from(runtime.svg.font_size));
+        assert_eq!(runtime.canvas.padding, f64::from(runtime.svg.padding));
+        assert_eq!(
+            runtime.canvas.rounded_corners,
+            f64::from(runtime.svg.rounded_corners)
+        );
         assert_eq!(
             runtime.canvas.line_height,
             f64::from(runtime.svg.line_height)
@@ -4430,7 +4443,7 @@ mod tests {
     }
 
     #[test]
-    fn align_canvas_typography_with_svg_preserves_non_typography_canvas_settings() {
+    fn canvas_alignment_shares_typography_and_corners_but_keeps_raster_settings() {
         let canvas = CanvasRenderConfig {
             padding: 12.0,
             node_fill: "#123456".to_string(),
@@ -4442,6 +4455,7 @@ mod tests {
             font_family: "Test Font".to_string(),
             font_size: 22.0,
             line_height: 2.0,
+            rounded_corners: 17.5,
             ..SvgRenderConfig::default()
         };
 
@@ -4450,9 +4464,50 @@ mod tests {
         assert_eq!(aligned.font_family, "Test Font");
         assert_eq!(aligned.font_size, 22.0);
         assert_eq!(aligned.line_height, 2.0);
+        assert_eq!(aligned.rounded_corners, 17.5);
         assert_eq!(aligned.padding, 12.0);
         assert_eq!(aligned.node_fill, "#123456");
         assert_eq!(aligned.edge_stroke_width, 3.0);
+    }
+
+    #[test]
+    fn raster_padding_uses_shared_overrides_and_keeps_explicit_canvas_precedence() {
+        let base = CanvasRenderConfig::default();
+        for shared in [0.0, 12.0, 48.0] {
+            let defaults = CanvasConfigOverrides::default();
+            let aligned = merge_canvas_config(&base, &defaults, Some(shared));
+            assert_eq!(aligned.padding, f64::from(shared));
+            let later = merge_canvas_config(&aligned, &defaults, None);
+            assert_eq!(
+                later.padding, aligned.padding,
+                "unrelated updates preserve the viewport"
+            );
+            let explicit = CanvasConfigOverrides {
+                padding: Some(7.0),
+                ..Default::default()
+            };
+            assert_eq!(
+                merge_canvas_config(&base, &explicit, Some(shared)).padding,
+                7.0
+            );
+        }
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            let overrides = CanvasConfigOverrides {
+                padding: Some(invalid),
+                ..Default::default()
+            };
+            assert_eq!(
+                merge_canvas_config(&base, &overrides, Some(18.0)).padding,
+                18.0
+            );
+        }
+        for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+            assert_eq!(
+                merge_canvas_config(&base, &CanvasConfigOverrides::default(), Some(invalid))
+                    .padding,
+                base.padding,
+            );
+        }
     }
 
     #[test]
