@@ -57,7 +57,7 @@ use wardley::layout_diagram_wardley_traced;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::f32::consts::PI;
 use std::mem::size_of;
 use std::rc::Rc;
@@ -5488,20 +5488,85 @@ fn build_label_layer(
                 .unwrap_or_else(|| "#7c8da5".to_owned());
             let source = RenderSource::Node(node_box.node_index);
             let bounds = node_box.bounds;
+            if !declared.contains_key("fill")
+                && !declared.contains_key("fill-opacity")
+                && ir
+                    .meta
+                    .theme_overrides
+                    .theme_variables
+                    .get("primaryColor")
+                    .and_then(|paint| scene_paint(paint))
+                    .is_none()
+                && bounds.width > 2.0
+                && bounds.height > 2.0
+                && let Some(palette) = fm_core::ErCardPalette::new("#f8fafc", &border, &color)
+            {
+                let opacity = declared
+                    .get("opacity")
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0);
+                let mut surfaces =
+                    RenderGroup::new(Some(format!("fm-er-surfaces-{}", node_box.node_index)));
+                // The scene's rectangular node outline has a five-unit radius. Keep every
+                // decorative surface inside its inset curve instead of covering the corners.
+                surfaces.clip = Some(RenderClip::Path(rounded_rect_path(
+                    LayoutRect {
+                        x: bounds.x + 0.75,
+                        y: bounds.y + 0.75,
+                        width: bounds.width - 1.5,
+                        height: bounds.height - 1.5,
+                    },
+                    4.25,
+                )));
+                let rows = std::iter::once((
+                    0.75,
+                    card.header_height.min(bounds.height) - 0.75,
+                    palette.header_fill.as_str(),
+                ))
+                .chain(card.attribute_rows.iter().skip(1).step_by(2).map(|row| {
+                    let top = row.top.max(0.75);
+                    let bottom = (row.top + row.height).min(bounds.height - 0.75);
+                    (top, bottom - top, palette.alternate_fill.as_str())
+                }));
+                for (top, height, fill) in rows.filter(|(_, height, _)| *height > 0.0) {
+                    surfaces.children.push(scene_path(
+                        source,
+                        rounded_rect_path(
+                            LayoutRect {
+                                x: bounds.x + 0.75,
+                                y: bounds.y + top,
+                                width: bounds.width - 1.5,
+                                height,
+                            },
+                            0.0,
+                        ),
+                        Some(FillStyle::Solid {
+                            color: fill.to_owned(),
+                            opacity,
+                        }),
+                        None,
+                    ));
+                }
+                layer.children.push(RenderItem::Group(surfaces));
+            }
+            let mut divider_stroke = StrokeStyle::solid(&border, 0.75);
+            divider_stroke.opacity = 0.65;
             layer.children.push(RenderItem::Path(RenderPath {
                 source,
                 commands: vec![
                     PathCmd::MoveTo {
-                        x: bounds.x + 2.0,
+                        x: bounds.x + 0.75,
                         y: bounds.y + card.header_height,
                     },
                     PathCmd::LineTo {
-                        x: bounds.x + bounds.width - 2.0,
+                        x: bounds.x + bounds.width - 0.75,
                         y: bounds.y + card.header_height,
                     },
                 ],
                 fill: None,
-                stroke: Some(StrokeStyle::solid(&border, 0.8)),
+                stroke: Some(divider_stroke),
                 marker_start: MarkerKind::None,
                 marker_end: MarkerKind::None,
             }));
@@ -9180,27 +9245,7 @@ fn tree_node_boxes(
         })
         .collect();
 
-    let mut span_memo = vec![None; node_count];
-    compute_tree_subtree_spans(
-        &tree.roots,
-        &tree.children,
-        &span_sizes,
-        spacing,
-        &mut span_memo,
-    );
-    let subtree_spans: Vec<f32> = span_memo
-        .into_iter()
-        .map(|span| span.unwrap_or(0.0))
-        .collect();
-
-    let mut span_centers = vec![0.0_f32; node_count];
-    compute_all_tree_span_centers(
-        &tree.roots,
-        &tree.children,
-        &subtree_spans,
-        spacing,
-        &mut span_centers,
-    );
+    let span_centers = compute_tree_span_centers(&tree.roots, &tree.children, &span_sizes, spacing);
 
     let depth_level_sizes = tree_depth_level_sizes(&tree, node_sizes);
     let depth_centers = depth_level_centers(
@@ -9265,8 +9310,8 @@ fn layout_directed_path_tree_traced(
         subtree_spans[node_index] = running_span;
     }
 
-    // A path has one child at each non-leaf depth. Reproduce the generic tree center recurrence
-    // exactly, but without child adjacency, BFS queues, or per-rank buckets.
+    // A path has one child at each non-leaf depth. Keep the same centered spine as contour
+    // placement, without building child adjacency, depth contours, or per-rank buckets.
     let mut span_centers = vec![0.0_f32; node_count];
     let mut span_start = 0.0_f32;
     for (logical_depth, &node_index) in path_order.iter().enumerate() {
@@ -16532,103 +16577,102 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     }
 }
 
-fn compute_tree_subtree_spans(
+/// The occupied interval at each depth of one subtree, relative to its root.
+///
+/// Translating a subtree changes only `offset`. Merging reuses the longer contour and visits
+/// only shared depths; a shallow branch next to a deep chain must not copy the whole chain.
+/// Prepending a parent is amortized O(1), so even a comb tree has no quadratic tail copying.
+#[derive(Default)]
+struct TreeContour {
+    levels: VecDeque<(f32, f32)>,
+    offset: f32,
+}
+
+impl TreeContour {
+    /// Place `next` to the right, clearing every occupied depth, and return its root position.
+    fn append(&mut self, mut next: Self, gap: f32) -> f32 {
+        let shift = self
+            .levels
+            .iter()
+            .zip(&next.levels)
+            .map(|(&(_, right), &(left, _))| right + self.offset + gap - left - next.offset)
+            .fold(0.0_f32, f32::max);
+        next.offset += shift;
+
+        if next.levels.len() > self.levels.len() {
+            std::mem::swap(self, &mut next);
+        }
+        let relative = next.offset - self.offset;
+        for ((left, right), (next_left, next_right)) in self.levels.iter_mut().zip(next.levels) {
+            *left = left.min(next_left + relative);
+            *right = right.max(next_right + relative);
+        }
+        shift
+    }
+
+    fn prepend(&mut self, half_span: f32) {
+        self.levels
+            .push_front((-half_span - self.offset, half_span - self.offset));
+    }
+}
+
+/// Tidy-tree compaction against the actual contour, rather than a rectangle spanning every
+/// descendant. Deep branches can occupy space below a finished shallow branch, while nodes at
+/// the same depth retain the requested clearance. Each parent is centered over its outermost
+/// immediate children, and single-child chains keep a straight spine.
+fn compute_tree_span_centers(
     roots: &[usize],
     children: &TreeChildren,
     node_span_sizes: &[f32],
     spacing: LayoutSpacing,
-    memo: &mut [Option<f32>],
-) {
+) -> Vec<f32> {
     let node_count = children.node_count();
-    let mut post_order = Vec::with_capacity(node_count);
-
-    let mut state = vec![0_u8; node_count];
-    for &start_node in roots {
-        if state[start_node] != 0 {
-            continue;
-        }
-
-        let mut stack = vec![(start_node, 0)];
-        state[start_node] = 1;
-
-        while let Some((node, child_idx)) = stack.pop() {
-            let node_children = children.of(node);
-            if child_idx < node_children.len() {
-                stack.push((node, child_idx + 1));
-                let child = node_children[child_idx];
-                if state[child] == 0 {
-                    state[child] = 1;
-                    stack.push((child, 0));
-                }
-            } else {
-                state[node] = 2;
-                post_order.push(node);
-            }
-        }
+    let mut preorder = Vec::with_capacity(node_count);
+    let mut stack = roots.to_vec();
+    while let Some(node) = stack.pop() {
+        preorder.push(node);
+        stack.extend_from_slice(children.of(node));
     }
 
-    for &node in &post_order {
-        if memo[node].is_some() {
-            continue;
-        }
-
-        let own_span = node_span_sizes[node].max(1.0);
+    let mut contours: Vec<Option<TreeContour>> = (0..node_count).map(|_| None).collect();
+    let mut centers = vec![0.0_f32; node_count];
+    for &node in preorder.iter().rev() {
+        let mut contour = TreeContour::default();
         let node_children = children.of(node);
-        let child_span_total = if node_children.is_empty() {
-            0.0
-        } else {
-            let subtree_span_sum: f32 = node_children
-                .iter()
-                .map(|child| memo[*child].unwrap_or(0.0))
-                .sum();
-            let gaps = spacing.node_spacing * (node_children.len().saturating_sub(1) as f32);
-            subtree_span_sum + gaps
-        };
-
-        let span = own_span.max(child_span_total);
-        memo[node] = Some(span);
-    }
-}
-
-fn compute_all_tree_span_centers(
-    roots: &[usize],
-    children: &TreeChildren,
-    subtree_spans: &[f32],
-    spacing: LayoutSpacing,
-    out_centers: &mut [f32],
-) {
-    let mut queue = Vec::new();
-    let mut root_cursor = 0.0_f32;
-    for &root in roots {
-        queue.push((root, root_cursor));
-        root_cursor += spacing.node_spacing.mul_add(1.5, subtree_spans[root]);
-    }
-
-    let mut queue_idx = 0;
-    while let Some(&(node, span_start)) = queue.get(queue_idx) {
-        queue_idx += 1;
-        let subtree_span = subtree_spans[node];
-        out_centers[node] = span_start + (subtree_span / 2.0);
-
-        let node_children = children.of(node);
-        if node_children.is_empty() {
-            continue;
-        }
-
-        let child_total: f32 = spacing.node_spacing.mul_add(
-            node_children.len().saturating_sub(1) as f32,
-            node_children
-                .iter()
-                .map(|child| subtree_spans[*child])
-                .sum::<f32>(),
-        );
-        let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
-
         for &child in node_children {
-            queue.push((child, child_cursor));
-            child_cursor += subtree_spans[child] + spacing.node_spacing;
+            centers[child] = contour.append(
+                contours[child]
+                    .take()
+                    .expect("child contour precedes parent"),
+                spacing.node_spacing,
+            );
+        }
+        let midpoint = node_children
+            .last()
+            .map_or(0.0, |&last| centers[last] / 2.0);
+        contour.offset -= midpoint;
+        for &child in node_children {
+            centers[child] -= midpoint;
+        }
+        contour.prepend(node_span_sizes[node].max(1.0) / 2.0);
+        contours[node] = Some(contour);
+    }
+
+    let mut forest = TreeContour::default();
+    for &root in roots {
+        centers[root] = forest.append(
+            contours[root].take().expect("root contour is complete"),
+            spacing.node_spacing * 1.5,
+        );
+    }
+    // Coordinates above are relative to each parent. One iterative walk resolves them without
+    // revisiting descendants during contour merges or recursing with the input's depth.
+    for node in preorder {
+        for &child in children.of(node) {
+            centers[child] += centers[node];
         }
     }
+    centers
 }
 
 fn tree_depth_level_sizes(tree: &TreeLayoutStructure, node_sizes: &[(f32, f32)]) -> Vec<f32> {
@@ -24001,6 +24045,35 @@ fn build_edge_paths_with_orientation(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
+            // Resolve authored frame endpoints before choosing ports or parallel lanes. A
+            // subgraph's representative member is useful for ranking, but its position and
+            // dimensions do not describe the boundary that the connector actually touches.
+            let (from_subgraph, to_subgraph) = edge.named_subgraphs();
+            let end_box = |subgraph: Option<fm_core::IrSubgraphId>, member: &LayoutNodeBox| {
+                let cluster = ir.graph.subgraph(subgraph?)?.cluster?;
+                let found = clusters.iter().find(|c| c.cluster_index == cluster.0)?;
+                Some(LayoutNodeBox {
+                    bounds: found.bounds,
+                    ..member.clone()
+                })
+            };
+            let (source_frame, target_frame) = (
+                end_box(from_subgraph, source_box),
+                end_box(to_subgraph, target_box),
+            );
+            let shape = |frame: &Option<LayoutNodeBox>, member| {
+                frame
+                    .as_ref()
+                    .map_or_else(|| node_shape_at(ir, member), |_| fm_core::NodeShape::Rect)
+            };
+            let source_end = (
+                source_frame.as_ref().unwrap_or(source_box),
+                shape(&source_frame, source_box),
+            );
+            let target_end = (
+                target_frame.as_ref().unwrap_or(target_box),
+                shape(&target_frame, target_box),
+            );
             // A timeline has two axes: periods connect horizontally, while their events descend
             // vertically. Horizontal ports on both sent the event connector through its period.
             // Other families follow the direction of their innermost directed subgraph.
@@ -24009,8 +24082,12 @@ fn build_edge_paths_with_orientation(
             } else {
                 subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks)
             };
+            let horizontal_ranks = ranked_edge_axis(
+                node_outline_bounds(source_end.0.bounds, source_end.1),
+                node_outline_bounds(target_end.0.bounds, target_end.1),
+                horizontal_ranks,
+            );
 
-            let (from_subgraph, to_subgraph) = edge.named_subgraphs();
             let is_self_loop =
                 from_subgraph == to_subgraph && (from_subgraph.is_some() || source == target);
             let (pair_total, pair_idx, pair_label_width, pair_label_height) = if any_parallel {
@@ -24037,8 +24114,8 @@ fn build_edge_paths_with_orientation(
                     Some(width) => width.mul_add(1.4, 30.0).max(26.0),
                 };
                 let offset_step = parallel_port_step(
-                    node_outline_bounds(source_box.bounds, node_shape_at(ir, source_box)),
-                    node_outline_bounds(target_box.bounds, node_shape_at(ir, target_box)),
+                    node_outline_bounds(source_end.0.bounds, source_end.1),
+                    node_outline_bounds(target_end.0.bounds, target_end.1),
                     horizontal_ranks,
                     pair_total,
                     requested_step,
@@ -24051,35 +24128,6 @@ fn build_edge_paths_with_orientation(
             let points = if is_self_loop {
                 self_loops.get(&edge_index)?.clone()
             } else {
-                // An end written to a subgraph (`one --> two`) is drawn to the subgraph's box, as
-                // mermaid draws it: it leaves or enters the box's face instead of the member the
-                // endpoint resolved to for ranking.
-                let end_box = |subgraph: Option<fm_core::IrSubgraphId>, member: &LayoutNodeBox| {
-                    let cluster = ir.graph.subgraph(subgraph?)?.cluster?;
-                    let found = clusters.iter().find(|c| c.cluster_index == cluster.0)?;
-                    Some(LayoutNodeBox {
-                        bounds: found.bounds,
-                        ..member.clone()
-                    })
-                };
-                let (source_end, target_end) = (
-                    end_box(from_subgraph, source_box),
-                    end_box(to_subgraph, target_box),
-                );
-                let shape = |end: &Option<LayoutNodeBox>, member| {
-                    end.as_ref()
-                        .map_or_else(|| node_shape_at(ir, member), |_| fm_core::NodeShape::Rect)
-                };
-                let (source_end, target_end) = (
-                    (
-                        source_end.as_ref().unwrap_or(source_box),
-                        shape(&source_end, source_box),
-                    ),
-                    (
-                        target_end.as_ref().unwrap_or(target_box),
-                        shape(&target_end, target_box),
-                    ),
-                );
                 let nested_anchors = nested_boundary_anchors(
                     source_end.0.bounds,
                     target_end.0.bounds,
@@ -24993,6 +25041,22 @@ fn route_mixed_face_edge(
         None,
         Some(endpoint_bounds),
     )
+}
+
+/// Keep the authored rank direction when it leaves a clear gap between the endpoints.
+/// Same-rank nodes instead connect through their facing side ports: using the rank axis
+/// there sends the departure and arrival backwards through the endpoint fills, hiding
+/// the arrowhead. Both port placement and routing must use this resolved axis.
+fn ranked_edge_axis(source: LayoutRect, target: LayoutRect, horizontal: bool) -> bool {
+    let separated_x =
+        source.x + source.width < target.x - 0.001 || target.x + target.width < source.x - 0.001;
+    let separated_y =
+        source.y + source.height < target.y - 0.001 || target.y + target.height < source.y - 0.001;
+    match (horizontal, separated_x, separated_y) {
+        (true, false, true) => false,
+        (false, true, false) => true,
+        _ => horizontal,
+    }
 }
 
 fn edge_anchors(
@@ -28887,6 +28951,197 @@ mod tests {
             ir.nodes[index].label = Some(IrLabelId(index));
         }
         ir
+    }
+
+    #[test]
+    fn ranked_sideways_edges_keep_ports_and_arrowheads_outside_endpoint_fills() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for extra_edges in ["", "C -> B; B -> C;"] {
+                let ir = parse(&format!(
+                    "digraph G {{ rankdir={direction}; node [shape=box]; \
+                     {{ rank=same; B; C; }} A -> B; A -> C; B -> C; {extra_edges} }}"
+                ))
+                .ir;
+                assert_eq!(ir.nodes.len(), 3);
+                for routing in [EdgeRouting::Orthogonal, EdgeRouting::Spline] {
+                    let traced = super::layout_diagram_traced_with_config(
+                        &ir,
+                        LayoutAlgorithm::Auto,
+                        LayoutConfig {
+                            edge_routing: routing,
+                            ..Default::default()
+                        },
+                    );
+                    let layout = &traced.layout;
+                    let b = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == "B")
+                        .unwrap();
+                    let c = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == "C")
+                        .unwrap();
+                    assert_eq!(
+                        b.rank, c.rank,
+                        "fixture must retain the same-rank constraint"
+                    );
+                    assert_eq!(layout.edges.len(), ir.edges.len());
+                    let interiors: Vec<_> = layout
+                        .nodes
+                        .iter()
+                        .map(|node| LayoutRect {
+                            x: node.bounds.x + 0.25,
+                            y: node.bounds.y + 0.25,
+                            width: node.bounds.width - 0.5,
+                            height: node.bounds.height - 0.5,
+                        })
+                        .collect();
+                    for path in &layout.edges {
+                        for segment in path.points.windows(2) {
+                            assert!(
+                                !super::cga_routing::segment_intersects_obstacles(
+                                    segment[0], segment[1], &interiors, 0.0,
+                                ),
+                                "{direction}/{routing:?}: connector disappears under a card: {path:?}"
+                            );
+                        }
+                        let edge = &ir.edges[path.edge_index];
+                        let from = super::endpoint_node_index(&ir, edge.from).unwrap();
+                        let to = super::endpoint_node_index(&ir, edge.to).unwrap();
+                        if ir.nodes[from].id == "A" {
+                            continue;
+                        }
+                        let source = &layout.nodes[from];
+                        let target = &layout.nodes[to];
+                        let start = path.points[0];
+                        let end = *path.points.last().unwrap();
+                        let sideways_horizontal = matches!(direction, "TB" | "BT");
+                        for (point, node, other) in [(start, source, target), (end, target, source)]
+                        {
+                            let bounds = node.bounds;
+                            let expected = if sideways_horizontal {
+                                if other.bounds.center().x > bounds.center().x {
+                                    bounds.x + bounds.width
+                                } else {
+                                    bounds.x
+                                }
+                            } else if other.bounds.center().y > bounds.center().y {
+                                bounds.y + bounds.height
+                            } else {
+                                bounds.y
+                            };
+                            let actual = if sideways_horizontal {
+                                point.x
+                            } else {
+                                point.y
+                            };
+                            assert!(
+                                (actual - expected).abs() < 0.01,
+                                "{direction}/{routing:?}: use the facing side of the card"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_cross_links_use_the_gap_between_same_depth_nodes() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let ir = parse(&format!("flowchart {direction}\nA --> B\nA --> C\nB --> C")).ir;
+            let layout =
+                super::layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Tree).layout;
+            let b = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "B")
+                .unwrap();
+            let c = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "C")
+                .unwrap();
+            assert_eq!(b.rank, c.rank);
+            let path = layout
+                .edges
+                .iter()
+                .find(|path| path.edge_index == 2)
+                .unwrap();
+            let interiors: Vec<_> = [b, c]
+                .iter()
+                .map(|node| LayoutRect {
+                    x: node.bounds.x + 0.25,
+                    y: node.bounds.y + 0.25,
+                    width: node.bounds.width - 0.5,
+                    height: node.bounds.height - 0.5,
+                })
+                .collect();
+            assert!(
+                path.points.windows(2).all(|pair| {
+                    !super::cga_routing::segment_intersects_obstacles(
+                        pair[0], pair[1], &interiors, 0.0,
+                    )
+                }),
+                "{direction}: cross-link must not run through either sibling: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ranked_edge_axis_preserves_separated_ranks_and_nested_frames() {
+        let source = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 80.0,
+        };
+        let beside = LayoutRect {
+            x: 180.0,
+            y: 20.0,
+            width: 100.0,
+            height: 140.0,
+        };
+        let below = LayoutRect {
+            x: 20.0,
+            y: 180.0,
+            width: 140.0,
+            height: 60.0,
+        };
+        let diagonal = LayoutRect {
+            x: 180.0,
+            y: 180.0,
+            width: 100.0,
+            height: 60.0,
+        };
+        let nested = LayoutRect {
+            x: 20.0,
+            y: 20.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        for (a, b) in [(source, beside), (beside, source)] {
+            assert!(super::ranked_edge_axis(a, b, false));
+        }
+        for (a, b) in [(source, below), (below, source)] {
+            assert!(!super::ranked_edge_axis(a, b, true));
+        }
+        for preferred in [false, true] {
+            assert_eq!(
+                super::ranked_edge_axis(source, diagonal, preferred),
+                preferred
+            );
+            assert_eq!(
+                super::ranked_edge_axis(source, nested, preferred),
+                preferred
+            );
+            assert_eq!(
+                super::ranked_edge_axis(source, source, preferred),
+                preferred
+            );
+        }
     }
 
     /// Force-directed edges must stop on the node's drawn OUTLINE, not on its bounding box.
@@ -37450,6 +37705,220 @@ mod tests {
     }
 
     #[test]
+    fn auto_tree_compacts_branches_at_different_depths() {
+        // The shallow A fan ends one rank before the wider B fan. Reserving both subtrees as
+        // full-height rectangles leaves an entire unused column below A and puts Root off-center.
+        let source = "flowchart TB\n\
+            Root --> A\nRoot --> B\n\
+            A --> A1\nA --> A2\n\
+            B --> B1\n\
+            B1 --> B2\nB1 --> B3\nB1 --> B4\nB1 --> B5\n\
+            B1 --> B6\n";
+        let spacing = LayoutSpacing::default();
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let mut ir = parse(source).ir;
+            ir.direction = direction;
+            let traced = layout_diagram_traced(&ir);
+            assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+            let layout = &traced.layout;
+            assert_eq!(layout.nodes.len(), 11);
+            assert_eq!(layout.edges.len(), 10);
+            assert_eq!(layout, &layout_diagram_traced(&ir).layout);
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let across = |rect: LayoutRect| {
+                if horizontal {
+                    (rect.y, rect.height)
+                } else {
+                    (rect.x, rect.width)
+                }
+            };
+            let center = |id| {
+                let (start, size) = across(*node_bounds(layout, id));
+                start + size / 2.0
+            };
+            let span = |ids: &[&str]| {
+                let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                for id in ids {
+                    let (start, size) = across(*node_bounds(layout, id));
+                    lo = lo.min(start);
+                    hi = hi.max(start + size);
+                }
+                hi - lo
+            };
+            let rectangular_reservation =
+                span(&["A1", "A2"]) + span(&["B2", "B3", "B4", "B5", "B6"]) + spacing.node_spacing;
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for node in &layout.nodes {
+                let (start, size) = across(node.bounds);
+                lo = lo.min(start);
+                hi = hi.max(start + size);
+            }
+            assert!(
+                hi - lo < rectangular_reservation * 0.8,
+                "{direction:?}: the deep fan must use the space below the finished shallow fan"
+            );
+            assert!(
+                (center("Root") - f32::midpoint(center("A"), center("B"))).abs() < 0.01,
+                "{direction:?}: a parent must be centered over its immediate children"
+            );
+            assert!((center("B") - center("B1")).abs() < 0.01);
+            for (index, node) in layout.nodes.iter().enumerate() {
+                for other in &layout.nodes[index + 1..] {
+                    assert!(!rects_overlap(node.bounds, other.bounds));
+                    if node.rank == other.rank {
+                        let (a, aw) = across(node.bounds);
+                        let (b, bw) = across(other.bounds);
+                        let gap = a.max(b) - (a + aw).min(b + bw);
+                        assert!(gap + 0.01 >= spacing.node_spacing);
+                    }
+                }
+            }
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let from = super::endpoint_node_index(&ir, edge.from).unwrap();
+                let to = super::endpoint_node_index(&ir, edge.to).unwrap();
+                let obstacles: Vec<_> = layout
+                    .nodes
+                    .iter()
+                    .filter(|node| node.node_index != from && node.node_index != to)
+                    .map(|node| node.bounds)
+                    .collect();
+                assert!(
+                    !super::cga_routing::polyline_intersects_obstacles(
+                        &path.points,
+                        &obstacles,
+                        0.1,
+                    ),
+                    "{direction:?}: compaction must retain a clear route for edge {}",
+                    path.edge_index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_contours_reserve_unequal_node_sizes_in_every_direction() {
+        let edges: Vec<_> = (1..41)
+            .map(|node| {
+                let parent = if node % 4 == 0 {
+                    node - 1
+                } else {
+                    (node - 1) / 3
+                };
+                (parent, node)
+            })
+            .collect();
+        let sizes: Vec<_> = (0..41)
+            .map(|node| {
+                (
+                    80.0 + (node % 5) as f32 * 73.0,
+                    35.0 + (node % 7) as f32 * 17.0,
+                )
+            })
+            .collect();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let spacing = LayoutSpacing::default();
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let mut ir = graph_ir(DiagramType::Flowchart, 41, &edges);
+            ir.direction = direction;
+            let nodes = super::tree_node_boxes(&ir, &sizes, spacing, &metrics);
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let cross_center = |node: usize| {
+                let center = nodes[node].bounds.center();
+                if horizontal { center.y } else { center.x }
+            };
+            for (index, node) in nodes.iter().enumerate() {
+                assert_eq!((node.bounds.width, node.bounds.height), sizes[index]);
+                for other in &nodes[index + 1..] {
+                    assert!(!rects_overlap(node.bounds, other.bounds));
+                    if node.rank == other.rank {
+                        let (a, aw, b, bw) = if horizontal {
+                            (
+                                node.bounds.y,
+                                node.bounds.height,
+                                other.bounds.y,
+                                other.bounds.height,
+                            )
+                        } else {
+                            (
+                                node.bounds.x,
+                                node.bounds.width,
+                                other.bounds.x,
+                                other.bounds.width,
+                            )
+                        };
+                        assert!(a.max(b) - (a + aw).min(b + bw) + 0.01 >= spacing.node_spacing);
+                    }
+                }
+                let children: Vec<_> = edges
+                    .iter()
+                    .filter(|&&(parent, _)| parent == index)
+                    .collect();
+                if !children.is_empty() {
+                    let lo = children
+                        .iter()
+                        .map(|&&(_, child)| cross_center(child))
+                        .fold(f32::INFINITY, f32::min);
+                    let hi = children
+                        .iter()
+                        .map(|&&(_, child)| cross_center(child))
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    assert!((cross_center(index) - f32::midpoint(lo, hi)).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_contours_handle_deep_combs_without_recursive_subtree_copies() {
+        const DEPTH: usize = 8_192;
+        let count = DEPTH * 2 + 1;
+        for tall_first in [false, true] {
+            let mut children = super::TreeChildren {
+                flat: Vec::with_capacity(DEPTH * 2),
+                start: vec![0; count],
+                len: vec![0; count],
+            };
+            for parent in 0..DEPTH {
+                children.start[parent] = children.flat.len();
+                children.len[parent] = 2;
+                let leaf = DEPTH + 1 + parent;
+                children.flat.extend(if tall_first {
+                    [parent + 1, leaf]
+                } else {
+                    [leaf, parent + 1]
+                });
+            }
+            let centers = super::compute_tree_span_centers(
+                &[0],
+                &children,
+                &vec![100.0; count],
+                LayoutSpacing::default(),
+            );
+            assert_eq!(centers.len(), count);
+            assert!(centers.iter().all(|center| center.is_finite()));
+            for parent in 0..DEPTH {
+                let leaf = DEPTH + 1 + parent;
+                assert_eq!((centers[parent + 1] - centers[leaf]).abs(), 140.0);
+                assert_eq!(
+                    centers[parent],
+                    f32::midpoint(centers[parent + 1], centers[leaf])
+                );
+            }
+        }
+    }
+
+    #[test]
     fn radial_layout_is_deterministic() {
         let mut ir = sample_tree_ir(GraphDirection::TB);
         ir.diagram_type = DiagramType::Mindmap;
@@ -40012,7 +40481,7 @@ mod tests {
     }
 
     #[test]
-    fn named_outer_frame_keeps_unrelated_inner_frames_as_obstacles() {
+    fn named_outer_frame_uses_facing_ports_without_crossing_unrelated_inner_frames() {
         let ir = parse("flowchart LR\nsubgraph outer[Platform]\nsubgraph inner[Application]\nA[Member]\nend\nend\nouter --> External\n").ir;
         let outer = LayoutRect {
             x: 0.0,
@@ -40080,7 +40549,9 @@ mod tests {
             &[],
         );
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].points[0], LayoutPoint { x: 400.0, y: 150.0 });
+        // The external node is above the actual frame, despite the graph's LR direction.
+        // Depart through its facing top edge instead of detouring from the right edge.
+        assert_eq!(edges[0].points[0], LayoutPoint { x: 200.0, y: 0.0 });
         assert!(
             !super::cga_routing::polyline_intersects_obstacles(&edges[0].points, &[inner], 8.0),
             "named outer frame incorrectly exempted its representative's inner group: {:?}",

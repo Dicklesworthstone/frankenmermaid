@@ -2982,10 +2982,58 @@ pub struct ErCardText {
     pub emphasized: bool,
 }
 
+/// The vertical extent of one complete attribute, including every line of its cells.
+/// Alternating table surfaces follow attributes, so a multiline comment never looks like
+/// several unrelated rows and the following attribute keeps its own band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErCardAttributeRow {
+    pub top: f32,
+    pub height: f32,
+}
+
+/// Quiet table surfaces derived from the node's own palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErCardPalette {
+    pub header_fill: String,
+    pub alternate_fill: String,
+}
+
+impl ErCardPalette {
+    /// Keep readable theme text on both surfaces, including high-contrast themes. Unknown
+    /// paints and already unreadable combinations receive no decorative recoloring. Callers
+    /// omit these surfaces when the author supplies a node fill.
+    #[must_use]
+    pub fn new(fill: &str, border: &str, text: &str) -> Option<Self> {
+        let fill = mindmap::hex_rgb(fill)?;
+        let border = mindmap::hex_rgb(border)?;
+        let text_luminance = shape_color_luminance(mindmap::hex_rgb(text)?);
+        let base_contrast = shape_color_contrast(text_luminance, shape_color_luminance(fill));
+        if base_contrast < 4.5 {
+            return None;
+        }
+        let minimum_contrast = if base_contrast >= 7.0 { 7.0 } else { 4.5 };
+        let surface = |weight| {
+            (1..=weight)
+                .rev()
+                .map(|weight| mix_shape_colors(fill, border, weight))
+                .find(|&mixed| {
+                    shape_color_contrast(text_luminance, shape_color_luminance(mixed))
+                        >= minimum_contrast
+                })
+                .map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
+        };
+        Some(Self {
+            header_fill: surface(15)?,
+            alternate_fill: surface(6)?,
+        })
+    }
+}
+
 /// Complete measured ER table geometry shared by layout and every graphical backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErCardLayout {
     pub text: Vec<ErCardText>,
+    pub attribute_rows: Vec<ErCardAttributeRow>,
     pub column_offsets: [f32; 4],
     pub header_height: f32,
     pub width: f32,
@@ -3036,6 +3084,7 @@ impl ErCardLayout {
         let (column_offsets, body_width) =
             er_cell_columns(members, metrics, scale, er_cell_gutter(attribute_font_size));
         let mut center_y = header_height + attribute_font_size * 0.9;
+        let mut attribute_rows = Vec::with_capacity(members.len());
         for member in members {
             let key = member.key_cell();
             let cells = [
@@ -3046,6 +3095,11 @@ impl ErCardLayout {
             ];
             let lines = cells.map(|cell| cell.split('\n').collect::<Vec<_>>());
             let row_count = lines.iter().map(Vec::len).max().unwrap_or(1);
+            let top = (center_y - row_pitch * 0.5).max(header_height);
+            attribute_rows.push(ErCardAttributeRow {
+                top,
+                height: center_y + (row_count as f32 - 0.5) * row_pitch - top,
+            });
             for row in 0..row_count {
                 for (column, cell_lines) in lines.iter().enumerate() {
                     let Some(value) = cell_lines.get(row).filter(|value| !value.is_empty()) else {
@@ -3066,6 +3120,7 @@ impl ErCardLayout {
             metrics.estimate_preserved_width(name, font_size, metrics.avg_char_width()) * 1.18;
         Self {
             text,
+            attribute_rows,
             column_offsets,
             header_height,
             width: (body_width.max(heading_width) + 2.0 * Self::PADDING_X).max(100.0),
@@ -16172,6 +16227,98 @@ mod tests {
             .map(|run| run.center_y)
             .collect();
         assert!(centers.windows(2).all(|rows| rows[1] - rows[0] > 20.0));
+    }
+
+    #[test]
+    fn er_attribute_bands_keep_multiline_cells_together_without_covering_the_header() {
+        let members = vec![
+            IrEntityAttribute {
+                data_type: "uuid".into(),
+                name: "id".into(),
+                keys: vec![IrAttributeKey::Pk],
+                ..Default::default()
+            },
+            IrEntityAttribute {
+                data_type: "string".into(),
+                name: "address".into(),
+                comment: Some("First line\n\nLast line".into()),
+                ..Default::default()
+            },
+            IrEntityAttribute {
+                data_type: "string".into(),
+                name: "status".into(),
+                ..Default::default()
+            },
+        ];
+        for line_height in [1.3, 1.5, 2.4] {
+            let metrics = super::FontMetrics::new(super::FontMetricsConfig {
+                line_height,
+                ..Default::default()
+            });
+            for declared in [None, Some("30px")] {
+                let card = super::ErCardLayout::new(&members, "Account", &metrics, declared, 8.0);
+                assert_eq!(card.attribute_rows.len(), members.len());
+                for row in &card.attribute_rows {
+                    assert!(row.top >= card.header_height);
+                    assert!(row.height > 0.0 && row.top + row.height < card.height);
+                }
+                for adjacent in card.attribute_rows.windows(2) {
+                    assert!(adjacent[0].top + adjacent[0].height <= adjacent[1].top + 0.01);
+                }
+                for run in card.text.iter().filter(|run| run.column.is_some()) {
+                    let containing: Vec<_> = card
+                        .attribute_rows
+                        .iter()
+                        .filter(|row| {
+                            run.center_y - run.font_size * 0.5 >= row.top
+                                && run.center_y + run.font_size * 0.5 <= row.top + row.height
+                        })
+                        .collect();
+                    assert_eq!(containing.len(), 1, "a cell must belong to one full row");
+                    if matches!(run.text.as_str(), "address" | "First line" | "Last line") {
+                        assert_eq!(containing[0], &card.attribute_rows[1]);
+                    } else if run.text == "status" {
+                        assert_eq!(containing[0], &card.attribute_rows[2]);
+                    }
+                }
+            }
+        }
+        let empty = super::ErCardLayout::new(
+            &[],
+            "Empty",
+            &super::FontMetrics::default_metrics(),
+            None,
+            8.0,
+        );
+        assert!(empty.attribute_rows.is_empty());
+    }
+
+    #[test]
+    fn er_card_surfaces_keep_light_dark_and_high_contrast_text_readable() {
+        for (fill, border, text) in [
+            ("#f8fafc", "#7c8da5", "#1e293b"),
+            ("#1e293b", "#64748b", "#f8fafc"),
+            ("#ffffff", "#000000", "#000000"),
+            ("#003366", "#ffffff", "#ffffff"),
+        ] {
+            let palette = super::ErCardPalette::new(fill, border, text).unwrap();
+            assert_ne!(palette.header_fill, fill);
+            assert_ne!(palette.alternate_fill, fill);
+            assert_ne!(palette.header_fill, palette.alternate_fill);
+            let text_luminance =
+                super::shape_color_luminance(super::mindmap::hex_rgb(text).unwrap());
+            for paint in [palette.header_fill, palette.alternate_fill] {
+                let contrast = super::shape_color_contrast(
+                    text_luminance,
+                    super::shape_color_luminance(super::mindmap::hex_rgb(&paint).unwrap()),
+                );
+                assert!(contrast >= 7.0, "{text} on {paint}: {contrast}");
+            }
+        }
+        for fill in ["none", "transparent", "url(#paint)", "rgba(0,0,0,.5)"] {
+            assert!(super::ErCardPalette::new(fill, "#000", "#000").is_none());
+        }
+        assert!(super::ErCardPalette::new("#fff", "#000", "#eee").is_none());
     }
 
     #[test]
