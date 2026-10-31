@@ -7146,17 +7146,9 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Mermaid accepts `A o--o B`, but its ER database records three standalone entities rather
-        // than a relationship. Preserve that exact topology before the `--` fallback can mangle
-        // the two endpoint names (bd-5ir5r).
-        if parse_er_bare_o_text(trimmed, line_number, line, builder)
-            || parse_plain_er_relationship(trimmed, line_number, line, builder)
-            || parse_er_relationship(trimmed, line_number, line, builder)
-        {
-            continue;
-        }
-
-        // Inside entity block - parse attribute
+        // Entity blocks contain attributes. Resolve the full form before considering relationships:
+        // quoted comments such as "Shipped to customer" and attributes named `to` must not create
+        // phantom entities or consume the attribute as a word-form relationship.
         if let Some(entity_id) = current_entity
             && let Some(attr) = parse_er_attribute(trimmed)
         {
@@ -7167,6 +7159,16 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
                 attr.keys,
                 attr.comment.as_deref(),
             );
+            continue;
+        }
+
+        // Mermaid accepts `A o--o B`, but its ER database records three standalone entities rather
+        // than a relationship. Preserve that exact topology before the `--` fallback can mangle
+        // the two endpoint names (bd-5ir5r).
+        if parse_er_bare_o_text(trimmed, line_number, line, builder)
+            || parse_plain_er_relationship(trimmed, line_number, line, builder)
+            || parse_er_relationship(trimmed, line_number, line, builder)
+        {
             continue;
         }
 
@@ -21808,6 +21810,113 @@ mod tests {
         assert_eq!(order.members[2].data_type, "date");
         assert_eq!(order.members[2].name, "created_at");
         assert!(order.members[2].keys.is_empty());
+    }
+
+    #[test]
+    fn er_attribute_comments_do_not_create_relationships() {
+        for comment in [
+            "Shipped to customer",
+            "Return optionally to sender",
+            "one or more to zero or one account",
+            "Target ||--o{ source",
+            "retry..later",
+            "Parent: link to invoice",
+            "前処理 to 後処理",
+        ] {
+            let source =
+                format!("erDiagram\nORDER {{\n timestamp fulfilled_at \"{comment}\"\n}}\n");
+            let parsed = parse_mermaid(&source);
+            assert_eq!(parsed.ir.nodes.len(), 1, "comment: {comment}");
+            assert!(parsed.ir.edges.is_empty(), "comment: {comment}");
+            let entity = &parsed.ir.nodes[0];
+            assert_eq!(entity.id, "ORDER");
+            assert_eq!(entity.members.len(), 1, "comment: {comment}");
+            let attribute = &entity.members[0];
+            assert_eq!(attribute.data_type, "timestamp");
+            assert_eq!(attribute.name, "fulfilled_at");
+            assert_eq!(attribute.comment.as_deref(), Some(comment));
+        }
+    }
+
+    #[test]
+    fn er_attribute_scope_preserves_relationship_words_and_complex_types() {
+        let parsed = parse_mermaid(
+            r#"erDiagram
+    ACCOUNT {
+        uuid to PK, FK "Relationship destination"
+        string[] aliases "Export to clients"
+        decimal(10,2) subtotal "Amount to charge"
+    }
+"#,
+        );
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert!(parsed.ir.edges.is_empty());
+        let attributes = &parsed.ir.nodes[0].members;
+        assert_eq!(attributes.len(), 3);
+        assert_eq!(attributes[0].name, "to");
+        assert_eq!(
+            attributes[0].keys,
+            [fm_core::IrAttributeKey::Pk, fm_core::IrAttributeKey::Fk]
+        );
+        assert_eq!(
+            attributes[0].comment.as_deref(),
+            Some("Relationship destination")
+        );
+        assert_eq!(attributes[1].data_type, "string[]");
+        assert_eq!(attributes[1].comment.as_deref(), Some("Export to clients"));
+        assert_eq!(attributes[2].data_type, "decimal(10,2)");
+        assert_eq!(attributes[2].comment.as_deref(), Some("Amount to charge"));
+    }
+
+    #[test]
+    fn er_attribute_scope_ends_before_following_word_relationships() {
+        let parsed = parse_mermaid(
+            r#"erDiagram
+    ORDER {
+        uuid customer_id FK "Assigned to customer"
+    }
+    CUSTOMER {
+        uuid id PK
+    }
+    ORDER many optionally to one CUSTOMER : placed_by
+"#,
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let order = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "ORDER")
+            .unwrap();
+        assert_eq!(order.members.len(), 1);
+        assert_eq!(
+            order.members[0].comment.as_deref(),
+            Some("Assigned to customer")
+        );
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.arrow, fm_core::ArrowType::DottedLine);
+        assert_eq!(edge.er_notation(), Some("}o..||"));
+    }
+
+    #[test]
+    fn er_attribute_relationship_words_survive_escaped_comment_quotes() {
+        let parsed = parse_mermaid(
+            r#"erDiagram
+    ORDER {
+        string destination "Send to \"primary\" customer"
+    }
+"#,
+        );
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert!(parsed.ir.edges.is_empty());
+        let attributes = &parsed.ir.nodes[0].members;
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].name, "destination");
+        assert_eq!(
+            attributes[0].comment.as_deref(),
+            Some("Send to \"primary\" customer")
+        );
     }
 
     #[test]
