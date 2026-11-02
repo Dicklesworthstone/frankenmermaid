@@ -4793,6 +4793,8 @@ struct SvgGeometry {
     frame: SvgFrame,
     detail: RenderDetailProfile,
     label_positions: Option<Vec<Option<fm_layout::LayoutPoint>>>,
+    radar: Option<fm_layout::RadarChartLayout>,
+    treemap: Option<fm_layout::TreemapChartLayout>,
 }
 
 /// Resolve label placement before the document frame is fixed. An unusually wide label, or a
@@ -4807,17 +4809,50 @@ fn svg_geometry(
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let title_height = if layout.extensions.journey.is_some() || generic_title_for(ir).is_none() {
+    let radar = ir
+        .radar_meta
+        .as_ref()
+        .zip(layout.extensions.radar.as_ref())
+        .map(|(meta, radar)| {
+            fm_layout::RadarChartLayout::new(
+                meta,
+                radar,
+                ir.declared_title_if_drawn(),
+                &config.font_metrics(),
+            )
+        });
+    let treemap = (ir.diagram_type == DiagramType::Treemap && ir.treemap_meta.is_some())
+        .then(|| fm_layout::TreemapChartLayout::new(ir, layout, &config.font_metrics()));
+    let title_height = if radar.is_some()
+        || treemap.is_some()
+        || layout.extensions.journey.is_some()
+        || generic_title_for(ir).is_none()
+    {
         0.0
     } else {
         config.font_size + 22.0
     };
+    // The plotting area encodes values; captions must enlarge the document around it, not
+    // shrink or move data to fit. Reuse these measured compositions when drawing below.
+    let mut bounds = layout.bounds;
+    for chart in radar
+        .iter()
+        .map(|chart| chart.bounds)
+        .chain(treemap.iter().map(|chart| chart.bounds))
+    {
+        let right = (bounds.x + bounds.width).max(chart.x + chart.width);
+        let bottom = (bounds.y + bounds.height).max(chart.y + chart.height);
+        bounds.x = bounds.x.min(chart.x);
+        bounds.y = bounds.y.min(chart.y);
+        bounds.width = right - bounds.x;
+        bounds.height = bottom - bounds.y;
+    }
 
     let mut frame = SvgFrame {
-        viewbox_width: (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
-        viewbox_height: layout.bounds.height + padding * 2.0 + legend_height + title_height,
-        offset_x: padding - layout.bounds.x,
-        offset_y: padding - layout.bounds.y + title_height,
+        viewbox_width: (bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
+        viewbox_height: bounds.height + padding * 2.0 + legend_height + title_height,
+        offset_x: padding - bounds.x,
+        offset_y: padding - bounds.y + title_height,
     };
     if let Some(meta) = ir.pie_meta.as_ref().filter(|meta| !meta.slices.is_empty()) {
         let pie = fm_layout::PieChartLayout::new(
@@ -4917,6 +4952,8 @@ fn svg_geometry(
         frame,
         detail,
         label_positions,
+        radar,
+        treemap,
     }
 }
 
@@ -4967,6 +5004,8 @@ fn render_layout_to_svg(
         frame,
         mut detail,
         label_positions: preserved_label_positions,
+        radar,
+        treemap,
     } = svg_geometry(ir, layout, config);
     if layout.extensions.journey.is_some() {
         detail.show_node_labels = false;
@@ -4974,7 +5013,8 @@ fn render_layout_to_svg(
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let generic_title = generic_title_for(ir).filter(|_| layout.extensions.journey.is_none());
+    let generic_title = generic_title_for(ir)
+        .filter(|_| layout.extensions.journey.is_none() && radar.is_none() && treemap.is_none());
     let width = frame.viewbox_width;
     let height = frame.viewbox_height;
 
@@ -5370,17 +5410,25 @@ fn render_layout_to_svg(
         doc = doc.child(Element::raw_svg(info_svg));
     }
     // The radar wheel (bd-sk4dv). `None` for every other diagram type.
-    if layout.extensions.radar.is_some() {
+    if let Some(chart) = &radar {
         let mut radar_svg = String::new();
-        write_radar_into(&mut radar_svg, ir, layout, offset_x, offset_y, config);
+        write_radar_into(
+            &mut radar_svg,
+            ir,
+            layout,
+            chart,
+            offset_x,
+            offset_y,
+            config,
+        );
         doc = doc.child(Element::raw_svg(radar_svg));
     }
     // Treemap tiles (bd-9ghyo). Empty for every other diagram type, so this costs nothing
     // elsewhere. Drawn BEFORE the bands block because a treemap has no bands and no nodes — the
     // tiles are the whole diagram.
-    if !layout.extensions.treemap_tiles.is_empty() {
+    if let Some(chart) = &treemap {
         let mut tiles_svg = String::new();
-        write_treemap_tiles_into(&mut tiles_svg, ir, layout, offset_x, offset_y, config);
+        write_treemap_tiles_into(&mut tiles_svg, ir, chart, offset_x, offset_y, config);
         doc = doc.child(Element::raw_svg(tiles_svg));
     }
     // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
@@ -6586,11 +6634,12 @@ fn write_radar_into(
     out: &mut String,
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
+    chart: &fm_layout::RadarChartLayout,
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
 ) {
-    use crate::attributes::{write_escaped_text, write_number_into};
+    use crate::attributes::write_number_into;
     let (Some(radar), Some(meta)) = (layout.extensions.radar.as_ref(), ir.radar_meta.as_ref())
     else {
         return;
@@ -6600,7 +6649,7 @@ fn write_radar_into(
     let cx = radar.center.x + offset_x;
     let cy = radar.center.y + offset_y;
 
-    out.push_str("<g class=\"fm-radar\">");
+    out.push_str("<g class=\"fm-radar\" id=\"radar-chart\" xml:space=\"preserve\">");
 
     // Graticule. In polygon mode the rings are n-gons through the axis directions rather than
     // circles — and, measured, that option changes the CURVE too (handled below).
@@ -6630,8 +6679,8 @@ fn write_radar_into(
         }
     }
 
-    // Spokes and their labels.
-    for (index, axis) in radar.axes.iter().enumerate() {
+    // Keep the measured data geometry independent of caption placement.
+    for axis in &radar.axes {
         out.push_str("<line class=\"fm-radar-axis\" x1=\"");
         let _ = write_number_into(out, cx);
         out.push_str("\" y1=\"");
@@ -6643,20 +6692,6 @@ fn write_radar_into(
         out.push_str("\" stroke=\"");
         out.push_str(&colors.node_stroke);
         out.push_str("\" stroke-width=\"2\"/>");
-
-        if let Some(declared) = meta.axes.get(index) {
-            out.push_str("<text class=\"fm-radar-axis-label\" x=\"");
-            let _ = write_number_into(out, axis.label_anchor.x + offset_x);
-            out.push_str("\" y=\"");
-            let _ = write_number_into(out, axis.label_anchor.y + offset_y);
-            out.push_str(
-                "\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"12\" fill=\"",
-            );
-            let _ = crate::attributes::write_escaped_attr(out, &colors.text);
-            out.push_str("\">");
-            let _ = write_escaped_text(out, declared.display());
-            out.push_str("</text>");
-        }
     }
 
     // One closed curve per series.
@@ -6681,31 +6716,46 @@ fn write_radar_into(
         out.push_str("\" stroke-width=\"2\"/>");
     }
 
-    // Legend, one row per series. Suppressed by `showLegend false`.
-    if meta.show_legend {
-        let legend_x = cx + radar.outer_radius * 0.875;
-        let legend_y = cy - radar.outer_radius * 0.875;
-        for (index, curve) in meta.curves.iter().enumerate() {
-            let row = legend_y + index as f32 * 20.0;
-            let fill = RADAR_PALETTE[index % RADAR_PALETTE.len()];
-            out.push_str("<rect class=\"fm-radar-legend-box\" x=\"");
-            let _ = write_number_into(out, legend_x);
-            out.push_str("\" y=\"");
-            let _ = write_number_into(out, row);
-            out.push_str("\" width=\"12\" height=\"12\" fill=\"");
-            out.push_str(fill);
-            out.push_str("\" fill-opacity=\"0.5\" stroke=\"");
-            out.push_str(fill);
-            out.push_str("\"/>");
-            out.push_str("<text class=\"fm-radar-legend-label\" x=\"");
-            let _ = write_number_into(out, legend_x + 16.0);
-            out.push_str("\" y=\"");
-            let _ = write_number_into(out, row + 6.0);
-            out.push_str("\" dominant-baseline=\"middle\" font-size=\"12\" fill=\"");
-            let _ = crate::attributes::write_escaped_attr(out, &colors.text);
-            out.push_str("\">");
-            let _ = write_escaped_text(out, curve.display());
-            out.push_str("</text>");
+    // Captions and the external legend share the same measured geometry as Canvas and Scene.
+    // Leaders identify any caption moved away from its original spoke to avoid a collision.
+    for entry in &chart.paths {
+        let class = match entry.role {
+            fm_layout::RadarPathRole::Leader => "fm-radar-label-leader",
+            fm_layout::RadarPathRole::Legend(_) => "fm-radar-legend-box",
+            _ => continue,
+        };
+        let mut element = render_scene_path(&entry.path, false, None)
+            .class(class)
+            .transform(&format!("translate({offset_x},{offset_y})"));
+        if entry.role == fm_layout::RadarPathRole::Leader {
+            element = element.stroke(&colors.node_stroke);
+        }
+        element.write_to_string(out);
+    }
+    for block in &chart.text {
+        let class = match block.role {
+            fm_layout::RadarTextRole::Axis(_) => "fm-radar-axis-label",
+            fm_layout::RadarTextRole::Legend(_) => "fm-radar-legend-label",
+            fm_layout::RadarTextRole::Title => "fm-diagram-title",
+        };
+        for (text, point) in block.rows() {
+            let mut row = TextBuilder::new(text)
+                .x(point.x + offset_x)
+                .y(point.y + offset_y)
+                .anchor(match block.align {
+                    RenderTextAlign::Start => TextAnchor::Start,
+                    RenderTextAlign::Middle => TextAnchor::Middle,
+                    RenderTextAlign::End => TextAnchor::End,
+                })
+                .baseline(text::DominantBaseline::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(block.font_size)
+                .fill(&colors.text)
+                .class(class);
+            if block.role == fm_layout::RadarTextRole::Title {
+                row = row.font_weight("600");
+            }
+            row.build().write_to_string(out);
         }
     }
 
@@ -6808,58 +6858,14 @@ fn write_info_version_into(
     out.push_str("</text>");
 }
 
-/// The treemap palette, cycled per SECTION.
-const TREEMAP_PALETTE: [&str; 6] = [
-    "#8686ff", "#ffff78", "#d7ff86", "#ff86c8", "#86e0ff", "#ffc386",
-];
-
-/// Assign each tile a palette slot: one per section, INHERITED by everything inside it.
+/// Draw the measured treemap composition while preserving its quantitative rectangles.
 ///
-/// ⚠️ NOT ONE HUE PER TILE. Upstream measurably colours by container: in a two-group document the
-/// groups took `rgb(255,255,120)` and `rgb(215,255,134)`, and every leaf inside a group repeated
-/// its group's hue exactly. A per-tile hue says "which child am I", which is not a fact a treemap
-/// is trying to communicate — the fact it communicates is "which box am I in", and giving siblings
-/// different colours actively hides it.
-fn treemap_palette_slots(
-    meta: &fm_core::IrTreemapMeta,
-    tiles: &[fm_layout::LayoutTreemapTile],
-) -> std::collections::HashMap<usize, usize> {
-    let mut slots = std::collections::HashMap::new();
-    let mut next = 0_usize;
-    for tile in tiles {
-        // Every SECTION takes the next slot; only a LEAF inherits. Measured upstream: `Root`, `G1`
-        // and `G2` came out three different hues while `G1`'s two leaves both repeated `G1`'s.
-        // Letting sections inherit too collapses the whole diagram to one colour, which is the
-        // first thing this got wrong.
-        let inherited = if tile.is_leaf {
-            meta.nodes
-                .get(tile.node)
-                .and_then(|item| item.parent)
-                .and_then(|parent| slots.get(&parent).copied())
-        } else {
-            None
-        };
-        let slot = inherited.unwrap_or_else(|| {
-            let assigned = next;
-            next += 1;
-            assigned
-        });
-        slots.insert(tile.node, slot);
-    }
-    slots
-}
-
-/// Draw a `treemap`: nested rectangles whose area encodes their value (bd-9ghyo).
-///
-/// Structure MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151. A SECTION is a
-/// container with a 25px title band carrying its label at the left and its summed value at the
-/// right; a LEAF is a filled rectangle with its label and value stacked at the centre. Every tile
-/// is clipped to its own rectangle, because a label wider than its tile is the normal case in a
-/// treemap and must not spill over a neighbour.
+/// Captions use the configured typography. Entries that cannot fit keep their full hierarchy
+/// and value in an external details column; tile-local text has an explicit clipping rectangle.
 fn write_treemap_tiles_into(
     out: &mut String,
     ir: &MermaidDiagramIr,
-    layout: &DiagramLayout,
+    chart: &fm_layout::TreemapChartLayout,
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
@@ -6869,151 +6875,172 @@ fn write_treemap_tiles_into(
     };
     let theme = resolve_theme(Some(ir), config);
     let colors = &theme.colors;
-    let slots = treemap_palette_slots(meta, &layout.extensions.treemap_tiles);
-
-    for tile in &layout.extensions.treemap_tiles {
-        let Some(item) = meta.nodes.get(tile.node) else {
-            continue;
-        };
-        if tile.bounds.width <= 0.0 || tile.bounds.height <= 0.0 {
-            continue;
-        }
-        let x = tile.bounds.x + offset_x;
-        let y = tile.bounds.y + offset_y;
-        let w = tile.bounds.width;
-        let h = tile.bounds.height;
-        let fill =
-            TREEMAP_PALETTE[slots.get(&tile.node).copied().unwrap_or(0) % TREEMAP_PALETTE.len()];
-        let value = fm_layout::format_treemap_value(tile.value);
-
-        out.push_str("<g class=\"fm-treemap-tile fm-treemap-");
-        out.push_str(if tile.is_leaf { "leaf" } else { "section" });
-        // `fm-node-user-{slug}`, NOT the bare author name: that is the marker the `classDef` rule
-        // this crate already emits is written against (`.fm-node-user-hot .fm-node-shape`). Emitting
-        // the bare name left the rule matching nothing, so a `classDef` we parsed and accepted was
-        // silently dropped, and put an unnamespaced author string into the class list besides.
-        for class in &item.classes {
-            out.push_str(" fm-node-user-");
-            let _ = crate::attributes::write_escaped_attr(out, &sanitize_css_token(class));
-        }
-        // `fm-node-shape` is the other half of that selector. Safe on a treemap rect: every other
-        // `.fm-node-shape` rule in the crate is `.fm-node.fm-node-shape-<name>`, scoped under
-        // `.fm-node` and suffixed, so none of them reaches this element.
-        out.push_str("\"><rect class=\"fm-node-shape\" x=\"");
-        let _ = crate::attributes::write_number_into(out, x);
-        out.push_str("\" y=\"");
-        let _ = crate::attributes::write_number_into(out, y);
-        out.push_str("\" width=\"");
-        let _ = crate::attributes::write_number_into(out, w);
-        out.push_str("\" height=\"");
-        let _ = crate::attributes::write_number_into(out, h);
-        out.push_str("\" fill=\"");
-        out.push_str(fill);
-        out.push_str("\" fill-opacity=\"");
-        // A section is a container the eye must see THROUGH to its children, so it is drawn much
-        // fainter than a leaf. Both are the same hue, which is what ties a leaf to its section.
-        out.push_str(if tile.is_leaf { "0.35" } else { "0.15" });
-        out.push_str("\" stroke=\"");
-        out.push_str(&colors.node_stroke);
-        out.push_str("\" stroke-width=\"1\"/>");
-
-        if tile.is_leaf {
-            // Label and value stacked at the centre.
-            write_treemap_text_into(
-                out,
-                item.label.as_str(),
-                x + w / 2.0,
-                y + h / 2.0,
-                &TreemapTextStyle {
-                    anchor: "middle",
-                    class: "fm-treemap-label",
-                    font_size: 14.0,
-                    fill: &colors.text,
-                },
-            );
-            write_treemap_text_into(
-                out,
-                &value,
-                x + w / 2.0,
-                y + h / 2.0 + 16.0,
-                &TreemapTextStyle {
-                    anchor: "middle",
-                    class: "fm-treemap-value",
-                    font_size: 11.0,
-                    fill: &colors.text,
-                },
-            );
+    let safe_paint = |value: &str| {
+        if value.contains(';') {
+            None
         } else {
-            // Header band: label left, summed value right.
-            write_treemap_text_into(
-                out,
-                item.label.as_str(),
-                x + 6.0,
-                y + 16.0,
-                &TreemapTextStyle {
-                    anchor: "start",
-                    class: "fm-treemap-section-label",
-                    font_size: 12.0,
-                    fill: &colors.text,
-                },
-            );
-            write_treemap_text_into(
-                out,
-                &value,
-                x + w - 6.0,
-                y + 16.0,
-                &TreemapTextStyle {
-                    anchor: "end",
-                    class: "fm-treemap-section-value",
-                    font_size: 10.0,
-                    fill: &colors.text,
-                },
-            );
+            fm_core::sanitize_style_value(value)
         }
-        out.push_str("</g>");
-    }
-}
+    };
 
-/// How one treemap caption is styled — grouped so the writer takes a position and a style rather
-/// than eight loose parameters in an order a caller can silently transpose.
-struct TreemapTextStyle<'a> {
-    anchor: &'static str,
-    class: &'static str,
-    font_size: f32,
-    fill: &'a str,
-}
-
-fn write_treemap_text_into(
-    out: &mut String,
-    text: &str,
-    x: f32,
-    y: f32,
-    style: &TreemapTextStyle<'_>,
-) {
-    let TreemapTextStyle {
-        anchor,
-        class,
-        font_size,
-        fill,
-    } = *style;
-    if text.is_empty() {
-        return;
+    // A clip's identity includes its translated geometry: inline charts cannot accidentally
+    // borrow a differently sized tile clip from another SVG in the same document.
+    let clip_id = |clip: fm_layout::LayoutRect| {
+        format!(
+            "fm-treemap-clip-{:08x}-{:08x}-{:08x}-{:08x}",
+            (clip.x + offset_x).to_bits(),
+            (clip.y + offset_y).to_bits(),
+            clip.width.to_bits(),
+            clip.height.to_bits(),
+        )
+    };
+    let mut clips = BTreeMap::new();
+    for block in &chart.text {
+        if let Some(clip) = block.clip {
+            clips.entry(clip_id(clip)).or_insert(clip);
+        }
     }
-    out.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(out, x);
-    out.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(out, y);
-    out.push_str("\" class=\"");
-    out.push_str(class);
-    out.push_str("\" text-anchor=\"");
-    out.push_str(anchor);
-    out.push_str("\" font-size=\"");
-    let _ = crate::attributes::write_number_into(out, font_size);
-    out.push_str("\" fill=\"");
-    let _ = crate::attributes::write_escaped_attr(out, fill);
-    out.push_str("\">");
-    let _ = crate::attributes::write_escaped_text(out, text);
-    out.push_str("</text>");
+
+    out.push_str("<g class=\"fm-treemap\" id=\"treemap-chart\" xml:space=\"preserve\">");
+    out.push_str("<defs>");
+    for (id, clip) in clips {
+        Element::clip_path()
+            .id(&id)
+            .attr("clipPathUnits", "userSpaceOnUse")
+            .child(
+                Element::rect()
+                    .x(clip.x + offset_x)
+                    .y(clip.y + offset_y)
+                    .width(clip.width)
+                    .height(clip.height),
+            )
+            .write_to_string(out);
+    }
+    out.push_str("</defs>");
+
+    for tile in &chart.tiles {
+        let fill = safe_paint(&tile.fill).unwrap_or_else(|| "none".to_owned());
+        let stroke = tile
+            .stroke
+            .as_deref()
+            .and_then(safe_paint)
+            .unwrap_or_else(|| colors.node_stroke.clone());
+        let mut group = Element::group()
+            .class(if tile.is_leaf {
+                "fm-treemap-tile fm-treemap-leaf"
+            } else {
+                "fm-treemap-tile fm-treemap-section"
+            })
+            .id(&format!("treemap-tile-{}", tile.node));
+        for class in &tile.classes {
+            group = group.class(&format!("fm-node-user-{}", sanitize_css_token(class)));
+        }
+        // The composition has already resolved class order and multiplied opacity into both
+        // paints. Keep the public class hooks, but do not let embedded classDef CSS apply the
+        // same opacity a second time or override that resolved cascade.
+        let paint = format!(
+            "fill:{fill};fill-opacity:{};stroke:{stroke};stroke-opacity:{};stroke-width:{};opacity:1",
+            tile.fill_opacity, tile.stroke_opacity, tile.stroke_width,
+        );
+        group
+            .child(
+                Element::rect()
+                    .class("fm-node-shape")
+                    .x(tile.bounds.x + offset_x)
+                    .y(tile.bounds.y + offset_y)
+                    .width(tile.bounds.width)
+                    .height(tile.bounds.height)
+                    .fill(&fill)
+                    .fill_opacity(tile.fill_opacity)
+                    .stroke(&stroke)
+                    .stroke_opacity(tile.stroke_opacity)
+                    .stroke_width(tile.stroke_width)
+                    .attr("style", &paint),
+            )
+            .write_to_string(out);
+    }
+
+    for detail in &chart.details {
+        let fill = safe_paint(&detail.fill).unwrap_or_else(|| "none".to_owned());
+        Element::rect()
+            .class("fm-treemap-detail-swatch")
+            .x(detail.swatch.x + offset_x)
+            .y(detail.swatch.y + offset_y)
+            .width(detail.swatch.width)
+            .height(detail.swatch.height)
+            .fill(&fill)
+            .fill_opacity(detail.opacity)
+            .write_to_string(out);
+    }
+
+    // Paint labels after all tiles so a child cannot cover its parent's caption.
+    for (index, block) in chart.text.iter().enumerate() {
+        let (id, class) = match block.role {
+            fm_layout::TreemapTextRole::Label(node) => (
+                format!("treemap-text-{node}-{index}"),
+                if meta.nodes.get(node).is_some_and(|item| item.is_leaf()) {
+                    "fm-treemap-label"
+                } else {
+                    "fm-treemap-section-label"
+                },
+            ),
+            fm_layout::TreemapTextRole::Value(node) => (
+                format!("treemap-text-{node}-{index}"),
+                if meta.nodes.get(node).is_some_and(|item| item.is_leaf()) {
+                    "fm-treemap-value"
+                } else {
+                    "fm-treemap-section-value"
+                },
+            ),
+            fm_layout::TreemapTextRole::DetailPath(node) => (
+                format!("treemap-text-{node}-{index}"),
+                "fm-treemap-detail-label",
+            ),
+            fm_layout::TreemapTextRole::Reference(node) => (
+                format!("treemap-text-{node}-{index}"),
+                "fm-treemap-reference",
+            ),
+            fm_layout::TreemapTextRole::Title => ("treemap-title".to_owned(), "fm-diagram-title"),
+        };
+        let typography = resolve_treemap_scene_typography(ir, Some(&id));
+        let mut group = Element::group().id(&id);
+        if let Some(clip) = block.clip {
+            group = group.clip_path_ref(&format!("url(#{})", clip_id(clip)));
+        }
+        let fill = block
+            .color
+            .as_deref()
+            .and_then(safe_paint)
+            .unwrap_or_else(|| colors.text.clone());
+        for (text, point) in block.rows() {
+            let mut row = TextBuilder::new(text)
+                .x(point.x + offset_x)
+                .y(point.y + offset_y)
+                .anchor(match block.align {
+                    RenderTextAlign::Start => TextAnchor::Start,
+                    RenderTextAlign::Middle => TextAnchor::Middle,
+                    RenderTextAlign::End => TextAnchor::End,
+                })
+                .baseline(text::DominantBaseline::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(block.font_size)
+                .fill(&fill)
+                .class(class)
+                .build()
+                .fill_opacity(block.opacity);
+            if block.role == fm_layout::TreemapTextRole::Title {
+                row = row.attr("font-weight", "600");
+            }
+            if let Some(typography) = &typography {
+                for (property, value) in typography {
+                    row = row.attr(property.clone(), value.as_str());
+                }
+            }
+            group = group.child(row);
+        }
+        group.write_to_string(out);
+    }
+    out.push_str("</g>");
 }
 
 fn render_sequence_lifeline(
@@ -10436,9 +10463,11 @@ fn write_subroutine_node_fragment_into(
     let _ = crate::attributes::write_number_into(out, font_size);
     out.push_str("\" fill=\"");
     let _ = write_escaped_attr(out, text_fill);
-    out.push_str("\">");
+    out.push_str("\" xml:space=\"preserve\">");
     let _ = write_escaped_text(out, label);
-    out.push_str("</text></g>");
+    out.push_str("</text><title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", subroutine box</title></g>");
 }
 
 /// Whether the per-element accessibility flags are uniformly on (`Some(true)`) or uniformly off
@@ -10725,7 +10754,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     let _ = crate::attributes::write_number_into(f, font_size);
     f.push_str("\" fill=\"");
     let _ = write_escaped_attr(f, text_fill);
-    f.push_str("\">");
+    f.push_str("\" xml:space=\"preserve\">");
     let _ = write_escaped_text(f, label);
     f.push_str("</text>");
     // <title>Node: {raw_label}, rectangle</title> -- this is `describe_node(node, ir)` for the gated
@@ -12254,28 +12283,9 @@ fn render_node(
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.0),
             );
-            g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
-            if detail.show_node_labels {
-                return group.child(g).child(render_node_label_text(
-                    ir,
-                    label_id,
-                    label_text.as_ref(),
-                    cx,
-                    cy - label_text.lines().count().saturating_sub(1) as f32
-                        * node_font_size
-                        * config.line_height
-                        * 0.5
-                        + node_font_size / 3.0,
-                    node_font_size,
-                    fit_width((w - 16.0).max(node_font_size)),
-                    (h - 16.0).max(node_font_size),
-                    config,
-                    colors,
-                    text_style.as_deref(),
-                    emit_classdef_classes,
-                ));
-            }
-            return group.child(g);
+            // Keep the shared label, accessibility and interaction finishing path. Returning
+            // here used to discard titles, links, callbacks and tooltips for this shape.
+            g
         }
 
         NodeShape::Asymmetric => {
@@ -12500,28 +12510,7 @@ fn render_node(
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
-            g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
-            if detail.show_node_labels {
-                return group.child(g).child(render_node_label_text(
-                    ir,
-                    label_id,
-                    &label_text,
-                    cx,
-                    cy - label_text.lines().count().saturating_sub(1) as f32
-                        * node_font_size
-                        * config.line_height
-                        * 0.5
-                        + node_font_size / 3.0,
-                    node_font_size,
-                    fit_width((w * 0.8).max(node_font_size)),
-                    (h * 0.8).max(node_font_size),
-                    config,
-                    colors,
-                    text_style.as_deref(),
-                    emit_classdef_classes,
-                ));
-            }
-            return group.child(g);
+            g
         }
         // ── mermaid 11 shapes (bd-7ls21) ──────────────────────────────────────────────────────
         // Silhouettes read off a Chromium 151 render of the pinned 11.15.0 bundle. mermaid draws
@@ -13090,7 +13079,12 @@ fn render_node(
         && semantic_colors.is_none()
         && !matches!(
             shape,
-            NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar
+            NodeShape::Note
+                | NodeShape::FilledCircle
+                | NodeShape::HorizontalBar
+                // The inner primitive owns each composite's fill.
+                | NodeShape::Subroutine
+                | NodeShape::CrossedCircle
         ) {
         shape_elem.fill("url(#fm-node-gradient)")
     } else {
@@ -13339,6 +13333,13 @@ fn render_node(
         }
     }
 
+    // Attach authored tooltips before Inline links wrap and return the completed node.
+    if let Some(node) = ir_node
+        && let Some(tooltip) = node.tooltip()
+    {
+        group = group.attr("title", tooltip);
+    }
+
     if let Some(node) = ir_node
         && let Some(href) = node.href()
         && is_safe_link_target(href, ir.meta.init.config.sanitize_mode)
@@ -13360,7 +13361,8 @@ fn render_node(
                     .attr("target", node.link_target().unwrap_or("_blank"))
                     .attr("rel", "noopener noreferrer");
 
-                group = group.attr("style", "cursor: pointer;");
+                // Keep the node's semantic palette and animation variables intact.
+                group = group.attr("cursor", "pointer");
 
                 a = a.child(group);
                 return a;
@@ -13378,29 +13380,8 @@ fn render_node(
     {
         group = group
             .attr("data-callback", callback)
-            .attr("style", "cursor: pointer;")
+            .attr("cursor", "pointer")
             .class("fm-node-has-callback");
-    }
-
-    // `click a "url" "some tooltip"` (bd-bk7h). `IrNodeInteraction.tooltip` was parsed, stored, and
-    // rendered by NOTHING: fm-render-svg and fm-render-canvas referenced it zero times, and the
-    // terminal's only uses are in `diff.rs`, which reports that it CHANGED without ever drawing it.
-    // That is the dead-IR-field class this project has already found twice (bd-jgco branch names,
-    // bd-jerh attribute comments).
-    //
-    // A `title` ATTRIBUTE, not a `<title>` child, because that is what the incumbent emits:
-    // mermaid 11.15.0 does `t.tooltip && n.attr("title", t.tooltip)`. The `<title>Node: ...`
-    // children elsewhere in this file are the a11y name for the shape; a tooltip is the author's
-    // own text and belongs where a browser will show it on hover.
-    //
-    // It sits on the same decoration path as href and callback, so the fast paths above already
-    // had to learn to refuse it - hence the `node.tooltip().is_none()` clause added to each of
-    // them. Without that clause a tooltip-bearing node would take a streaming path and never reach
-    // this line, which is exactly how the field came to be dead in the first place.
-    if let Some(node) = ir_node
-        && let Some(tooltip) = node.tooltip()
-    {
-        group = group.attr("title", tooltip);
     }
 
     group
@@ -14310,6 +14291,13 @@ fn node_label_fit_dimensions(
     config: &SvgRenderConfig,
 ) -> (f32, f32) {
     let (content_width, content_height) = content_size;
+    if shape == NodeShape::CrossedCircle {
+        // Preserve the composite's established label region when it uses the shared renderer.
+        return (
+            (content_width * 0.8).max(font_size),
+            (content_height * 0.8).max(font_size),
+        );
+    }
     if shape != NodeShape::Diamond || label.is_empty() {
         return (
             (content_width - 16.0).max(font_size),
@@ -18131,9 +18119,37 @@ mod tests {
         .collect();
         let config = SvgRenderConfig::default();
         let geometry = svg_geometry(&ir, &layout, &config);
-        assert_eq!(
-            geometry.label_positions.unwrap()[1],
-            Some(fm_layout::LayoutPoint { x: 200.0, y: 200.0 }),
+        let positions = geometry.label_positions.as_ref().expect("graph captions");
+        let position = positions[1].expect("branch caption");
+        assert_eq!(position.x, 200.0, "caption stays on its own vertical route");
+        assert!(
+            position.y > 250.0 && position.y < 300.0,
+            "prefer the distinct branch over the ambiguous shared trunk: {position:?}"
+        );
+        let colors = ThemeColors::default();
+        let context = EdgeRenderContext {
+            ir: &ir,
+            offset_x: geometry.frame.offset_x,
+            offset_y: geometry.frame.offset_y,
+            config: &config,
+            detail: geometry.detail,
+            colors: &colors,
+            accessible_node_labels: None,
+            preserved_label_positions: Some(positions),
+            sequence_messages: &[],
+            sankey_widest_flow: None,
+        };
+        let mut plate = edge_label_test_plate(&render_edge(&layout.edges[1], &context).render());
+        plate.x -= geometry.frame.offset_x;
+        plate.y -= geometry.frame.offset_y;
+        edge_label_test_assert_clear(
+            &plate,
+            &fm_layout::LayoutRect {
+                x: 200.0,
+                y: 250.0,
+                width: 100.0,
+                height: 0.0,
+            },
         );
     }
 
@@ -19022,6 +19038,7 @@ mod tests {
                 NodeShape::Stadium,
                 NodeShape::Circle,
                 NodeShape::DoubleCircle,
+                NodeShape::CrossedCircle,
                 NodeShape::Note,
                 NodeShape::Cloud,
                 NodeShape::Subroutine,
@@ -19035,38 +19052,26 @@ mod tests {
                 NodeShape::InvParallelogram,
                 NodeShape::Asymmetric,
             ] {
-                let mut ir = create_ir_with_single_node("N0", shape);
-                // Keep every supported fragment eligible for its fast path, including circles.
-                ir.labels[0].text = "Role".to_string();
-                let node_box = LayoutNodeBox {
-                    node_index: 0,
-                    node_id: "N0".to_string(),
-                    rank: 0,
-                    order: 0,
-                    span: Span::default(),
-                    bounds: fm_layout::LayoutRect {
-                        x: 10.0,
-                        y: 20.0,
-                        width: 140.0,
-                        height: 90.0,
-                    },
-                };
-                let mut streamed = String::new();
-                render_node_into(
-                    &mut streamed,
-                    &node_box,
-                    &ir,
-                    0.0,
-                    0.0,
-                    &config,
-                    detail,
-                    &colors,
-                    false,
-                    &centrality,
-                );
-                for permit_fast in [false, true] {
-                    let mut built = String::new();
-                    render_node(
+                for label in ["Role", "A  B"] {
+                    let mut ir = create_ir_with_single_node("N0", shape);
+                    // Keep every supported fragment eligible for its fast path, including circles.
+                    ir.labels[0].text = label.to_string();
+                    let node_box = LayoutNodeBox {
+                        node_index: 0,
+                        node_id: "N0".to_string(),
+                        rank: 0,
+                        order: 0,
+                        span: Span::default(),
+                        bounds: fm_layout::LayoutRect {
+                            x: 10.0,
+                            y: 20.0,
+                            width: 140.0,
+                            height: 90.0,
+                        },
+                    };
+                    let mut streamed = String::new();
+                    render_node_into(
+                        &mut streamed,
                         &node_box,
                         &ir,
                         0.0,
@@ -19076,16 +19081,88 @@ mod tests {
                         &colors,
                         false,
                         &centrality,
-                        permit_fast,
-                    )
-                    .write_to_string(&mut built);
-                    assert_eq!(streamed, built, "{preset:?} {shape:?} fast={permit_fast}");
+                    );
+                    for permit_fast in [false, true] {
+                        let mut built = String::new();
+                        render_node(
+                            &node_box,
+                            &ir,
+                            0.0,
+                            0.0,
+                            &config,
+                            detail,
+                            &colors,
+                            false,
+                            &centrality,
+                            permit_fast,
+                        )
+                        .write_to_string(&mut built);
+                        assert_eq!(
+                            streamed, built,
+                            "{preset:?} {shape:?} {label:?} fast={permit_fast}"
+                        );
+                    }
+                    assert!(streamed.contains(&format!(">{label}</text>")));
+                    assert!(streamed.contains("xml:space=\"preserve\""));
+                    if let Some(role) = semantic_node_colors(&ir, 0, shape, &config, &colors) {
+                        assert!(streamed.contains("fm-node-semantic"));
+                        assert!(streamed.contains(&format!("--fm-node-fill:{}", role.fill)));
+                        assert!(streamed.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+                        assert!(streamed.contains("fill=\"var(--fm-node-fill)\""));
+                    }
                 }
-                if let Some(role) = semantic_node_colors(&ir, 0, shape, &config, &colors) {
-                    assert!(streamed.contains("fm-node-semantic"));
-                    assert!(streamed.contains(&format!("--fm-node-fill:{}", role.fill)));
-                    assert!(streamed.contains(&format!("--fm-node-stroke:{}", role.stroke)));
-                    assert!(streamed.contains("fill=\"var(--fm-node-fill)\""));
+            }
+        }
+    }
+
+    #[test]
+    fn composite_shapes_keep_links_callbacks_tooltips_and_text_alternatives() {
+        for (shape, description) in [
+            (NodeShape::Subroutine, "subroutine box"),
+            (NodeShape::CrossedCircle, "crossed circle"),
+        ] {
+            for action in ["link", "callback", "tooltip"] {
+                for embed_theme_css in [false, true] {
+                    for text_alternatives in [false, true] {
+                        let mut ir = create_ir_with_single_node("N0", shape);
+                        ir.labels[0].text = "A  B".to_owned();
+                        let interaction = ir.nodes[0].interaction_mut();
+                        interaction.tooltip = Some("Inspect & compare".to_owned());
+                        if action == "link" {
+                            interaction.href = Some("https://example.com/details".to_owned());
+                            interaction.link_target = Some("_self".to_owned());
+                        } else if action == "callback" {
+                            interaction.callback = Some("openDetails".to_owned());
+                        }
+                        let config = SvgRenderConfig {
+                            embed_theme_css,
+                            link_mode: MermaidLinkMode::Inline,
+                            a11y: A11yConfig {
+                                text_alternatives,
+                                ..A11yConfig::default()
+                            },
+                            ..SvgRenderConfig::default()
+                        };
+                        let svg = render_svg_with_config(&ir, &config);
+                        assert!(svg.contains("title=\"Inspect &amp; compare\""));
+                        assert!(svg.contains(">A  B</text>"));
+                        assert_eq!(
+                            svg.contains(&format!("<title>Node: A  B, {description}</title>")),
+                            text_alternatives,
+                            "{shape:?} {action} must honor the accessibility configuration"
+                        );
+                        if action == "link" {
+                            assert!(svg.contains("href=\"https://example.com/details\""));
+                            assert!(svg.contains("target=\"_self\""));
+                            assert!(svg.contains("rel=\"noopener noreferrer\""));
+                        } else if action == "callback" {
+                            assert!(svg.contains("data-callback=\"openDetails\""));
+                            assert!(svg.contains("fm-node-has-callback"));
+                        }
+                        if action != "tooltip" {
+                            assert!(svg.contains("cursor=\"pointer\""));
+                        }
+                    }
                 }
             }
         }
@@ -19229,6 +19306,59 @@ mod tests {
                     .0;
                 assert!(reset.contains(&format!("--fm-node-fill:{fill}!important")));
                 assert!(reset.contains(&format!("--fm-node-stroke:{stroke}!important")));
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_nodes_keep_semantic_colors_and_animation_styles() {
+        let marker = format!("id=\"{}\"", mermaid_node_element_id("N0", 0));
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            for shape in [NodeShape::Diamond, NodeShape::Cylinder] {
+                for callback in [false, true] {
+                    for animations_enabled in [false, true] {
+                        let mut ir = create_ir_with_single_node("N0", shape);
+                        let interaction = ir.nodes[0].interaction_mut();
+                        if callback {
+                            interaction.callback = Some("openDetails".to_string());
+                        } else {
+                            interaction.href = Some("https://example.com/details".to_string());
+                        }
+                        let config = SvgRenderConfig {
+                            theme: preset,
+                            link_mode: MermaidLinkMode::Inline,
+                            animations_enabled,
+                            ..SvgRenderConfig::default()
+                        };
+                        let role = semantic_node_colors(
+                            &ir,
+                            0,
+                            shape,
+                            &config,
+                            &ThemeColors::from_preset(preset),
+                        )
+                        .expect("semantic node colors");
+                        let svg = render_svg_with_config(&ir, &config);
+                        let node = svg
+                            .split_once(&marker)
+                            .expect("interactive node")
+                            .1
+                            .split_once("</g>")
+                            .expect("node group end")
+                            .0;
+                        let opening = node.split_once('>').expect("node opening tag").0;
+                        assert!(opening.contains("cursor=\"pointer\""));
+                        assert!(opening.contains(&format!("--fm-node-fill:{}", role.fill)));
+                        assert!(opening.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+                        assert_eq!(opening.contains("--fm-enter-order:"), animations_enabled);
+                        assert!(node.contains("fill=\"var(--fm-node-fill)\""));
+                        if callback {
+                            assert!(opening.contains("data-callback=\"openDetails\""));
+                        } else {
+                            assert!(svg.contains("href=\"https://example.com/details\""));
+                        }
+                    }
+                }
             }
         }
     }
@@ -20526,6 +20656,7 @@ mod tests {
             .fill(&colors.text)
             .build();
         expected = maybe_add_class(expected, "fm-node-label", true);
+        expected = expected.attr("xml:space", "preserve");
         expected = expected.attr("style", "font-weight:700");
 
         let actual = render_node_label_text(
@@ -22616,7 +22747,7 @@ mod tests {
             &svg[start..end]
         }
         fn attribute<'a>(tag: &'a str, name: &str) -> &'a str {
-            tag.split_once(&format!("{name}=\""))
+            tag.split_once(&format!(" {name}=\""))
                 .expect("caption attribute")
                 .1
                 .split('"')
@@ -23750,10 +23881,27 @@ mod tests {
             );
             let sms_group = svg.split_once("data-id=\"S\"").expect("SMS group").1;
             let sms_group = sms_group.split_once("</g>").expect("SMS group end").0;
+            let rows: Vec<_> = sms_group
+                .split("<tspan ")
+                .skip(1)
+                .map(|span| {
+                    span.split_once('>')
+                        .expect("row opening")
+                        .1
+                        .split_once("</tspan>")
+                        .expect("row closing")
+                        .0
+                })
+                .collect();
+            // A long authored line can soft-wrap, but an explicit newline must still
+            // separate the following instructions instead of merging them into that row.
+            assert!(rows.len() >= 3, "authored paragraphs at {tier:?}");
+            assert_eq!(rows[rows.len() - 2], "1 / 2 / 3 = zvolený termín");
+            assert_eq!(rows[rows.len() - 1], "4 = zavolejte mi");
             assert_eq!(
-                sms_group.matches("<tspan ").count(),
-                3,
-                "explicit line breaks at {tier:?}"
+                rows[..rows.len() - 2].concat(),
+                "SMS: avízo hovoru a konkrétní termíny",
+                "soft-wrapped first paragraph at {tier:?}"
             );
         }
     }
@@ -25993,7 +26141,7 @@ marker#arrow-open path {
         let svg = render_svg(&ir);
         assert!(svg.contains("data-callback=\"handleNodeClick\""));
         assert!(svg.contains("fm-node-has-callback"));
-        assert!(svg.contains("cursor: pointer;"));
+        assert!(svg.contains("cursor=\"pointer\""));
     }
 
     #[test]

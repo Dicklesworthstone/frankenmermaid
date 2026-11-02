@@ -336,15 +336,20 @@ fn scene_node_rows(svg: &str, node: usize) -> Vec<(&str, &str)> {
 }
 
 #[test]
-fn treemap_scene_keeps_hierarchy_values_theme_and_one_visible_title() {
+fn treemap_backends_keep_hierarchy_values_theme_and_one_visible_title() {
     use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemeColors, ThemePreset};
 
     let mut ir = fm_parser::parse(NESTED).ir;
     ir.meta.title = Some("Capacity plan".to_owned());
     let layout = fm_layout::layout_diagram(&ir);
-    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+    for (theme, backend) in [ThemePreset::Default, ThemePreset::Dark]
+        .into_iter()
+        .flat_map(|theme| {
+            [SvgBackend::default(), SvgBackend::Scene].map(|backend| (theme, backend))
+        })
+    {
         let config = SvgRenderConfig {
-            backend: SvgBackend::Scene,
+            backend,
             theme,
             ..Default::default()
         };
@@ -380,7 +385,7 @@ fn treemap_scene_keeps_hierarchy_values_theme_and_one_visible_title() {
 }
 
 #[test]
-fn treemap_scene_retains_tiny_and_zero_entries_in_readable_bounded_details() {
+fn treemap_backends_retain_tiny_and_zero_entries_in_readable_bounded_details() {
     use fm_render_svg::{SvgBackend, SvgRenderConfig};
 
     let tiny = "Tiny  東京 service with complete regional coverage";
@@ -395,9 +400,12 @@ fn treemap_scene_retains_tiny_and_zero_entries_in_readable_bounded_details() {
     let layout = fm_layout::layout_diagram(&ir);
     let original_tiles = layout.extensions.treemap_tiles.clone();
     let meta = ir.treemap_meta.as_ref().unwrap();
-    for font_size in [15.0, 36.0] {
+    for (font_size, backend) in [15.0, 36.0]
+        .into_iter()
+        .flat_map(|size| [SvgBackend::default(), SvgBackend::Scene].map(|backend| (size, backend)))
+    {
         let config = SvgRenderConfig {
-            backend: SvgBackend::Scene,
+            backend,
             font_size,
             font_family: "monospace".to_owned(),
             ..Default::default()
@@ -471,7 +479,7 @@ fn treemap_scene_retains_tiny_and_zero_entries_in_readable_bounded_details() {
 }
 
 #[test]
-fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
+fn treemap_backends_apply_author_typography_and_alpha_exactly_once() {
     use fm_render_svg::{SvgBackend, SvgRenderConfig};
 
     let source = "treemap\n\"Root\"\n    \"Priority\": 10:::hot\n    \"Other\": 20\nclassDef default font-family:serif,font-weight:400\nclassDef hot fill:#112233,fill-opacity:0.8,stroke:#aabbcc,stroke-opacity:0.5,stroke-width:2px,color:#fedcba,opacity:0.5,font-size:22px,font-family:monospace,font-weight:700,font-style:italic\n";
@@ -493,9 +501,12 @@ fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
         .unwrap();
     let number =
         |tag: &str, name: &str| scene_attribute(tag, name).unwrap().parse::<f64>().unwrap();
-    for embed_theme_css in [false, true] {
+    for (embed_theme_css, backend) in [false, true]
+        .into_iter()
+        .flat_map(|css| [SvgBackend::default(), SvgBackend::Scene].map(|backend| (css, backend)))
+    {
         let config = SvgRenderConfig {
-            backend: SvgBackend::Scene,
+            backend,
             embed_theme_css,
             ..Default::default()
         };
@@ -504,7 +515,11 @@ fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
         let opening = group.split('>').next().unwrap();
         assert_eq!(scene_attribute(opening, "opacity"), None);
         let path = group
-            .split("<path")
+            .split(if backend == SvgBackend::Scene {
+                "<path"
+            } else {
+                "<rect"
+            })
             .nth(1)
             .unwrap()
             .split('>')
@@ -516,6 +531,18 @@ fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
         assert!((number(path, "fill-opacity") - 0.4).abs() < 1e-6);
         assert!((number(path, "stroke-opacity") - 0.25).abs() < 1e-6);
         assert_eq!(scene_attribute(path, "opacity"), None);
+        if backend == SvgBackend::LegacyLayout {
+            let resolved: std::collections::BTreeMap<_, _> = scene_attribute(path, "style")
+                .expect("resolved paint must take precedence over embedded classDef CSS")
+                .split(';')
+                .map(|property| property.split_once(':').unwrap())
+                .collect();
+            assert_eq!(resolved.get("fill"), Some(&"#112233"));
+            assert_eq!(resolved.get("stroke"), Some(&"#aabbcc"));
+            assert_eq!(resolved.get("fill-opacity"), Some(&"0.4"));
+            assert_eq!(resolved.get("stroke-opacity"), Some(&"0.25"));
+            assert_eq!(resolved.get("opacity"), Some(&"1"));
+        }
         let rows = scene_node_rows(&svg, node);
         assert_eq!(
             rows.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
@@ -531,4 +558,141 @@ fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
             assert_eq!(scene_attribute(tag, "opacity"), None);
         }
     }
+}
+
+#[test]
+fn default_treemap_clips_text_to_its_actual_tile_and_keeps_inline_clips_distinct() {
+    use fm_render_svg::SvgRenderConfig;
+    use std::collections::BTreeMap;
+
+    let ir = fm_parser::parse(NESTED).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let number =
+        |tag: &str, name: &str| scene_attribute(tag, name).unwrap().parse::<f32>().unwrap();
+    let rectangle = |tag: &str| {
+        [
+            number(tag, "x"),
+            number(tag, "y"),
+            number(tag, "width"),
+            number(tag, "height"),
+        ]
+    };
+    let mut inline_clips = BTreeMap::new();
+    for padding in [16.0, 57.0] {
+        let config = SvgRenderConfig {
+            padding,
+            ..Default::default()
+        };
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+        let mut clips = BTreeMap::new();
+        for definition in svg.split("<clipPath").skip(1) {
+            let (tag, body) = definition.split_once('>').unwrap();
+            let id = scene_attribute(tag, "id").unwrap();
+            assert_eq!(
+                scene_attribute(tag, "clipPathUnits"),
+                Some("userSpaceOnUse")
+            );
+            let rect = body
+                .split("<rect")
+                .nth(1)
+                .unwrap()
+                .split('>')
+                .next()
+                .unwrap();
+            let bounds = rectangle(rect);
+            assert!(clips.insert(id, bounds).is_none(), "duplicate clip ID {id}");
+            if let Some(previous) = inline_clips.insert(id.to_owned(), bounds) {
+                assert_eq!(
+                    previous, bounds,
+                    "inline charts share a clip with different geometry"
+                );
+            }
+        }
+        assert!(!clips.is_empty());
+        let metrics = config.font_metrics();
+        let mut clipped_rows = 0;
+        for tile in &layout.extensions.treemap_tiles {
+            let tile_group = scene_group(&svg, &format!("treemap-tile-{}", tile.node));
+            let tile_rect = tile_group
+                .split("<rect")
+                .nth(1)
+                .unwrap()
+                .split('>')
+                .next()
+                .unwrap();
+            let expected = rectangle(tile_rect);
+            assert!((expected[2] - tile.bounds.width).abs() < 0.02);
+            assert!((expected[3] - tile.bounds.height).abs() < 0.02);
+            let marker = format!("id=\"treemap-text-{}-", tile.node);
+            for group in svg
+                .split("<g")
+                .skip(1)
+                .filter(|group| group.split('>').next().unwrap().contains(&marker))
+            {
+                let opening = group.split('>').next().unwrap();
+                let reference = scene_attribute(opening, "clip-path")
+                    .expect("tile-local text must have a clipping rectangle");
+                let id = reference
+                    .strip_prefix("url(#")
+                    .unwrap()
+                    .strip_suffix(')')
+                    .unwrap();
+                let bounds = clips.get(id).expect("the clip reference must resolve");
+                assert_eq!(*bounds, expected, "text is clipped against another tile");
+                for (tag, text) in scene_rows(group.split("</g>").next().unwrap()) {
+                    let size = number(tag, "font-size");
+                    let width =
+                        metrics.estimate_preserved_width(text, size, metrics.avg_char_width());
+                    let x = number(tag, "x");
+                    let y = number(tag, "y");
+                    let left = match scene_attribute(tag, "text-anchor") {
+                        Some("middle") => x - width * 0.5,
+                        Some("end") => x - width,
+                        _ => x,
+                    };
+                    assert!(
+                        left >= bounds[0] - 0.02,
+                        "{text} escapes its tile on the left"
+                    );
+                    assert!(
+                        left + width <= bounds[0] + bounds[2] + 0.02,
+                        "{text} escapes its tile on the right"
+                    );
+                    assert!(
+                        y - size * 0.5 >= bounds[1] - 0.02,
+                        "{text} escapes its tile above"
+                    );
+                    assert!(
+                        y + size * 0.5 <= bounds[1] + bounds[3] + 0.02,
+                        "{text} escapes its tile below"
+                    );
+                    clipped_rows += 1;
+                }
+            }
+        }
+        assert_eq!(
+            clipped_rows, 12,
+            "all six tiles retain their label and value"
+        );
+    }
+    assert_eq!(
+        inline_clips.len(),
+        12,
+        "moving the drawing must also move its clips"
+    );
+}
+
+#[test]
+fn default_treemap_retains_entries_without_quantitative_area() {
+    let ir = fm_parser::parse(
+        "treemap\n\"Root\"\n    \"First empty service\": 0\n    \"Second empty service\": 0\n",
+    )
+    .ir;
+    let svg = fm_render_svg::render_svg(&ir);
+    let rows = scene_rows(&svg);
+    let text: String = rows.iter().map(|(_, text)| *text).collect();
+    assert!(text.contains("First empty service"));
+    assert!(text.contains("Second empty service"));
+    assert_eq!(rows.iter().filter(|(_, text)| *text == "0").count(), 3);
+    assert!(svg.contains("id=\"treemap-chart\""));
 }

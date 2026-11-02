@@ -35,55 +35,236 @@ fn render(source: &str) -> String {
 const BASIC: &str = "radar-beta\n  axis a, b, c\n  curve x{1,2,3}\n";
 
 #[test]
-fn radar_scene_retains_complete_content_and_uses_the_resolved_theme() {
+fn radar_backends_retain_complete_content_and_use_the_resolved_theme() {
     use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset};
     let ir = fm_parser::parse("radar-beta\n  title Capability review\n  axis a[\"Availability\"], b[\"Scale\"], c[\"Coverage\"]\n  curve x[\"Current  platform\"]{1,2,3}\n  curve y[\"Target platform\"]{3,3,3}\n").ir;
     let layout = fm_layout::layout_diagram(&ir);
-    for theme in [ThemePreset::Default, ThemePreset::Dark] {
-        let config = SvgRenderConfig {
-            backend: SvgBackend::Scene,
-            theme,
-            ..Default::default()
-        };
-        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
-        for text in [
-            "Availability",
-            "Scale",
-            "Coverage",
-            "Current  platform",
-            "Target platform",
-        ] {
-            assert!(svg.contains(text), "scene lost {text}");
-        }
-        assert!(svg.contains("#8686ff"));
-        assert!(svg.contains("#ffff78"));
-        // The document's accessibility title may repeat the name, but only one drawable row may.
-        let visible = svg
-            .split("<text")
-            .skip(1)
-            .filter(|element| {
-                element
-                    .split("</text>")
-                    .next()
-                    .unwrap_or_default()
-                    .contains("Capability review")
-            })
-            .count();
-        assert_eq!(visible, 1);
-        let chart = svg
-            .split("<g")
-            .filter_map(|group| group.split('>').next())
-            .find(|group| group.contains("id=\"radar-chart\""))
-            .expect("the measured chart root must be present");
-        assert!(
-            chart.contains("xml:space=\"preserve\""),
-            "authored spaces must survive SVG text rendering"
-        );
-        if theme == ThemePreset::Dark {
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        for theme in [ThemePreset::Default, ThemePreset::Dark] {
+            let config = SvgRenderConfig {
+                backend,
+                theme,
+                ..Default::default()
+            };
+            let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+            for text in [
+                "Availability",
+                "Scale",
+                "Coverage",
+                "Current  platform",
+                "Target platform",
+            ] {
+                assert!(svg.contains(text), "{backend:?} lost {text}");
+            }
+            assert!(svg.contains("#8686ff"));
+            assert!(svg.contains("#ffff78"));
+            // The accessibility title may repeat the name, but only one drawable row may.
+            let visible = radar_rows(&svg)
+                .iter()
+                .filter(|(_, text)| *text == "Capability review")
+                .count();
+            assert_eq!(visible, 1, "{backend:?}");
+            let chart = svg
+                .split("<g")
+                .filter_map(|group| group.split('>').next())
+                .find(|group| group.contains("id=\"radar-chart\""))
+                .expect("the measured chart root must be present");
             assert!(
-                !svg.contains("fill=\"#1e293b\""),
-                "light-theme text leaked into the dark chart"
+                chart.contains("xml:space=\"preserve\""),
+                "authored spaces must survive SVG text rendering"
             );
+            if theme == ThemePreset::Dark {
+                assert!(
+                    !svg.contains("fill=\"#1e293b\""),
+                    "light-theme text leaked into the dark chart"
+                );
+            }
+        }
+    }
+}
+
+fn radar_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split_once(&format!(" {name}=\""))?
+        .1
+        .split_once('"')
+        .map(|(value, _)| value)
+}
+
+fn radar_rows(svg: &str) -> Vec<(&str, &str)> {
+    svg.split("<text")
+        .skip(1)
+        .filter_map(|element| {
+            let (tag, body) = element.split_once('>')?;
+            Some((tag, body.split_once("</text>")?.0))
+        })
+        .collect()
+}
+
+#[test]
+fn radar_title_keeps_its_header_when_an_explicit_layout_has_no_wheel() {
+    let ir = fm_parser::parse(
+        "radar-beta\n  title Capability review\n  axis a, b, c\n  curve current{1,2,3}\n",
+    )
+    .ir;
+    let mut layout = fm_layout::layout_diagram(&ir);
+    layout.extensions.radar = None;
+    let config = fm_render_svg::SvgRenderConfig::default();
+    let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+    assert_eq!(
+        radar_rows(&svg)
+            .iter()
+            .filter(|(_, text)| *text == "Capability review")
+            .count(),
+        1
+    );
+    let svg_tag = svg.split_once("<svg").unwrap().1.split_once('>').unwrap().0;
+    let height = radar_attribute(svg_tag, "viewBox")
+        .unwrap()
+        .split_whitespace()
+        .nth(3)
+        .unwrap()
+        .parse::<f32>()
+        .unwrap();
+    assert_eq!(
+        height,
+        layout.bounds.height + config.padding * 2.0 + config.font_size + 22.0
+    );
+}
+
+#[test]
+fn default_radar_preserves_long_captions_at_the_requested_size_outside_the_data() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset};
+
+    let title = format!(
+        "{}Reliability review",
+        "Delivery planning across services and regions ".repeat(6)
+    );
+    let axes = [
+        "Reliable delivery of every customer request through all participating services and regions",
+        "Capacity planning for sustained peak traffic and the recovery of downstream dependencies",
+        "Complete observability across application boundaries with actionable signals for operators",
+        "Safe deployment and rollback of changes with continuous verification of customer outcomes",
+    ];
+    let legends = [
+        "Current  platform capabilities measured during the latest coordinated reliability review",
+        "Target platform capabilities after all planned availability and recovery improvements",
+    ];
+    let source = format!(
+        "radar-beta\n  title {title}\n  axis a[\"{}\"], b[\"{}\"], c[\"{}\"], d[\"{}\"]\n  curve current[\"{}\"]{{1,2,3,4}}\n  curve target[\"{}\"]{{4,4,4,4}}\n",
+        axes[0], axes[1], axes[2], axes[3], legends[0], legends[1],
+    );
+    let parsed = fm_parser::parse(&source);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let ir = parsed.ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let original_radar = layout.extensions.radar.clone();
+
+    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        for font_size in [15.0, 24.0] {
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    theme,
+                    font_family: "monospace".to_owned(),
+                    font_size,
+                    avg_char_width: font_size * 0.6,
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                assert_eq!(config.backend, SvgBackend::LegacyLayout);
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+                let rows = radar_rows(&svg);
+                let rows_with_class = |class| {
+                    rows.iter()
+                        .copied()
+                        .filter(|(tag, _)| radar_attribute(tag, "class") == Some(class))
+                        .collect::<Vec<_>>()
+                };
+                let title_rows = rows_with_class("fm-diagram-title");
+                let axis_rows = rows_with_class("fm-radar-axis-label");
+                let legend_rows = rows_with_class("fm-radar-legend-label");
+                assert!(title_rows.len() > 1, "the long title must wrap");
+                assert!(axis_rows.len() > axes.len(), "axis captions must wrap");
+                assert!(
+                    legend_rows.len() > legends.len(),
+                    "legend captions must wrap"
+                );
+                assert_eq!(
+                    title_rows.iter().map(|(_, text)| *text).collect::<String>(),
+                    title
+                );
+                assert_eq!(
+                    axis_rows.iter().map(|(_, text)| *text).collect::<String>(),
+                    axes.concat()
+                );
+                assert_eq!(
+                    legend_rows
+                        .iter()
+                        .map(|(_, text)| *text)
+                        .collect::<String>(),
+                    legends.concat()
+                );
+
+                let svg_tag = svg.split_once("<svg").unwrap().1.split_once('>').unwrap().0;
+                let viewbox: Vec<f32> = radar_attribute(svg_tag, "viewBox")
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|value| value.parse().unwrap())
+                    .collect();
+                assert_eq!(viewbox.len(), 4);
+                assert!(viewbox.iter().all(|value| value.is_finite()));
+                let center = numbers(&svg, "cx")[0] as f32;
+                let outer_radius = numbers(&svg, "r").into_iter().fold(0.0, f64::max) as f32;
+                assert_eq!(outer_radius, 300.0);
+                assert_eq!(numbers(&svg, "r"), [60.0, 120.0, 180.0, 240.0, 300.0]);
+                let metrics = config.font_metrics();
+                for (tag, text) in rows {
+                    let number = |name| radar_attribute(tag, name).unwrap().parse::<f32>().unwrap();
+                    let class = radar_attribute(tag, "class").unwrap();
+                    let size = number("font-size");
+                    assert_eq!(
+                        size,
+                        if class == "fm-diagram-title" {
+                            font_size + 4.0
+                        } else {
+                            font_size
+                        }
+                    );
+                    if !embed_theme_css {
+                        assert_eq!(radar_attribute(tag, "font-family"), Some("monospace"));
+                    }
+                    if class == "fm-radar-legend-label" {
+                        assert!(
+                            number("x") > center + outer_radius,
+                            "legend overlaps the data: {text}"
+                        );
+                    }
+                    let width =
+                        metrics.estimate_preserved_width(text, size, metrics.avg_char_width());
+                    let left = number("x")
+                        - match radar_attribute(tag, "text-anchor") {
+                            Some("middle") => width * 0.5,
+                            Some("end") => width,
+                            _ => 0.0,
+                        };
+                    assert!(left >= viewbox[0] - 0.01, "caption escapes left: {text}");
+                    assert!(
+                        left + width <= viewbox[0] + viewbox[2] + 0.01,
+                        "caption escapes right: {text}"
+                    );
+                    assert!(
+                        number("y") - size * 0.5 >= viewbox[1] - 0.01,
+                        "caption escapes top: {text}"
+                    );
+                    assert!(
+                        number("y") + size * 0.5 <= viewbox[1] + viewbox[3] + 0.01,
+                        "caption escapes bottom: {text}"
+                    );
+                    if theme == ThemePreset::Dark {
+                        assert_ne!(radar_attribute(tag, "fill"), Some("#1e293b"));
+                    }
+                }
+                assert_eq!(layout.extensions.radar, original_radar);
+            }
         }
     }
 }

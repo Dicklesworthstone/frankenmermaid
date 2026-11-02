@@ -140,29 +140,64 @@ impl RadarChartLayout {
                     TextAlign::Middle => label.bounds.width * 0.5,
                     TextAlign::End => label.bounds.width,
                 };
-            label.bounds.y = axis.label_anchor.y - label.bounds.height * 0.5;
+            // Keep the whole caption outside its spoke, including every wrapped row.
+            // Centering a tall caption on the northern or southern anchor draws half of
+            // its text back over the plotted values; align those edges outward just as
+            // the horizontal alignment above does for eastern and western captions.
+            label.bounds.y = axis.label_anchor.y
+                - if axis.angle.sin() < -0.2 {
+                    label.bounds.height
+                } else if axis.angle.sin() > 0.2 {
+                    0.0
+                } else {
+                    label.bounds.height * 0.5
+                };
             chart.text.push(label);
         }
-        // Adjacent captions stay separate without moving data. Moved captions retain
-        // leaders back to the original spoke, so their association remains explicit.
-        // Compare horizontal spans across the whole wheel: centered polar captions
-        // can overlap captions on either side, even when their anchors do not.
-        let mut indexes: Vec<_> = (0..chart.text.len()).collect();
-        indexes.sort_by(|&a, &b| chart.text[a].bounds.y.total_cmp(&chart.text[b].bounds.y));
-        for (order, &index) in indexes.iter().enumerate() {
+        // Reserve captions nearest the equator first, then move northern captions upward
+        // and southern captions downward. A top-to-bottom pass can push a clear northern
+        // caption back over the wheel. Moving monotonically outward preserves wheel
+        // clearance while separating every horizontally overlapping caption interval.
+        let mut indexes: Vec<_> = chart
+            .text
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let RadarTextRole::Axis(axis) = label.role else {
+                    unreachable!("only axis captions have been composed")
+                };
+                (index, radar.axes[axis].angle.sin())
+            })
+            .collect();
+        indexes.sort_by(|(a, a_sin), (b, b_sin)| {
+            a_sin.abs().total_cmp(&b_sin.abs()).then_with(|| a.cmp(b))
+        });
+        for (order, &(index, sine)) in indexes.iter().enumerate() {
             let original = chart.text[index].bounds;
-            let bottom = indexes[..order]
+            let north = sine < 0.0;
+            let y = indexes[..order]
                 .iter()
-                .map(|&prior| chart.text[prior].bounds)
+                .map(|&(prior, _)| chart.text[prior].bounds)
                 .filter(|prior| {
                     prior.x < original.x + original.width + 6.0
                         && original.x < prior.x + prior.width + 6.0
                 })
-                .map(|prior| prior.y + prior.height)
-                .fold(f32::NEG_INFINITY, f32::max);
+                .map(|prior| {
+                    if north {
+                        prior.y - original.height - 6.0
+                    } else {
+                        prior.y + prior.height + 6.0
+                    }
+                })
+                .fold(
+                    original.y,
+                    |y, clear| {
+                        if north { y.min(clear) } else { y.max(clear) }
+                    },
+                );
             let label = &mut chart.text[index];
-            label.bounds.y = original.y.max(bottom + 6.0);
-            if label.bounds.y > original.y + 1.0 {
+            label.bounds.y = y;
+            if (label.bounds.y - original.y).abs() > 1.0 {
                 let RadarTextRole::Axis(axis) = label.role else {
                     continue;
                 };
