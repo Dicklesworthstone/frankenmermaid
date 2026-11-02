@@ -9661,7 +9661,7 @@ impl MermaidDiagramIr {
 
     /// Compose a readable paragraph before generic nodes are sized and routed.
     ///
-    /// Flowchart and state labels use an 18-em text column, so a sentence grows its card
+    /// Flowchart, state and mindmap labels use an 18-em text column, so a sentence grows its card
     /// vertically instead of making the whole graph several screens wide. The caller supplies
     /// the effective node font metrics, including authored size and family overrides. Short
     /// labels remain borrowed; wrapped labels preserve every character, explicit line break,
@@ -9674,7 +9674,7 @@ impl MermaidDiagramIr {
         let text = self.node_display_text(node);
         if !matches!(
             self.diagram_type,
-            DiagramType::Flowchart | DiagramType::State
+            DiagramType::Flowchart | DiagramType::State | DiagramType::Mindmap
         ) || node.class_meta.is_some()
             || node.c4_meta.is_some()
             || node.requirement_meta.is_some()
@@ -11365,8 +11365,10 @@ mod tests {
         assert_eq!(ir.labels[0].text, label);
 
         let composed = composed.into_owned();
-        ir.diagram_type = DiagramType::State;
-        assert_eq!(ir.node_layout_text(&node, &metrics), composed);
+        for family in [DiagramType::State, DiagramType::Mindmap] {
+            ir.diagram_type = family;
+            assert_eq!(ir.node_layout_text(&node, &metrics), composed);
+        }
     }
 
     #[test]
@@ -11378,11 +11380,18 @@ mod tests {
             id: "Ready\nfor review".into(),
             ..Default::default()
         };
-        assert!(matches!(
-            ir.node_layout_text(&node, &metrics),
-            Cow::Borrowed(_)
-        ));
-        assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
+        for family in [
+            DiagramType::Flowchart,
+            DiagramType::State,
+            DiagramType::Mindmap,
+        ] {
+            ir.diagram_type = family;
+            assert!(matches!(
+                ir.node_layout_text(&node, &metrics),
+                Cow::Borrowed(_)
+            ));
+            assert_eq!(ir.node_layout_text(&node, &metrics), node.id);
+        }
         node.id =
             "a_very_long_identifier_that_must_remain_complete_even_without_any_word_breaks".into();
         let composed = ir.node_layout_text(&node, &metrics);

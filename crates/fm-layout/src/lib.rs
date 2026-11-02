@@ -38014,6 +38014,117 @@ mod tests {
     }
 
     #[test]
+    fn descriptive_mindmap_paragraphs_keep_the_map_compact_and_text_complete() {
+        let branches: String = (0..7)
+            .map(|index| {
+                format!(
+                    "    branch{index}[Coordinate engineering delivery and review every dependency before publishing the approved release to all regions {index}]\n"
+                )
+            })
+            .collect();
+        let mut ir = parse(&format!(
+            "mindmap\n  root((Plan the reliable delivery of the new platform with every participating team))\n{branches}    ready[Ready<br/>for review]\n"
+        ))
+        .ir;
+        let styled_node = ir
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "branch0")
+            .unwrap();
+        styled_node.inline_style = Some(Box::new(fm_core::IrInlineStyle {
+            properties: [
+                ("font-size".into(), "22px".into()),
+                ("font-family".into(), "Georgia, serif".into()),
+            ]
+            .into_iter()
+            .collect(),
+        }));
+
+        for metrics in [
+            fm_core::FontMetrics::default_metrics(),
+            fm_core::FontMetrics::monospace(24.0),
+        ] {
+            let config = LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            };
+            let traced = layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                config.clone(),
+                LayoutGuardrails::default(),
+            );
+            let layout = traced.layout.as_ref();
+            assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+            assert_eq!(layout.nodes.len(), 9);
+            assert_eq!(layout.edges.len(), 8);
+            assert_eq!(layout, &layout_diagram_with_config(&ir, config));
+            assert_radial_labels_are_separate(layout);
+            assert_radial_spokes_are_clear(&ir, layout);
+            // Sentences must not force an ordinary eight-branch map onto a multi-screen canvas.
+            // Scale the presentation bound with the largest authored or configured type size.
+            let extent_limit = metrics.font_size().max(22.0) * 125.0;
+            assert!(layout.bounds.width < extent_limit, "{:?}", layout.bounds);
+            assert!(layout.bounds.height < extent_limit, "{:?}", layout.bounds);
+
+            let (labels, _) = super::build_label_layer(&ir, layout, &metrics);
+            for node_box in &layout.nodes {
+                let node = &ir.nodes[node_box.node_index];
+                let authored = ir.node_display_text(node);
+                let effective = ir.effective_node_font_metrics(node_box.node_index, &metrics);
+                let rows: Vec<_> = labels
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Text(text)
+                            if text.source == RenderSource::Node(node_box.node_index) =>
+                        {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    rows.iter().map(|row| row.text.as_str()).collect::<String>(),
+                    authored.replace('\n', ""),
+                    "every character must survive paragraph composition for {}",
+                    node.id,
+                );
+                if node.id == "ready" {
+                    assert_eq!(
+                        rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+                        ["Ready", "for review"]
+                    );
+                } else {
+                    assert!(
+                        rows.len() > authored.lines().count(),
+                        "{} must wrap its descriptive label",
+                        node.id
+                    );
+                    assert!(node_box.bounds.width < effective.estimate_width(authored));
+                }
+                if node.id == "branch0" {
+                    assert_eq!(effective.font_size(), 22.0);
+                    assert_eq!(effective.config().preset, fm_core::FontPreset::Serif);
+                }
+                for row in rows {
+                    let width = effective.estimate_preserved_width(
+                        &row.text,
+                        effective.font_size(),
+                        effective.avg_char_width(),
+                    );
+                    let bounds = node_box.bounds;
+                    assert_eq!(row.font_size, effective.font_size());
+                    assert!(row.x - width * 0.5 >= bounds.x - 0.01);
+                    assert!(row.x + width * 0.5 <= bounds.x + bounds.width + 0.01);
+                    assert!(row.y - row.font_size * 0.5 >= bounds.y - 0.01);
+                    assert!(row.y + row.font_size * 0.5 <= bounds.y + bounds.height + 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn radial_spokes_clear_mixed_labels_and_large_rings() {
         for count in [8, 24, 65, 129] {
             let branches: String = (0..count)
