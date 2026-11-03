@@ -19504,6 +19504,12 @@ fn is_flowchart_header(line: &str) -> bool {
 ///
 /// The TERMINAL claim is still true and stays: that renderer emits no ANSI at all and
 /// `TermRenderConfig` has no colour field, so there is nothing for a declared colour to reach.
+///
+/// Because the note describes one renderer, the parser records it only as the structured
+/// `style-directive-not-applied` diagnostic and keeps it out of `ParseResult::warnings` (GH #18):
+/// the parser runs before an output is chosen, and a caller that refuses on any parse warning
+/// would otherwise reject a valid diagram that will only ever be rendered to SVG. `fm-cli render`
+/// raises the note as a warning when it renders to the terminal.
 const STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE: &str = "style directives (classDef/style/linkStyle) are applied by the SVG and canvas renderers; \
 terminal output has no colour channel and uses theme defaults";
 const STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION: &str = "Use --format svg, or the canvas/browser preview, for styled output. Terminal output cannot \
@@ -19889,8 +19895,9 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
         if let Some(span) = first_style_span {
             diagnostic = diagnostic.with_span(span);
         }
+        // Structured diagnostic only, never `builder.add_warning`: see
+        // `STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE`.
         builder.add_diagnostic(diagnostic);
-        builder.add_warning(STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE.to_string());
     }
 }
 
@@ -30765,30 +30772,37 @@ Rel_Back(db, app, "Responds")"#,
         assert!(parsed.ir.nodes[0].inline_style.is_none());
     }
 
+    /// GH #18: the terminal-only style note is a structured diagnostic, not a parse warning. The
+    /// parser runs before an output is chosen, so a caller that refuses on any parse warning must
+    /// still accept a valid styled diagram that it renders to SVG.
     #[test]
-    fn classdef_emits_compatibility_warning() {
-        let parsed =
-            parse_mermaid("flowchart LR\n  A[Node]\n  classDef important fill:#f9f,stroke:#333");
-        let diagnostic = parsed
-            .ir
-            .diagnostics
-            .iter()
-            .find(|diag| diag.message == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
-            .expect("expected classDef/style diagnostic warning");
-        assert_eq!(diagnostic.category, DiagnosticCategory::Compatibility);
-        assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
-        assert_eq!(
-            diagnostic.rule_id.as_deref(),
-            Some("style-directive-not-applied"),
-            "expected rule_id for machine-readable diagnostics"
-        );
-        assert!(
-            parsed
-                .warnings
+    fn style_directives_emit_compatibility_diagnostic_but_no_parse_warning() {
+        for source in [
+            "flowchart LR\n  A[Node]\n  classDef important fill:#f9f,stroke:#333",
+            "flowchart LR\n  A --> B\n  classDef hot fill:#f96\n  class A hot\n",
+            "flowchart LR\n  A --> B\n  style A fill:#f96\n",
+            "flowchart LR\n  A --> B\n  linkStyle 0 stroke:#f00\n",
+        ] {
+            let parsed = parse_mermaid(source);
+            let diagnostic = parsed
+                .ir
+                .diagnostics
                 .iter()
-                .any(|warning| warning == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE),
-            "expected parse warning to surface in render logs"
-        );
+                .find(|diag| diag.message == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
+                .unwrap_or_else(|| panic!("expected the style diagnostic for {source:?}"));
+            assert_eq!(diagnostic.category, DiagnosticCategory::Compatibility);
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+            assert_eq!(
+                diagnostic.rule_id.as_deref(),
+                Some("style-directive-not-applied"),
+                "expected rule_id for machine-readable diagnostics"
+            );
+            assert!(
+                parsed.warnings.is_empty(),
+                "a valid styled diagram must parse without warnings: {source:?} -> {:?}",
+                parsed.warnings
+            );
+        }
     }
 
     /// `classDef a,b fill:#f00` declares TWO classes (bd-34tu sibling).

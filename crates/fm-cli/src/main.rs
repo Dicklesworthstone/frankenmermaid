@@ -5285,6 +5285,15 @@ fn render_batch_parse_ref_with_pressure(
     )
 }
 
+/// The parser's note that the terminal renderer cannot apply `classDef`/`style`/`linkStyle`, when
+/// the diagram declares any. Matched by the parser's rule id, not its message text.
+fn terminal_style_directive_note(ir: &MermaidDiagramIr) -> Option<String> {
+    ir.diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.rule_id.as_deref() == Some("style-directive-not-applied"))
+        .map(|diagnostic| diagnostic.message.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_parsed_ir_with_pressure(
     source: &str,
@@ -5301,6 +5310,16 @@ fn render_parsed_ir_with_pressure(
         parse_time,
         total_start,
     } = timing;
+    // The parser keeps its terminal-only style note out of the parse warnings (GH #18), because
+    // SVG, PNG and canvas output apply the styles. Raise it here when the terminal is the target.
+    let terminal_style_note = matches!(options.format, OutputFormat::Term | OutputFormat::Ascii)
+        .then(|| terminal_style_directive_note(ir))
+        .flatten();
+    let warnings: Vec<String> = warnings
+        .iter()
+        .cloned()
+        .chain(terminal_style_note)
+        .collect();
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
         ir.diagram_type,
@@ -5309,7 +5328,7 @@ fn render_parsed_ir_with_pressure(
         warnings.len()
     );
 
-    for warning in warnings {
+    for warning in &warnings {
         warn!("Parse warning: {warning}");
     }
 
@@ -5556,7 +5575,7 @@ fn render_parsed_ir_with_pressure(
             layout_time_ms: layout_time.as_secs_f64() * 1000.0,
             render_time_ms: render_time.as_secs_f64() * 1000.0,
             total_time_ms: total_time.as_secs_f64() * 1000.0,
-            warnings: warnings.to_vec(),
+            warnings,
             fnx_witness,
         })
     } else {

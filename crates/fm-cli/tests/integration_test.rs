@@ -1201,6 +1201,61 @@ fn render_json_writes_artifact_and_stdout_metadata() {
     assert!(artifact.contains("data-fm-source-span="));
 }
 
+/// GH #18: the note that terminal output cannot show `classDef` colours is a render warning only
+/// when the terminal is the target. SVG output applies the styles, so it reports no warning.
+#[test]
+fn style_directive_note_warns_only_for_terminal_renders() {
+    let source = "flowchart LR\n  A --> B\n  classDef hot fill:#f96\n  class A hot\n";
+    let render_warnings = |format: &str| -> Vec<String> {
+        let output_file = NamedTempFile::new().expect("temp render output file");
+        let output_path = output_file
+            .path()
+            .to_str()
+            .expect("temp path must be valid utf-8")
+            .to_string();
+        let output = run_cli(
+            &[
+                "render",
+                "-",
+                "--format",
+                format,
+                "--json",
+                "--output",
+                &output_path,
+            ],
+            source,
+        );
+        assert!(
+            output.status.success(),
+            "{format} render should succeed; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("render --json must print metadata JSON");
+        json["warnings"]
+            .as_array()
+            .expect("render metadata carries a warnings array")
+            .iter()
+            .map(|warning| warning.as_str().expect("warning is a string").to_owned())
+            .collect()
+    };
+
+    let svg = render_warnings("svg");
+    assert!(
+        svg.is_empty(),
+        "SVG applies classDef, so it must not warn: {svg:?}"
+    );
+    for format in ["term", "ascii"] {
+        let terminal = render_warnings(format);
+        assert!(
+            terminal
+                .iter()
+                .any(|warning| warning.contains("terminal output has no colour channel")),
+            "{format} output cannot show classDef colours and must say so: {terminal:?}"
+        );
+    }
+}
+
 #[test]
 fn render_svg_can_disable_embedded_source_spans() {
     let output_file = NamedTempFile::new().expect("temp render output file");
