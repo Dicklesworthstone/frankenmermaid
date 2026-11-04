@@ -484,11 +484,7 @@ fn treemap_backends_apply_author_typography_and_alpha_exactly_once() {
 
     let source = "treemap\n\"Root\"\n    \"Priority\": 10:::hot\n    \"Other\": 20\nclassDef default font-family:serif,font-weight:400\nclassDef hot fill:#112233,fill-opacity:0.8,stroke:#aabbcc,stroke-opacity:0.5,stroke-width:2px,color:#fedcba,opacity:0.5,font-size:22px,font-family:monospace,font-weight:700,font-style:italic\n";
     let parsed = fm_parser::parse(source);
-    assert!(
-        parsed.warnings.iter().all(|warning| warning == "style directives (classDef/style/linkStyle) are applied by the SVG and canvas renderers; terminal output has no colour channel and uses theme defaults"),
-        "{:?}",
-        parsed.warnings
-    );
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     let ir = parsed.ir;
     let layout = fm_layout::layout_diagram(&ir);
     let node = ir
