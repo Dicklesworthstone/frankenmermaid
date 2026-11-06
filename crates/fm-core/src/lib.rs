@@ -3711,25 +3711,35 @@ impl C4CardLayout {
                 font_size: size,
                 ..metrics.config().clone()
             });
-            // Leave room for actual system-font advances and the emphasized name. The width
-            // estimator intentionally remains deterministic rather than depending on a browser.
-            let mut wrap_width = available / 1.4;
-            let mut lines = row_metrics.wrap_to_width(&text, wrap_width);
-            // A fixed allowance alone cannot cover runs of wide glyphs or a condensed preset.
-            // Reflow against the same conservative measurement used to size the card itself.
-            for _ in 0..6 {
-                let widest = lines
-                    .iter()
-                    .map(|line| {
-                        metrics.estimate_preserved_width(line, size, metrics.avg_char_width())
-                    })
-                    .fold(0.0, f32::max);
-                if widest <= available {
-                    break;
+            // The `<<type>>` stereotype is a single token mermaid never wraps: it draws it as one
+            // `.text("<<" + typeC4Shape.text + ">>")`. Keep it on one line so a long external type
+            // like `<<external_container_queue>>` stays whole instead of splitting into `<<…` + `>>`
+            // (which read as no `<<…>>` label at all). The card width already folds in its measured
+            // width above, so a single line fits.
+            let lines = if kind == C4CardRowKind::Stereotype {
+                vec![text]
+            } else {
+                // Leave room for actual system-font advances and the emphasized name. The width
+                // estimator intentionally remains deterministic rather than depending on a browser.
+                let mut wrap_width = available / 1.4;
+                let mut lines = row_metrics.wrap_to_width(&text, wrap_width);
+                // A fixed allowance alone cannot cover runs of wide glyphs or a condensed preset.
+                // Reflow against the same conservative measurement used to size the card itself.
+                for _ in 0..6 {
+                    let widest = lines
+                        .iter()
+                        .map(|line| {
+                            metrics.estimate_preserved_width(line, size, metrics.avg_char_width())
+                        })
+                        .fold(0.0, f32::max);
+                    if widest <= available {
+                        break;
+                    }
+                    wrap_width *= (available / widest).min(0.95);
+                    lines = row_metrics.wrap_to_width(&text, wrap_width);
                 }
-                wrap_width *= (available / widest).min(0.95);
-                lines = row_metrics.wrap_to_width(&text, wrap_width);
-            }
+                lines
+            };
             let line_height = size * metrics.config().line_height.max(1.2);
             for text in lines {
                 rows.push(C4CardRow {
@@ -15947,6 +15957,58 @@ mod tests {
         for row in card.rows {
             assert!(row.center_y - row.font_size * 0.5 > card.height * 0.2);
             assert!(row.center_y + row.font_size * 0.5 < card.height * 0.9);
+        }
+    }
+
+    #[test]
+    fn c4_card_width_holds_the_longest_stereotype_on_one_line() {
+        // Regression guard: `external_container_queue` is the longest C4 type string, so
+        // `<<external_container_queue>>` is the widest `<<type>>` mermaid draws. It is a single
+        // token mermaid never wraps, so C4CardLayout must keep it on ONE row AND size the card at
+        // least as wide as that one line (not merely refuse to wrap it). Checked for every font
+        // preset and both the rectangular and slanted (queue) shapes.
+        let meta = super::IrC4NodeMeta {
+            element_type: "external_container_queue".to_string(),
+            technology: None,
+            description: None,
+        };
+        for preset in [
+            super::FontPreset::SystemUi,
+            super::FontPreset::SansSerif,
+            super::FontPreset::Serif,
+            super::FontPreset::Monospace,
+            super::FontPreset::Condensed,
+        ] {
+            let metrics = super::FontMetrics::new(super::FontMetricsConfig {
+                preset,
+                ..Default::default()
+            });
+            for shape in [NodeShape::Rounded, NodeShape::Parallelogram] {
+                let card = super::C4CardLayout::new(&meta, "Queue", shape, &metrics, None, None);
+                let stereotype_rows: Vec<&super::C4CardRow> = card
+                    .rows
+                    .iter()
+                    .filter(|row| row.kind == super::C4CardRowKind::Stereotype)
+                    .collect();
+                assert_eq!(
+                    stereotype_rows.len(),
+                    1,
+                    "{preset:?}/{shape:?}: the `<<..>>` stereotype must stay one row, got {}",
+                    stereotype_rows.len()
+                );
+                let row = stereotype_rows[0];
+                assert_eq!(row.text, "<<external_container_queue>>");
+                let measured = metrics.estimate_preserved_width(
+                    &row.text,
+                    row.font_size,
+                    metrics.avg_char_width(),
+                );
+                assert!(
+                    card.width >= measured,
+                    "{preset:?}/{shape:?}: card width {} is narrower than the one-line stereotype {measured}",
+                    card.width
+                );
+            }
         }
     }
 
