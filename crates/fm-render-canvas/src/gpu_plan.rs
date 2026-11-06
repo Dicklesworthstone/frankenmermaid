@@ -8755,7 +8755,10 @@ mod tests {
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
-            ("draw_sequence_numbers", "bd-adabx: sequence autonumber text"),
+            (
+                "draw_sequence_numbers",
+                "bd-adabx: sequence autonumber text",
+            ),
             (
                 "draw_path_markers",
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",

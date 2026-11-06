@@ -239,9 +239,8 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Six vertices, the two waists at 0.55h (88.57) and 0.45h (81.93).
     let lightning = render("bolt");
     assert!(
-        lightning.contains(
-            "M152 52 L54.30 88.57 L110.60 88.57 L52 118.50 L149.70 81.93 L93.40 81.93 Z"
-        ),
+        lightning
+            .contains("M152 52 L54.30 88.57 L110.60 88.57 L52 118.50 L149.70 81.93 L93.40 81.93 Z"),
         "bolt is not the measured six-vertex zigzag: {}",
         silhouette(&lightning)
     );
@@ -306,8 +305,7 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Document outline, then the fold, whose base rejoins the outline at (133.80, 107.75).
     let tagged_doc = render("tag-doc");
     assert!(
-        tagged_doc
-            .contains("M133.80 107.75 L152 90.57 L152 105.20 Q142.90 106.17,133.80 107.75 Z"),
+        tagged_doc.contains("M133.80 107.75 L152 90.57 L152 105.20 Q142.90 106.17,133.80 107.75 Z"),
         "tag-doc has no fold: {}",
         silhouette(&tagged_doc)
     );
