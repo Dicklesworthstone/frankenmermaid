@@ -434,9 +434,13 @@ mod tests {
 
     // Read the actual emitted transform/text operations, not the returned viewport. Comparing
     // a viewport round-trip only with itself would miss the renderer's per-primitive translation.
-    fn drawn_label_position(context: &MockCanvas2dContext, label: &str) -> (f64, f64) {
+    fn drawn_positions(
+        context: &MockCanvas2dContext,
+        point: impl Fn(&DrawOperation) -> Option<(f64, f64)>,
+    ) -> Vec<(f64, f64)> {
         let mut transform = ViewportTransform::identity();
         let mut stack = Vec::new();
+        let mut positions = Vec::new();
         for op in context.operations() {
             match op {
                 DrawOperation::Save => stack.push(transform),
@@ -469,13 +473,23 @@ mod tests {
                         f: 0.0,
                     });
                 }
-                DrawOperation::FillText(text, x, y) if text == label => {
-                    return transform.apply(*x, *y);
-                }
                 _ => {}
             }
+            if let Some((x, y)) = point(op) {
+                positions.push(transform.apply(x, y));
+            }
         }
-        panic!("render never drew label {label}");
+        positions
+    }
+
+    fn drawn_label_position(context: &MockCanvas2dContext, label: &str) -> (f64, f64) {
+        drawn_positions(context, |operation| match operation {
+            DrawOperation::FillText(text, x, y) if text == label => Some((*x, *y)),
+            _ => None,
+        })
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("render never drew label {label}"))
     }
 
     #[test]
@@ -711,6 +725,168 @@ mod tests {
                 assert_eq!(region.bounds, layout.nodes[0].bounds);
             }
         }
+    }
+
+    #[test]
+    fn scene_affine_groups_transform_paths_text_and_clips_before_viewport_normalization() {
+        use fm_layout::{
+            FillStyle, MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath,
+            RenderRect, RenderSource, RenderText, RenderTransform, StrokeStyle,
+        };
+
+        let text = |label: &str, x, y| {
+            RenderItem::Text(RenderText {
+                source: RenderSource::Diagram,
+                text: label.to_owned(),
+                x,
+                y,
+                font_size: 12.0,
+                align: fm_layout::TextAlign::Start,
+                baseline: fm_layout::TextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: String::from("#000000"),
+                    opacity: 1.0,
+                },
+            })
+        };
+        // Independently worked-out world coordinates: child maps (x,y) to
+        // (sx*x + y/2 + 4, y-3); parent then maps (u,v) to (10-3*v, 20+2*u).
+        // Include a reflection and a singular matrix: composing scenes needs no inversion.
+        for (scale_x, expected) in [
+            (1.0, [(7.0, 36.0), (-5.0, 48.0), (13.0, 32.0), (1.0, 42.0)]),
+            (-1.0, [(7.0, 28.0), (-5.0, 24.0), (13.0, 28.0), (1.0, 26.0)]),
+            (0.0, [(7.0, 32.0), (-5.0, 36.0), (13.0, 30.0), (1.0, 34.0)]),
+        ] {
+            let mut child = RenderGroup::new(Some(String::from("child")));
+            child.transform = Some(RenderTransform::Matrix {
+                a: scale_x,
+                b: 0.0,
+                c: 0.5,
+                d: 1.0,
+                e: 4.0,
+                f: -3.0,
+            });
+            child.clip = Some(RenderClip::Rect(RenderRect {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            }));
+            child.children = vec![
+                RenderItem::Path(RenderPath {
+                    source: RenderSource::Diagram,
+                    commands: vec![
+                        PathCmd::MoveTo { x: 2.0, y: 4.0 },
+                        PathCmd::LineTo { x: 6.0, y: 8.0 },
+                    ],
+                    fill: None,
+                    stroke: Some(StrokeStyle::solid("#000000", 1.0)),
+                    marker_start: MarkerKind::None,
+                    marker_end: MarkerKind::None,
+                }),
+                text("Nested", 2.0, 4.0),
+            ];
+            let mut parent = RenderGroup::new(Some(String::from("parent")));
+            parent.transform = Some(RenderTransform::Matrix {
+                a: 0.0,
+                b: 2.0,
+                c: -3.0,
+                d: 0.0,
+                e: 10.0,
+                f: 20.0,
+            });
+            parent.children = vec![RenderItem::Group(child), text("Parent", 5.0, -2.0)];
+            let mut root = RenderGroup::new(Some(String::from("root")));
+            root.children = vec![RenderItem::Group(parent), text("Root", -8.0, 7.0)];
+            let scene = RenderScene {
+                bounds: RenderRect {
+                    x: -40.0,
+                    y: -30.0,
+                    width: 200.0,
+                    height: 120.0,
+                },
+                root,
+            };
+            for auto_fit in [false, true] {
+                let config = CanvasRenderConfig {
+                    auto_fit,
+                    padding: 10.0,
+                    ..Default::default()
+                };
+                let mut context = MockCanvas2dContext::new(120.0, 100.0);
+                render_scene_to_canvas(&scene, &mut context, &config);
+                // Fit is constrained by width: (120-20)/200 = 1/2. Its normalized
+                // offset is (30,35); an unfitted frame has scale 1 and offset (50,40).
+                let project = |(x, y): (f64, f64)| {
+                    if auto_fit {
+                        (x * 0.5 + 30.0, y * 0.5 + 35.0)
+                    } else {
+                        (x + 50.0, y + 40.0)
+                    }
+                };
+                let assert_point = |actual: (f64, f64), expected: (f64, f64)| {
+                    assert!(
+                        (actual.0 - expected.0).abs() < 0.0001
+                            && (actual.1 - expected.1).abs() < 0.0001,
+                        "{actual:?} != {expected:?} (auto_fit={auto_fit}, scale_x={scale_x})"
+                    );
+                };
+                assert_point(
+                    drawn_label_position(&context, "Nested"),
+                    project(expected[0]),
+                );
+                assert_point(
+                    drawn_label_position(&context, "Parent"),
+                    project((16.0, 30.0)),
+                );
+                assert_point(drawn_label_position(&context, "Root"), project((-8.0, 7.0)));
+                let path = drawn_positions(&context, |operation| match operation {
+                    DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => Some((*x, *y)),
+                    _ => None,
+                });
+                assert_eq!(path.len(), 2);
+                assert_point(path[0], project(expected[0]));
+                assert_point(path[1], project(expected[1]));
+                let clip_start = drawn_positions(&context, |operation| match operation {
+                    DrawOperation::Rect(x, y, _, _) => Some((*x, *y)),
+                    _ => None,
+                });
+                let clip_end = drawn_positions(&context, |operation| match operation {
+                    DrawOperation::Rect(x, y, w, h) => Some((x + w, y + h)),
+                    _ => None,
+                });
+                assert_eq!(clip_start.len(), 1);
+                assert_eq!(clip_end.len(), 1);
+                assert_point(clip_start[0], project(expected[2]));
+                assert_point(clip_end[0], project(expected[3]));
+                assert!(context.operations().windows(2).any(|pair| {
+                    matches!(pair, [DrawOperation::Rect(..), DrawOperation::Clip])
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn scene_identity_matrix_preserves_the_drawing_stream() {
+        let (ir, layout) = selection_fixture();
+        let mut scene = fm_layout::build_render_scene(&ir, &layout);
+        let config = CanvasRenderConfig::default();
+        scene.root.transform = None;
+        let mut plain = MockCanvas2dContext::new(240.0, 160.0);
+        let plain_result = render_scene_to_canvas(&scene, &mut plain, &config);
+        scene.root.transform = Some(fm_layout::RenderTransform::Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mut identity = MockCanvas2dContext::new(240.0, 160.0);
+        let identity_result = render_scene_to_canvas(&scene, &mut identity, &config);
+        assert_eq!(identity.operations(), plain.operations());
+        assert_eq!(identity_result.viewport, plain_result.viewport);
+        assert_eq!(identity_result.draw_calls, plain_result.draw_calls);
     }
 
     #[test]

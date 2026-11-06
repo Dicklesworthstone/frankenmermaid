@@ -7,7 +7,7 @@ use crate::shapes::{
     draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
     draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape, trace_rounded_rect,
 };
-use crate::viewport::{Viewport, fit_to_viewport};
+use crate::viewport::{Viewport, ViewportTransform, fit_to_viewport};
 use fm_core::{ArrowType, DiagramType, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, NodeShape};
 use fm_layout::{
     DiagramLayout, FillStyle, LineCap as IrLineCap, LineJoin as IrLineJoin, MarkerKind, PathCmd,
@@ -177,7 +177,8 @@ pub struct CanvasRenderResult {
     /// Number of labels drawn.
     pub labels_drawn: usize,
     /// Maps the coordinates of the drawn layout or scene to canvas pixels, including its
-    /// measured bounds origin and padding. Use it directly for picking and overlays.
+    /// measured bounds origin and padding. Scene group transforms apply before this viewport.
+    /// Use it directly for picking and overlays in layout/world coordinates.
     pub viewport: Viewport,
     /// Clickable areas for the interactive nodes IN THE LAYOUT THAT WAS JUST DRAWN (bd-2u0.2).
     ///
@@ -557,7 +558,7 @@ impl Canvas2dRenderer {
         }
 
         if let Some(treemap) = &treemap {
-            let labels_drawn = self.draw_treemap(treemap, ctx, offset_x, offset_y);
+            let labels_drawn = self.draw_treemap(treemap, ctx, offset_x, offset_y, transform);
             ctx.restore();
             return CanvasRenderResult {
                 draw_calls: self.draw_calls,
@@ -633,7 +634,7 @@ impl Canvas2dRenderer {
             }
         }
         // Radar uses the same measured wheel, legend and captions as the shared scene.
-        labels_drawn += self.draw_radar(radar.as_ref(), ctx, offset_x, offset_y);
+        labels_drawn += self.draw_radar(radar.as_ref(), ctx, offset_x, offset_y, transform);
         if ir.diagram_type == DiagramType::Info {
             self.draw_info_version(ctx, offset_x, offset_y, &mut labels_drawn);
         }
@@ -916,7 +917,7 @@ impl Canvas2dRenderer {
         viewport.offset_y += offset_y * viewport.zoom;
 
         let mut stats = SceneRenderStats::default();
-        self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);
+        self.render_group(&scene.root, ctx, offset_x, offset_y, transform, &mut stats);
 
         ctx.restore();
 
@@ -942,13 +943,14 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
+        parent_transform: ViewportTransform,
         stats: &mut SceneRenderStats,
     ) {
         ctx.save();
 
-        if let Some(transform) = group.transform {
-            self.apply_render_transform(ctx, transform);
-        }
+        let transform = group.transform.map_or(parent_transform, |transform| {
+            self.apply_render_transform(ctx, transform, parent_transform, offset_x, offset_y)
+        });
 
         if let Some(clip) = &group.clip {
             self.apply_render_clip(ctx, clip, offset_x, offset_y);
@@ -957,7 +959,7 @@ impl Canvas2dRenderer {
         for child in &group.children {
             match child {
                 RenderItem::Group(nested) => {
-                    self.render_group(nested, ctx, offset_x, offset_y, stats);
+                    self.render_group(nested, ctx, offset_x, offset_y, transform, stats);
                 }
                 RenderItem::Path(path) => {
                     self.render_path_item(path, ctx, offset_x, offset_y, stats);
@@ -985,26 +987,36 @@ impl Canvas2dRenderer {
         &mut self,
         ctx: &mut C,
         transform: RenderTransform,
-    ) {
+        parent: ViewportTransform,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> ViewportTransform {
         match transform {
             RenderTransform::Matrix { a, b, c, d, e, f } => {
-                if (a - 1.0).abs() < f32::EPSILON
-                    && b.abs() < f32::EPSILON
-                    && c.abs() < f32::EPSILON
-                    && (d - 1.0).abs() < f32::EPSILON
-                    && e.abs() < f32::EPSILON
-                    && f.abs() < f32::EPSILON
-                {
-                    return;
+                let transform = ViewportTransform {
+                    a: f64::from(a),
+                    b: f64::from(b),
+                    c: f64::from(c),
+                    d: f64::from(d),
+                    e: f64::from(e),
+                    f: f64::from(f),
+                };
+                if transform == ViewportTransform::identity() {
+                    return parent;
                 }
 
-                if b.abs() < f32::EPSILON && c.abs() < f32::EPSILON {
-                    ctx.translate(f64::from(e), f64::from(f));
-                    ctx.scale(f64::from(a), f64::from(d));
-                }
-
-                // For arbitrary affine matrices, defer transformation for now.
-                // Using `set_transform` here would replace the active viewport transform.
+                // Primitive coordinates already include bounds normalization. Keep that
+                // translation OUTSIDE authored group transforms: V * T(o) * G * p, not
+                // V * G * T(o) * p. Conjugation preserves the existing primitive stream,
+                // while composing with the parent retains fit, nested transforms and clips.
+                let normalized = ViewportTransform::translate(offset_x, offset_y)
+                    .multiply(&transform)
+                    .multiply(&ViewportTransform::translate(-offset_x, -offset_y));
+                let composed = parent.multiply(&normalized);
+                ctx.set_transform(
+                    composed.a, composed.b, composed.c, composed.d, composed.e, composed.f,
+                );
+                composed
             }
         }
     }
@@ -1629,10 +1641,11 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
+        transform: ViewportTransform,
     ) -> usize {
         let scene = chart.to_scene(&self.config.label_color, &self.config.node_stroke);
         let mut stats = SceneRenderStats::default();
-        self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);
+        self.render_group(&scene.root, ctx, offset_x, offset_y, transform, &mut stats);
         stats.labels_drawn
     }
 
@@ -1643,13 +1656,14 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
+        transform: ViewportTransform,
     ) -> usize {
         let Some(chart) = chart else {
             return 0;
         };
         let scene = chart.to_scene(&self.config.label_color, &self.config.node_stroke);
         let mut stats = SceneRenderStats::default();
-        self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);
+        self.render_group(&scene.root, ctx, offset_x, offset_y, transform, &mut stats);
         stats.labels_drawn
     }
 
