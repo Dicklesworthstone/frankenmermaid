@@ -26,6 +26,28 @@ fn canvas_text(ops_debug: &str) -> Vec<String> {
     out
 }
 
+/// Text drawn inside `<text>`/`<tspan>` elements — the content between an opening tag's `>` and
+/// the next `<`, NOT attribute values or class tokens. Lets a check assert on VISIBLE text rather
+/// than raw markup, so a class like `fm-req-risk-high` cannot satisfy a drawn-text assertion.
+fn svg_drawn_text(svg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for tag in ["<text", "<tspan"] {
+        let mut rest = svg;
+        while let Some(i) = rest.find(tag) {
+            rest = &rest[i..];
+            let Some(gt) = rest.find('>') else { break };
+            rest = &rest[gt + 1..];
+            let Some(lt) = rest.find('<') else { break };
+            let content = rest[..lt].trim();
+            if !content.is_empty() {
+                out.push(content.to_string());
+            }
+            rest = &rest[lt..];
+        }
+    }
+    out
+}
+
 /// `(case, source, declared text)` — text the SOURCE declares and the SVG is expected to draw.
 const CASES: &[(&str, &str, &str)] = &[
     (
@@ -68,11 +90,6 @@ const CASES: &[(&str, &str, &str)] = &[
         "req_text",
         "requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  }\n",
         "hello",
-    ),
-    (
-        "req_risk",
-        "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  risk: high\n  }\n",
-        "high",
     ),
     (
         "c4_desc",
@@ -464,6 +481,58 @@ fn the_three_renderers_agree_on_declared_text() {
         disagreements.is_empty(),
         "renderers disagree on declared text:\n  {}",
         disagreements.join("\n  ")
+    );
+}
+
+/// Requirement risk text, per renderer idiom (bd-qdmn). All three renderers DRAW the declared
+/// risk; the casing differs by design: SVG and canvas capitalise via `requirement_risk_display`
+/// ("Risk: High"), the terminal uses its lowercase compact requirement table ("risk: high").
+/// Pulled out of the shared single-`want` corpus (which cannot carry a per-renderer literal). The
+/// SVG check reads drawn `<text>`/`<tspan>` CONTENT, never raw markup, so the `fm-req-risk-high`
+/// class cannot satisfy it; three positive controls assert each renderer draws ITS literal. A
+/// companion unit test (svg_drawn_text_reads_element_content_not_attributes_or_titles) proves the
+/// SVG check reads element content, not attribute values or titles.
+#[test]
+fn req_risk_text_matches_each_renderer_idiom() {
+    let ir = fm_parser::parse(
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  risk: high\n  }\n",
+    )
+    .ir;
+
+    let svg = fm_render_svg::render_svg(&ir);
+    let svg_text = svg_drawn_text(&svg);
+    let term = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let canvas = canvas_text(&format!("{:?}", context.operations()));
+
+    // Positive control 1 — SVG draws the capitalised literal as VISIBLE <text>/<tspan> content.
+    assert!(
+        svg_text.iter().any(|t| t.contains("Risk: High")),
+        "the SVG must draw \"Risk: High\" as text content: {svg_text:?}"
+    );
+    // Positive control 2 — the canvas draws the same literal via fill_text.
+    assert!(
+        canvas.iter().any(|t| t.contains("Risk: High")),
+        "the canvas must draw \"Risk: High\": {canvas:?}"
+    );
+    // Positive control 3 — the terminal draws its lowercase compact-table idiom (bd-qdmn).
+    assert!(
+        term.contains("risk: high"),
+        "the terminal must draw \"risk: high\" (bd-qdmn lowercase requirement table)"
+    );
+}
+
+/// `svg_drawn_text` must read element CONTENT only — never attribute values or `<title>` text —
+/// so a control cannot be fooled by an aria-label/class/title that happens to carry the string.
+#[test]
+fn svg_drawn_text_reads_element_content_not_attributes_or_titles() {
+    assert!(
+        svg_drawn_text(r#"<g aria-label="Risk: High"><title>Risk: High</title></g>"#).is_empty()
+    );
+    assert_eq!(
+        svg_drawn_text(r#"<text x="1" aria-label="ignored">Risk: High</text>"#),
+        vec!["Risk: High".to_string()]
     );
 }
 
