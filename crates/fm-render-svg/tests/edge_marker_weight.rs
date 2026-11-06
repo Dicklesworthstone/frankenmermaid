@@ -10,8 +10,11 @@
 //! 1. The stroke-width match listed only `ThickArrow` / `DoubleThickArrow` / `ThickLine`, so every
 //!    `==` body that ended in a circle or a cross fell through to the default 1.8. The `==` was
 //!    parsed, stored, and then thrown away at the last step.
-//! 2. The style-class match likewise fell through to `fm-edge-solid`, so `.fm-edge-thick` — the
-//!    rule that thickens the edge on hover — never applied to those edges.
+//! 2. The style-class match likewise fell through to `fm-edge-solid`, so the edge was never
+//!    classed thick. Since f1c2fe2 `fm-edge-thick` is a RULE-LESS weight marker: there is no
+//!    `.fm-edge-thick{}` rule and there must not be one — the thick weight lives in the resolved
+//!    inline `stroke-width`, which a class-level CSS constant would override (the keeps_its_rules
+//!    contract). This test asserts the inline weight is present and the rule is absent.
 //! 3. The streaming path spelled the dotted class `fm-edge-dotted`, WHICH IS DECLARED NOWHERE. It
 //!    was a class name with no rule behind it: the dashes came from the inline `stroke-dasharray`
 //!    alone, and the `.fm-animations-enabled .fm-edge-dashed` flow animation skipped those edges.
@@ -102,15 +105,26 @@ fn no_edge_carries_a_class_the_stylesheet_never_declares() {
             !svg.contains("fm-edge-dotted"),
             "{source:?} emits `fm-edge-dotted`, which no stylesheet in this repo declares"
         );
-        for class in ["fm-edge-dashed", "fm-edge-thick"] {
-            if svg.contains(&format!("class=\"fm-edge {class}"))
-                || svg.contains(&format!(" {class}\""))
-            {
-                assert!(
-                    svg.contains(&format!(".{class}{{")),
-                    "{source:?} uses `{class}` but the stylesheet block declaring it was stripped"
-                );
-            }
+        // `fm-edge-dashed` is theme-styled: if an edge carries it, the stylesheet must declare it.
+        if svg.contains("class=\"fm-edge fm-edge-dashed") || svg.contains(" fm-edge-dashed\"") {
+            assert!(
+                svg.contains(".fm-edge-dashed{"),
+                "{source:?} uses `fm-edge-dashed` but the stylesheet block declaring it was stripped"
+            );
+        }
+        // Since f1c2fe2, `fm-edge-thick` is a RULE-LESS weight marker: the thick weight lives in the
+        // resolved inline `stroke-width`, and a class-level `.fm-edge-thick{}` constant would override
+        // a proportional/sankey width (the keeps_its_rules contract). Assert the inline weight is
+        // present AND that no `.fm-edge-thick{` rule exists — never that one does.
+        if svg.contains("class=\"fm-edge fm-edge-thick") || svg.contains(" fm-edge-thick\"") {
+            assert!(
+                edge_element(&svg).contains("stroke-width=\"2.50\""),
+                "{source:?} is classed thick but lost its resolved inline weight: {svg}"
+            );
+            assert!(
+                !svg.contains(".fm-edge-thick{"),
+                "{source:?} reintroduced a `.fm-edge-thick{{` constant that would override the resolved inline width (f1c2fe2 / keeps_its_rules)"
+            );
         }
     }
 }
