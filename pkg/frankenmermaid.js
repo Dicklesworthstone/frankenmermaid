@@ -1,5 +1,10 @@
 /* @ts-self-types="./frankenmermaid.d.ts" */
 
+/**
+ * A retained Canvas renderer with initialization defaults captured at construction.
+ * Successful per-render overrides become this instance's defaults; later global `init` calls
+ * affect new renderers, while source directives apply only to the current diagram.
+ */
 export class Diagram {
     static __wrap(ptr) {
         const obj = Object.create(Diagram.prototype);
@@ -1301,6 +1306,16 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_instanceof_Map_b2611749102d7ba3: function(arg0) {
+            let result;
+            try {
+                result = getObject(arg0) instanceof Map;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
         __wbg_instanceof_Uint8Array_828cef2aaacafc31: function(arg0) {
             let result;
             try {
@@ -1402,9 +1417,6 @@ function __wbg_get_imports() {
         __wbg_save_f32554f1747071d1: function(arg0) {
             getObject(arg0).save();
         },
-        __wbg_scale_a6ef716accd967d5: function() { return handleError(function (arg0, arg1, arg2) {
-            getObject(arg0).scale(arg1, arg2);
-        }, arguments); },
         __wbg_setLineDash_9fc0f9169c542b64: function() { return handleError(function (arg0, arg1) {
             getObject(arg0).setLineDash(getObject(arg1));
         }, arguments); },
@@ -1506,12 +1518,17 @@ function __wbg_get_imports() {
             const ret = arg0;
             return addHeapObject(ret);
         },
-        __wbindgen_generic_0000000000000002: function(arg0, arg1) {
+        __wbindgen_generic_0000000000000002: function(arg0) {
+            // Cast intrinsic for `I64 -> Externref`.
+            const ret = arg0;
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000003: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return addHeapObject(ret);
         },
-        __wbindgen_generic_0000000000000003: function(arg0) {
+        __wbindgen_generic_0000000000000004: function(arg0) {
             // Cast intrinsic for `U64 -> Externref`.
             const ret = BigInt.asUintN(64, arg0);
             return addHeapObject(ret);

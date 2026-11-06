@@ -81,6 +81,11 @@ export type DiagramSelectionContainment = "intersects" | "contains";
 
 
 
+/**
+ * A retained Canvas renderer with initialization defaults captured at construction.
+ * Successful per-render overrides become this instance's defaults; later global `init` calls
+ * affect new renderers, while source directives apply only to the current diagram.
+ */
 export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
