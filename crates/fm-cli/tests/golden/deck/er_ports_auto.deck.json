@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 326.13,
-    "height": 623.5
+    "width": 246.13,
+    "height": 492.4
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "everything",
       "title": "everything",
       "bounds": {
-        "x": 92.0,
-        "y": 92.0,
+        "x": 52.0,
+        "y": 52.0,
         "width": 142.13,
-        "height": 439.5
+        "height": 388.4
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -82,10 +82,10 @@
       "id": "orders",
       "title": "orders",
       "bounds": {
-        "x": 92.0,
-        "y": 92.0,
+        "x": 52.0,
+        "y": 52.0,
         "width": 142.13,
-        "height": 253.0
+        "height": 241.6
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -140,22 +140,22 @@
   },
   "nodeGeometry": {
     "fm-node-customer-0": {
-      "x": 92.0,
-      "y": 92.0,
+      "x": 52.0,
+      "y": 52.0,
       "width": 142.13,
-      "height": 66.5
+      "height": 76.8
     },
     "fm-node-item-2": {
-      "x": 110.15,
-      "y": 465.0,
+      "x": 70.15,
+      "y": 381.6,
       "width": 105.83,
-      "height": 66.5
+      "height": 58.8
     },
     "fm-node-order-1": {
-      "x": 106.44,
-      "y": 278.5,
+      "x": 66.44,
+      "y": 216.8,
       "width": 113.25,
-      "height": 66.5
+      "height": 76.8
     }
   },
   "edgeEndpoints": {

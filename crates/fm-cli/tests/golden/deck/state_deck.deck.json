@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 480.6,
-    "height": 907.5
+    "width": 360.6,
+    "height": 543.5
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "happy",
       "title": "Happy path",
       "bounds": {
-        "x": 92.0,
-        "y": 232.0,
-        "width": 199.15,
-        "height": 439.5
+        "x": 52.0,
+        "y": 136.0,
+        "width": 179.15,
+        "height": 267.5
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -82,10 +82,10 @@
       "id": "errors",
       "title": "errors",
       "bounds": {
-        "x": 186.15,
-        "y": 418.5,
-        "width": 202.45,
-        "height": 253.0
+        "x": 126.15,
+        "y": 246.5,
+        "width": 182.45,
+        "height": 157.0
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -154,38 +154,38 @@
   },
   "nodeGeometry": {
     "fm-node-busy-2": {
-      "x": 186.15,
-      "y": 418.5,
+      "x": 126.15,
+      "y": 246.5,
       "width": 105.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-done-3": {
-      "x": 92.0,
-      "y": 605.0,
+      "x": 52.0,
+      "y": 357.0,
       "width": 105.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-failed-4": {
-      "x": 277.0,
-      "y": 605.0,
+      "x": 197.0,
+      "y": 357.0,
       "width": 111.6,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-idle-1": {
-      "x": 188.65,
-      "y": 232.0,
+      "x": 128.65,
+      "y": 136.0,
       "width": 100.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-state-end-5": {
-      "x": 132.5,
-      "y": 791.5,
+      "x": 92.5,
+      "y": 467.5,
       "width": 24.0,
       "height": 24.0
     },
     "fm-node-state-start-0": {
-      "x": 228.65,
-      "y": 92.0,
+      "x": 168.65,
+      "y": 52.0,
       "width": 20.0,
       "height": 20.0
     }

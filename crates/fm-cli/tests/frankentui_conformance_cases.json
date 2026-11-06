@@ -681,7 +681,7 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": ["fm-info-version", "v0.3.0"]
+      "svg_contains": ["fm-info-version", "v0.5.0"]
     }
   }
 ]

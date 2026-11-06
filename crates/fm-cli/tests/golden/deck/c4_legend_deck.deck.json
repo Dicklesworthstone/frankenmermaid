@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 475.65,
-    "height": 623.5
+    "width": 504.0,
+    "height": 594.31
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "people",
       "title": "people",
       "bounds": {
-        "x": 92.0,
-        "y": 92.0,
-        "width": 291.65,
-        "height": 66.5
+        "x": 52.0,
+        "y": 52.0,
+        "width": 400.0,
+        "height": 105.68
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -46,10 +46,10 @@
       "id": "systems",
       "title": "systems",
       "bounds": {
-        "x": 168.41,
-        "y": 278.5,
-        "width": 134.7,
-        "height": 253.0
+        "x": 162.0,
+        "y": 221.68,
+        "width": 180.0,
+        "height": 320.64
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -108,28 +108,28 @@
   },
   "nodeGeometry": {
     "fm-node-admin-1": {
-      "x": 273.7,
-      "y": 92.0,
-      "width": 109.95,
-      "height": 66.5
+      "x": 272.0,
+      "y": 52.0,
+      "width": 180.0,
+      "height": 105.68
     },
     "fm-node-db-3": {
-      "x": 168.41,
-      "y": 465.0,
-      "width": 134.7,
-      "height": 66.5
+      "x": 162.0,
+      "y": 391.35,
+      "width": 180.0,
+      "height": 150.96
     },
     "fm-node-user-0": {
-      "x": 92.0,
-      "y": 92.0,
-      "width": 101.7,
-      "height": 66.5
+      "x": 52.0,
+      "y": 52.0,
+      "width": 180.0,
+      "height": 105.68
     },
     "fm-node-web-2": {
-      "x": 170.89,
-      "y": 278.5,
-      "width": 129.75,
-      "height": 66.5
+      "x": 162.0,
+      "y": 221.68,
+      "width": 180.0,
+      "height": 105.68
     }
   },
   "edgeEndpoints": {

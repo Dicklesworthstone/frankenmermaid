@@ -6,8 +6,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 1508.0,
-    "height": 354.5
+    "width": 1133.76,
+    "height": 226.55
   },
   "options": {
     "fitMargin": 150.0,
@@ -21,10 +21,10 @@
       "title": "Entry",
       "caption": "where it starts",
       "bounds": {
-        "x": 92.0,
-        "y": 144.0,
-        "width": 325.05,
-        "height": 66.5
+        "x": 52.0,
+        "y": 72.47,
+        "width": 292.16,
+        "height": 81.61
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -56,10 +56,10 @@
       "id": "core",
       "title": "The core",
       "bounds": {
-        "x": 537.05,
-        "y": 92.0,
-        "width": 653.95,
-        "height": 170.5
+        "x": 418.81,
+        "y": 52.0,
+        "width": 493.95,
+        "height": 122.55
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -128,10 +128,10 @@
       "id": "all",
       "title": "all",
       "bounds": {
-        "x": 92.0,
-        "y": 92.0,
-        "width": 1324.0,
-        "height": 170.5
+        "x": 52.0,
+        "y": 52.0,
+        "width": 1029.76,
+        "height": 122.55
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -217,40 +217,40 @@
   },
   "nodeGeometry": {
     "fm-node-core1-2": {
-      "x": 589.05,
-      "y": 144.0,
+      "x": 446.81,
+      "y": 100.05,
       "width": 100.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-core2-3": {
-      "x": 809.05,
-      "y": 144.0,
+      "x": 610.81,
+      "y": 100.05,
       "width": 100.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-core3-4": {
-      "x": 1029.05,
-      "y": 144.0,
+      "x": 774.81,
+      "y": 100.05,
       "width": 109.95,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-done-5": {
-      "x": 1311.0,
-      "y": 144.0,
+      "x": 976.76,
+      "y": 80.03,
       "width": 105.0,
       "height": 66.5
     },
     "fm-node-gate-1": {
-      "x": 315.35,
-      "y": 144.0,
-      "width": 101.7,
-      "height": 66.5
+      "x": 219.35,
+      "y": 72.47,
+      "width": 124.81,
+      "height": 81.61
     },
     "fm-node-start-0": {
-      "x": 92.0,
-      "y": 144.0,
+      "x": 52.0,
+      "y": 90.03,
       "width": 103.35,
-      "height": 66.5
+      "height": 46.5
     }
   },
   "edgeEndpoints": {

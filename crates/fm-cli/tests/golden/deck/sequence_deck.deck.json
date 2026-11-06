@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 718.25,
-    "height": 806.5
+    "width": 606.25,
+    "height": 446.5
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "handshake",
       "title": "handshake",
       "bounds": {
-        "x": 40.0,
-        "y": 40.0,
-        "width": 363.35,
-        "height": 546.5
+        "x": 24.0,
+        "y": 24.0,
+        "width": 323.35,
+        "height": 302.5
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -60,10 +60,10 @@
       "id": "server",
       "title": "server",
       "bounds": {
-        "x": 303.35,
-        "y": 40.0,
-        "width": 374.9,
-        "height": 426.5
+        "x": 247.35,
+        "y": 24.0,
+        "width": 334.9,
+        "height": 238.5
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -129,22 +129,22 @@
   },
   "nodeGeometry": {
     "fm-node-alice-0": {
-      "x": 40.0,
-      "y": 40.0,
+      "x": 24.0,
+      "y": 24.0,
       "width": 103.35,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-bob-1": {
-      "x": 303.35,
-      "y": 40.0,
+      "x": 247.35,
+      "y": 24.0,
       "width": 100.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-server-2": {
-      "x": 563.35,
-      "y": 40.0,
+      "x": 467.35,
+      "y": 24.0,
       "width": 114.9,
-      "height": 66.5
+      "height": 46.5
     }
   },
   "edgeEndpoints": {

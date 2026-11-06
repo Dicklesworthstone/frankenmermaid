@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 492.15,
-    "height": 623.5
+    "width": 372.15,
+    "height": 403.92
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "loop",
       "title": "The retry loop",
       "bounds": {
-        "x": 92.0,
-        "y": 92.0,
-        "width": 213.59,
-        "height": 439.5
+        "x": 52.0,
+        "y": 52.0,
+        "width": 197.95,
+        "height": 299.92
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -89,10 +89,10 @@
       "id": "exit",
       "title": "exit",
       "bounds": {
-        "x": 200.61,
-        "y": 278.5,
-        "width": 199.54,
-        "height": 253.0
+        "x": 131.28,
+        "y": 162.5,
+        "width": 188.87,
+        "height": 189.42
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -143,28 +143,28 @@
   },
   "nodeGeometry": {
     "fm-node-check-1": {
-      "x": 200.61,
-      "y": 278.5,
-      "width": 100.0,
-      "height": 66.5
+      "x": 131.28,
+      "y": 162.5,
+      "width": 118.67,
+      "height": 78.92
     },
     "fm-node-done-3": {
-      "x": 295.15,
-      "y": 465.0,
+      "x": 215.15,
+      "y": 305.42,
       "width": 105.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-fetch-0": {
-      "x": 195.64,
-      "y": 92.0,
+      "x": 135.64,
+      "y": 52.0,
       "width": 109.95,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-retry-2": {
-      "x": 92.0,
-      "y": 465.0,
+      "x": 52.0,
+      "y": 305.42,
       "width": 123.15,
-      "height": 66.5
+      "height": 46.5
     }
   },
   "edgeEndpoints": {

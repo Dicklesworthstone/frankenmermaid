@@ -5,8 +5,8 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 1546.83,
-    "height": 354.5
+    "width": 1138.82,
+    "height": 226.55
   },
   "options": {
     "fitMargin": 150.0,
@@ -19,10 +19,10 @@
       "id": "tight",
       "title": "Just one node",
       "bounds": {
-        "x": 396.23,
-        "y": 144.0,
+        "x": 276.23,
+        "y": 100.05,
         "width": 114.9,
-        "height": 66.5
+        "height": 46.5
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -62,10 +62,10 @@
       "id": "whole",
       "title": "whole",
       "bounds": {
-        "x": 344.23,
-        "y": 92.0,
-        "width": 1110.6,
-        "height": 170.5
+        "x": 248.23,
+        "y": 52.0,
+        "width": 838.6,
+        "height": 122.55
       },
       "fitMargin": 150.0,
       "zoomMax": 1.4,
@@ -163,40 +163,40 @@
   },
   "nodeGeometry": {
     "fm-node-far-5": {
-      "x": 92.0,
-      "y": 144.0,
+      "x": 52.0,
+      "y": 90.03,
       "width": 132.23,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-m1-0": {
-      "x": 396.23,
-      "y": 144.0,
+      "x": 276.23,
+      "y": 100.05,
       "width": 114.9,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-m2-1": {
-      "x": 631.13,
-      "y": 144.0,
+      "x": 455.13,
+      "y": 100.05,
       "width": 100.0,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-m3-2": {
-      "x": 851.13,
-      "y": 144.0,
+      "x": 619.13,
+      "y": 100.05,
       "width": 109.95,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-m4-3": {
-      "x": 1081.07,
-      "y": 144.0,
+      "x": 793.07,
+      "y": 100.05,
       "width": 101.7,
-      "height": 66.5
+      "height": 46.5
     },
     "fm-node-m5-4": {
-      "x": 1302.78,
-      "y": 144.0,
+      "x": 958.78,
+      "y": 100.05,
       "width": 100.05,
-      "height": 66.5
+      "height": 46.5
     }
   },
   "edgeEndpoints": {
