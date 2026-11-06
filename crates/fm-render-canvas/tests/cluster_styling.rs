@@ -65,8 +65,12 @@ fn an_uncoloured_cluster_keeps_the_theme_background() {
         !fills.is_empty(),
         "nothing was filled, so this control proves nothing"
     );
+    // c142a339 "unify default styling" set the canvas cluster default to the theme fill
+    // (CanvasRenderConfig::default().cluster_fill == theme colors.cluster_fill == "#f1f5f9");
+    // the pre-c142a339 rgba(226,232,240,0.44) this once asserted is gone.
+    let theme_cluster_fill = CanvasRenderConfig::default().cluster_fill;
     assert!(
-        fills.iter().any(|f| f.starts_with("rgba(226,232,240")),
+        fills.iter().any(|f| *f == theme_cluster_fill),
         "the default cluster fill is missing: {fills:?}"
     );
 }
@@ -87,8 +91,10 @@ fn a_malformed_cluster_colour_falls_back_to_the_theme() {
         !fills.iter().any(|f| f.contains(';')),
         "a malformed colour was forwarded to the canvas verbatim: {fills:?}"
     );
+    // Falls back to the theme cluster fill unified by c142a339 (see above).
+    let theme_cluster_fill = CanvasRenderConfig::default().cluster_fill;
     assert!(
-        fills.iter().any(|f| f.starts_with("rgba(226,232,240")),
+        fills.iter().any(|f| *f == theme_cluster_fill),
         "the theme fallback did not apply: {fills:?}"
     );
 }
