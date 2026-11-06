@@ -13,9 +13,14 @@
 //! whether `extensions.cluster_dividers` is populated, so the cells that appear are the ones this
 //! code path drew and nothing else.
 
-use fm_core::MermaidDiagramIr;
-use fm_layout::DiagramLayout;
-use fm_render_term::{TermRenderConfig, render_term_with_layout_and_config};
+use fm_core::{DiagramType, MermaidDiagramIr, MermaidGlyphMode, MermaidRenderMode, MermaidTier};
+use fm_layout::{
+    DiagramLayout, LayoutClusterBox, LayoutClusterDivider, LayoutExtensions, LayoutPoint,
+    LayoutRect, LayoutStats,
+};
+use fm_render_term::{
+    EdgeGlyphs, ResolvedConfig, TermRenderConfig, TermRenderer, render_term_with_layout_and_config,
+};
 
 /// Two concurrent regions inside one composite state.
 const CONCURRENT: &str = "stateDiagram-v2\n    state Big {\n        [*] --> A\n        A --> B\n        --\n        [*] --> C\n        C --> D\n    }\n";
@@ -32,8 +37,12 @@ fn parse(source: &str) -> (MermaidDiagramIr, DiagramLayout) {
     (ir, layout)
 }
 
-fn render(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<Vec<char>> {
-    render_term_with_layout_and_config(ir, layout, &TermRenderConfig::rich(), COLS, ROWS)
+fn render(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &TermRenderConfig,
+) -> Vec<Vec<char>> {
+    render_term_with_layout_and_config(ir, layout, config, COLS, ROWS)
         .output
         .lines()
         .map(|line| line.chars().collect())
@@ -42,11 +51,19 @@ fn render(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<Vec<char>> {
 
 /// The (column, row) cells the dividers add, measured against the same layout with them removed.
 fn cells_added_by_dividers(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<(usize, usize)> {
+    cells_added_by_dividers_with_config(ir, layout, &TermRenderConfig::rich())
+}
+
+fn cells_added_by_dividers_with_config(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &TermRenderConfig,
+) -> Vec<(usize, usize)> {
     let mut without = layout.clone();
     without.extensions.cluster_dividers.clear();
 
-    let after = render(ir, layout);
-    let before = render(ir, &without);
+    let after = render(ir, layout, config);
+    let before = render(ir, &without, config);
 
     let mut added = Vec::new();
     for (row, line) in after.iter().enumerate() {
@@ -85,11 +102,22 @@ fn a_concurrency_divider_puts_cells_on_the_canvas() {
         "CONTROL FAILED: no divider in this layout, so an empty diff would prove nothing"
     );
 
-    let added = cells_added_by_dividers(&ir, &layout);
-    assert!(
-        !added.is_empty(),
-        "populating extensions.cluster_dividers changed no cell in the terminal output"
-    );
+    for config in [
+        TermRenderConfig::rich(),
+        TermRenderConfig::compact(),
+        TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            ..TermRenderConfig::rich()
+        },
+    ] {
+        let added = cells_added_by_dividers_with_config(&ir, &layout, &config);
+        assert!(
+            !added.is_empty(),
+            "populating extensions.cluster_dividers changed no cell in {:?}/{:?} output",
+            config.tier,
+            config.render_mode,
+        );
+    }
 }
 
 /// THE NEGATIVE CASE a naive implementation fails: a composite state WITHOUT a separator must not
@@ -117,23 +145,28 @@ fn a_composite_state_without_a_separator_draws_no_divider() {
     );
 }
 
-/// The divider is a HORIZONTAL rule, not a scribble. `build_state_cluster_dividers` emits
-/// `start.y == end.y`, so every cell it adds must share one row per divider.
+/// The divider follows the layout axis. Side-by-side regions need a vertical rule, while
+/// stacked regions need a horizontal one; forcing either orientation can cut through states.
 #[test]
-fn the_divider_is_a_horizontal_rule() {
+fn the_divider_follows_its_layout_orientation() {
     let (ir, layout) = parse(CONCURRENT);
-    let divider_rows = layout.extensions.cluster_dividers.len();
+    assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+    let divider = &layout.extensions.cluster_dividers[0];
+    let vertical = divider.start.x == divider.end.x;
+    assert!(vertical || divider.start.y == divider.end.y);
     let added = cells_added_by_dividers(&ir, &layout);
     assert!(!added.is_empty(), "no divider cells to check");
 
-    let mut rows: Vec<usize> = added.iter().map(|(_, row)| *row).collect();
-    rows.sort_unstable();
-    rows.dedup();
-    assert!(
-        rows.len() <= divider_rows,
-        "{divider_rows} divider(s) touched {} distinct terminal rows {rows:?}; a horizontal rule \
-         occupies one row each",
-        rows.len()
+    let mut cross_axis: Vec<usize> = added
+        .iter()
+        .map(|&(col, row)| if vertical { col } else { row })
+        .collect();
+    cross_axis.sort_unstable();
+    cross_axis.dedup();
+    assert_eq!(
+        cross_axis.len(),
+        1,
+        "{divider:?} touched multiple cells across its axis: {cross_axis:?}",
     );
 }
 
@@ -145,36 +178,31 @@ fn the_divider_is_a_horizontal_rule() {
 #[test]
 fn the_divider_is_dashed_and_the_gaps_survive_cell_quantisation() {
     let (ir, layout) = parse(CONCURRENT);
-    let added = cells_added_by_dividers(&ir, &layout);
+    assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+    let divider = &layout.extensions.cluster_dividers[0];
+    let vertical = divider.start.x == divider.end.x;
+    // Labels can erase pixels on a solid rule and create false dash gaps. Test the geometry
+    // without that text overlay, still using exactly the same IR and layout for the control.
+    let added = cells_added_by_dividers_with_config(
+        &ir,
+        &layout,
+        &TermRenderConfig {
+            show_labels: false,
+            ..TermRenderConfig::rich()
+        },
+    );
     assert!(!added.is_empty(), "no divider cells to check");
 
-    // Group by row, then look for a gap inside each row's column span. A solid rule fills every
-    // column between its endpoints; a dashed one does not.
-    let mut rows: Vec<usize> = added.iter().map(|(_, row)| *row).collect();
-    rows.sort_unstable();
-    rows.dedup();
-
-    let mut any_row_has_a_gap = false;
-    for row in rows {
-        let mut columns: Vec<usize> = added
-            .iter()
-            .filter(|(_, r)| *r == row)
-            .map(|(col, _)| *col)
-            .collect();
-        columns.sort_unstable();
-        let (Some(first), Some(last)) = (columns.first().copied(), columns.last().copied()) else {
-            continue;
-        };
-        let span = last - first + 1;
-        if columns.len() < span {
-            any_row_has_a_gap = true;
-        }
-    }
-
+    let mut positions: Vec<usize> = added
+        .iter()
+        .map(|&(col, row)| if vertical { row } else { col })
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    let span = positions.last().unwrap() - positions.first().unwrap() + 1;
     assert!(
-        any_row_has_a_gap,
-        "every divider row was a solid run of cells; a solid rule is indistinguishable from the \
-         cluster border this divider sits inside"
+        positions.len() < span,
+        "{divider:?} was a solid run along its axis: {positions:?}; the boundary must retain dash gaps"
     );
 }
 
@@ -206,4 +234,173 @@ fn the_divider_stays_within_its_cluster() {
         span <= allowed,
         "divider spans {span} columns but the widest cluster is only {allowed} columns wide"
     );
+}
+
+/// Explicit geometry makes both orientations mandatory, independently of how the layout
+/// chooses to pack a parsed fixture. The empty interior also prevents labels or crossing
+/// edges from supplying accidental gaps to an otherwise solid boundary.
+#[test]
+fn both_divider_axes_survive_all_terminal_modes() {
+    let ir = MermaidDiagramIr::empty(DiagramType::State);
+    for (start, end) in [
+        (
+            LayoutPoint { x: 20.0, y: 50.0 },
+            LayoutPoint { x: 80.0, y: 50.0 },
+        ),
+        (
+            LayoutPoint { x: 50.0, y: 20.0 },
+            LayoutPoint { x: 50.0, y: 80.0 },
+        ),
+    ] {
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: vec![LayoutClusterBox {
+                cluster_index: 0,
+                span: Default::default(),
+                title: None,
+                color: None,
+                bounds: LayoutRect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 80.0,
+                },
+            }],
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions {
+                cluster_dividers: vec![LayoutClusterDivider {
+                    cluster_index: 0,
+                    start,
+                    end,
+                }],
+                ..Default::default()
+            },
+            dirty_regions: Vec::new(),
+        };
+        for (tier, mode, glyph_mode) in [
+            (
+                MermaidTier::Compact,
+                MermaidRenderMode::CellOnly,
+                MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidTier::Compact,
+                MermaidRenderMode::Braille,
+                MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidTier::Normal,
+                MermaidRenderMode::CellOnly,
+                MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidTier::Normal,
+                MermaidRenderMode::CellOnly,
+                MermaidGlyphMode::Ascii,
+            ),
+            (
+                MermaidTier::Rich,
+                MermaidRenderMode::Block,
+                MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidTier::Rich,
+                MermaidRenderMode::HalfBlock,
+                MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidTier::Rich,
+                MermaidRenderMode::Braille,
+                MermaidGlyphMode::Unicode,
+            ),
+        ] {
+            let config = TermRenderConfig {
+                tier,
+                render_mode: mode,
+                glyph_mode,
+                show_labels: false,
+                show_clusters: true,
+                max_width: COLS,
+                max_height: ROWS,
+                ..TermRenderConfig::rich()
+            };
+            let case = format!("{tier:?}/{mode:?}/{glyph_mode:?}, {start:?} -> {end:?}");
+            let added = cells_added_by_dividers_with_config(&ir, &layout, &config);
+            assert!(
+                added.len() >= 2,
+                "{case}: the separator is missing or collapsed to a point"
+            );
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, COLS, ROWS));
+            let (x0, y0) = renderer.map_layout_point_to_cells(&layout, ir.direction, start);
+            let (x1, y1) = renderer.map_layout_point_to_cells(&layout, ir.direction, end);
+            let vertical = start.x == end.x;
+            let fixed = if vertical { x0 } else { y0 };
+            let (first, last) = if vertical { (y0, y1) } else { (x0, x1) };
+            let (left, top) = renderer.map_layout_point_to_cells(
+                &layout,
+                ir.direction,
+                LayoutPoint { x: 10.0, y: 10.0 },
+            );
+            let (right, bottom) = renderer.map_layout_point_to_cells(
+                &layout,
+                ir.direction,
+                LayoutPoint { x: 90.0, y: 90.0 },
+            );
+            for &(col, row) in &added {
+                assert_eq!(
+                    if vertical { col } else { row },
+                    fixed,
+                    "{case}: separator moved across its layout axis"
+                );
+                let along = if vertical { row } else { col };
+                assert!(
+                    (first.min(last)..=first.max(last)).contains(&along),
+                    "{case}: separator escaped its source endpoints at ({col}, {row})"
+                );
+                assert!(
+                    col > left && col < right && row > top && row < bottom,
+                    "{case}: separator escaped its cluster at ({col}, {row})"
+                );
+            }
+            let mut positions: Vec<_> = added
+                .iter()
+                .map(|&(col, row)| if vertical { row } else { col })
+                .collect();
+            positions.sort_unstable();
+            positions.dedup();
+            let span = positions.last().unwrap() - positions.first().unwrap() + 1;
+            assert!(
+                span >= first.abs_diff(last) / 2,
+                "{case}: separator covers too little of its region"
+            );
+            assert!(
+                positions.len() < span,
+                "{case}: dashed separator became a solid cell run"
+            );
+
+            if tier == MermaidTier::Compact || mode == MermaidRenderMode::CellOnly {
+                let glyphs = EdgeGlyphs::for_mode(glyph_mode);
+                let expected = if vertical {
+                    glyphs.dotted_v
+                } else {
+                    glyphs.dotted_h
+                };
+                let rendered = render(&ir, &layout, &config);
+                assert!(
+                    added
+                        .iter()
+                        .all(|&(col, row)| rendered[row][col] == expected),
+                    "{case}: cell separator lost its dashed glyph"
+                );
+            }
+        }
+    }
 }

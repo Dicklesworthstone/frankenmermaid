@@ -640,6 +640,29 @@ impl TermRenderer {
             }
         }
 
+        // Concurrent-state regions are separated in either axis, depending on their layout.
+        // Keep real cell gaps so the boundary remains distinct from the enclosing solid frame,
+        // including Compact/Outline and ASCII output.
+        for divider in &layout.extensions.cluster_dividers {
+            let (x0, y0) = self.point_to_cells(&divider.start, scale_x, scale_y);
+            let (x1, y1) = self.point_to_cells(&divider.end, scale_x, scale_y);
+            let dx = x1 as isize - x0 as isize;
+            let dy = y1 as isize - y0 as isize;
+            let steps = dx.abs().max(dy.abs());
+            let glyph = if dx.abs() >= dy.abs() {
+                self.edge_glyphs.dotted_h
+            } else {
+                self.edge_glyphs.dotted_v
+            };
+            for step in (0..=steps).step_by(2) {
+                let x = x0 as isize + dx * step / steps.max(1);
+                let y = y0 as isize + dy * step / steps.max(1);
+                if x >= 0 && y >= 0 {
+                    buffer.set(x as usize, y as usize, glyph);
+                }
+            }
+        }
+
         if ir.diagram_type == fm_core::DiagramType::Sequence {
             // Lifeline bands already encode creation and destruction boundaries. Draw their
             // exact interval before messages so Compact and CellOnly retain participant time.
@@ -1091,13 +1114,9 @@ impl TermRenderer {
         // marker gives above: the overlay carries state names, and a rule written there would erase
         // one. A divider is worth less than the label it would cover.
         //
-        // DASHED, at the same 3-pixel cadence the sequence lifeline already uses on this canvas,
-        // because a SOLID rule here is indistinguishable from the cluster's own border —
-        // `render_cluster_canvas` draws that border with `draw_rect`, which is solid. The dash is
-        // what carries "region boundary" rather than "another box", exactly as the SVG's
-        // `stroke-dasharray("6,4")` does there. It survives sub-cell quantisation: braille packs 2
-        // pixels per column, so a 3-on/3-off run alternates set and clear cells rather than filling
-        // every one.
+        // Dash gaps survive quantisation in both axes: Braille uses two pixels per column but
+        // four per row, so a vertical boundary needs a longer cadence than a horizontal one.
+        // A solid rule would read as another enclosing frame instead of a concurrent region.
         for divider in &layout.extensions.cluster_dividers {
             let x0 = (divider.start.x * pixel_scale_x) as isize + padding_x as isize;
             let y0 = (divider.start.y * pixel_scale_y) as isize + padding_y as isize;
@@ -2046,22 +2065,14 @@ impl TermRenderer {
         }
     }
 
-    /// Draw a DASHED segment on the pixel canvas, in the 3-on/3-off cadence the sequence lifeline
-    /// already uses here (bd-dgnm4).
+    /// Draw a dashed segment whose gaps remain visible at the canvas's cell resolution.
     ///
-    /// Written parametrically rather than as a horizontal special case even though every divider
-    /// `build_state_cluster_dividers` emits today is horizontal (it sets `start.y == end.y`). The
-    /// geometry it consumes is a general `LayoutPoint` pair, and a horizontal-only implementation
-    /// would silently draw a future vertical or diagonal divider in the wrong place instead of
-    /// failing — the same shape as the state-note leader bug that cast a negative coordinate to
-    /// `usize` and lost the line entirely.
+    /// Concurrent-state layouts emit horizontal or vertical dividers. The same interpolation
+    /// handles diagonal supplied segments without forcing their geometry into one axis.
     ///
     /// `draw_line` takes `isize` and clips internally, so off-canvas dashes are dropped rather than
     /// wrapped.
     fn draw_dashed_segment(canvas: &mut Canvas, x0: isize, y0: isize, x1: isize, y1: isize) {
-        /// Pixels drawn, then pixels skipped. Matches the lifeline dash on this canvas.
-        const DASH: isize = 3;
-
         let dx = x1 - x0;
         let dy = y1 - y0;
         let steps = dx.abs().max(dy.abs());
@@ -2070,9 +2081,19 @@ impl TermRenderer {
             return;
         }
 
+        let (pixel_width, pixel_height) = canvas.pixel_dimensions();
+        let (cell_width, cell_height) = canvas.cell_dimensions();
+        let pixels_per_cell = if dx.abs() >= dy.abs() {
+            pixel_width / cell_width.max(1)
+        } else {
+            pixel_height / cell_height.max(1)
+        };
+        // An off run of 2*n-1 pixels contains a whole n-pixel cell at every phase.
+        // Three off pixels work horizontally in Braille, but cannot empty a four-pixel row.
+        let dash = (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as isize;
         let mut step = 0_isize;
         while step <= steps {
-            let end = (step + DASH - 1).min(steps);
+            let end = (step + dash - 1).min(steps);
             // Endpoints of this dash, interpolated along the segment. Integer arithmetic keeps the
             // result deterministic across platforms, which the terminal output determinism test
             // depends on.
@@ -2081,7 +2102,7 @@ impl TermRenderer {
             let bx = x0 + dx * end / steps;
             let by = y0 + dy * end / steps;
             canvas.draw_line(ax, ay, bx, by);
-            step += DASH * 2;
+            step += dash * 2;
         }
     }
 

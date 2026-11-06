@@ -1271,9 +1271,14 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
             plan, without_layer,
             "{name} fixture contains no target geometry"
         );
-        let image = render_diagram(&gpu, &pipelines, &plan, None, 640, 480)
+        // Geometry-only controls omit text deliberately. A text-layer control needs the same
+        // atlas on both sides, otherwise both images skip that layer before submission.
+        let atlas = (plan.text_quads != without_layer.text_quads).then(|| {
+            GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &solid_coverage(&plan.glyph_atlas))
+        });
+        let image = render_diagram(&gpu, &pipelines, &plan, atlas.as_ref(), 640, 480)
             .expect("render complete diagram geometry");
-        let control = render_diagram(&gpu, &pipelines, &without_layer, None, 640, 480)
+        let control = render_diagram(&gpu, &pipelines, &without_layer, atlas.as_ref(), 640, 480)
             .expect("render diagram with one layer omitted");
         let changed = image
             .rgba
@@ -1302,6 +1307,130 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
                     "cluster covered its node"
                 );
             }
+        }
+    }
+}
+
+/// Real digit outlines must remain visible over their opaque capsules, including the entire
+/// exact counter. Filled synthetic cells alone cannot establish that the digits are legible.
+#[test]
+fn sequence_number_digits_paint_real_glyph_ink_above_their_capsules() {
+    use fm_render_canvas::glyph_raster::{GlyphFont, rasterize_atlas};
+
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    // Match the real-glyph tests' existing host-font fixture; no typeface is bundled here.
+    const FONT_PATH: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    let Ok(bytes) = std::fs::read(FONT_PATH) else {
+        eprintln!("[glyph] SKIPPED: no font at {FONT_PATH}");
+        return;
+    };
+    let font = GlyphFont::from_bytes(&bytes).expect("DejaVuSans should parse");
+    let ir =
+        fm_parser::parse("sequenceDiagram\nautonumber 4294967295 4294967295\nA->>B:\nB-->>A:\n").ir;
+    let config = CanvasRenderConfig {
+        font_size: 32.0,
+        edge_stroke: "#111111".into(),
+        background: Some("#ffffff".into()),
+        ..Default::default()
+    };
+    let metrics = config.font_metrics();
+    let layout = fm_layout::layout_diagram_with_config(
+        &ir,
+        fm_layout::LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        },
+    );
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let runs: Vec<_> = plan
+        .text_runs
+        .iter()
+        .filter(|run| run.source == fm_render_canvas::GpuTextSource::SequenceNumber)
+        .collect();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(plan.sequence_number_instances.len(), 2);
+    let coverage = rasterize_atlas(&plan.glyph_atlas, &font);
+    assert!(
+        coverage.missing.is_empty(),
+        "missing glyphs: {:?}",
+        coverage.missing
+    );
+    assert!(
+        coverage.clipped.is_empty(),
+        "clipped glyphs: {:?}",
+        coverage.clipped
+    );
+    let atlas = GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &coverage.bitmap);
+    let pipelines = DiagramPipelines::new(&gpu);
+    let image = render_diagram(&gpu, &pipelines, &plan, Some(&atlas), 1280, 640).unwrap();
+    let mut without_digits = plan.clone();
+    without_digits
+        .text_quads
+        .truncate(plan.sequence_number_quad_start);
+    let control =
+        render_diagram(&gpu, &pipelines, &without_digits, Some(&atlas), 1280, 640).unwrap();
+
+    let [atlas_width, atlas_height] = plan.glyph_atlas.texture_px;
+    for (run, expected) in runs.into_iter().zip(["4294967295", "8589934590"]) {
+        let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+        assert_eq!(quads.len(), expected.len());
+        for (quad, glyph) in quads.iter().zip(expected.chars()) {
+            let cell = plan
+                .glyph_atlas
+                .cell(glyph)
+                .expect("counter digit is in the atlas");
+            assert_eq!(quad.uv_min, cell.uv_min);
+            assert_eq!(quad.uv_max, cell.uv_max);
+            let x0 = (cell.uv_min[0] * atlas_width as f32).round() as u32;
+            let x1 = (cell.uv_max[0] * atlas_width as f32).round() as u32;
+            let y0 = (cell.uv_min[1] * atlas_height as f32).round() as u32;
+            let y1 = (cell.uv_max[1] * atlas_height as f32).round() as u32;
+            let (mut ink, mut gaps) = (0, 0);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if coverage.bitmap[(y * atlas_width + x) as usize] > 0 {
+                        ink += 1;
+                    } else {
+                        gaps += 1;
+                    }
+                }
+            }
+            assert!(
+                ink > 0 && gaps > 0,
+                "digit {glyph} needs a real outline with transparent space"
+            );
+
+            // Inspect each digit's advance column separately so another visible digit cannot
+            // make an entirely missing counter tail pass an image-wide difference assertion.
+            let half_advance = metrics.estimate_width(&glyph.to_string())
+                * fm_layout::LayoutSequenceNumber::FONT_SCALE
+                * 0.5;
+            let (left, top) = image.pixel_for(
+                &plan.bounds,
+                quad.center[0] - half_advance,
+                quad.center[1] - quad.half_extent[1],
+            );
+            let (right, bottom) = image.pixel_for(
+                &plan.bounds,
+                quad.center[0] + half_advance,
+                quad.center[1] + quad.half_extent[1],
+            );
+            let mut visible_ink = 0;
+            for y in top..=bottom {
+                for x in left..=right {
+                    let actual = image.pixel(x, y).unwrap();
+                    let missing = control.pixel(x, y).unwrap();
+                    if (0..3).all(|channel| actual[channel].saturating_sub(missing[channel]) > 16) {
+                        visible_ink += 1;
+                    }
+                }
+            }
+            assert!(
+                visible_ink > 3,
+                "digit {glyph} of {expected} has no contrasting ink above its capsule"
+            );
         }
     }
 }
