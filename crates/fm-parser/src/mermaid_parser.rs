@@ -5072,20 +5072,47 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
 /// - `"Map~K,V~"` → `("Map", vec!["K", "V"])`
 /// - `"Animal"` → `("Animal", vec![])`
 fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
-    let Some(tilde_start) = raw_name.find('~') else {
-        return (raw_name, Vec::new());
-    };
-    let Some(tilde_end) = raw_name[tilde_start + 1..].find('~') else {
+    let Some((tilde_start, tilde_end)) = class_generic_bounds(raw_name) else {
         return (raw_name, Vec::new());
     };
     let class_name = &raw_name[..tilde_start];
-    let generics_str = &raw_name[tilde_start + 1..tilde_start + 1 + tilde_end];
+    let generics_str = &raw_name[tilde_start + 1..tilde_end];
     let generics: Vec<String> = generics_str
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
     (class_name, generics)
+}
+
+/// Locate the class name's generic token, excluding quoted names, display labels and CSS suffixes.
+/// Mermaid's generic lexer treats the bytes between the two tildes as one token. A tilde inside
+/// a backtick-quoted name or `A["List~T~ values"]` is ordinary text, not type metadata.
+fn class_generic_bounds(raw: &str) -> Option<(usize, usize)> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in raw.bytes().enumerate() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && delimiter != b'`' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => quote = Some(byte),
+            b'[' | b'(' | b'{' | b':' => return None,
+            b'~' => {
+                let close = raw[index + 1..].find('~')? + index + 1;
+                return Some((index, close));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Remove one valid `~T~` group from a class declaration while retaining any node label after it.
@@ -5095,13 +5122,9 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
 /// return only `A`, discarding the suffix before that parser could see it. Rebuilding the source as
 /// `A["Pretty Label"]` keeps the two independent pieces of syntax on their rightful paths.
 fn strip_class_declaration_generics(raw: &str) -> (String, Vec<String>) {
-    let Some(tilde_start) = raw.find('~') else {
+    let Some((tilde_start, tilde_end)) = class_generic_bounds(raw) else {
         return (raw.to_string(), Vec::new());
     };
-    let Some(relative_tilde_end) = raw[tilde_start + 1..].find('~') else {
-        return (raw.to_string(), Vec::new());
-    };
-    let tilde_end = tilde_start + 1 + relative_tilde_end;
     let generics: Vec<String> = raw[tilde_start + 1..tilde_end]
         .split(',')
         .map(|parameter| parameter.trim().to_string())
@@ -5328,14 +5351,15 @@ fn strip_class_relation_generics(statement: &str) -> Option<StrippedClassRelatio
     let mut found = Vec::new();
     let mut rewrite = |side: &str| -> String {
         let trimmed = trim_fast(side);
-        let (clean, generics) = extract_class_generics(trimmed);
+        let (clean, generics) = strip_class_declaration_generics(trimmed);
         if generics.is_empty() || clean.is_empty() {
             return side.to_string();
         }
-        found.push((clean.to_string(), generics));
-        // Keep the surrounding whitespace so cardinality extraction, which works on byte offsets
-        // around the operator, sees the same shape it did before.
-        side.replacen(trimmed, clean, 1)
+        // Labels and cardinalities have already been separated. Remove only the generic token
+        // from each endpoint so an inline class suffix or display name cannot be truncated.
+        let rewritten = side.replacen(trimmed, &clean, 1);
+        found.push((clean, generics));
+        rewritten
     };
     let left = rewrite(&statement[..operator_idx]);
     let right = rewrite(&statement[operator_idx + operator.len()..]);
@@ -5363,20 +5387,56 @@ fn split_class_relation_label(statement: &str) -> (&str, Option<&str>) {
         return (statement, None);
     };
     let after_op = op_idx + op_str.len();
-    let Some(colon_offset) = statement[after_op..].find(':') else {
-        return (statement, None);
-    };
-    let colon_idx = after_op + colon_offset;
-    // `:::` is the CSS-class shorthand (`A --> B:::styled`), not a label. Splitting on the first
-    // colon blindly would turn it into a label named `:styled` and strip the class assignment.
-    if statement[colon_idx..].starts_with(":::") {
-        return (statement, None);
+    let bytes = statement.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut generic = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+    for (index, &byte) in bytes.iter().enumerate().skip(after_op) {
+        if generic {
+            if byte == b'~' {
+                generic = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && delimiter != b'`' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => quote = Some(byte),
+            b'[' => square_depth = square_depth.saturating_add(1),
+            b']' => square_depth = square_depth.saturating_sub(1),
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' => brace_depth = brace_depth.saturating_add(1),
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'~' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                generic = true;
+            }
+            b':' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                // A `:::` suffix applies a CSS class; none of its three colons starts a label.
+                if statement[index..].starts_with(":::") || bytes[index - 1] == b':' {
+                    continue;
+                }
+                let label = trim_fast(&statement[index + 1..]);
+                return (
+                    trim_end_fast(&statement[..index]),
+                    (!label.is_empty()).then_some(label),
+                );
+            }
+            _ => {}
+        }
     }
-    let label = trim_fast(&statement[colon_idx + 1..]);
-    if label.is_empty() {
-        return (statement, None);
-    }
-    (trim_end_fast(&statement[..colon_idx]), Some(label))
+    (statement, None)
 }
 
 /// Attach a relation label to an edge AST, leaving a label the edge parser already found alone.
@@ -5444,10 +5504,9 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
 
     // Extract source cardinality from left side: `ClassA "1"` → `ClassA`, `"1"`
     let cleaned_left;
-    if let Some(q_start) = left.rfind('"') {
-        let before_last_quote = &left[..q_start];
+    if let Some(before_last_quote) = trim_end_fast(left).strip_suffix('"') {
         if let Some(q_open) = before_last_quote.rfind('"') {
-            source_card = Some(left[q_open + 1..q_start].to_string());
+            source_card = Some(before_last_quote[q_open + 1..].to_string());
             cleaned_left = format!("{}{}", trim_end_fast(&left[..q_open]), " ");
         } else {
             cleaned_left = left.to_string();
@@ -5474,11 +5533,13 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
         return None;
     }
 
+    // Retain token boundaries: joining `Left` directly to `o--` would make the aggregation
+    // marker part of the class identifier when the rewritten relation is parsed again.
     let result = format!(
-        "{}{}{}",
+        "{} {} {}",
         trim_end_fast(&cleaned_left),
         op_str,
-        cleaned_right
+        trim_start_fast(&cleaned_right)
     );
     Some((result, source_card, target_card))
 }
@@ -5552,32 +5613,20 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             }
         }
 
-        // Try edge parsing — first strip cardinality labels if present. `None` ⇒ no quoted
-        // cardinality, so the edge parser sees the original borrowed `statement` (no rebuild alloc).
-        // Take the trailing `: label` off FIRST (bd-sq8p), so neither the cardinality stripper nor
-        // the edge parser sees it. `A --|> B : implements` otherwise interns a class literally
-        // named `B : implements`.
-        // bd-9erl: take generics off the relation's endpoints BEFORE anything else reads them, so
-        // the endpoint interns as `Container` with its generics recorded, rather than as a class
-        // whose displayed name is the raw `Container~T~`.
-        let generics_rewrite = strip_class_relation_generics(statement);
-        let (statement, relation_generics) = match &generics_rewrite {
-            Some((rewritten, found)) => (rewritten.as_str(), found.as_slice()),
-            None => (statement, &[][..]),
-        };
-        for (class_name, generics) in relation_generics {
-            statements.push(ClassStatement::BlockStart(
-                class_name.clone(),
-                generics.clone(),
-            ));
-            statements.push(ClassStatement::End);
-        }
-
+        // Separate each grammar field before interpreting the class names. Rewriting generics
+        // on the whole relation erased its trailing label and source multiplicity, or treated
+        // `: returns List~T~` as type metadata on the target class. With the label and both
+        // cardinalities removed, the generic pass sees only the two endpoint declarations.
         let (relation_body, relation_label) = split_class_relation_label(statement);
         let stripped = strip_class_cardinality(relation_body);
-        let edge_input = match &stripped {
+        let relation_endpoints = match &stripped {
             Some((cleaned, ..)) => cleaned.as_str(),
             None => relation_body,
+        };
+        let generics_rewrite = strip_class_relation_generics(relation_endpoints);
+        let (edge_input, relation_generics) = match &generics_rewrite {
+            Some((rewritten, found)) => (rewritten.as_str(), found.as_slice()),
+            None => (relation_endpoints, &[][..]),
         };
         if let Some(asts) = parse_edge_statement_asts(
             edge_input,
@@ -5587,6 +5636,13 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             config,
             0,
         ) {
+            for (class_name, generics) in relation_generics {
+                statements.push(ClassStatement::BlockStart(
+                    class_name.clone(),
+                    generics.clone(),
+                ));
+                statements.push(ClassStatement::End);
+            }
             // `A <.. B` MEANS `B ..> A`, and until bd-8yj9 we drew it as the latter's mirror image.
             //
             // CLASS_OPERATORS gives every other reversed relation its own ArrowType — `<|--`
@@ -12180,11 +12236,29 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 
         // Quadrant labels: "quadrant-1 Label", "quadrant-2 Label", etc.
         if let Some(rest) = trimmed.strip_prefix("quadrant-") {
-            if let Some((_digit, label)) = rest.split_once(' ') {
-                let label = label.trim();
-                if !label.is_empty() {
-                    meta.quadrant_labels.push(label.to_string());
+            let (quadrant, label) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let quadrant_index = match quadrant {
+                "1" => 0,
+                "2" => 1,
+                "3" => 2,
+                "4" => 3,
+                _ => {
+                    builder.add_warning(format!(
+                        "Line {line_number}: invalid quadrant index `{quadrant}`; expected 1 through 4"
+                    ));
+                    continue;
                 }
+            };
+            let label = label.trim();
+            if !label.is_empty() {
+                // The number fixes the heading's position, independently of declaration order.
+                // Empty slots keep a sparse Q4 heading in Q4, and repeated directives replace
+                // only their own heading.
+                if meta.quadrant_labels.len() <= quadrant_index {
+                    meta.quadrant_labels
+                        .resize(quadrant_index + 1, String::new());
+                }
+                meta.quadrant_labels[quadrant_index] = label.to_string();
             }
             continue;
         }
@@ -15763,12 +15837,20 @@ fn find_operator_core<'a>(
     // parser corpus + golden snapshots.
     let mut in_quote: Option<u8> = None;
     let mut escaped = false;
+    let mut in_class_generic = false;
     let mut square_depth = 0_usize;
     let mut paren_depth = 0_usize;
     let mut brace_depth = 0_usize;
 
     for (idx, &byte) in statement.as_bytes().iter().enumerate() {
         if idx < start_index {
+            continue;
+        }
+
+        if in_class_generic {
+            if byte == b'~' {
+                in_class_generic = false;
+            }
             continue;
         }
 
@@ -15819,6 +15901,16 @@ fn find_operator_core<'a>(
         }
 
         match byte {
+            b'~' if scan.mermaid_class_relations
+                && square_depth == 0
+                && paren_depth == 0
+                && brace_depth == 0 =>
+            {
+                // Class generic parameters are opaque tokens: `Box~T..U~ --> Item` contains
+                // one association, not a dotted relation inside the parameter text.
+                in_class_generic = true;
+                continue;
+            }
             b'"' | b'\'' | b'`' => {
                 in_quote = Some(byte);
                 continue;
@@ -25801,6 +25893,169 @@ Rel_Back(db, app, "Responds")"#,
         }
     }
 
+    #[test]
+    fn class_relation_generics_preserve_cardinalities_labels_and_direction() {
+        for (left, left_generics, right, right_generics) in [
+            ("Left", Vec::new(), "Right", Vec::new()),
+            ("Left~T~", vec!["T"], "Right", Vec::new()),
+            ("Left", Vec::new(), "Right~U~", vec!["U"]),
+            ("Left~K,V~", vec!["K", "V"], "Right~U~", vec!["U"]),
+        ] {
+            for (operator, reversed) in [("-->", false), ("<..", true), ("o--*", false)] {
+                let source = format!(
+                    "classDiagram\n{left} \"1..*\" {operator} \"0..1\" {right} : contains values\n"
+                );
+                let parsed = parse_mermaid(&source);
+                assert!(
+                    parsed.warnings.is_empty(),
+                    "{source}: {:?}",
+                    parsed.warnings
+                );
+                let ir = parsed.ir;
+                let mut ids: Vec<_> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+                ids.sort_unstable();
+                assert_eq!(ids, ["Left", "Right"], "{source}: phantom class");
+                assert_eq!(ir.edges.len(), 1, "{source}: relationship count");
+                let edge = &ir.edges[0];
+                let endpoint_name = |endpoint: fm_core::IrEndpoint| match endpoint {
+                    fm_core::IrEndpoint::Node(id) => ir.nodes[id.0].id.as_str(),
+                    other => panic!("{source}: unexpected endpoint {other:?}"),
+                };
+                assert_eq!(
+                    (endpoint_name(edge.from), endpoint_name(edge.to)),
+                    if reversed {
+                        ("Right", "Left")
+                    } else {
+                        ("Left", "Right")
+                    },
+                    "{source}: relationship direction"
+                );
+                assert_eq!(
+                    (edge.source_cardinality(), edge.target_cardinality()),
+                    if reversed {
+                        (Some("0..1"), Some("1..*"))
+                    } else {
+                        (Some("1..*"), Some("0..1"))
+                    },
+                    "{source}: endpoint multiplicities"
+                );
+                assert_eq!(
+                    edge.label.map(|id| ir.labels[id.0].text.as_str()),
+                    Some("contains values"),
+                    "{source}: relationship label"
+                );
+                for (id, expected) in [("Left", &left_generics), ("Right", &right_generics)] {
+                    let node = ir.nodes.iter().find(|node| node.id == id).unwrap();
+                    let generics: Vec<_> = node.class_meta.as_ref().map_or_else(Vec::new, |meta| {
+                        meta.generics.iter().map(String::as_str).collect()
+                    });
+                    assert_eq!(&generics, expected, "{source}: {id} generics");
+                    assert!(
+                        node.label.is_none_or(|label| ir.labels[label.0].text == id),
+                        "{source}: relationship syntax leaked into {id}'s display name"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_relation_generic_syntax_inside_labels_is_only_text() {
+        for label in [
+            "returns List~T~ values",
+            "returns List~List~int~~ values",
+            "handles ~T~ and ~U~: values",
+        ] {
+            let source = format!("classDiagram\nLeft --> Right : {label}\n");
+            let parsed = parse_mermaid(&source);
+            assert!(
+                parsed.warnings.is_empty(),
+                "{source}: {:?}",
+                parsed.warnings
+            );
+            let ir = parsed.ir;
+            assert_eq!(ir.nodes.len(), 2, "{source}: phantom class");
+            assert_eq!(ir.edges.len(), 1, "{source}: lost relationship");
+            assert_eq!(
+                ir.edges[0].label.map(|id| ir.labels[id.0].text.as_str()),
+                Some(label)
+            );
+            for node in &ir.nodes {
+                assert!(
+                    node.class_meta
+                        .as_ref()
+                        .is_none_or(|meta| meta.generics.is_empty()),
+                    "{source}: label text became generic metadata on {}",
+                    node.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn class_relation_generics_keep_operators_and_colons_inside_type_parameters() {
+        let parsed = parse_mermaid(
+            "classDiagram\nLeft~T..U~ \"1\" --> \"0..*\" Right~std::string~ : converts types\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        let ids: Vec<_> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["Left", "Right"]);
+        assert_eq!(ir.edges.len(), 1);
+        assert_eq!(ir.edges[0].arrow, ArrowType::Arrow);
+        assert_eq!(ir.edges[0].source_cardinality(), Some("1"));
+        assert_eq!(ir.edges[0].target_cardinality(), Some("0..*"));
+        assert_eq!(
+            ir.edges[0].label.map(|id| ir.labels[id.0].text.as_str()),
+            Some("converts types")
+        );
+        for (node, parameter) in ir.nodes.iter().zip(["T..U", "std::string"]) {
+            assert_eq!(node.class_meta.as_ref().unwrap().generics, [parameter]);
+        }
+    }
+
+    #[test]
+    fn class_relation_generics_preserve_quoted_names_cardinalities_and_class_labels() {
+        let parsed = parse_mermaid(concat!(
+            "classDiagram\n",
+            "class Left[\"List~T~ values\"]\n",
+            "Left \"ratio:1\" --> \"~many~\" Right~U~ : contains\n",
+            "`Literal~T~` --> Right~U~ : references\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        let mut ids: Vec<_> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["Left", "Literal_T", "Right"]);
+        let left = ir.nodes.iter().find(|node| node.id == "Left").unwrap();
+        assert_eq!(
+            left.label.map(|id| ir.labels[id.0].text.as_str()),
+            Some("List~T~ values")
+        );
+        let literal = ir.nodes.iter().find(|node| node.id == "Literal_T").unwrap();
+        assert_eq!(
+            literal.label.map(|id| ir.labels[id.0].text.as_str()),
+            Some("Literal~T~")
+        );
+        for node in [left, literal] {
+            assert!(
+                node.class_meta
+                    .as_ref()
+                    .is_none_or(|meta| meta.generics.is_empty())
+            );
+        }
+        assert_eq!(ir.edges.len(), 2);
+        assert_eq!(ir.edges[0].source_cardinality(), Some("ratio:1"));
+        assert_eq!(ir.edges[0].target_cardinality(), Some("~many~"));
+        assert_eq!(
+            ir.edges
+                .iter()
+                .map(|edge| edge.label.map(|id| ir.labels[id.0].text.as_str()))
+                .collect::<Vec<_>>(),
+            [Some("contains"), Some("references")]
+        );
+    }
+
     /// bd-6r13: pie and quadrant leaked too, and the rest of the family is enumerated clean.
     ///
     /// This test is the family's BOUNDARY as much as its guard: the eight clean paths are asserted
@@ -28886,6 +29141,59 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(quad.points.len(), 2);
         assert!((quad.points[0].x - 0.3).abs() < 0.01);
         assert!((quad.points[0].y - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn quadrant_heading_indices_preserve_sparse_positions() {
+        for (quadrant, expected) in [
+            (1, vec!["Research"]),
+            (2, vec!["", "Research"]),
+            (3, vec!["", "", "Research"]),
+            (4, vec!["", "", "", "Research"]),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "quadrantChart\n  quadrant-{quadrant} Research\n  A: [0.75, 0.25]\n"
+            ));
+            let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+            assert_eq!(meta.quadrant_labels, expected, "quadrant-{quadrant}");
+            assert_eq!(meta.points.len(), 1);
+            assert_eq!(parsed.ir.nodes.len(), 1);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+    }
+
+    #[test]
+    fn quadrant_heading_indices_handle_reordering_and_replacement() {
+        let parsed = parse_mermaid(
+            "quadrantChart\n  quadrant-4 Original fourth\n  quadrant-2 Original second\n  quadrant-1 Expand\n  quadrant-4 Research\n  quadrant-3 Re-evaluate\n  quadrant-2\tPromote café\n  A: [0.75, 0.25]\n",
+        );
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+        assert_eq!(
+            meta.quadrant_labels,
+            ["Expand", "Promote café", "Re-evaluate", "Research"]
+        );
+        assert_eq!(meta.points.len(), 1);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn quadrant_heading_indices_reject_invalid_directives_without_moving_content() {
+        for invalid in ["0", "5", "10", "-1", "one", "01", ""] {
+            let parsed = parse_mermaid(&format!(
+                "quadrantChart\n  quadrant-{invalid} Misplaced\n  quadrant-4 Research\n  A: [0.75, 0.25]\n"
+            ));
+            let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+            assert_eq!(meta.quadrant_labels, ["", "", "", "Research"]);
+            assert_eq!(meta.points.len(), 1);
+            assert_eq!(parsed.ir.nodes.len(), 1);
+            assert!(
+                parsed.warnings.iter().any(|warning| warning
+                    .contains(&format!("Line 2: invalid quadrant index `{invalid}`"))),
+                "missing diagnostic for quadrant-{invalid}: {:?}",
+                parsed.warnings
+            );
+        }
     }
 
     // ── Accessibility directive tests ──────────────────────────────────
