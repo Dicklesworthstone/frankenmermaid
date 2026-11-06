@@ -2380,6 +2380,7 @@ fn render_scene_document_with_ir(
         ir,
         &mut clip_defs,
         &mut clip_id_counter,
+        &mut SceneInteractionState::default(),
     );
 
     for clip in clip_defs {
@@ -2389,6 +2390,90 @@ fn render_scene_document_with_ir(
     doc = doc.defs(defs);
 
     doc.child(scene_root).to_string()
+}
+
+/// Scene geometry is layered by paint order, so a node's body, compartments and labels can
+/// live in different groups. Keep native interaction wrappers at each piece's original place:
+/// a foreground overlay would make covered nodes clickable through the shapes hiding them.
+/// Only the first fragment of a semantic node owns sequential keyboard focus.
+#[derive(Default)]
+struct SceneInteractionState {
+    announced: std::collections::BTreeSet<usize>,
+    inherited_node: Option<usize>,
+}
+
+fn scene_node_has_interaction(
+    node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    config: &SvgRenderConfig,
+) -> bool {
+    let sanitize_mode = ir.meta.init.config.sanitize_mode;
+    node.tooltip().is_some()
+        || node.callback().is_some()
+        || node.menu_links.iter().any(|link| {
+            sanitize_mode == MermaidSanitizeMode::Lenient
+                || is_safe_link_target(&link.url, sanitize_mode)
+        })
+        || (config.link_mode != MermaidLinkMode::Off
+            && node
+                .href()
+                .is_some_and(|href| is_safe_link_target(href, sanitize_mode)))
+}
+
+fn finish_scene_node_interaction(
+    element: Element,
+    source: RenderSource,
+    ir: Option<&MermaidDiagramIr>,
+    config: &SvgRenderConfig,
+    state: &mut SceneInteractionState,
+) -> Element {
+    let source = if source == RenderSource::Diagram {
+        state.inherited_node.map_or(source, RenderSource::Node)
+    } else {
+        source
+    };
+    let (Some(ir), RenderSource::Node(index)) = (ir, source) else {
+        return element;
+    };
+    let Some(node) = ir.nodes.get(index) else {
+        return element;
+    };
+    if !scene_node_has_interaction(node, ir, config) {
+        return element;
+    }
+    let primary = state.announced.insert(index);
+    let mut owner = Element::group()
+        .data("id", &node.id)
+        .data(
+            "fm-interaction-primary",
+            if primary { "true" } else { "false" },
+        )
+        .class("fm-scene-interaction")
+        .child(element.attr("role", "presentation"));
+    if primary {
+        owner = apply_source_metadata(
+            owner.id(&mermaid_node_element_id(&node.id, index)),
+            source,
+            config.include_source_spans,
+            Some(ir),
+            true,
+        );
+    }
+    if config.a11y.text_alternatives || node.tooltip().is_some() {
+        let description = node
+            .tooltip()
+            .map_or_else(|| describe_node(node, ir), str::to_owned);
+        owner = owner.child(Element::title(&description));
+    }
+    let mut owner = finish_node_interactions(owner, node, ir, config);
+    if !primary {
+        owner = owner.attr("role", "presentation").attr("tabindex", "-1");
+    } else if config.a11y.keyboard_nav {
+        owner = owner.attr("tabindex", "0");
+    } else if owner.kind() == ElementKind::A {
+        owner = owner.attr("tabindex", "-1");
+    }
+    owner
 }
 
 fn count_scene_items(group: &RenderGroup) -> (usize, usize, usize) {
@@ -2418,7 +2503,14 @@ fn render_scene_group(
     ir: Option<&MermaidDiagramIr>,
     clip_defs: &mut Vec<Element>,
     clip_id_counter: &mut usize,
+    interactions: &mut SceneInteractionState,
 ) -> Element {
+    let inherited_node = interactions.inherited_node;
+    interactions.inherited_node = match group.source {
+        RenderSource::Node(index) => Some(index),
+        RenderSource::Diagram => inherited_node,
+        RenderSource::Edge(_) | RenderSource::Cluster(_) => None,
+    };
     let mut elem = Element::group();
 
     if let Some(id) = &group.id {
@@ -2459,10 +2551,17 @@ fn render_scene_group(
         }
     }
 
-    elem = apply_source_metadata(elem, group.source, config.include_source_spans, ir);
-
+    let has_interaction_owner = scene_source_has_interaction(group.source, ir, config);
+    elem = apply_source_metadata(
+        elem,
+        group.source,
+        config.include_source_spans,
+        ir,
+        !has_interaction_owner,
+    );
     if config.a11y.keyboard_nav
         && matches!(group.source, RenderSource::Node(_) | RenderSource::Edge(_))
+        && !has_interaction_owner
     {
         elem = elem.attr("tabindex", "0");
     }
@@ -2490,7 +2589,8 @@ fn render_scene_group(
         && matches!(group.id.as_deref(), Some("nodes" | "labels"));
     let mut announced_packet_nodes = std::collections::BTreeSet::new();
     for (index, child) in group.children.iter().enumerate() {
-        let mut rendered = render_scene_item(child, config, ir, clip_defs, clip_id_counter);
+        let mut rendered =
+            render_scene_item(child, config, ir, clip_defs, clip_id_counter, interactions);
         if let Some(theme) = &sequence_number_theme {
             rendered = match child {
                 RenderItem::Path(_) => rendered
@@ -2517,7 +2617,12 @@ fn render_scene_group(
                 }
                 _ => false,
             };
-            if repeated {
+            let interactive = match child {
+                RenderItem::Path(path) => scene_source_has_interaction(path.source, ir, config),
+                RenderItem::Text(text) => scene_source_has_interaction(text.source, ir, config),
+                RenderItem::Group(_) => false,
+            };
+            if repeated && !interactive {
                 rendered = rendered.attr("aria-hidden", "true");
             }
         }
@@ -2588,9 +2693,24 @@ fn render_scene_group(
                 rendered = rendered.attr(property.clone(), value.as_str());
             }
         }
+        // Group-specific paint and typography belong on the actual geometry. Finish interaction
+        // wrappers afterwards so explicit leaf attributes cannot override a themed wrapper.
+        let rendered = match child {
+            // Lifelines carry a node source for traceability, but actor headers own actions.
+            // A zero-width vertical line would also make an unusable canonical menu anchor.
+            RenderItem::Path(_) if group.id.as_deref() == Some("sequence-lifelines") => rendered,
+            RenderItem::Path(path) => {
+                finish_scene_node_interaction(rendered, path.source, ir, config, interactions)
+            }
+            RenderItem::Text(text) => {
+                finish_scene_node_interaction(rendered, text.source, ir, config, interactions)
+            }
+            RenderItem::Group(_) => rendered,
+        };
         elem = elem.child(rendered);
     }
 
+    interactions.inherited_node = inherited_node;
     elem
 }
 
@@ -2647,13 +2767,19 @@ fn render_scene_item(
     ir: Option<&MermaidDiagramIr>,
     clip_defs: &mut Vec<Element>,
     clip_id_counter: &mut usize,
+    interactions: &mut SceneInteractionState,
 ) -> Element {
     match item {
         RenderItem::Group(group) => {
-            render_scene_group(group, config, ir, clip_defs, clip_id_counter)
+            render_scene_group(group, config, ir, clip_defs, clip_id_counter, interactions)
         }
         RenderItem::Path(path) => {
-            let mut element = render_scene_path(path, config.include_source_spans, ir);
+            let mut element = render_scene_path(
+                path,
+                config.include_source_spans,
+                ir,
+                !scene_source_has_interaction(path.source, ir, config),
+            );
             if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Sankey) {
                 let theme = resolve_theme(Some(ir), config);
                 match path.source {
@@ -2706,25 +2832,45 @@ fn render_scene_item(
             element
         }
         RenderItem::Text(text) => {
-            let element = render_scene_text(text, config, ir);
+            let mut element = render_scene_text(
+                text,
+                config,
+                ir,
+                !scene_source_has_interaction(text.source, ir, config),
+            );
             if let Some(ir) =
                 ir.filter(|ir| matches!(ir.diagram_type, DiagramType::Pie | DiagramType::Sankey))
             {
-                element.fill(&resolve_theme(Some(ir), config).colors.text)
-            } else {
-                element
+                element = element.fill(&resolve_theme(Some(ir), config).colors.text);
             }
+            element
         }
     }
+}
+
+fn scene_source_has_interaction(
+    source: RenderSource,
+    ir: Option<&MermaidDiagramIr>,
+    config: &SvgRenderConfig,
+) -> bool {
+    let RenderSource::Node(index) = source else {
+        return false;
+    };
+    ir.is_some_and(|ir| {
+        ir.nodes
+            .get(index)
+            .is_some_and(|node| scene_node_has_interaction(node, ir, config))
+    })
 }
 
 fn render_scene_path(
     path: &RenderPath,
     include_source_spans: bool,
     ir: Option<&MermaidDiagramIr>,
+    announce: bool,
 ) -> Element {
     let mut elem = Element::path().d(&path_cmds_to_d(&path.commands));
-    elem = apply_source_metadata(elem, path.source, include_source_spans, ir);
+    elem = apply_source_metadata(elem, path.source, include_source_spans, ir, announce);
 
     if let Some(fill) = &path.fill {
         elem = apply_fill_style(elem, fill);
@@ -2992,6 +3138,7 @@ fn render_scene_text(
     text: &RenderText,
     config: &SvgRenderConfig,
     ir: Option<&MermaidDiagramIr>,
+    announce: bool,
 ) -> Element {
     let mut elem = TextBuilder::new(&text.text)
         .x(text.x)
@@ -3098,7 +3245,7 @@ fn render_scene_text(
             elem = elem.attr("style", &style);
         }
     }
-    apply_source_metadata(elem, text.source, config.include_source_spans, ir)
+    apply_source_metadata(elem, text.source, config.include_source_spans, ir, announce)
 }
 
 fn apply_source_metadata(
@@ -3106,6 +3253,7 @@ fn apply_source_metadata(
     source: RenderSource,
     include_source_spans: bool,
     ir: Option<&MermaidDiagramIr>,
+    announce: bool,
 ) -> Element {
     match source {
         RenderSource::Diagram => {
@@ -3128,7 +3276,7 @@ fn apply_source_metadata(
         }
     }
 
-    if let Some(diagram_ir) = ir {
+    if announce && let Some(diagram_ir) = ir {
         match source {
             RenderSource::Node(index) => {
                 if let Some(node) = diagram_ir.nodes.get(index) {
@@ -5498,7 +5646,7 @@ fn render_layout_to_svg(
             let mut text = row.to_render_text(RenderSource::Diagram, &theme.colors.text);
             text.x += offset_x;
             text.y += offset_y;
-            doc = doc.child(render_scene_text(&text, config, Some(ir)));
+            doc = doc.child(render_scene_text(&text, config, Some(ir), true));
         }
     }
 
@@ -6854,7 +7002,7 @@ fn write_radar_into(
             fm_layout::RadarPathRole::Legend(_) => "fm-radar-legend-box",
             _ => continue,
         };
-        let mut element = render_scene_path(&entry.path, false, None)
+        let mut element = render_scene_path(&entry.path, false, None, true)
             .class(class)
             .transform(&format!("translate({offset_x},{offset_y})"));
         if entry.role == fm_layout::RadarPathRole::Leader {
@@ -9766,6 +9914,7 @@ fn write_journey_steps_into(
                 RenderSource::Node(step.node_index),
                 config.include_source_spans,
                 Some(ir),
+                true,
             )
             .write_to_string(out);
         }
@@ -13442,9 +13591,21 @@ fn render_node(
         group = group.child(Element::title(&node_desc));
     }
 
-    if let Some(node) = ir_node
-        && !node.menu_links.is_empty()
-    {
+    if let Some(node) = ir_node {
+        return finish_node_interactions(group, node, ir, config);
+    }
+    group
+}
+
+/// Finish both layout-rendered nodes and scene interaction owners through the same URL,
+/// target, tooltip and callback policy. Geometry and semantic paint stay on the supplied group.
+fn finish_node_interactions(
+    mut group: Element,
+    node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    config: &SvgRenderConfig,
+) -> Element {
+    if !node.menu_links.is_empty() {
         let sanitize_mode = ir.meta.init.config.sanitize_mode;
         let menu_links: Vec<fm_core::IrMenuLink> = if sanitize_mode == MermaidSanitizeMode::Lenient
         {
@@ -13464,14 +13625,11 @@ fn render_node(
     }
 
     // Attach authored tooltips before Inline links wrap and return the completed node.
-    if let Some(node) = ir_node
-        && let Some(tooltip) = node.tooltip()
-    {
+    if let Some(tooltip) = node.tooltip() {
         group = group.attr("title", tooltip);
     }
 
-    if let Some(node) = ir_node
-        && let Some(href) = node.href()
+    if let Some(href) = node.href()
         && is_safe_link_target(href, ir.meta.init.config.sanitize_mode)
     {
         match config.link_mode {
@@ -13505,9 +13663,7 @@ fn render_node(
     }
 
     // Callback nodes: emit data-callback attribute for embedding JS integration.
-    if let Some(node) = ir_node
-        && let Some(callback) = node.callback()
-    {
+    if let Some(callback) = node.callback() {
         group = group
             .attr("data-callback", callback)
             .attr("cursor", "pointer")
@@ -22615,6 +22771,330 @@ mod tests {
         assert!(messages < destroy);
         assert!(svg[lifelines..activations].contains("stroke-dasharray=\"6,4\""));
         assert!(svg[fragments..notes].contains("stroke-dasharray=\"6,4\""));
+    }
+
+    #[test]
+    fn scene_backend_links_every_node_piece_with_one_keyboard_target() {
+        for source in [
+            "flowchart LR\nA[[Open details]]-->B[Next]\n",
+            "classDiagram\nclass A {\n +String name\n +save()\n}\n",
+            "erDiagram\nA {\n string id PK\n string name\n}\n",
+            "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: request\n",
+            "packet-beta\n24-95: \"Payload\"\n",
+        ] {
+            let mut ir = fm_parser::parse(source).ir;
+            assert!(!ir.nodes.is_empty(), "fixture must have semantic nodes");
+            let id = mermaid_node_element_id(&ir.nodes[0].id, 0);
+            let interaction = ir.nodes[0].interaction_mut();
+            interaction.href = Some("https://example.com/details?a=1&b=2".into());
+            interaction.link_target = Some("_self".into());
+            interaction.tooltip = Some("Inspect & compare".into());
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                link_mode: MermaidLinkMode::Inline,
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert_eq!(svg, render_svg_with_config(&ir, &config));
+            let anchors: Vec<_> = svg.split("<a ").skip(1).collect();
+            assert!(
+                anchors.len() >= 2,
+                "body and labels must both be clickable: {source}"
+            );
+            assert_eq!(svg.matches("</a>").count(), anchors.len());
+            assert_eq!(svg.matches(&format!("id=\"{id}\"")).count(), 1);
+            assert_eq!(
+                svg.matches("tabindex=\"0\"").count(),
+                1,
+                "one keyboard stop: {source}"
+            );
+            assert_eq!(svg.matches("tabindex=\"-1\"").count(), anchors.len() - 1);
+            assert_eq!(
+                svg.matches("data-fm-interaction-primary=\"true\"").count(),
+                1
+            );
+            assert_eq!(
+                svg.matches("data-fm-interaction-primary=\"false\"").count(),
+                anchors.len() - 1
+            );
+            for anchor in &anchors {
+                let fragment = anchor.split_once("</a>").expect("no nested anchors").0;
+                assert!(
+                    !fragment.contains("aria-hidden=\"true\""),
+                    "visible interaction fragments must remain usable by the browser binder"
+                );
+                assert!(fragment.contains("href=\"https://example.com/details?a=1&amp;b=2\""));
+                assert!(fragment.contains("target=\"_self\""));
+                assert!(fragment.contains("rel=\"noopener noreferrer\""));
+                assert!(fragment.contains("title=\"Inspect &amp; compare\""));
+                assert!(fragment.contains("<title>Inspect &amp; compare</title>"));
+            }
+            assert!(
+                anchors
+                    .iter()
+                    .any(|a| a.split_once("</a>").unwrap().0.contains("<path"))
+            );
+            assert!(
+                anchors
+                    .iter()
+                    .any(|a| a.split_once("</a>").unwrap().0.contains("<text"))
+            );
+            assert!(
+                !svg.contains("fm-scene-interactions"),
+                "no overlay may change hit order"
+            );
+            if ir.diagram_type == DiagramType::Sequence {
+                let lifelines = svg
+                    .split_once("id=\"sequence-lifelines\"")
+                    .expect("sequence furniture")
+                    .1
+                    .split_once("</g>")
+                    .unwrap()
+                    .0;
+                assert!(
+                    !lifelines.contains("data-fm-interaction-primary"),
+                    "actor headers must own actions instead of zero-width lifelines"
+                );
+                let stroke = resolve_theme(Some(&ir), &config).colors.node_stroke;
+                assert!(
+                    lifelines
+                        .split('<')
+                        .filter(|tag| tag.starts_with("path "))
+                        .all(|tag| tag.contains(&format!("stroke=\"{stroke}\"")))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scene_interactions_keep_authored_typography_on_the_text_leaf() {
+        let mut ir = fm_parser::parse("treemap\n\"Styled caption\": 10\n").ir;
+        // Treemap metadata owns its classes independently of generic node style references.
+        ir.treemap_meta.as_mut().unwrap().nodes[0]
+            .classes
+            .push("captionFace".into());
+        ir.style_defs.push(fm_core::IrStyleDef {
+            name: "captionFace".into(),
+            properties: BTreeMap::from([
+                ("font-family".into(), "monospace".into()),
+                ("font-weight".into(), "700".into()),
+            ]),
+            span: Span::default(),
+        });
+        if ir.nodes.is_empty() {
+            ir.nodes.push(IrNode {
+                id: "tile".into(),
+                ..Default::default()
+            });
+        }
+        ir.nodes[0].interaction_mut().href = Some("https://example.com/tile".into());
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            embed_theme_css: false,
+            link_mode: MermaidLinkMode::Inline,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram(&ir);
+        let mut scene = build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+        // Retained scenes can attach semantic ownership to a text group; its anonymous rows
+        // inherit that owner while preserving the treemap's separately authored typography.
+        for item in &mut scene.root.children {
+            if let RenderItem::Group(group) = item
+                && group
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("treemap-text-0-"))
+            {
+                group.source = RenderSource::Node(0);
+            }
+        }
+        let svg = render_scene_document_with_ir(&scene, &config, Some(&ir));
+        assert!(svg.contains("data-fm-interaction-primary=\"true\""));
+        let end = svg
+            .find(">Styled caption</text>")
+            .expect("visible tile label");
+        let start = svg[..end].rfind("<text ").unwrap();
+        let text = &svg[start..end];
+        assert!(text.contains("font-family=\"monospace\""), "{text}");
+        assert!(text.contains("font-weight=\"700\""), "{text}");
+    }
+
+    #[test]
+    fn scene_backend_interactions_keep_link_modes_callbacks_and_safe_menus() {
+        let mut ir = fm_parser::parse("flowchart LR\nA[Linked]-->B[Callback]\n").ir;
+        ir.nodes[0].interaction_mut().href = Some("https://example.com/details".into());
+        ir.nodes[1].interaction_mut().callback = Some("openDetails".into());
+        ir.nodes[1].interaction_mut().tooltip = Some("Inspect details".into());
+        ir.nodes[1].menu_links = vec![
+            fm_core::IrMenuLink {
+                label: "Docs".into(),
+                url: "https://example.com/docs".into(),
+            },
+            fm_core::IrMenuLink {
+                label: "Unsafe".into(),
+                url: "javascript:alert(1)".into(),
+            },
+        ];
+        ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Strict;
+        for mode in [
+            MermaidLinkMode::Inline,
+            MermaidLinkMode::Footnote,
+            MermaidLinkMode::Off,
+        ] {
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    link_mode: mode,
+                    ..Default::default()
+                },
+            );
+            assert!(svg.matches("data-callback=\"openDetails\"").count() >= 2);
+            assert!(svg.matches("data-menu-links=").count() >= 2);
+            assert!(svg.contains("https://example.com/docs"));
+            assert!(!svg.contains("javascript:") && !svg.contains("Unsafe"));
+            assert_eq!(svg.contains("<a "), mode == MermaidLinkMode::Inline);
+            assert_eq!(
+                svg.contains("data-link=\""),
+                mode == MermaidLinkMode::Footnote
+            );
+            assert_eq!(
+                svg.matches("tabindex=\"0\"").count(),
+                1 + usize::from(mode != MermaidLinkMode::Off)
+            );
+            assert_eq!(
+                svg.matches("data-fm-interaction-primary=\"true\"").count(),
+                1 + usize::from(mode != MermaidLinkMode::Off)
+            );
+            assert!(!svg.contains("aria-hidden=\"true\""));
+        }
+    }
+
+    #[test]
+    fn scene_backend_rejects_unsafe_targets_and_needs_real_geometry() {
+        let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
+        ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Strict;
+        for href in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "%6aavascript:alert(1)",
+            "data:text/html,unsafe",
+        ] {
+            ir.nodes[0].interaction_mut().href = Some(href.into());
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    link_mode: MermaidLinkMode::Inline,
+                    ..Default::default()
+                },
+            );
+            assert!(!svg.contains("<a "), "unsafe target {href}");
+            assert!(!svg.contains("fm-scene-interaction"));
+        }
+        ir.nodes[0].interaction_mut().href = Some("https://example.com".into());
+        let mut scene = create_scene_with_path_and_text();
+        scene.root.children.clear();
+        let svg = render_scene_document_with_ir(&scene, &SvgRenderConfig::default(), Some(&ir));
+        assert!(
+            !svg.contains("<a "),
+            "absent geometry must not invent a clickable area"
+        );
+    }
+
+    #[test]
+    fn scene_interaction_regions_retain_nested_transforms_and_clips() {
+        let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
+        ir.nodes[0].interaction_mut().callback = Some("inspect".into());
+        let mut scene = create_scene_with_path_and_text();
+        let mut group =
+            RenderGroup::new(Some("rotated-node".into())).with_source(RenderSource::Node(0));
+        group.transform = Some(RenderTransform::Matrix {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 42.0,
+            f: 8.0,
+        });
+        group.clip = Some(RenderClip::Rect(RenderRect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        }));
+        group.children.push(scene.root.children[0].clone());
+        group.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Diagram,
+            text: "Inherited owner".into(),
+            x: 4.0,
+            y: 8.0,
+            font_size: 12.0,
+            align: RenderTextAlign::Start,
+            baseline: RenderTextBaseline::Top,
+            fill: FillStyle::Solid {
+                color: "#000".into(),
+                opacity: 1.0,
+            },
+        }));
+        scene.root.clip = Some(RenderClip::Rect(scene.bounds));
+        scene.root.children = vec![RenderItem::Group(group)];
+        let config = SvgRenderConfig::default();
+        let svg = render_scene_document_with_ir(&scene, &config, Some(&ir));
+        assert_eq!(svg.matches("data-callback=\"inspect\"").count(), 2);
+        assert_eq!(svg.matches("tabindex=\"0\"").count(), 1);
+        assert_eq!(svg.matches("tabindex=\"-1\"").count(), 1);
+        assert_eq!(
+            svg.matches("transform=\"matrix(0,1,-1,0,42,8)\"").count(),
+            1
+        );
+        assert_eq!(svg.matches("clip-path=\"").count(), 2);
+        assert!(
+            svg.contains("Inherited owner"),
+            "a node group owns its anonymous text"
+        );
+        assert_eq!(
+            svg.matches("<path").count(),
+            1,
+            "geometry is never copied to an overlay"
+        );
+        assert_eq!(svg.matches("<text").count(), 1);
+    }
+
+    #[test]
+    fn scene_interactions_preserve_occlusion_and_do_not_nest_anchors() {
+        let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
+        ir.nodes[0].interaction_mut().href = Some("https://example.com".into());
+        ir.nodes.push(IrNode {
+            id: "cover".into(),
+            ..Default::default()
+        });
+        let mut scene = create_scene_with_path_and_text();
+        let mut cover = scene.root.children[0].clone();
+        if let RenderItem::Path(path) = &mut cover {
+            path.source = RenderSource::Node(1);
+        }
+        if let RenderItem::Text(text) = &mut scene.root.children[1] {
+            text.source = RenderSource::Node(0);
+        }
+        scene.root.children.insert(1, cover);
+        // A node-owned group must not create an anchor around its already-linked pieces.
+        scene.root.source = RenderSource::Node(0);
+        let config = SvgRenderConfig {
+            link_mode: MermaidLinkMode::Inline,
+            ..Default::default()
+        };
+        let svg = render_scene_document_with_ir(&scene, &config, Some(&ir));
+        assert_eq!(svg.matches("<a ").count(), 2);
+        assert_eq!(svg.matches("<path").count(), 2);
+        assert_eq!(svg.matches("<text").count(), 1);
+        let first_link = svg.find("<a ").unwrap();
+        let first_end = svg.find("</a>").unwrap();
+        let occluder = svg.find("data-fm-source-index=\"1\"").unwrap();
+        let second_link = first_end + svg[first_end..].find("<a ").unwrap();
+        assert!(first_link < first_end && first_end < occluder && occluder < second_link);
+        assert_eq!(svg.matches("tabindex=\"0\"").count(), 1);
     }
 
     #[test]

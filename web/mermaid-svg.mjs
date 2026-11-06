@@ -240,7 +240,7 @@ function prepareSvgDocument(svg, id, document, deck = false) {
       ids.set(original, element === root ? id : namespaced);
     }
   }
-  let menuLinkCount = 0;
+  const menuLinkCounts = [];
   for (const element of elements) {
     for (const attr of [...element.attributes]) {
       const name = attr.localName.toLowerCase();
@@ -249,7 +249,7 @@ function prepareSvgDocument(svg, id, document, deck = false) {
       }
       // XML is case-sensitive; HTML insertion folds these names. Do not publish a second,
       // unvalidated interpretation of an ID, URL, or inline stylesheet in result.svg.
-      if (["id", "href", "style", "data-menu-links"].includes(name) && attr.localName !== name) {
+      if (["id", "href", "style", "data-menu-links", "data-fm-interaction-primary"].includes(name) && attr.localName !== name) {
         throw new Error("Engine SVG contains a non-canonical attribute name.");
       }
       let value = attr.value;
@@ -257,9 +257,11 @@ function prepareSvgDocument(svg, id, document, deck = false) {
       else if (name === "href") value = element.localName === "a" ? linkUrl(value, ids, document) : localUrl(value, ids);
       else if (name === "data-menu-links") {
         const links = checkedMenuLinks(value, ids, document);
-        menuLinkCount += links.length;
-        if (menuLinkCount > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
+        menuLinkCounts.push([element, links.length]);
         value = JSON.stringify(links);
+      }
+      else if (name === "data-fm-interaction-primary" && !["true", "false"].includes(value)) {
+        throw new Error("SVG interaction fragments require a boolean primary marker.");
       }
       else if (ARIA_REFERENCES.has(name)) {
         value = value.trim();
@@ -274,6 +276,9 @@ function prepareSvgDocument(svg, id, document, deck = false) {
     }
     if (element.localName === "a" && element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
   }
+  const fragments = planSvgInteractionFragments(root);
+  const menuLinkCount = menuLinkCounts.reduce((total, [node, count]) => total + (fragments.primary(node) === node ? count : 0), 0);
+  if (menuLinkCount > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
   root.setAttribute("id", id);
   const presentationWarnings = new Set();
   const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window, presentationWarnings);
@@ -473,15 +478,71 @@ export function checkCallbackName(name) {
 
 let nextMenuId = 0;
 
+// Scene nodes can paint several interleaved fragments. Keep their native hit areas,
+// but give the one declared primary ownership of keyboard focus and actor menus.
+// Unmarked layout-rendered nodes retain their existing independent bindings.
+function planSvgInteractionFragments(root) {
+  const marker = "data-fm-interaction-primary", entries = new Map(), anchors = new Map(), groups = new Map();
+  const link = node => {
+    const anchor = node.closest("a[href], a[*|href]");
+    return anchor && root.contains(anchor) ? anchor : null;
+  };
+  const metadata = node => JSON.stringify([node.getAttribute("data-callback"),
+    node.getAttribute("data-menu-links"), node.getAttribute("data-link")]);
+  const linkMetadata = anchor => anchor && JSON.stringify([anchor.getAttribute("href"),
+    anchor.getAttributeNS(XLINK_NS, "href"), anchor.getAttribute("target"), anchor.getAttribute("rel")]);
+  for (const node of root.querySelectorAll(`[${marker}]`)) {
+    const value = node.getAttribute(marker), sourceId = node.getAttribute("data-id"), anchor = link(node);
+    if (!["true", "false"].includes(value) || !sourceId || node.localName !== "g"
+      || node.closest("svg") !== root || node.closest("defs, symbol, clipPath, mask") || (anchor && anchors.has(anchor))) {
+      throw new Error("SVG interaction fragment has no unique addressable source node.");
+    }
+    const entry = { node, value, sourceId, anchor, metadata: metadata(node), linkMetadata: linkMetadata(anchor) };
+    entries.set(node, entry);
+    if (anchor) anchors.set(anchor, node);
+    if (!groups.has(sourceId)) groups.set(sourceId, []);
+    groups.get(sourceId).push(entry);
+  }
+  for (const group of groups.values()) {
+    const primaries = group.filter(entry => entry.value === "true");
+    if (primaries.length !== 1 || group.some(entry => entry.metadata !== primaries[0].metadata
+      || entry.linkMetadata !== primaries[0].linkMetadata)) {
+      throw new Error("SVG interaction fragments require one primary with matching actions.");
+    }
+    for (const entry of group) entry.primary = primaries[0];
+  }
+  const current = entry => root.contains(entry.node) && entry.node.closest("svg") === root
+    && entry.node.getAttribute(marker) === entry.value && entry.node.getAttribute("data-id") === entry.sourceId
+    && metadata(entry.node) === entry.metadata && link(entry.node) === entry.anchor
+    && linkMetadata(entry.anchor) === entry.linkMetadata;
+  return {
+    secondary: [...entries.values()].filter(entry => entry !== entry.primary),
+    node: node => anchors.get(node) || node,
+    primary: node => entries.get(node)?.primary.node || node,
+    focus: node => { const primary = entries.get(node)?.primary; return primary?.anchor || primary?.node || node; },
+    valid: node => { const entry = entries.get(node); return !entry || (current(entry) && current(entry.primary)); },
+  };
+}
+
+function svgInteractionVisible(node, window) {
+  for (let parent = node; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
+    if (parent.matches('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return false;
+    const style = window.getComputedStyle(parent);
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+  }
+  return true;
+}
+
 // One lazily created HTML menu per bound SVG; no foreignObject, external resources,
 // graph reparse, or node-geometry mutation. The host's bindFunctions cleanup owns it.
-function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
+function bindSvgLinkMenus(root, callbackPlans, fragments, isLive, report) {
   const document = root.ownerDocument, window = document.defaultView, tree = root.getRootNode();
   const ids = new Map([...root.querySelectorAll("[id]")].map(node => [node.id, node.id]));
   ids.set(root.id, root.id);
   const plans = new Map();
   let count = 0;
   for (const node of root.querySelectorAll("[data-menu-links]")) {
+    if (fragments.primary(node) !== node) continue;
     const raw = node.getAttribute("data-menu-links"), sourceId = node.getAttribute("data-id");
     const links = checkedMenuLinks(raw, ids, document);
     if (!links.length) continue;
@@ -496,7 +557,7 @@ function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
       if (!["http:", "https:", "mailto:", "tel:"].includes(href.protocol)) throw new Error("Unsafe actor menu hyperlink.");
       return { label: link.label, href: href.href, local: link.url.startsWith("#") };
     });
-    plans.set(node, { node, raw, sourceId, links: destinations });
+    plans.set(node, { node, focus: fragments.focus(node), raw, sourceId, links: destinations });
   }
   if (!plans.size) return () => {};
   const removals = [], attributes = new Map();
@@ -509,25 +570,23 @@ function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
     if (value === null) node.removeAttribute(name); else node.setAttribute(name, value);
   }
   function usable(plan) {
-    const node = plan.node;
+    const node = plan.node, trigger = plan.trigger || node;
     if (disposed || !isLive() || !root.isConnected || !node.isConnected || root.ownerDocument !== document
       || root.getRootNode() !== tree || !root.contains(node) || node.closest("svg") !== root
-      || node.getAttribute("data-id") !== plan.sourceId || node.getAttribute("data-menu-links") !== plan.raw) return false;
-    for (let parent = node; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
-      if (parent.matches('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return false;
-      const style = window.getComputedStyle(parent);
-      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
-    }
-    const box = node.getBoundingClientRect();
-    return [box.x, box.y, box.width, box.height].every(Number.isFinite) && box.width > 0 && box.height > 0;
+      || node.getAttribute("data-id") !== plan.sourceId || node.getAttribute("data-menu-links") !== plan.raw
+      || !fragments.valid(trigger) || !svgInteractionVisible(trigger, window) || !svgInteractionVisible(node, window)) return false;
+    return [node, trigger].every(element => {
+      const box = element.getBoundingClientRect();
+      return [box.x, box.y, box.width, box.height].every(Number.isFinite) && box.width > 0 && box.height > 0;
+    });
   }
   function target(event) {
     if (event.defaultPrevented || disposed) return null;
     let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
-    if (node?.closest("svg") !== root) return null;
+    if (node?.closest("svg") !== root || !svgInteractionVisible(node, window)) return null;
     for (; node && node !== root; node = node.parentElement) {
-      const plan = plans.get(node);
-      if (plan) return usable(plan) ? plan : null;
+      const trigger = fragments.node(node), plan = plans.get(fragments.primary(trigger));
+      if (plan) { const targeted = { ...plan, trigger }; return usable(targeted) ? targeted : null; }
     }
     return null;
   }
@@ -593,7 +652,7 @@ function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
     if (typeof menu.showPopover === "function") menu.setAttribute("popover", "manual");
     (tree.nodeType === 9 ? document.body || document.documentElement : tree).append(menu);
     const observer = new window.MutationObserver(() => { try { position(); } catch (error) { close(); report(error); } });
-    active = { plan, node: plan.node, menu, items, observer, removals: [] };
+    active = { plan, node: plan.focus, menu, items, observer, removals: [] };
     const job = active;
     function focus(index) {
       if (active !== job) return;
@@ -603,7 +662,7 @@ function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
     }
     try {
       if (menu.hasAttribute("popover")) menu.showPopover();
-      attribute(plan.node, "aria-expanded", "true"); attribute(plan.node, "aria-controls", menu.id);
+      attribute(plan.focus, "aria-expanded", "true"); attribute(plan.focus, "aria-controls", menu.id);
       position();
       if (active !== job) return;
       focus(last ? items.length - 1 : 0);
@@ -654,11 +713,13 @@ function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
     if (!root.hasAttribute("tabindex")) attribute(root, "tabindex", "-1");
     if (root.getAttribute("role") === "img") attribute(root, "role", "group");
     for (const plan of plans.values()) {
-      attribute(plan.node, "role", "button"); attribute(plan.node, "tabindex", "0");
-      attribute(plan.node, "aria-haspopup", "menu"); attribute(plan.node, "aria-expanded", "false");
-      attribute(plan.node, "aria-keyshortcuts", "Enter Space ArrowDown ArrowUp");
-      if (!plan.node.hasAttribute("aria-label") && !plan.node.hasAttribute("aria-labelledby")) {
-        attribute(plan.node, "aria-label", plan.node.querySelector("title")?.textContent || plan.sourceId);
+      if (plan.focus === plan.node) attribute(plan.focus, "role", "button");
+      else { attribute(plan.node, "role", "presentation"); attribute(plan.node, "tabindex", "-1"); }
+      attribute(plan.focus, "tabindex", "0");
+      attribute(plan.focus, "aria-haspopup", "menu"); attribute(plan.focus, "aria-expanded", "false");
+      attribute(plan.focus, "aria-keyshortcuts", "Enter Space ArrowDown ArrowUp");
+      if (!plan.focus.hasAttribute("aria-label") && !plan.focus.hasAttribute("aria-labelledby")) {
+        attribute(plan.focus, "aria-label", plan.node.getAttribute("aria-label") || plan.node.querySelector("title")?.textContent || plan.sourceId);
       }
     }
     listen(root, "click", event => {
@@ -722,6 +783,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
     if (!root.isEqualNode(template)) throw new Error("SVG changed before binding; insert this render result before binding its interactions.");
 
     // Plan all bindings before touching the DOM. Nodes without registered handlers stay inert.
+    const fragments = planSvgInteractionFragments(root);
     const plans = new Map(), missing = new Set();
     for (const node of root.querySelectorAll("[data-callback]")) {
       const name = node.getAttribute("data-callback"), sourceId = node.getAttribute("data-id");
@@ -751,13 +813,18 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
       if (disposed || !isLive() || !root.isConnected || root.ownerDocument !== document || event.defaultPrevented) return null;
       let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
       if (!node || !root.contains(node) || node.closest("svg") !== root) return null;
-      if (node.closest('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return null;
+      if (!svgInteractionVisible(node, document.defaultView)) return null;
       for (; node && node !== root; node = node.parentElement) {
         // A nested hyperlink owns its normal browser click and Enter behavior.
         if (node.localName === "a" && (node.hasAttribute("href") || node.hasAttributeNS(XLINK_NS, "href"))) return null;
         const plan = plans.get(node);
         if (plan && node.getAttribute("data-id") === plan.sourceId &&
-            node.getAttribute("data-callback") === plan.name && resolveCallback(plan.name) === plan.callback) return node;
+            node.getAttribute("data-callback") === plan.name && resolveCallback(plan.name) === plan.callback) {
+          const primary = fragments.primary(node), canonical = plans.get(primary);
+          if (node.closest("a[href], a[*|href]") || !canonical || !fragments.valid(node)
+            || !svgInteractionVisible(primary, document.defaultView)) return null;
+          return primary;
+        }
       }
       return null;
     }
@@ -770,7 +837,11 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
     function click(event) {
       if (event.button !== 0 || modified(event)) return;
       const node = target(event);
-      if (node) { event.preventDefault(); activate(node); }
+      if (node) {
+        event.preventDefault();
+        if (node.hasAttribute("data-fm-interaction-primary")) node.focus({ preventScroll: true });
+        activate(node);
+      }
     }
     function keydown(event) {
       if (modified(event) || event.isComposing || !["Enter", " "].includes(event.key)) return;
@@ -803,6 +874,10 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
       bindings.delete(root);
     }
     try {
+      for (const { node, anchor } of fragments.secondary) {
+        attribute(node, "tabindex", "-1");
+        if (anchor) attribute(anchor, "tabindex", "-1");
+      }
       if (plans.size) {
         // Chromium otherwise adds an implicit Tab stop to an SVG with a click listener.
         // The actionable node buttons, not the event-delegation root, own keyboard focus.
@@ -811,6 +886,10 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
         // Expose the interactive children, retaining the engine's accessible name/description.
         if (root.getAttribute("role") === "img") attribute(root, "role", "group");
         for (const node of plans.keys()) {
+          if (fragments.primary(node) !== node || fragments.focus(node) !== node) {
+            attribute(node, "tabindex", "-1");
+            continue;
+          }
           attribute(node, "role", "button");
           attribute(node, "tabindex", "0");
           attribute(node, "aria-keyshortcuts", "Enter Space");
@@ -823,7 +902,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
         root.addEventListener("keyup", keyup);
         root.addEventListener("blur", blur, true);
       }
-      cleanupMenus = bindSvgLinkMenus(root, plans, () => !disposed && isLive(), report);
+      cleanupMenus = bindSvgLinkMenus(root, plans, fragments, () => !disposed && isLive(), report);
       bindings.set(root, cleanup);
       onBind(root, cleanup);
       if (!isLive()) throw new Error("The interaction owner was disposed while installing bindings.");

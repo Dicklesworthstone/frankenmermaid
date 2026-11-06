@@ -43,12 +43,16 @@ def main() -> int:
           window.links = [{label:'Dashboard',url:'https://service.example/health'},
             {label:'Docs café 😀',url:'../reference?q=1&lang=en'}, {label:'Wiki',url:'https://wiki.example/'}];
           const xml = text => text.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
-          window.svgSource = ({menus = links, raw, callback = false, wrapped = false, extra = ''} = {}) => {
+          window.svgSource = ({menus = links, raw, callback = false, wrapped = false, fragmented = false, extra = ''} = {}) => {
             const data = xml(raw ?? JSON.stringify(menus));
-            const actor = `<g id="fm-node-alice-0" class="fm-node fm-node-has-menu-links" data-id="Alice" data-menu-links="${data}" ${callback ? 'data-callback="inspect"' : ''}>
+            const metadata = `data-id="Alice" data-menu-links="${data}" ${callback ? 'data-callback="inspect"' : ''}`;
+            const actor = `<g id="fm-node-alice-0" class="fm-node fm-node-has-menu-links" ${metadata} ${fragmented ? 'data-fm-interaction-primary="true"' : ''}>
               <title>Alice service</title><rect x="20" y="20" width="170" height="70" fill="lightgray"/><text x="40" y="60">Alice</text></g>`;
+            const secondary = fragmented ? `<g ${metadata} data-fm-interaction-primary="false" role="presentation" tabindex="-1">
+              <text x="40" y="140">Alice continuation</text></g>` : '';
             return `<svg xmlns="http://www.w3.org/2000/svg" role="img" width="600" height="300" viewBox="0 0 600 300">
-              ${wrapped ? '<a href="https://primary.example/">'+actor+'</a>' : actor}
+              ${wrapped ? '<a href="https://primary.example/" tabindex="0">'+actor+'</a>' : actor}
+              ${wrapped && secondary ? '<a href="https://primary.example/" tabindex="-1">'+secondary+'</a>' : secondary}
               <g id="fm-node-bob-1" class="fm-node" data-id="Bob" data-callback="inspect"><rect x="280" y="20" width="170" height="70" fill="lightgray"/></g>${extra}</svg>`;
           };
           window.cleanups = [];
@@ -63,6 +67,7 @@ def main() -> int:
             window.svg = prepared.element.cloneNode(true);
             document.querySelector('#mount').append(svg);
             window.actor = svg.querySelector('[data-id="Alice"]');
+            window.fragment = svg.querySelector('[data-fm-interaction-primary="false"]');
             window.bob = svg.querySelector('[data-id="Bob"]');
             // Callback identity must remain stable for the existing callback binder.
             const handler = id => calls.push(id);
@@ -130,6 +135,80 @@ def main() -> int:
           fresh(); click(bob); equal(calls,['Bob']); expect(!menu());
           press(bob,' '); bob.dispatchEvent(new KeyboardEvent('keyup',{key:' ',bubbles:true,cancelable:true})); equal(calls,['Bob','Bob']);
         """)
+        check("scene-fragments-share-one-callback-and-keyboard-owner", """
+          fresh({fragmented:true,callback:true});
+          click(actor.querySelector('rect')); click(fragment.querySelector('text')); equal(calls,['Alice','Alice']);
+          expect(actor.getAttribute('tabindex')==='0'); expect(actor.getAttribute('role')==='button');
+          expect(fragment.getAttribute('tabindex')==='-1'); expect(fragment.getAttribute('role')==='presentation');
+          expect(!fragment.hasAttribute('aria-haspopup') && !fragment.hasAttribute('aria-keyshortcuts'));
+          equal([...svg.querySelectorAll('[tabindex="0"]')].map(node=>node.getAttribute('data-id')),['Alice','Bob']);
+          actor.focus(); press(actor,'Enter'); equal(calls,['Alice','Alice','Alice']); expect(!menu());
+        """)
+        check("scene-secondary-menu-returns-focus-to-canonical-owner", """
+          fresh({fragmented:true}); click(fragment.querySelector('text')); expect(menu());
+          expect(actor.getAttribute('aria-controls')===menu().id); expect(!fragment.hasAttribute('aria-controls'));
+          press(document.activeElement,'Escape'); expect(document.activeElement===actor); expect(!menu());
+          fresh({fragmented:true,callback:true});
+          fragment.querySelector('text').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+          expect(menu()); equal(calls,[]); press(document.activeElement,'Escape'); expect(document.activeElement===actor);
+        """)
+        check("scene-fragment-hidden-guards-apply-before-forwarding", """
+          for(const attribute of ['inert','hidden','aria-hidden','aria-disabled']) {
+            for(const owner of ['paint','fragment','primary']) {
+              fresh({fragmented:true,callback:true}); const paint=fragment.querySelector('text');
+              ({paint,fragment,primary:actor})[owner].setAttribute(attribute,'true');
+              click(paint); paint.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+              equal(calls,[]); expect(!menu(),attribute+' '+owner);
+            }
+          }
+          fresh({fragmented:true,callback:true}); actor.style.display='none'; click(fragment); equal(calls,[]);
+          fresh({fragmented:true,callback:true}); fragment.style.visibility='hidden'; click(fragment); equal(calls,[]);
+        """)
+        check("scene-fragment-identity-mutations-revoke-forwarding", """
+          for(const [name,value] of [['data-id','Bob'],['data-fm-interaction-primary','true'],
+              ['data-callback','other'],['data-menu-links','[]']]) {
+            fresh({fragmented:true,callback:true}); fragment.setAttribute(name,value);
+            click(fragment); fragment.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+            equal(calls,[]); expect(!menu(),name);
+          }
+          fresh({fragmented:true,callback:true}); actor.remove(); click(fragment); equal(calls,[]);
+          fresh({fragmented:true}); click(fragment); expect(menu());
+          fragment.setAttribute('data-fm-interaction-primary','true'); await frame(); expect(!menu());
+        """)
+        check("scene-fragments-require-an-unambiguous-matching-primary", """
+          for(const mutate of [
+            root=>root.querySelector('[data-fm-interaction-primary="true"]').remove(),
+            root=>root.querySelector('[data-fm-interaction-primary="false"]').setAttribute('data-fm-interaction-primary','true'),
+            root=>root.querySelector('[data-fm-interaction-primary="false"]').setAttribute('data-callback','other'),
+            root=>root.querySelector('[data-fm-interaction-primary="false"]').setAttribute('data-menu-links','[]')]) {
+            const prepared=adapter.prepareSvg(svgSource({fragmented:true,callback:true}),'fragmented',document);
+            mutate(prepared.element); const root=prepared.element.cloneNode(true); document.body.append(root);
+            const original=root.cloneNode(true); throws(()=>adapter.createSvgBinder(prepared.element)(root));
+            expect(root.isEqualNode(original),'failed fragment planning must not mutate DOM'); root.remove();
+          }
+          for(const marker of ['TRUE','1','', 'true ']) {
+            throws(()=>adapter.prepareSvg(svgSource({fragmented:true}).replace('primary="true"',`primary="${marker}"`),'bad',document));
+          }
+          throws(()=>adapter.prepareSvg(svgSource({fragmented:true}).replace('data-fm-interaction-primary=','DATA-FM-INTERACTION-PRIMARY='),'bad',document));
+        """)
+        check("scene-hyperlink-fragments-keep-native-action-and-one-menu-focus", """
+          fresh({fragmented:true,wrapped:true,callback:true});
+          const primary=actor.parentElement, secondary=fragment.parentElement;
+          expect(primary.localName==='a' && primary.getAttribute('tabindex')==='0');
+          expect(actor.getAttribute('tabindex')==='-1'); expect(fragment.getAttribute('tabindex')==='-1');
+          expect(secondary.getAttribute('tabindex')==='-1'); expect(primary.getAttribute('aria-haspopup')==='menu');
+          svg.addEventListener('click', event=>{ window.primaryPrevented=event.defaultPrevented; event.preventDefault(); },{once:true});
+          click(fragment.querySelector('text')); expect(!primaryPrevented); equal(calls,[]); expect(!menu());
+          fragment.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})); expect(menu());
+          expect(primary.getAttribute('aria-controls')===menu().id); press(document.activeElement,'Escape');
+          expect(document.activeElement===primary); press(primary,'ArrowDown'); expect(menu());
+        """)
+        check("scene-fragment-cleanup-restores-admitted-svg", """
+          fresh({fragmented:true,callback:true}); click(fragment); equal(calls,['Alice']);
+          fragment.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})); expect(menu());
+          cleanup(); expect(!menu()); expect(svg.isEqualNode(prepared.element));
+          click(fragment); equal(calls,['Alice']); cleanups.push(bind(svg)); click(fragment); equal(calls,['Alice','Alice']);
+        """)
         check("callback-registry-replacement-stays-inert", """
           fresh({binder:{resolveCallback:()=>()=>calls.push('should-not-run')}}); click(bob); equal(calls,[]);
         """)
@@ -183,6 +262,15 @@ def main() -> int:
           const first=parsed.querySelector('[data-id="Alice"]');
           for (let i=0;i<32;i++) { const copy=first.cloneNode(true); copy.id='node'+i; parsed.documentElement.append(copy); }
           throws(() => adapter.prepareSvg(new XMLSerializer().serializeToString(parsed),'bad',document));
+        """)
+        check("scene-menu-budget-counts-validated-semantic-owners", """
+          const parsed=new DOMParser().parseFromString(svgSource({fragmented:true,menus:Array(128).fill(links[0])}),'image/svg+xml');
+          const secondary=parsed.querySelector('[data-fm-interaction-primary="false"]');
+          for(let i=0;i<40;i++) parsed.documentElement.append(secondary.cloneNode(true));
+          const prepared=adapter.prepareSvg(new XMLSerializer().serializeToString(parsed),'fragments',document);
+          expect(prepared.element.querySelectorAll('[data-menu-links]').length===42);
+          secondary.setAttribute('data-menu-links','[]');
+          throws(()=>adapter.prepareSvg(new XMLSerializer().serializeToString(parsed),'bad',document));
         """)
         check("metadata-change-revokes-an-open-menu", """
           fresh(); click(actor); actor.setAttribute('data-menu-links','[]'); await frame(); expect(!menu());
@@ -267,6 +355,22 @@ def main() -> int:
             page.keyboard.press("Tab")
             page.evaluate("expect(!menu()); expect(document.activeElement===bob)")
         check("real-pointer-keyboard-space-tab", real_input)
+
+        def real_fragment_input():
+            page.evaluate("fresh({fragmented:true,callback:true})")
+            page.locator('[data-fm-interaction-primary="false"] text').click()
+            page.evaluate("equal(calls,['Alice']); expect(document.activeElement===actor)")
+            page.keyboard.press("Tab")
+            page.evaluate("expect(document.activeElement===bob,'secondary fragment must not add a Tab stop')")
+            page.locator('[data-fm-interaction-primary="false"] text').click(button="right")
+            page.evaluate("expect(menu())")
+            page.keyboard.press("Escape")
+            page.evaluate("expect(document.activeElement===actor)")
+            page.evaluate("""fresh({fragmented:true,callback:true,
+              extra:'<rect id="cover" x="20" y="20" width="170" height="70" fill="red"/>'})""")
+            page.locator('rect[fill="red"]').click()
+            page.evaluate("equal(calls,[]); expect(!menu())")
+        check("real-scene-fragment-pointer-menu-tab-and-occlusion", real_fragment_input)
         check("no-uncaught-browser-errors", lambda: page.evaluate("errors => expect(errors.length===0,JSON.stringify(errors))", page_errors))
         browser.close()
     print(json.dumps({"checks": checks, "failures": failures,
