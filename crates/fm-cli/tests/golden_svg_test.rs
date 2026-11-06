@@ -1702,9 +1702,15 @@ fn quadrant_points(svg: &str) -> Vec<(String, f32, f32)> {
         let rest = &chunk[at + key.len() + 2..];
         rest[..rest.find('"')?].parse().ok()
     };
-    let mut circles: Vec<(f32, f32)> = Vec::new();
+    // 50f347d8 ("make quadrant charts readable without moving data") keeps each point at its
+    // authored coordinate but moves the VISIBLE label off the point -- with a leader line when the
+    // move is large -- so a point can no longer be paired to a label by vertical proximity. Pair by
+    // the point's OWN identity instead: every `<circle class="fm-quadrant-point">` carries a
+    // `<title>` of "{label}: {quadrant}" (quadrant_point_accessible_name), so the label on the same
+    // element is an exact 1:1 mapping, independent of where the visible label was placed.
+    let mut out: Vec<(String, f32, f32)> = Vec::new();
     for chunk in svg.split("<circle ").skip(1) {
-        let head = chunk.split("/>").next().unwrap_or_default();
+        let head = chunk.split('>').next().unwrap_or_default();
         if !head.contains("class=\"fm-quadrant-point\"") {
             continue;
         }
@@ -1713,47 +1719,56 @@ fn quadrant_points(svg: &str) -> Vec<(String, f32, f32)> {
             cx.is_some() && cy.is_some(),
             "a fm-quadrant-point has no readable cx/cy: {head}"
         );
-        circles.push((cx.unwrap_or(f32::NAN), cy.unwrap_or(f32::NAN)));
+        let title = chunk
+            .split_once("<title>")
+            .and_then(|(_, r)| r.split_once("</title>"))
+            .map(|(t, _)| t.trim().to_string());
+        assert!(
+            title.is_some(),
+            "a fm-quadrant-point has no <title> to identify it; pairing would be guesswork: {head}"
+        );
+        let title = title.unwrap_or_default();
+        let label = title.split(": ").next().unwrap_or(&title).to_string();
+        out.push((label, cx.unwrap_or(f32::NAN), cy.unwrap_or(f32::NAN)));
     }
-    let mut labels: Vec<(String, f32)> = Vec::new();
-    for chunk in svg.split("<text ").skip(1) {
-        let head = chunk.split('>').next().unwrap_or_default();
-        if !head.contains("class=\"fm-quadrant-point-label\"") {
+    // Non-vacuity: a render that drew no points (or whose titles vanished) must fail here, not pass
+    // an empty verdict. The visible point-label count is an independent second source and must
+    // agree, so neither a missing title nor a missing label slips through.
+    let visible_labels = svg.matches("class=\"fm-quadrant-point-label\"").count();
+    assert!(
+        !out.is_empty(),
+        "no fm-quadrant-point found; the guard would be vacuous"
+    );
+    assert_eq!(
+        out.len(),
+        visible_labels,
+        "quadrant drew {} titled points but {} visible point labels; the two must agree",
+        out.len(),
+        visible_labels
+    );
+    // Any label moved far enough to need a leader must have that leader terminate on ITS OWN point
+    // (one endpoint within 0.5px of a point centre): a leader to nothing, or to the wrong point,
+    // would mislead exactly where this chart is hardest to read.
+    for leader in svg.split("<line ").skip(1) {
+        let head = leader.split('>').next().unwrap_or_default();
+        if !head.contains("class=\"fm-quadrant-label-leader\"") {
             continue;
         }
-        let text = chunk
-            .split_once('>')
-            .and_then(|(_, r)| r.split_once("</text>"))
-            .map(|(t, _)| t.trim().to_string())
-            .unwrap_or_default();
-        let y = attr(head, "y");
+        let on_a_point = [
+            (attr(head, "x1"), attr(head, "y1")),
+            (attr(head, "x2"), attr(head, "y2")),
+        ]
+        .iter()
+        .any(|(ex, ey)| match (ex, ey) {
+            (Some(ex), Some(ey)) => out
+                .iter()
+                .any(|(_, cx, cy)| (ex - cx).abs() < 0.5 && (ey - cy).abs() < 0.5),
+            _ => false,
+        });
         assert!(
-            y.is_some(),
-            "a fm-quadrant-point-label has no readable y: {head}"
+            on_a_point,
+            "a fm-quadrant-label-leader does not terminate on any point centre: {head}"
         );
-        labels.push((text, y.unwrap_or(f32::NAN)));
-    }
-    assert_eq!(
-        circles.len(),
-        labels.len(),
-        "quadrant has {} points but {} point labels; this guard cannot pair them and any verdict \
-         would be meaningless",
-        circles.len(),
-        labels.len()
-    );
-
-    let mut out = Vec::new();
-    for (cx, cy) in circles {
-        let paired = labels
-            .iter()
-            .find(|(_, ly)| (ly - (cy + 4.0)).abs() < 1.5)
-            .or_else(|| labels.iter().find(|(_, ly)| (ly - cy).abs() < 12.0));
-        assert!(
-            paired.is_some(),
-            "no label found near the quadrant point at ({cx}, {cy}); labels: {labels:?}"
-        );
-        let label = paired.map_or_else(String::new, |(l, _)| l.clone());
-        out.push((label, cx, cy));
     }
     out
 }
