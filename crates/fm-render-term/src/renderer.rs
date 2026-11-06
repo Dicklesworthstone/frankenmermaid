@@ -245,6 +245,72 @@ fn is_invisible_edge(ir: &MermaidDiagramIr, edge_path: &fm_layout::LayoutEdgePat
         .is_some_and(|edge| edge.arrow == ArrowType::Invisible)
 }
 
+/// Keep branch order from the sequence timeline, including note-only and empty operands.
+/// Older supplied layouts can omit `branch_tops`; their first message remains a useful fallback.
+fn sequence_fragment_branches<'a>(
+    ir: &'a MermaidDiagramIr,
+    layout: &DiagramLayout,
+    fragment_index: usize,
+) -> Vec<(f32, &'a str)> {
+    let Some(fragment) = layout.extensions.sequence_fragments.get(fragment_index) else {
+        return Vec::new();
+    };
+    let Some(source) = ir
+        .sequence_meta
+        .as_ref()
+        .and_then(|meta| meta.fragments.get(fragment_index))
+    else {
+        return Vec::new();
+    };
+    let message_y = |edge_index| {
+        layout
+            .edges
+            .iter()
+            .find(|edge| edge.edge_index == edge_index)
+            .and_then(|edge| edge.points.first())
+            .map(|point| point.y)
+    };
+    let lead = message_y(source.start_edge)
+        .map(|y| y - fragment.bounds.y)
+        .unwrap_or(0.0);
+    source
+        .alternatives
+        .iter()
+        .enumerate()
+        .filter_map(|(index, alternative)| {
+            let y = fragment
+                .branch_tops
+                .get(index)
+                .copied()
+                .or_else(|| message_y(alternative.start_edge).map(|y| y - lead))?;
+            (y.is_finite()
+                && y >= fragment.bounds.y
+                && y <= fragment.bounds.y + fragment.bounds.height)
+                .then_some((y, alternative.label.as_str()))
+        })
+        .collect()
+}
+
+fn sequence_fragment_keyword(kind: fm_core::FragmentKind) -> Option<&'static str> {
+    match kind {
+        fm_core::FragmentKind::Loop => Some("loop"),
+        fm_core::FragmentKind::Alt => Some("alt"),
+        fm_core::FragmentKind::Opt => Some("opt"),
+        fm_core::FragmentKind::Par => Some("par"),
+        fm_core::FragmentKind::Critical => Some("critical"),
+        fm_core::FragmentKind::Break => Some("break"),
+        fm_core::FragmentKind::Rect => None,
+    }
+}
+
+fn sequence_alternative_keyword(kind: fm_core::FragmentKind) -> &'static str {
+    match kind {
+        fm_core::FragmentKind::Par => "and",
+        fm_core::FragmentKind::Critical => "option",
+        _ => "else",
+    }
+}
+
 const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     match arrow {
         ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
@@ -780,17 +846,26 @@ impl TermRenderer {
                     }
                 }
             }
-            for fragment in &layout.extensions.sequence_fragments {
+            for (fragment_index, fragment) in
+                layout.extensions.sequence_fragments.iter().enumerate()
+            {
                 let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
                 if fw >= 3 && fh >= 3 {
                     self.draw_shape_border(&mut buffer, fx, fy, fw, fh, NodeShape::Rect);
-                    let mut text = format!("{:?}", fragment.kind).to_lowercase();
-                    if !fragment.label.is_empty() {
-                        text.push(' ');
-                        text.push_str(&fragment.label);
+                    for (branch_y, _) in sequence_fragment_branches(ir, layout, fragment_index) {
+                        let (_, row) = self.layout_point_to_cells(0.0, branch_y, scale_x, scale_y);
+                        let row = (row + self.config.padding).clamp(fy + 1, fy + fh - 2);
+                        self.draw_line_cell(
+                            &mut buffer,
+                            fx + 1,
+                            row,
+                            fx + fw - 2,
+                            row,
+                            &self.edge_glyphs,
+                            false,
+                            ArrowType::DottedLine,
+                        );
                     }
-                    let text = self.truncate_label(&text);
-                    buffer.set_string(fx + 1, fy + 1, &text);
                 }
             }
             for note in &layout.extensions.sequence_notes {
@@ -812,7 +887,11 @@ impl TermRenderer {
             .map(<[char]>::to_vec)
             .collect();
         let (edge_labels, occluded_edge_label_count) =
-            self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[]);
+            if ir.diagram_type == fm_core::DiagramType::Sequence {
+                self.overlay_sequence_message_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
+            } else {
+                self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
+            };
         let mut output = serialize_cell_labels(&grid, &edge_labels, true);
         let debug_metrics = self
             .config
@@ -1144,13 +1223,24 @@ impl TermRenderer {
         }
 
         // Render sequence fragment boxes (loop/alt/par, etc.).
-        for fragment in &layout.extensions.sequence_fragments {
+        for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
             let fx = (fragment.bounds.x * pixel_scale_x) as usize + padding_x;
             let fy = (fragment.bounds.y * pixel_scale_y) as usize + padding_y;
             let fw = (fragment.bounds.width * pixel_scale_x) as usize;
             let fh = (fragment.bounds.height * pixel_scale_y) as usize;
             if fw > 2 && fh > 2 {
                 canvas.draw_rect(fx, fy, fw, fh);
+                for (branch_y, _) in sequence_fragment_branches(ir, layout, fragment_index) {
+                    let row = ((branch_y * pixel_scale_y) as isize + padding_y as isize)
+                        .clamp((fy + 1) as isize, (fy + fh - 2) as isize);
+                    Self::draw_dashed_segment(
+                        &mut canvas,
+                        (fx + 1) as isize,
+                        row,
+                        (fx + fw - 2) as isize,
+                        row,
+                    );
+                }
             }
         }
 
@@ -2641,84 +2731,6 @@ impl TermRenderer {
             }
         }
 
-        // Overlay SEQUENCE FRAGMENT labels (bd-039t).
-        //
-        // `render_subcell_mode` draws each fragment's RECTANGLE via `canvas.draw_rect` and no text,
-        // so `loop Every day` and `alt is ok` came out as bare boxes while fm-render-svg drew the
-        // frame AND its label. Measured SVG vs terminal: `Every day` and `is ok` appeared in the
-        // SVG and in neither terminal render.
-        //
-        // Drawn at the first INTERIOR row, not the frame's top row: that row is the rectangle's own
-        // border, and writing there would trade the frame edge for the text. Only blank cells are
-        // written, the same guard the cluster-title overlay uses, so a label can never overwrite a
-        // message arrow or a participant box that shares the frame's interior.
-        for fragment in &layout.extensions.sequence_fragments {
-            let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
-            if fw < 3 || fh < 3 {
-                continue;
-            }
-            // TRY SUCCESSIVE INTERIOR ROWS, because one occupied cell must not drop the whole
-            // label. Measured: `alt is ok` (9 chars) drew while `loop Every day` (14 chars) did
-            // not, with IDENTICAL frame bounds — the longer run met a lifeline glyph and the
-            // all-or-nothing guard discarded it entirely. Rows are tried top-down so the label
-            // still reads as belonging to the frame's head.
-            // `kind` is the frame tag mermaid shows (loop / alt / opt / par), and the label is the
-            // condition. Both matter: `alt` with no condition and a bare condition read differently.
-            let mut text = format!("{:?}", fragment.kind).to_lowercase();
-            if !fragment.label.is_empty() {
-                text.push(' ');
-                text.push_str(&fragment.label);
-            }
-            let text = self.truncate_label(&text);
-            let start = fx + 1;
-            let last_row = (fy + fh.saturating_sub(1)).min(lines.len());
-            let mut placed = false;
-            for line in lines.iter_mut().take(last_row).skip(fy + 1) {
-                let fits = text.chars().enumerate().all(|(offset, _)| {
-                    let col = start + offset;
-                    col < cell_width
-                        && line
-                            .get(col)
-                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                });
-                if !fits {
-                    continue;
-                }
-                for (offset, ch) in text.chars().enumerate() {
-                    line[start + offset] = ch;
-                }
-                placed = true;
-                // Placed; a second copy further down would be worse than none.
-                break;
-            }
-
-            // FALLBACK: draw it anyway, in the frame's first interior row.
-            //
-            // A blank span is not always available, and the all-or-nothing guard then discarded the
-            // label completely. MEASURED: `alt is ok` (9 chars) found a span and drew, while `loop
-            // Every day` (14 chars) did not — with IDENTICAL frame bounds, so it is the run length
-            // meeting a lifeline column, not the frame's size. Verified by disarming this overlay:
-            // both labels then vanish, so this code is what draws them.
-            //
-            // mermaid draws the frame label in a tab at the top-left, over whatever lies beneath, so
-            // overwriting here is faithful rather than a compromise. It is confined to the frame's
-            // OWN first interior row at its left edge, where messages between lifelines do not sit,
-            // and `sequence_fragment_label_reaches_terminal_output` asserts the frame's contents
-            // survive.
-            if !placed {
-                let row = fy + 1;
-                if row < lines.len() {
-                    for (offset, ch) in text.chars().enumerate() {
-                        let col = start + offset;
-                        if col >= cell_width {
-                            break;
-                        }
-                        lines[row][col] = ch;
-                    }
-                }
-            }
-        }
-
         // Overlay CLUSTER titles (bd-u3fo).
         //
         // `render_cluster_canvas` draws each cluster's RECTANGLE and nothing else, while
@@ -3126,18 +3138,13 @@ impl TermRenderer {
             if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
             }
-            if !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+            if ir.diagram_type != fm_core::DiagramType::Sequence
+                && !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
                 && let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
             {
                 let base_label = self.truncate_label(&label.text);
-                let truncated = if let Some(number) = ir
-                    .sequence_meta
-                    .as_ref()
-                    .and_then(|meta| meta.autonumber_value(edge_path.edge_index))
-                {
-                    format!("{number} {base_label}")
-                } else if ir.diagram_type == fm_core::DiagramType::C4Dynamic {
+                let truncated = if ir.diagram_type == fm_core::DiagramType::C4Dynamic {
                     // C4Dynamic diagrams use the declaration order as part of their meaning:
                     // Mermaid numbers each relationship while drawing it, leaving the parsed label
                     // unchanged so the same relationship syntax remains bare in C4Context.
@@ -3447,15 +3454,271 @@ impl TermRenderer {
             }
         }
 
-        let (labels, occluded) = self.overlay_graph_edge_labels(
-            &mut lines,
+        let (labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
+            self.overlay_sequence_message_labels(
+                &mut lines,
+                ir,
+                layout,
+                scale_x,
+                scale_y,
+                &edge_label_rects,
+            )
+        } else {
+            self.overlay_graph_edge_labels(
+                &mut lines,
+                ir,
+                layout,
+                scale_x,
+                scale_y,
+                &edge_label_rects,
+            )
+        };
+        (serialize_cell_labels(&lines, &labels, false), occluded)
+    }
+
+    /// Sequence messages carry the same captions and directive-scoped counters in every
+    /// terminal mode. Keep the counter outside the caption budget: shortening a message must
+    /// never turn its ordinal into a different number, including on unlabeled self messages.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_sequence_message_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+        protected: &[(usize, usize, usize, usize)],
+    ) -> (Vec<CellLabel>, usize) {
+        if !self.config.show_labels || ir.diagram_type != fm_core::DiagramType::Sequence {
+            return (Vec::new(), 0);
+        }
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        let mut labels = Vec::new();
+        let mut occluded = 0;
+        let mut blocked = vec![false; width * height];
+        let mut protect = |left: usize, top: usize, right: usize, bottom: usize| {
+            for row in top.min(height)..bottom.min(height) {
+                blocked[row * width + left.min(width)..row * width + right.min(width)].fill(true);
+            }
+        };
+        for bounds in layout
+            .nodes
+            .iter()
+            .chain(&layout.extensions.sequence_mirror_headers)
+            .map(|node| &node.bounds)
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| &note.bounds),
+            )
+        {
+            let (x, y, w, h) = self.bounds_to_cells(bounds, scale_x, scale_y);
+            protect(x, y, x.saturating_add(w + 1), y.saturating_add(h + 1));
+        }
+        for &(left, top, right, bottom) in protected {
+            protect(left, top, right, bottom);
+        }
+        self.overlay_sequence_fragment_labels(
+            grid,
             ir,
             layout,
-            scale_x,
-            scale_y,
-            &edge_label_rects,
+            (scale_x, scale_y),
+            &blocked,
+            &mut labels,
         );
-        (serialize_cell_labels(&lines, &labels, false), occluded)
+
+        for path in &layout.edges {
+            if path.bundled || path.points.len() < 2 || is_invisible_edge(ir, path) {
+                continue;
+            }
+            let number = ir
+                .sequence_meta
+                .as_ref()
+                .and_then(|meta| meta.autonumber_value(path.edge_index))
+                .map(|value| value.to_string());
+            let caption = layout
+                .extensions
+                .sequence_message(path.edge_index)
+                .map(|message| message.text.as_str())
+                .or_else(|| {
+                    ir.edges
+                        .get(path.edge_index)
+                        .and_then(|edge| edge.label)
+                        .and_then(|label| ir.labels.get(label.0))
+                        .map(|label| label.text.as_str())
+                })
+                .unwrap_or("");
+            let caption = edge_caption_text(
+                caption,
+                self.config
+                    .max_label_chars
+                    .max(1)
+                    .saturating_mul(self.config.max_label_lines.max(1)),
+            );
+            if caption.trim().is_empty() && number.is_none() {
+                continue;
+            }
+            if width < 3
+                || height == 0
+                || number
+                    .as_ref()
+                    .is_some_and(|number| number.len() > width - 2)
+            {
+                occluded += 1;
+                continue;
+            }
+            let label_lines = sequence_message_lines(
+                &caption,
+                number.as_deref(),
+                width - 2,
+                self.config.max_label_lines.max(1),
+            );
+            let mut label = CellLabel::new(path.edge_index, false, label_lines);
+            let route: Vec<_> = path
+                .points
+                .iter()
+                .map(|point| {
+                    (
+                        point.x * scale_x + self.config.padding as f32,
+                        point.y * scale_y + self.config.padding as f32,
+                    )
+                })
+                .collect();
+            // The outgoing horizontal leg anchors self-message captions, rather than the
+            // vertical return leg. Layout's measured caption is preferred when available.
+            let preferred = layout
+                .extensions
+                .sequence_message(path.edge_index)
+                .map_or_else(
+                    || {
+                        (
+                            f32::midpoint(route[0].0, route[1].0),
+                            route[0].1 - label.lines.len() as f32 * 0.5,
+                        )
+                    },
+                    |message| {
+                        (
+                            message.bounds.center().x * scale_x + self.config.padding as f32,
+                            message.bounds.center().y * scale_y + self.config.padding as f32,
+                        )
+                    },
+                );
+            let own_route = self
+                .edge_label_route_grid(ir, layout, path, false, width, height, scale_x, scale_y);
+            let foreign_routes =
+                self.edge_label_route_grid(ir, layout, path, true, width, height, scale_x, scale_y);
+            let occupied: Vec<bool> = grid
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    let blocked = &blocked;
+                    let own_route = &own_route;
+                    let foreign_routes = &foreign_routes;
+                    cells.iter().enumerate().map(move |(col, &cell)| {
+                        blocked[row * width + col]
+                            || !blank_terminal_cell(foreign_routes[row][col])
+                            || (!blank_terminal_cell(cell) && cell != own_route[row][col])
+                    })
+                })
+                .collect();
+            if let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                preferred,
+                &route,
+                label.width,
+                label.lines.len(),
+                width,
+                height,
+                None,
+            ) {
+                label.x = x;
+                label.y = y;
+                clear_cell_label(grid, &label);
+                labels.push(label);
+            } else {
+                occluded += 1;
+            }
+        }
+        (labels, occluded)
+    }
+
+    /// Fragment headings and alternative operands occupy their own timeline rows. Keeping
+    /// them in the same display-cell overlay as messages prevents a later caption from erasing
+    /// an `else`, `and`, or `option` condition. `rect` is a background, not a labeled operand.
+    fn overlay_sequence_fragment_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        (scale_x, scale_y): (f32, f32),
+        blocked: &[bool],
+        labels: &mut Vec<CellLabel>,
+    ) {
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        for (index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
+            let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
+            let x = fx.saturating_add(1);
+            let available = fw.saturating_sub(3).min(width.saturating_sub(x + 1));
+            if available == 0 || fh < 3 {
+                continue;
+            }
+            let mut captions = Vec::new();
+            if let Some(keyword) = sequence_fragment_keyword(fragment.kind) {
+                captions.push((fy + 1, keyword, fragment.label.as_str()));
+            }
+            for (y, condition) in sequence_fragment_branches(ir, layout, index) {
+                let (_, row) = self.layout_point_to_cells(0.0, y, scale_x, scale_y);
+                // The condition belongs immediately above its divider. In particular, an
+                // empty trailing operand can quantize onto the frame's bottom border;
+                // retain its caption in the final interior row instead of discarding it.
+                let row = (row + self.config.padding)
+                    .saturating_sub(1)
+                    .clamp(fy + 1, fy + fh - 2);
+                captions.push((row, sequence_alternative_keyword(fragment.kind), condition));
+            }
+            for (row, keyword, condition) in captions {
+                if row >= height || row < fy + 1 || row >= fy + fh - 1 {
+                    continue;
+                }
+                let text = if condition.trim().is_empty() {
+                    keyword.to_string()
+                } else {
+                    format!("{keyword} {condition}")
+                };
+                let text = edge_caption_text(
+                    &text,
+                    self.config
+                        .max_label_chars
+                        .max(1)
+                        .saturating_mul(self.config.max_label_lines.max(1)),
+                );
+                let mut label =
+                    CellLabel::new(usize::MAX, false, wrap_cell_label(&text, available, 1));
+                label.x = x;
+                label.y = row;
+                let right = x + label.width + 1;
+                if blocked[row * width + x..row * width + right]
+                    .iter()
+                    .any(|cell| *cell)
+                    || labels.iter().any(|prior| {
+                        row >= prior.y
+                            && row < prior.y + prior.lines.len()
+                            && x < prior.x + prior.width
+                            && prior.x < right
+                    })
+                {
+                    continue;
+                }
+                // Preserve the frame's side borders while clearing the operand's backing.
+                grid[row][x..right].fill(' ');
+                labels.push(label);
+            }
+        }
     }
 
     /// Use shared geometric placement with terminal-sized measurements, then validate the
@@ -4988,6 +5251,27 @@ fn edge_caption_text(text: &str, budget: usize) -> String {
         result.push('…');
     }
     result
+}
+
+fn sequence_message_lines(
+    caption: &str,
+    number: Option<&str>,
+    width: usize,
+    max_lines: usize,
+) -> Vec<String> {
+    let Some(number) = number else {
+        return wrap_cell_label(caption, width, max_lines);
+    };
+    if caption.trim().is_empty() || width <= number.len() + 1 {
+        return vec![number.to_string()];
+    }
+    let mut lines = wrap_cell_label(caption, width - number.len() - 1, max_lines);
+    if let Some(first) = lines.first_mut() {
+        first.insert_str(0, &format!("{number} "));
+    } else {
+        lines.push(number.to_string());
+    }
+    lines
 }
 
 fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
@@ -7896,6 +8180,242 @@ mod tests {
 
         assert!(result.output.contains("10 Ping"), "{}", result.output);
         assert!(result.output.contains("15 Pong"), "{}", result.output);
+    }
+
+    #[test]
+    fn sequence_captions_and_scoped_numbers_reach_every_terminal_mode() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             hideFootbox\n\
+             participant Alice\n\
+             participant Bob\n\
+             autonumber 10 5\n\
+             Alice->>Bob: Ping\n\
+             Bob->>Bob:\n\
+             autonumber off\n\
+             Bob-->>Alice: Pause\n\
+             autonumber 40 3\n\
+             Alice->>Bob: Again\n\
+             Bob-->>Alice:\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 5);
+        assert_eq!(
+            ir.sequence_meta.as_ref().unwrap().autonumber_value(1),
+            Some(15)
+        );
+        assert_eq!(ir.sequence_meta.as_ref().unwrap().autonumber_value(2), None);
+        let layout = layout_diagram(&ir);
+        for (tier, mode) in [
+            (MermaidTier::Compact, MermaidRenderMode::CellOnly),
+            (MermaidTier::Normal, MermaidRenderMode::CellOnly),
+            (MermaidTier::Rich, MermaidRenderMode::Block),
+            (MermaidTier::Rich, MermaidRenderMode::HalfBlock),
+            (MermaidTier::Rich, MermaidRenderMode::Braille),
+        ] {
+            let config = TermRenderConfig {
+                tier,
+                render_mode: mode,
+                max_width: 240,
+                max_height: 160,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 240, 160);
+            for caption in ["10 Ping", "Pause", "40 Again"] {
+                assert_eq!(
+                    result.output.matches(caption).count(),
+                    1,
+                    "{tier:?}/{mode:?} lost or duplicated {caption}:\n{}",
+                    result.output,
+                );
+            }
+            for number in ["15", "43"] {
+                assert_eq!(
+                    result
+                        .output
+                        .split_whitespace()
+                        .filter(|word| *word == number)
+                        .count(),
+                    1,
+                    "{tier:?}/{mode:?} lost unlabeled message {number}:\n{}",
+                    result.output,
+                );
+            }
+            assert!(!result.output.contains("20 Pause"), "{}", result.output);
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+        }
+    }
+
+    #[test]
+    fn sequence_counters_survive_caption_limits_and_unicode_columns() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             hideFootbox\n\
+             autonumber 4294967295 4294967295\n\
+             A->>B: 界面 cafe\u{301}\n\
+             B->>B:\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 2);
+        let layout = layout_diagram(&ir);
+        for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Rich,
+                render_mode: mode,
+                max_width: 200,
+                max_height: 100,
+                max_label_chars: 12,
+                max_label_lines: 1,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 200, 100);
+            assert!(
+                result.output.contains("4294967295 界面 cafe\u{301}"),
+                "{}",
+                result.output
+            );
+            assert!(result.output.contains("8589934590"), "{}", result.output);
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+            assert!(
+                result
+                    .output
+                    .lines()
+                    .all(|line| line.width() <= result.width)
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_outline_keeps_its_text_free_contract() {
+        let ir = fm_parser::parse("sequenceDiagram\nautonumber 99\nA->>B: Secret\n").ir;
+        let result = render_diagram_with_config(&ir, &TermRenderConfig::outline(), 80, 24);
+        assert!(!result.output.contains("Secret"), "{}", result.output);
+        assert!(!result.output.contains("99"), "{}", result.output);
+        assert_eq!(result.occluded_edge_label_count, 0);
+    }
+
+    #[test]
+    fn sequence_alternatives_keep_note_only_and_empty_branches_in_source_order() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             hideFootbox\n\
+             participant A\n\
+             participant B\n\
+             alt warm\n\
+               A->>B: Prime\n\
+             else wait\n\
+               Note over A,B: Hold\n\
+             else cold\n\
+               B->>A: Retry\n\
+             else idle\n\
+             end\n\
+             par read\n\
+               A->>B: Read\n\
+             and write\n\
+               B->>A: Write\n\
+             end\n\
+             critical lock\n\
+               A->>B: Save\n\
+             option race\n\
+               B->>A: Abort\n\
+             end\n",
+        )
+        .ir;
+        let meta = ir.sequence_meta.as_ref().unwrap();
+        assert_eq!(meta.fragments.len(), 3);
+        assert_eq!(meta.fragments[0].alternatives.len(), 3);
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_fragments[0].branch_tops.len(), 3);
+        for (tier, mode) in [
+            (MermaidTier::Compact, MermaidRenderMode::CellOnly),
+            (MermaidTier::Rich, MermaidRenderMode::CellOnly),
+            (MermaidTier::Rich, MermaidRenderMode::Block),
+            (MermaidTier::Rich, MermaidRenderMode::HalfBlock),
+            (MermaidTier::Rich, MermaidRenderMode::Braille),
+        ] {
+            let config = TermRenderConfig {
+                tier,
+                render_mode: mode,
+                max_width: 240,
+                max_height: 240,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 240, 240);
+            for caption in [
+                "alt warm",
+                "else wait",
+                "Hold",
+                "else cold",
+                "Retry",
+                "else idle",
+                "par read",
+                "and write",
+                "option race",
+                "Abort",
+            ] {
+                assert_eq!(
+                    result.output.matches(caption).count(),
+                    1,
+                    "{tier:?}/{mode:?} lost or duplicated {caption}:\n{}",
+                    result.output
+                );
+            }
+            let mut previous = 0;
+            for caption in ["else wait", "Hold", "else cold", "Retry", "else idle"] {
+                let offset = result.output.find(caption).unwrap();
+                assert!(
+                    offset >= previous,
+                    "{tier:?}/{mode:?} reordered {caption}:\n{}",
+                    result.output
+                );
+                previous = offset;
+            }
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+        }
+    }
+
+    #[test]
+    fn sequence_branch_dividers_render_with_legacy_layouts_and_without_text() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nhideFootbox\nalt warm\nA->>B: Prime\nelse cold\nB->>A: Retry\nend\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        layout.extensions.sequence_fragments[0].branch_tops.clear();
+        let branches = sequence_fragment_branches(&ir, &layout, 0);
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].1, "cold");
+        let config = TermRenderConfig {
+            tier: MermaidTier::Rich,
+            render_mode: MermaidRenderMode::CellOnly,
+            max_width: 240,
+            max_height: 160,
+            ..Default::default()
+        };
+        let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 240, 160);
+        assert!(result.output.contains("else cold"), "{}", result.output);
+        assert!(
+            result.output.contains(EdgeGlyphs::UNICODE.dotted_h),
+            "{}",
+            result.output
+        );
+        let hidden = render_diagram_with_layout_and_config(
+            &ir,
+            &layout,
+            &TermRenderConfig {
+                show_labels: false,
+                ..config
+            },
+            240,
+            160,
+        );
+        assert!(!hidden.output.contains("cold"), "{}", hidden.output);
+        assert!(!hidden.output.contains("Prime"), "{}", hidden.output);
+        assert!(
+            hidden.output.contains(EdgeGlyphs::UNICODE.dotted_h),
+            "{}",
+            hidden.output
+        );
     }
 
     #[test]
