@@ -600,18 +600,18 @@ fn the_delay_rounds_only_its_right_end() {
 /// Wave only the bottom and it is a document. Wave both in the SAME phase and it is a ribbon. Either
 /// mistake keeps the curve commands, the closed path and the difference from a rect element — so
 /// "has curves" and this bead's differs-from-Rect rule both pass while the shape is wrong. The phase
-/// shows up as controls on OPPOSITE sides of the box: 164.49 is below its bottom edge (158.50) and
-/// 86.01 is above its top (92).
+/// shows up as controls on OPPOSITE sides of the box: 124.49 is below its bottom edge (118.50) and
+/// 46.01 is above its top (52).
 #[test]
 fn the_flag_waves_both_edges_in_opposite_phase() {
     let banner = render("flag");
     assert!(
-        banner.contains("164.49"),
+        banner.contains("124.49"),
         "the bottom wave does not bulge below the box: {}",
         silhouette(&banner)
     );
     assert!(
-        banner.contains("86.01"),
+        banner.contains("46.01"),
         "the top wave does not bulge above the box, so both edges wave the same way: {}",
         silhouette(&banner)
     );
@@ -638,7 +638,7 @@ fn the_flag_waves_both_edges_in_opposite_phase() {
 fn the_bolt_waists_are_at_different_heights() {
     let lightning = render("bolt");
     assert!(
-        lightning.contains("128.57") && lightning.contains("121.93"),
+        lightning.contains("88.57") && lightning.contains("81.93"),
         "the bolt's two waists collapsed onto one height, making it a wedge: {}",
         silhouette(&lightning)
     );
