@@ -6291,7 +6291,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x1201_64c4_b182_4551;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x2d6c_67f8_d2f4_aee6;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -6319,32 +6319,32 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0xe372_cc54_5be9_737b,
+                0x46c3_6dc5_3f11_edf5,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x0194_a77f_e15a_24d3,
+                0x90ea_4c56_a6a0_fc83,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0xdad3_120c_347b_d6f4,
+                0x6171_445c_c897_64da,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xe23e_acf7_a929_e5c6,
+                0x00cc_561c_c38f_85a6,
             ),
             (
                 "sankey",
                 "sankey-beta\nSolar,Grid,60\nWind,Grid,40\nGas,Grid,30\nGrid,Homes,65\nGrid,Industry,45\nGrid,Transport,20\n",
-                0x3f68_910e_63f1_f8a1,
+                0xa172_9195_4a12_9c9b,
             ),
             (
                 "gantt",
                 "gantt\n title Product rollout\n dateFormat YYYY-MM-DD\n axisFormat %Y-%m-%d\n tickInterval 1day\n topAxis\n section Design\n Research :a, 2026-01-01, 3d\n Prototype :b, after a, 4d\n section Engineering\n Implementation :c, after b, 5d\n Review :d, after c, 2d\n",
-                0x0615_1efd_72a3_6ad4,
+                0x2d77_7ed2_55a4_ed41,
             ),
         ];
 
