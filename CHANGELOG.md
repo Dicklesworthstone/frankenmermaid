@@ -4,6 +4,17 @@ All notable changes to **frankenmermaid** are documented here.
 
 Historical scope: project inception through 2026-08-19; the v0.3.0 release section below extends that record through 2026-09-26 and the release fixes.
 
+## v0.5.0 — 2026-11-06
+
+Measured, readable rendering across every backend, with refreshed layout defaults. The release covers 214 commits since `v0.4.0` (73 features, 80 fixes).
+
+- Measured render redesigns shared across SVG, Canvas (GPU) and terminal: readable pie charts with label leaders, quadrant composition, radar, treemaps, C4 cards, ER tables, requirement cards, Gantt task styling and schedules, and sequence sizing around measured message captions.
+- Layout defaults: tighter default chart composition (56/80/36 -> 40/64/28, clearances x0.71/x0.80), readable node paragraphs composed before layout, clearer relationship captions, cycle reporting, and self-transition routing.
+- SVG fidelity: scene links, callbacks, tooltips and actor menus preserved; quadrant charts made readable without moving data; Canvas affine transforms.
+- Golden suites re-blessed to the current measured output: 41 layout scenarios (`layout_checksums.json`) and 43 SVG snapshots. All drift was reviewed as intended render/layout evolution (no overlaps, escapes or out-of-bounds; all removed SVG elements re-emitted); the SVG golden was green at v0.4.0.
+- New guard: a Gantt test asserts consecutive task rows keep a positive vertical gap; it fails at 55a99e90 (rows overlapped by 2.18px) and passes at this release (6.30px).
+- WebAssembly package (`pkg/`) rebuilt from this source with the canonical `build-wasm.sh`; its source-input and package digests re-pinned.
+
 ## v0.4.0 — 2026-10-08
 
 New diagram families and a cluster-aware layout. The release covers 47 commits since `v0.3.0` (35 features, 12 fixes) plus the release-review fixes below.
