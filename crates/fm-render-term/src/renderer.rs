@@ -640,6 +640,57 @@ impl TermRenderer {
             }
         }
 
+        if ir.diagram_type == fm_core::DiagramType::Sequence {
+            // Lifeline bands already encode creation and destruction boundaries. Draw their
+            // exact interval before messages so Compact and CellOnly retain participant time.
+            for band in &layout.extensions.bands {
+                if band.kind != fm_layout::LayoutBandKind::Lane || band.bounds.height <= 0.0 {
+                    continue;
+                }
+                let center_x = band.bounds.center().x;
+                let (x, top) = self.point_to_cells(
+                    &fm_layout::LayoutPoint {
+                        x: center_x,
+                        y: band.bounds.y,
+                    },
+                    scale_x,
+                    scale_y,
+                );
+                let (_, bottom) = self.point_to_cells(
+                    &fm_layout::LayoutPoint {
+                        x: center_x,
+                        y: band.bounds.y + band.bounds.height,
+                    },
+                    scale_x,
+                    scale_y,
+                );
+                if x < cell_width && top < cell_height {
+                    for row in top..=bottom.min(cell_height - 1) {
+                        buffer.set(x, row, self.edge_glyphs.dotted_v);
+                    }
+                }
+            }
+            // Activation width is independent of node-box minimums. A narrow activation is
+            // still a visible solid cell, distinguishable from its dashed lifeline.
+            for bar in &layout.extensions.activation_bars {
+                let (x, y) = self.point_to_cells(
+                    &fm_layout::LayoutPoint {
+                        x: bar.bounds.x,
+                        y: bar.bounds.y,
+                    },
+                    scale_x,
+                    scale_y,
+                );
+                let w = ((bar.bounds.width * scale_x).ceil() as usize).max(1);
+                let h = ((bar.bounds.height * scale_y).ceil() as usize).max(1);
+                for row in y..y.saturating_add(h).min(cell_height) {
+                    for col in x..x.saturating_add(w).min(cell_width) {
+                        buffer.set(col, row, self.box_glyphs.block_full);
+                    }
+                }
+            }
+        }
+
         // Compact state markers occupy one character at their actual layout centre. Route
         // their incident segments to that character rather than leaving an empty circle-sized
         // gap between the connector's geometric port and the displayed dot.
@@ -686,8 +737,7 @@ impl TermRenderer {
         for marker in &layout.extensions.sequence_lifecycle_markers {
             match marker.kind {
                 fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy => {
-                    let x = (marker.center.x * scale_x) as usize;
-                    let y = (marker.center.y * scale_y) as usize;
+                    let (x, y) = self.point_to_cells(&marker.center, scale_x, scale_y);
                     if x < cell_width && y < cell_height {
                         buffer.set(x, y, 'X');
                     }
@@ -872,8 +922,6 @@ impl TermRenderer {
                 let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
                 if nw >= 3 && nh >= 2 {
                     self.draw_shape_border(&mut buffer, nx, ny, nw, nh, NodeShape::Note);
-                    let text = self.truncate_label(&note.text);
-                    buffer.set_string(nx + 1, ny + 1, &text);
                 }
             }
         }
@@ -888,7 +936,7 @@ impl TermRenderer {
             .collect();
         let (edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
-                self.overlay_sequence_message_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
+                self.overlay_sequence_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
             } else {
                 self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
             };
@@ -2676,61 +2724,6 @@ impl TermRenderer {
             place(quad.quadrant_labels.get(3), lower_quarter, true);
         }
 
-        // Overlay SEQUENCE NOTE text (bd-59o4).
-        //
-        // `render_subcell_mode` draws each note as a bare RECTANGLE via `canvas.draw_rect` and no
-        // text, so `Note over Alice: Ponder` came out as an empty box. Measured SVG vs terminal vs
-        // canvas: `Ponder` appears in the SVG and on the CANVAS, and not in the terminal — so this
-        // is terminal-only, and the same geometry-without-text shape as bd-u3fo and the fragment
-        // labels below.
-        //
-        // Same placement discipline as those: interior rows only (the note's top row is its own
-        // border), blank cells preferred, and a fallback that writes anyway when no blank run
-        // exists — because an all-or-nothing guard silently drew NOTHING for the longer of two
-        // otherwise identical fragment labels, which is the bug that cost three builds on bd-039t.
-        for note in &layout.extensions.sequence_notes {
-            if note.text.is_empty() {
-                continue;
-            }
-            let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
-            if nw < 3 || nh < 2 {
-                continue;
-            }
-            let text = self.truncate_label(&note.text);
-            let start = nx + 1;
-            let last_row = (ny + nh.saturating_sub(1)).min(lines.len());
-            let mut placed = false;
-            for line in lines.iter_mut().take(last_row).skip(ny + 1) {
-                let fits = text.chars().enumerate().all(|(offset, _)| {
-                    let col = start + offset;
-                    col < cell_width
-                        && line
-                            .get(col)
-                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                });
-                if !fits {
-                    continue;
-                }
-                for (offset, ch) in text.chars().enumerate() {
-                    line[start + offset] = ch;
-                }
-                placed = true;
-                break;
-            }
-            if !placed {
-                let row = ny + 1;
-                if row < lines.len() {
-                    for (offset, ch) in text.chars().enumerate() {
-                        let col = start + offset;
-                        if col >= cell_width {
-                            break;
-                        }
-                        lines[row][col] = ch;
-                    }
-                }
-            }
-        }
-
         // Overlay CLUSTER titles (bd-u3fo).
         //
         // `render_cluster_canvas` draws each cluster's RECTANGLE and nothing else, while
@@ -3455,7 +3448,7 @@ impl TermRenderer {
         }
 
         let (labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
-            self.overlay_sequence_message_labels(
+            self.overlay_sequence_labels(
                 &mut lines,
                 ir,
                 layout,
@@ -3480,7 +3473,7 @@ impl TermRenderer {
     /// terminal mode. Keep the counter outside the caption budget: shortening a message must
     /// never turn its ordinal into a different number, including on unlabeled self messages.
     #[allow(clippy::too_many_arguments)]
-    fn overlay_sequence_message_labels(
+    fn overlay_sequence_labels(
         &self,
         grid: &mut [Vec<char>],
         ir: &MermaidDiagramIr,
@@ -3494,7 +3487,7 @@ impl TermRenderer {
         }
         let width = grid.first().map_or(0, Vec::len);
         let height = grid.len();
-        let mut labels = Vec::new();
+        let mut labels = self.overlay_sequence_note_labels(grid, layout, scale_x, scale_y);
         let mut occluded = 0;
         let mut blocked = vec![false; width * height];
         let mut protect = |left: usize, top: usize, right: usize, bottom: usize| {
@@ -3644,6 +3637,68 @@ impl TermRenderer {
             }
         }
         (labels, occluded)
+    }
+
+    /// Notes contain authored line breaks, not characters to stamp into a single grid row.
+    /// Reserve their measured display columns, including blank rows and wide/combining text,
+    /// and clear the note interior so lifelines do not run through the annotation.
+    fn overlay_sequence_note_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Vec<CellLabel> {
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        let mut labels: Vec<CellLabel> = Vec::new();
+        for note in &layout.extensions.sequence_notes {
+            let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+            let (x, y) = (nx + 1, ny + 1);
+            let available_width = nw.saturating_sub(2).min(width.saturating_sub(x + 1));
+            let available_height = nh.saturating_sub(2).min(height.saturating_sub(y + 1));
+            if available_width == 0 || available_height == 0 {
+                continue;
+            }
+            let text = edge_caption_text(
+                &note.text,
+                self.config
+                    .max_label_chars
+                    .max(1)
+                    .saturating_mul(self.config.max_label_lines.max(1)),
+            );
+            let mut label = CellLabel::new(
+                usize::MAX,
+                false,
+                wrap_cell_label(
+                    &text,
+                    available_width,
+                    self.config.max_label_lines.max(1).min(available_height),
+                ),
+            );
+            label.x = x;
+            label.y = y;
+            if labels.iter().any(|prior| {
+                x < prior.x + prior.width
+                    && prior.x < x + available_width
+                    && y < prior.y + prior.lines.len()
+                    && prior.y < y + available_height
+            }) {
+                continue;
+            }
+            for row in grid.iter_mut().skip(y).take(available_height) {
+                row[x..x + available_width].fill(' ');
+            }
+            if label.width > 0 {
+                // CellLabel centers unequal rows; pad each note row to keep the authored
+                // left alignment while preserving the width of CJK and combining sequences.
+                for line in &mut label.lines {
+                    line.push_str(&" ".repeat(label.width - line.width()));
+                }
+                labels.push(label);
+            }
+        }
+        labels
     }
 
     /// Fragment headings and alternative operands occupy their own timeline rows. Keeping
@@ -7898,7 +7953,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_scaled_activation_bars_still_render() {
+    fn sequence_tiny_scaled_activation_bars_still_render() {
         let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
         let layout = DiagramLayout {
             nodes: Vec::new(),
@@ -7927,15 +7982,140 @@ mod tests {
             },
             dirty_regions: Vec::new(),
         };
-        let config = TermRenderConfig {
-            tier: MermaidTier::Normal,
-            render_mode: MermaidRenderMode::Block,
-            ..Default::default()
+        let mut inactive = layout.clone();
+        inactive.extensions.activation_bars.clear();
+        for (mode, glyph_mode) in [
+            (MermaidRenderMode::Block, fm_core::MermaidGlyphMode::Unicode),
+            (
+                MermaidRenderMode::CellOnly,
+                fm_core::MermaidGlyphMode::Unicode,
+            ),
+            (
+                MermaidRenderMode::CellOnly,
+                fm_core::MermaidGlyphMode::Ascii,
+            ),
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Normal,
+                render_mode: mode,
+                glyph_mode,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 10, 10);
+            assert!(
+                result.output.chars().any(|ch| !ch.is_whitespace()),
+                "{mode:?}: {}",
+                result.output
+            );
+            let control = render_diagram_with_layout_and_config(&ir, &inactive, &config, 10, 10);
+            assert!(
+                control
+                    .output
+                    .chars()
+                    .all(|ch| ch == '\n' || blank_terminal_cell(ch))
+            );
+            if mode == MermaidRenderMode::CellOnly {
+                assert!(
+                    result
+                        .output
+                        .contains(BoxGlyphs::for_mode(glyph_mode).block_full)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_cell_lifelines_end_at_the_padded_destroy_marker() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let top = fm_layout::LayoutPoint { x: 31.0, y: 20.0 };
+        let bottom = fm_layout::LayoutPoint { x: 31.0, y: 60.0 };
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions {
+                bands: vec![fm_layout::LayoutBand {
+                    kind: fm_layout::LayoutBandKind::Lane,
+                    label: "Temporary".to_string(),
+                    bounds: LayoutRect {
+                        x: 30.0,
+                        y: 20.0,
+                        width: 2.0,
+                        height: 40.0,
+                    },
+                }],
+                sequence_lifecycle_markers: vec![fm_layout::LayoutSequenceLifecycleMarker {
+                    participant_index: 0,
+                    kind: fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy,
+                    center: bottom,
+                    size: 12.0,
+                }],
+                ..Default::default()
+            },
+            dirty_regions: Vec::new(),
         };
-
-        let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 10, 10);
-
-        assert!(result.output.chars().any(|ch| !ch.is_whitespace()));
+        for (tier, glyph_mode, fidelity_override) in [
+            (
+                MermaidTier::Normal,
+                fm_core::MermaidGlyphMode::Unicode,
+                None,
+            ),
+            (
+                MermaidTier::Compact,
+                fm_core::MermaidGlyphMode::Unicode,
+                None,
+            ),
+            (MermaidTier::Compact, fm_core::MermaidGlyphMode::Ascii, None),
+            (
+                MermaidTier::Compact,
+                fm_core::MermaidGlyphMode::Unicode,
+                Some(fm_core::MermaidFidelity::Outline),
+            ),
+        ] {
+            let config = TermRenderConfig {
+                tier,
+                render_mode: MermaidRenderMode::CellOnly,
+                glyph_mode,
+                fidelity_override,
+                max_width: 100,
+                max_height: 100,
+                padding: 3,
+                show_labels: false,
+                ..Default::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 100, 100));
+            let result = renderer.render_layout(&ir, &layout);
+            let (col, first_row) = renderer.map_layout_point_to_cells(&layout, ir.direction, top);
+            let (end_col, last_row) =
+                renderer.map_layout_point_to_cells(&layout, ir.direction, bottom);
+            assert_eq!(col, end_col);
+            let rows: Vec<_> = result.output.split('\n').collect();
+            assert_eq!(rows.len(), result.height);
+            for (row_index, row) in rows.iter().enumerate() {
+                let cell = row.chars().nth(col).unwrap_or(' ');
+                let expected = if row_index == last_row {
+                    'X'
+                } else if (first_row..last_row).contains(&row_index) {
+                    EdgeGlyphs::for_mode(glyph_mode).dotted_v
+                } else {
+                    ' '
+                };
+                assert_eq!(
+                    cell, expected,
+                    "{tier:?}/{glyph_mode:?} has the wrong lifetime at row {row_index}:\n{}",
+                    result.output
+                );
+            }
+            assert!(!result.output.contains("Temporary"));
+        }
     }
 
     #[test]
@@ -8287,10 +8467,15 @@ mod tests {
 
     #[test]
     fn sequence_outline_keeps_its_text_free_contract() {
-        let ir = fm_parser::parse("sequenceDiagram\nautonumber 99\nA->>B: Secret\n").ir;
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nautonumber 99\nA->>B: Secret\nNote over A: Private<br/>Note\n",
+        )
+        .ir;
         let result = render_diagram_with_config(&ir, &TermRenderConfig::outline(), 80, 24);
         assert!(!result.output.contains("Secret"), "{}", result.output);
         assert!(!result.output.contains("99"), "{}", result.output);
+        assert!(!result.output.contains("Private"), "{}", result.output);
+        assert!(!result.output.contains("Note"), "{}", result.output);
         assert_eq!(result.occluded_edge_label_count, 0);
     }
 
@@ -8416,6 +8601,85 @@ mod tests {
             "{}",
             hidden.output
         );
+    }
+
+    #[test]
+    fn sequence_notes_preserve_blank_lines_and_unicode_display_columns() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             hideFootbox\n\
+             participant A\n\
+             participant B\n\
+             Note over A,B: First<br/><br/>界面 cafe\u{301}<br/>Last\n\
+             A->>B: Next\n",
+        )
+        .ir;
+        assert_eq!(
+            ir.sequence_meta.as_ref().unwrap().notes[0].text,
+            "First\n\n界面 cafe\u{301}\nLast"
+        );
+        let layout = layout_diagram(&ir);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Braille,
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Rich,
+                render_mode: mode,
+                max_width: 240,
+                max_height: 160,
+                max_label_chars: 80,
+                max_label_lines: 6,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 240, 160);
+            let rows: Vec<_> = result.output.split('\n').collect();
+            assert_eq!(rows.len(), result.height, "{mode:?}: {}", result.output);
+            assert!(
+                rows.iter().all(|row| row.width() <= result.width),
+                "{mode:?}: {}",
+                result.output
+            );
+            for text in ["First", "界面 cafe\u{301}", "Last", "Next"] {
+                assert_eq!(
+                    result.output.matches(text).count(),
+                    1,
+                    "{mode:?} lost or duplicated {text}:\n{}",
+                    result.output
+                );
+            }
+            let first = rows.iter().position(|row| row.contains("First")).unwrap();
+            let wide = rows
+                .iter()
+                .position(|row| row.contains("界面 cafe\u{301}"))
+                .unwrap();
+            let last = rows.iter().position(|row| row.contains("Last")).unwrap();
+            assert_eq!(
+                wide,
+                first + 2,
+                "{mode:?} collapsed the authored blank row:\n{}",
+                result.output
+            );
+            assert_eq!(last, first + 3, "{mode:?}: {}", result.output);
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+
+            // Cropping a note must not inject new physical rows or overrun terminal columns.
+            for (cols, height) in [(8, 8), (20, 10)] {
+                let clipped =
+                    render_diagram_with_layout_and_config(&ir, &layout, &config, cols, height);
+                assert_eq!(clipped.output.split('\n').count(), clipped.height);
+                assert!(
+                    clipped
+                        .output
+                        .split('\n')
+                        .all(|row| row.width() <= clipped.width),
+                    "{mode:?} {cols}x{height}: {}",
+                    clipped.output
+                );
+            }
+        }
     }
 
     #[test]
