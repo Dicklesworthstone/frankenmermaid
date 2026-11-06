@@ -1824,41 +1824,33 @@ fn quadrant_points_plot_at_their_declared_coordinates() {
 #[test]
 fn journey_task_scores_are_distinguishable_in_the_output() {
     let svg = render_fixture("journey_basic");
-    let scores: [(&str, u32); 7] = [
-        ("Visit homepage", 5),
-        ("Search products", 4),
-        ("View product", 5),
-        ("Add to cart", 4),
-        ("Checkout", 3),
-        ("Payment", 2),
-        ("Confirmation", 5),
-    ];
-
     let mut fill_by_score: Vec<(u32, String)> = Vec::new();
     let mut rows: Vec<f32> = Vec::new();
     for chunk in svg.split("<g id=\"fm-node-").skip(1) {
         let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
-        let label = body
-            .split("<text")
-            .skip(1)
-            .filter_map(|t| t.split_once('>').and_then(|(_, r)| r.split_once("</text>")))
-            .map(|(t, _)| t.trim().to_string())
-            .find(|t| !t.is_empty())
-            .unwrap_or_default();
-        let Some((_, score)) = scores.iter().find(|(name, _)| *name == label) else {
+        // 1c1801aa ("share measured scores and actors across graphical renderers") moved the task
+        // labels into a shared `fm-journey-row` table, so the score no longer sits beside a label
+        // inside the node group. The node still carries its score on the class and its colour on the
+        // shape, co-located, so read the score->colour pairing from there rather than from a label.
+        let marker = "fm-node-user-journey-score-";
+        let Some(score) = body.find(marker).and_then(|at| {
+            let rest = &body[at + marker.len()..];
+            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            rest[..end].parse::<u32>().ok()
+        }) else {
             continue;
         };
-        // The score reaches the output as an inline fill on the task shape. If that ever moves to a
-        // class or an icon, this must fail loudly rather than silently find nothing.
+        // The score reaches the shape as an inline fill. If that ever moves to a class or an icon,
+        // this must fail loudly rather than silently find nothing.
         let at = body.find("style=\"fill: ");
         assert!(
             at.is_some(),
-            "journey task {label:?} has no inline fill; the score encoding moved and this guard can \
-             no longer read it — update the guard rather than deleting the assertion"
+            "journey task node (score {score}) has no inline fill; the score->colour encoding moved \
+             and this guard can no longer read it — update the guard rather than deleting the assertion"
         );
         let rest = &body[at.unwrap_or(0) + 13..];
         let fill = rest[..rest.find('"').unwrap_or(0)].to_string();
-        fill_by_score.push((*score, fill));
+        fill_by_score.push((score, fill));
         if let Some(y_at) = body.find("<rect ") {
             let r = &body[y_at..];
             if let Some(y_key) = r.find("y=\"") {
@@ -1871,9 +1863,8 @@ fn journey_task_scores_are_distinguishable_in_the_output() {
     }
     assert_eq!(
         fill_by_score.len(),
-        scores.len(),
-        "expected a fill for all {} tasks, read {}",
-        scores.len(),
+        7,
+        "expected 7 scored journey task nodes (one per task), read {}",
         fill_by_score.len()
     );
 
@@ -1898,6 +1889,24 @@ fn journey_task_scores_are_distinguishable_in_the_output() {
     assert!(
         rows.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
         "journey tasks are no longer on one row: {rows:?}"
+    );
+
+    // 1c1801aa also draws each task's score in the shared `fm-journey-row` table; assert all 7 tasks
+    // carry their own `Score: N` row, so the score stays legible there as well as in the fill.
+    let score_rows = svg
+        .split("class=\"fm-journey-row\"")
+        .skip(1)
+        .filter(|chunk| {
+            chunk
+                .split_once('>')
+                .and_then(|(_, r)| r.split_once("</text>"))
+                .map(|(t, _)| t.contains("Score:"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        score_rows, 7,
+        "expected one `Score: N` row per task in the fm-journey-row table, found {score_rows}"
     );
 }
 
