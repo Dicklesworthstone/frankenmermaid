@@ -286,7 +286,20 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # Keep canonical -Oz --converge, LTO, one codegen unit, and immediate-abort std. 1063K is the
 # smallest whole-KiB ceiling fitting the measured result, leaving 933 bytes. Render equivalence,
 # complete package provenance, and source-freshness assertions remain unchanged.
-MAX_GZIP_BYTES=$((1063 * 1024))
+# Raised 1063K -> 1089K on 2026-11-06 for the v0.5.0 package rebuild: the post-10-30 render and
+# layout work landed after the 2026-10-30 rebuild (8ab71e4b), so the committed package fell behind
+# source. Independently rebuilt with this script, nightly-2026-08-31, wasm-bindgen 0.2.129 and
+# Binaryen 125; measured with the same gzip command below:
+#  1087579 gzip / 2764680 raw  rebuild of 8ab71e4b, byte-identical to the committed package
+#  1114286 gzip / 2823712 raw  rebuild at 6f429199 (the 0.5.0 bump head)
+# The 26707 gzip bytes (2.46%) are 18 render/layout/parser source commits since 8ab71e4b (svg scene
+# links 0613680c, canvas affine bd8bce8e/a081941e, quadrant/packet ff110bb0, chart composition
+# 3d338ff2, connector routing f9685d60/24785e43/3a1a9fc2/b34cdd69, and the rest), already carried by
+# the re-blessed goldens. No third-party dependency moved. No shrink that would drop behavior was
+# applied; wasm-opt still runs -Oz --converge with LTO, one codegen unit and immediate-abort std.
+# 1089K is the smallest whole-KiB ceiling fitting 1114286, leaving 850 bytes. Render equivalence,
+# package provenance, and source-freshness assertions are unchanged.
+MAX_GZIP_BYTES=$((1089 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
