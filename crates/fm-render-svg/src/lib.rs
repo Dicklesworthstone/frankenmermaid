@@ -5426,7 +5426,12 @@ fn render_layout_to_svg(
     // `#fm-node-gradient stop { … }` print rule exists to neutralise this def, so suppressing the def
     // while still emitting the rule leaves 79 bytes of CSS selecting an id that is not in the
     // document.
-    let gradient_def_emitted = !takes_dedicated_chart_renderer(ir) && config.node_gradients;
+    // Sankey is on the generic path but draws ribbons and solid node bars, never a node-shape
+    // `fill="url(#fm-node-gradient)"`, so the gradient def has no referrer there — gate it out like
+    // the dedicated chart renderers above (every_url_reference_resolves_and_every_defs_id_is_used).
+    let gradient_def_emitted = !takes_dedicated_chart_renderer(ir)
+        && ir.diagram_type != DiagramType::Sankey
+        && config.node_gradients;
     if gradient_def_emitted && let Some(grad_svg) = node_gradient_svg(config, &theme) {
         defs = defs.raw_gradients(grad_svg);
     }
