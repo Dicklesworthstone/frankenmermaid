@@ -2644,6 +2644,52 @@ pub struct LayoutSequenceFragment {
     pub branch_tops: Vec<f32>,
 }
 
+/// Original fragment indices in stable parent-before-child paint order.
+///
+/// Parsed fragments are recorded when they close, so a nested region precedes its parent in
+/// the stored vector. Painting that vector directly lets an opaque parent erase its children.
+/// Keep the vector's indices intact for branch metadata while using its hierarchy for painting.
+/// External layouts without hierarchy retain their supplied order; malformed references and
+/// cycles recover deterministically, emitting every layout fragment exactly once.
+#[must_use]
+pub fn sequence_fragment_paint_order(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<usize> {
+    let count = layout.extensions.sequence_fragments.len();
+    let fragments = ir
+        .sequence_meta
+        .as_ref()
+        .map(|meta| meta.fragments.as_slice());
+    let mut parents = vec![0usize; count];
+    if let Some(fragments) = fragments {
+        for (parent, fragment) in fragments.iter().take(count).enumerate() {
+            for &child in &fragment.children {
+                if child < count && child != parent {
+                    parents[child] += 1;
+                }
+            }
+        }
+    }
+    let mut remaining: BTreeSet<_> = (0..count).collect();
+    let mut ready: BTreeSet<_> = (0..count).filter(|&index| parents[index] == 0).collect();
+    let mut order = Vec::with_capacity(count);
+    while let Some(index) = ready.pop_first().or_else(|| remaining.first().copied()) {
+        if !remaining.remove(&index) {
+            continue;
+        }
+        order.push(index);
+        if let Some(fragment) = fragments.and_then(|fragments| fragments.get(index)) {
+            for &child in &fragment.children {
+                if child < count && child != index && remaining.contains(&child) {
+                    parents[child] = parents[child].saturating_sub(1);
+                    if parents[child] == 0 {
+                        ready.insert(child);
+                    }
+                }
+            }
+        }
+    }
+    order
+}
+
 /// A sequence lifecycle marker positioned on a participant lifeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutSequenceLifecycleMarkerKind {
@@ -4749,7 +4795,8 @@ fn append_sequence_scene_layers(
     metrics: &fm_core::FontMetrics,
 ) {
     let mut backgrounds = RenderGroup::new(Some(String::from("sequence-backgrounds")));
-    for fragment in &layout.extensions.sequence_fragments {
+    for index in sequence_fragment_paint_order(ir, layout) {
+        let fragment = &layout.extensions.sequence_fragments[index];
         if fragment.kind != fm_core::FragmentKind::Rect {
             continue;
         }
@@ -35549,6 +35596,86 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn sequence_backgrounds_follow_fragment_hierarchy_not_close_order() {
+        let ir = parse(
+            "sequenceDiagram\nparticipant A\n\
+             rect rgb(240,210,200)\nrect rgb(210,230,240)\nA->>A: nested\nend\nend\n\
+             rect rgb(220,240,210)\nA->>A: sibling\nend\n",
+        )
+        .ir;
+        let meta = ir.sequence_meta.as_ref().unwrap();
+        assert_eq!(
+            meta.fragments[1].children,
+            vec![0],
+            "parser stores the child first"
+        );
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(
+            super::sequence_fragment_paint_order(&ir, &layout),
+            vec![1, 0, 2]
+        );
+        // Equal external bounds cannot reveal the nesting: its semantic parent must still paint
+        // before its child, while a later sibling keeps its authored place after both.
+        let bounds = layout.extensions.sequence_fragments[0].bounds;
+        for fragment in &mut layout.extensions.sequence_fragments {
+            fragment.bounds = bounds;
+        }
+        let scene = build_render_scene(&ir, &layout);
+        let backgrounds = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("sequence-backgrounds") => {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .expect("authored background layer");
+        let colors: Vec<_> = backgrounds
+            .children
+            .iter()
+            .filter_map(|item| match item {
+                RenderItem::Path(path) => match path.fill.as_ref() {
+                    Some(super::FillStyle::Solid { color, .. }) => Some(color.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            ["rgb(240,210,200)", "rgb(210,230,240)", "rgb(220,240,210)"]
+        );
+    }
+
+    #[test]
+    fn sequence_fragment_paint_order_recovers_external_hierarchy_safely() {
+        let mut ir = parse(
+            "sequenceDiagram\nrect red\nA->>B: first\nend\n\
+             rect green\nB->>A: second\nend\nrect blue\nA->>B: third\nend\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        let additional = layout.extensions.sequence_fragments[0].clone();
+        layout.extensions.sequence_fragments.push(additional);
+        let meta = ir.sequence_meta.as_mut().unwrap();
+        meta.fragments[0].children = vec![1, 1, usize::MAX, 0];
+        meta.fragments[1].children = vec![0];
+        assert_eq!(
+            super::sequence_fragment_paint_order(&ir, &layout),
+            vec![2, 3, 0, 1]
+        );
+        ir.sequence_meta = None;
+        assert_eq!(
+            super::sequence_fragment_paint_order(&ir, &layout),
+            vec![0, 1, 2, 3]
+        );
+        layout.extensions.sequence_fragments.clear();
+        assert!(super::sequence_fragment_paint_order(&ir, &layout).is_empty());
     }
 
     #[test]

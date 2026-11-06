@@ -1362,6 +1362,8 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Authored `rect` fills in parent-before-child order, underneath sequence lifelines.
+    pub sequence_background_instances: Vec<GpuNodeInstance>,
     /// Sequence lifelines. Other lane kinds use the panel buffer below.
     pub band_lane_segments: Vec<GpuEdgeSegment>,
     /// Solid section, lane and column panels. `node_index` refers to the layout band.
@@ -1412,9 +1414,6 @@ pub struct GpuRenderPlan {
     /// `node_index` here is the PARTICIPANT node index the bar sits on, which is a genuine index
     /// into `ir.nodes` -- unlike the cluster instances, where it indexes clusters.
     pub activation_instances: Vec<GpuNodeInstance>,
-    /// Authored `rect` background fills behind the sequence, drawn before lifelines (bd-adabx, 89d6d275).
-    /// Mirrors `draw_sequence_backgrounds`: only Rect fragments with a parseable authored colour.
-    pub sequence_background_instances: Vec<GpuNodeInstance>,
     /// Sequence interaction fragment fills, before their dashed outlines and all message edges.
     ///
     /// The node SDF cannot carry a perimeter dash phase, so its stroke is transparent; the border
@@ -1463,16 +1462,6 @@ pub struct GpuRenderPlan {
     /// Pinned by `the_plan_field_order_matches_the_raster_draw_order`, which reads the call order
     /// out of renderer.rs rather than trusting this comment to stay true.
     pub node_instances: Vec<GpuNodeInstance>,
-    /// Destroy-marker crosses, as line segments (bd-adabx).
-    ///
-    /// Two segments per marker. Reuses `GpuEdgeSegment` because a cross is two lines and that is
-    /// what the type describes -- their `edge_index` is [`NO_EDGE_INDEX`], since no edge produced
-    /// them.
-    ///
-    /// Moved after `node_instances` to match 89d6d275's deliberate paint-order move of
-    /// `draw_sequence_lifecycle_markers` to the end of the raster pass (field order must equal the
-    /// Canvas2D draw order, per `the_plan_field_order_matches_the_raster_draw_order`).
-    pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
     /// Dashed node borders, as edge segments (bd-l3nsf).
     ///
     /// ⚠️ DECLARED AFTER `node_instances` BECAUSE THAT IS THE DRAW ORDER: a border sits on top of the
@@ -1486,6 +1475,9 @@ pub struct GpuRenderPlan {
     pub node_border_segments: Vec<GpuEdgeSegment>,
     /// Per-glyph textured quads for the text pass.
     pub text_quads: Vec<GpuTextQuad>,
+    /// Two foreground segments per destruction cross, after messages, nodes, and labels.
+    /// Their `edge_index` is [`NO_EDGE_INDEX`], since a participant lifecycle produced them.
+    pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
     /// One entry per visible text row — the unit the Canvas2D pass draws in.
     pub text_runs: Vec<GpuTextRun>,
     /// Where each glyph lives in the atlas the quads sample.
@@ -1930,7 +1922,8 @@ impl GpuRenderPlan {
                             from,
                             to,
                             edge_index: NO_EDGE_INDEX,
-                            color: DEFAULT_EDGE_STROKE_RGBA,
+                            color: parse_paint_rgba(&config.edge_stroke)
+                                .unwrap_or(DEFAULT_EDGE_STROKE_RGBA),
                             dash_phase: 0.0,
                             dash: [0.0, 0.0],
                             width: LIFECYCLE_MARKER_STROKE_WIDTH,
@@ -1950,7 +1943,8 @@ impl GpuRenderPlan {
         // before the lifelines. Only Rect fragments with a parseable authored colour contribute, so
         // the GPU path carries the same early fill the Canvas2D pass draws instead of omitting it.
         let mut sequence_background_instances = Vec::new();
-        for fragment in &layout.extensions.sequence_fragments {
+        for fragment_index in fm_layout::sequence_fragment_paint_order(ir, layout) {
+            let fragment = &layout.extensions.sequence_fragments[fragment_index];
             if fragment.kind != fm_core::FragmentKind::Rect {
                 continue;
             }
@@ -1979,23 +1973,34 @@ impl GpuRenderPlan {
         let mut sequence_fragment_border_segments = Vec::new();
         for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
             let bounds = fragment.bounds;
-            let fill = fragment
-                .color
-                .as_deref()
-                .and_then(parse_paint_rgba)
-                .unwrap_or(SEQUENCE_FRAGMENT_FILL_RGBA);
-            sequence_fragment_instances.push(GpuNodeInstance {
-                center: [
-                    bounds.x + (bounds.width * 0.5),
-                    bounds.y + (bounds.height * 0.5),
-                ],
-                half_extent: [bounds.width * 0.5, bounds.height * 0.5],
-                fill,
-                stroke: [0.0, 0.0, 0.0, 0.0],
-                stroke_width: 0.0,
-                shape: GpuNodeShape::Rect as u32,
-                node_index: u32::try_from(fragment_index).unwrap_or(u32::MAX),
-            });
+            let is_region = fragment.kind == fm_core::FragmentKind::Rect;
+            // Regions were already filled underneath lifelines. Painting an opaque region again
+            // at this layer would conceal the activation bars and mirrored participants.
+            if !is_region {
+                sequence_fragment_instances.push(GpuNodeInstance {
+                    center: [
+                        bounds.x + (bounds.width * 0.5),
+                        bounds.y + (bounds.height * 0.5),
+                    ],
+                    half_extent: [bounds.width * 0.5, bounds.height * 0.5],
+                    fill: SEQUENCE_FRAGMENT_FILL_RGBA,
+                    stroke: [0.0; 4],
+                    stroke_width: 0.0,
+                    shape: GpuNodeShape::Rect as u32,
+                    node_index: u32::try_from(fragment_index).unwrap_or(u32::MAX),
+                });
+            }
+            let stroke = if is_region {
+                fragment
+                    .color
+                    .as_deref()
+                    .filter(|color| *color != "transparent")
+                    .and_then(parse_paint_rgba)
+            } else {
+                None
+            }
+            .or_else(|| parse_paint_rgba(&config.node_stroke))
+            .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
             let left = bounds.x;
             let right = bounds.x + bounds.width;
             let top = bounds.y;
@@ -2010,11 +2015,19 @@ impl GpuRenderPlan {
                     from,
                     to,
                     edge_index: NO_EDGE_INDEX,
-                    color: DEFAULT_NODE_STROKE_RGBA,
+                    color: stroke,
                     dash_phase: 0.0,
-                    dash: SEQUENCE_FRAGMENT_BORDER_DASH,
+                    dash: if is_region {
+                        [0.0, 0.0]
+                    } else {
+                        SEQUENCE_FRAGMENT_BORDER_DASH
+                    },
                     width: SEQUENCE_FRAGMENT_STROKE_WIDTH,
                 });
+            }
+
+            if is_region {
+                continue;
             }
 
             let Some(ir_fragment) = ir
@@ -3315,6 +3328,9 @@ impl GpuRenderPlan {
         // the atlas so every emitted glyph has a cell; omitting that feed would create a tidy run
         // with zero quads for labels containing unique characters.
         for (index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
+            if fragment.kind == fm_core::FragmentKind::Rect {
+                continue;
+            }
             sink.push_left(
                 sequence_fragment_labels
                     .get(index)
@@ -8634,6 +8650,10 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            (
+                "pub sequence_background_instances:",
+                "self.draw_sequence_backgrounds(",
+            ),
             ("pub band_lane_segments:", "self.draw_bands("),
             ("pub axis_tick_segments:", "self.draw_axis_ticks("),
             (

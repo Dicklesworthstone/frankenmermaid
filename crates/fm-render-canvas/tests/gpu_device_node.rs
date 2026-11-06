@@ -1123,6 +1123,11 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
             "flowchart TD\n subgraph Group\n A[Alpha] --> B[Beta]\n end\n",
             |plan| plan.cluster_instances.clear(),
         ),
+        (
+            "sequence region",
+            "sequenceDiagram\n participant Alice\n participant Bob\n rect rgb(30,70,110)\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n end\n",
+            |plan| plan.sequence_background_instances.clear(),
+        ),
         ("lifelines", SEQUENCE, |plan| {
             plan.band_lane_segments.clear()
         }),

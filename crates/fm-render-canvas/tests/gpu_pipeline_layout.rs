@@ -11,7 +11,7 @@
 //! declares `dash_phase` before `dash`, `EDGE_WGSL` binds `dash` before `dash_phase`), so a
 //! positional check would certify exactly the bug this file exists to catch.
 
-use fm_render_canvas::CanvasRenderConfig;
+use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
 use fm_render_canvas::gpu_pipeline::{
     DrawBatch, PipelineDescriptor, PrimitiveFamily, VertexFormat, draw_batches, edge_pipeline,
     node_pipeline, pie_pipeline, pipelines, text_pipeline, xy_area_pipeline,
@@ -439,6 +439,7 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::XyArea,
             PrimitiveFamily::XyBar,
             PrimitiveFamily::Cluster,
+            PrimitiveFamily::SequenceBackground,
             PrimitiveFamily::BandLane,
             PrimitiveFamily::BandSection,
             PrimitiveFamily::BandColumn,
@@ -451,7 +452,6 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::MirrorHeader,
             PrimitiveFamily::PacketFieldContinuation,
             PrimitiveFamily::Activation,
-            PrimitiveFamily::LifecycleMarker,
             PrimitiveFamily::SequenceFragment,
             PrimitiveFamily::SequenceFragmentBorder,
             PrimitiveFamily::SequenceNote,
@@ -461,10 +461,11 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::Pie,
             PrimitiveFamily::Node,
             PrimitiveFamily::NodeBorder,
-            PrimitiveFamily::Text
+            PrimitiveFamily::Text,
+            PrimitiveFamily::LifecycleMarker,
         ],
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
-         edges, boxes over both, dashed borders over boxes, and labels over everything"
+         edges, boxes over both, dashed borders over boxes, and destruction crosses above labels"
     );
 }
 
@@ -480,8 +481,9 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
         ),
         (
             "sequence",
-            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n participant Alice\n participant Bob\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n",
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n participant Alice\n participant Bob\n rect rgb(220,240,255)\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n end\n",
             &[
+                Family::SequenceBackground,
                 Family::BandLane,
                 Family::MirrorHeader,
                 Family::Activation,
@@ -554,6 +556,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
             plan.xy_area_triangles.len(),
             plan.xy_bar_instances.len(),
             plan.cluster_instances.len(),
+            plan.sequence_background_instances.len(),
             plan.band_lane_segments.len(),
             plan.band_section_instances.len(),
             plan.band_column_segments.len(),
@@ -589,6 +592,75 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
             "{name} populated geometry that never reaches a draw batch"
         );
     }
+}
+
+#[test]
+fn nested_sequence_regions_submit_under_the_conversation_and_destruction_crosses_over_it() {
+    use PrimitiveFamily as Family;
+
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n box rgb(210,210,210) Services\n participant Alice\n participant Bob\n end\n rect rgb(240,248,255)\n Alice->>Bob: request\n activate Bob\n rect rgb(10,20,30)\n Note over Alice,Bob: inner\n Bob-->>Alice: response\n end\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n end\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+
+    assert_eq!(plan.sequence_background_instances.len(), 2);
+    assert_eq!(
+        plan.sequence_background_instances[0].fill,
+        [240.0 / 255.0, 248.0 / 255.0, 1.0, 1.0],
+        "the outer region must be submitted before the nested region, regardless of parser arena order"
+    );
+    assert_eq!(
+        plan.sequence_background_instances[1].fill,
+        [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0]
+    );
+    assert!(
+        plan.sequence_fragment_instances.is_empty(),
+        "regions must not be filled again on top of lifelines and activation bars"
+    );
+    assert!(
+        plan.sequence_fragment_border_segments
+            .iter()
+            .all(|segment| segment.dash == [0.0, 0.0]),
+        "authored regions have solid borders, unlike interaction fragments"
+    );
+    assert!(
+        !plan
+            .text_runs
+            .iter()
+            .any(|run| { run.source == fm_render_canvas::GpuTextSource::SequenceFragment }),
+        "rect is a background directive, not a visible frame caption"
+    );
+
+    let families: Vec<_> = draw_batches(&plan)
+        .into_iter()
+        .map(|batch| batch.family)
+        .collect();
+    let layers = [
+        Family::Cluster,
+        Family::SequenceBackground,
+        Family::BandLane,
+        Family::Activation,
+        Family::SequenceNote,
+        Family::Edge,
+        Family::Node,
+        Family::Text,
+        Family::LifecycleMarker,
+    ];
+    let positions: Vec<_> = layers
+        .iter()
+        .map(|family| {
+            families
+                .iter()
+                .position(|candidate| candidate == family)
+                .unwrap_or_else(|| panic!("missing executable {family:?} layer"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "sequence layers must preserve background, conversation, and foreground order: {families:?}"
+    );
 }
 
 #[test]

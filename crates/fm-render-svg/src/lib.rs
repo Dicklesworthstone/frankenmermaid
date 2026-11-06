@@ -5681,7 +5681,7 @@ fn render_layout_to_svg(
     // Participant-group clusters must precede all sequence furniture. Keep sequence layers aside
     // until those backgrounds are emitted; opaque `box` and `rect` colors must never cover a
     // lifeline, activation or note.
-    let mut sequence_backgrounds = Vec::new();
+    let mut sequence_backgrounds = vec![None; layout.extensions.sequence_fragments.len()];
     let mut sequence_furniture = Vec::new();
     let mut sequence_foreground = Vec::new();
 
@@ -5902,7 +5902,7 @@ fn render_layout_to_svg(
             } else {
                 fill.clone()
             };
-            sequence_backgrounds.push(
+            sequence_backgrounds[fragment_index] = Some(
                 Element::rect()
                     .x(fx)
                     .y(fy)
@@ -6353,9 +6353,12 @@ fn render_layout_to_svg(
         }
     }
 
-    doc = doc
-        .children(sequence_backgrounds)
-        .children(sequence_furniture);
+    for index in fm_layout::sequence_fragment_paint_order(ir, layout) {
+        if let Some(background) = sequence_backgrounds[index].take() {
+            doc = doc.child(background);
+        }
+    }
+    doc = doc.children(sequence_furniture);
 
     for divider in &layout.extensions.cluster_dividers {
         let cluster_span = ir
@@ -23054,12 +23057,16 @@ mod tests {
             svg.contains("Inherited owner"),
             "a node group owns its anonymous text"
         );
+        let scene_body = svg
+            .split_once("id=\"scene-root\"")
+            .expect("painted scene root")
+            .1;
         assert_eq!(
-            svg.matches("<path").count(),
+            scene_body.matches("<path").count(),
             1,
             "geometry is never copied to an overlay"
         );
-        assert_eq!(svg.matches("<text").count(), 1);
+        assert_eq!(scene_body.matches("<text").count(), 1);
     }
 
     #[test]
@@ -23086,9 +23093,13 @@ mod tests {
             ..Default::default()
         };
         let svg = render_scene_document_with_ir(&scene, &config, Some(&ir));
+        let scene_body = svg
+            .split_once("id=\"scene-root\"")
+            .expect("painted scene root")
+            .1;
         assert_eq!(svg.matches("<a ").count(), 2);
-        assert_eq!(svg.matches("<path").count(), 2);
-        assert_eq!(svg.matches("<text").count(), 1);
+        assert_eq!(scene_body.matches("<path").count(), 2);
+        assert_eq!(scene_body.matches("<text").count(), 1);
         let first_link = svg.find("<a ").unwrap();
         let first_end = svg.find("</a>").unwrap();
         let occluder = svg.find("data-fm-source-index=\"1\"").unwrap();

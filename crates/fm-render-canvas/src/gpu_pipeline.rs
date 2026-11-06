@@ -108,6 +108,8 @@ pub enum PrimitiveFamily {
     XyBar,
     /// Subgraph containers behind their contents.
     Cluster,
+    /// Authored sequence-region backgrounds, underneath lifelines and activations.
+    SequenceBackground,
     /// Sequence lifelines and other layout lanes.
     BandLane,
     /// Filled section backgrounds in journey, Gantt, and related layouts.
@@ -132,7 +134,7 @@ pub enum PrimitiveFamily {
     PacketFieldContinuation,
     /// Sequence activation rectangles over the lifelines.
     Activation,
-    /// Sequence destruction crosses.
+    /// Sequence destruction crosses, above messages and labels.
     LifecycleMarker,
     /// Sequence-note boxes above fragment backgrounds.
     SequenceNote,
@@ -193,6 +195,9 @@ impl PrimitiveFamily {
             Self::XyArea => PrimitiveInstances::Triangles(&plan.xy_area_triangles),
             Self::XyBar => PrimitiveInstances::Nodes(&plan.xy_bar_instances),
             Self::Cluster => PrimitiveInstances::Nodes(&plan.cluster_instances),
+            Self::SequenceBackground => {
+                PrimitiveInstances::Nodes(&plan.sequence_background_instances)
+            }
             Self::BandLane => PrimitiveInstances::Edges(&plan.band_lane_segments),
             Self::BandSection => PrimitiveInstances::Nodes(&plan.band_section_instances),
             Self::BandColumn => PrimitiveInstances::Edges(&plan.band_column_segments),
@@ -524,13 +529,17 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 28] {
+pub const fn pipelines() -> [PipelineDescriptor; 29] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
         xy_area_pipeline(),
         xy_bar_pipeline(),
         node_family(PrimitiveFamily::Cluster, "fm-cluster"),
+        node_family(
+            PrimitiveFamily::SequenceBackground,
+            "fm-sequence-background",
+        ),
         edge_family(PrimitiveFamily::BandLane, "fm-band-lane"),
         node_family(PrimitiveFamily::BandSection, "fm-band-section"),
         edge_family(PrimitiveFamily::BandColumn, "fm-band-column"),
@@ -546,7 +555,6 @@ pub const fn pipelines() -> [PipelineDescriptor; 28] {
             "fm-packet-continuation",
         ),
         node_family(PrimitiveFamily::Activation, "fm-activation"),
-        edge_family(PrimitiveFamily::LifecycleMarker, "fm-lifecycle-marker"),
         sequence_fragment_pipeline(),
         sequence_fragment_border_pipeline(),
         node_family(PrimitiveFamily::SequenceNote, "fm-sequence-note"),
@@ -557,6 +565,7 @@ pub const fn pipelines() -> [PipelineDescriptor; 28] {
         node_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
+        edge_family(PrimitiveFamily::LifecycleMarker, "fm-lifecycle-marker"),
     ]
 }
 

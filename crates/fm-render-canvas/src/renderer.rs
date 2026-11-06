@@ -631,7 +631,7 @@ impl Canvas2dRenderer {
 
         // Authored sequence `rect` regions are backgrounds. Paint every nested region before
         // lifelines and activations so an opaque color cannot erase the conversation inside it.
-        self.draw_sequence_backgrounds(layout, ctx, offset_x, offset_y);
+        self.draw_sequence_backgrounds(layout, ir, ctx, offset_x, offset_y);
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
         self.draw_bands(layout, ir, ctx, offset_x, offset_y);
@@ -2640,11 +2640,13 @@ impl Canvas2dRenderer {
     fn draw_sequence_backgrounds<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
     ) {
-        for fragment in &layout.extensions.sequence_fragments {
+        for index in fm_layout::sequence_fragment_paint_order(ir, layout) {
+            let fragment = &layout.extensions.sequence_fragments[index];
             if fragment.kind != fm_core::FragmentKind::Rect {
                 continue;
             }
