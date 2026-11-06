@@ -4366,7 +4366,7 @@ pub(crate) fn resolve_cluster_dash_array(
     )
 }
 
-pub(crate) fn resolve_cluster_colors(
+fn resolve_cluster_colors(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
 ) -> (Option<String>, Option<String>) {

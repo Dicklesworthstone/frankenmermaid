@@ -9076,12 +9076,24 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map_or(GPU_FULL_SRC, |(production, _tests)| production);
         // (resolver, why it is exempt) — an entry here must cite a bead.
-        const EXEMPT: &[(&str, &str)] = &[(
-            "resolve_cluster_dash_array",
-            "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
-             length the SDF lacks. A cluster border is the same rect and can follow the same route; \
-             it is not done here only because that bead scoped itself to nodes",
-        )];
+        const EXEMPT: &[(&str, &str)] = &[
+            (
+                "resolve_cluster_dash_array",
+                "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
+                 length the SDF lacks. A cluster border is the same rect and can follow the same route; \
+                 it is not done here only because that bead scoped itself to nodes",
+            ),
+            (
+                "resolve_declared_node_font",
+                "bd-gpu-single-face-atlas-declared-node-font-9afxb: the GPU text pass is a single-face \
+                 glyph atlas (bd-2u0.2 component 3) keyed by char (GlyphAtlasPlan/GlyphCell), rasterised \
+                 browser-side with one configured family/weight (glyph_raster::rasterize_atlas). Declared \
+                 font-SIZE is honoured via per-run font_px and cell sizing, but per-node \
+                 font-WEIGHT/STYLE/FAMILY is an atlas-wide property the plan cannot vary until a \
+                 multi-face atlas lands; until then the raster pass (resolve_node_font) is the only \
+                 renderer that applies it",
+            ),
+        ];
 
         let mut resolvers = Vec::new();
         let mut rest = RENDERER_SRC;
