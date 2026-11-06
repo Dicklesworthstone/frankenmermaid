@@ -159,6 +159,8 @@ impl<'a> EdgeLabelPlacer<'a> {
     /// Find a clear center for a measured backing plate and reserve it for subsequent labels.
     /// The returned plate can extend outside the original layout; include it in render bounds.
     pub fn place(&mut self, path: &LayoutEdgePath, width: f32, height: f32) -> LayoutPoint {
+        let rendered = rendered_label_route(self.ir, path);
+        let path = &rendered;
         let mut foreign_routes = Vec::new();
         let mut shared_corridors = Vec::new();
         for &(edge_index, obstacle) in &self.routes {
@@ -312,6 +314,27 @@ impl<'a> EdgeLabelPlacer<'a> {
                 }
             })
     }
+}
+
+/// Routing waypoints are not the painted connector: a smoothed bend can depart from its
+/// diagonal chord by several pixels. Attachment, collision avoidance, and spacing refinement
+/// must all consume the same bounded curve geometry used by the graphical renderers.
+fn rendered_label_route(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> LayoutEdgePath {
+    let mut rendered = path.clone();
+    rendered.points.clear();
+    let mut current = None;
+    let _ =
+        crate::edge_paths::emit_diagram_edge_path(ir, path.edge_index, &path.points, |command| {
+            crate::edge_paths::flatten_connector_command(command, &mut current, &mut |from, to| {
+                if rendered.points.last().copied() != Some(from) {
+                    rendered.points.push(from);
+                }
+                if from != to {
+                    rendered.points.push(to);
+                }
+            });
+        });
+    rendered
 }
 
 /// Retain foreign branches beyond a shared trunk. Exempting an entire segment merely because
@@ -492,7 +515,7 @@ fn closest_clear_route_position(
     )
 }
 
-/// Search the complete route for a clear plate whose side touches its connector. A
+/// Search the complete route for a clear plate whose side or corner touches its connector. A
 /// narrow corridor may have no room for a centered plate while still having a readable
 /// slot beside it; checking only route vertices and midpoints misses these intervals.
 fn closest_clear_touching_route_position(
@@ -505,40 +528,55 @@ fn closest_clear_touching_route_position(
 ) -> Option<LayoutPoint> {
     let mut best = None;
     let mut best_score = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
-    for (x, y) in [
-        (width / 2.0, 0.0),
-        (-width / 2.0, 0.0),
-        (0.0, height / 2.0),
-        (0.0, -height / 2.0),
+    for offsets in [
+        [
+            (width / 2.0, 0.0),
+            (-width / 2.0, 0.0),
+            (0.0, height / 2.0),
+            (0.0, -height / 2.0),
+        ],
+        [
+            (width / 2.0, height / 2.0),
+            (width / 2.0, -height / 2.0),
+            (-width / 2.0, height / 2.0),
+            (-width / 2.0, -height / 2.0),
+        ],
     ] {
-        // Keep obstacles and shared-corridor exemptions from the original route.
-        // Only the candidate plate center is translated.
-        let Some(center) = closest_clear_route_position_with_offset(
-            path,
-            anchor,
-            width,
-            height,
-            obstacles,
-            LayoutPoint { x, y },
-        ) else {
-            continue;
-        };
-        let plate = LayoutRect {
-            x: center.x - width / 2.0,
-            y: center.y - height / 2.0,
-            width,
-            height,
-        };
-        let area = ((bounds.x + bounds.width).max(plate.x + width) - bounds.x.min(plate.x))
-            * ((bounds.y + bounds.height).max(plate.y + height) - bounds.y.min(plate.y));
-        let score = (
-            edge_label_route_distance_squared(path, plate),
-            area,
-            (center.x - anchor.x).powi(2) + (center.y - anchor.y).powi(2),
-        );
-        if score < best_score {
-            best = Some(center);
-            best_score = score;
+        for (x, y) in offsets {
+            // Keep obstacles and shared-corridor exemptions from the original route.
+            // Only the candidate plate center is translated.
+            let Some(center) = closest_clear_route_position_with_offset(
+                path,
+                anchor,
+                width,
+                height,
+                obstacles,
+                LayoutPoint { x, y },
+            ) else {
+                continue;
+            };
+            let plate = LayoutRect {
+                x: center.x - width / 2.0,
+                y: center.y - height / 2.0,
+                width,
+                height,
+            };
+            let area = ((bounds.x + bounds.width).max(plate.x + width) - bounds.x.min(plate.x))
+                * ((bounds.y + bounds.height).max(plate.y + height) - bounds.y.min(plate.y));
+            let score = (
+                edge_label_route_distance_squared(path, plate),
+                area,
+                (center.x - anchor.x).powi(2) + (center.y - anchor.y).powi(2),
+            );
+            if score < best_score {
+                best = Some(center);
+                best_score = score;
+            }
+        }
+        // Preserve clear side-attached placements. Corners recover otherwise missing slots
+        // at short bends without moving captions that already fit beside their connector.
+        if best.is_some() {
+            break;
         }
     }
     best
@@ -850,7 +888,8 @@ fn graph_edge_label_route_obstacles(
         if path.bundled || edge.arrow == ArrowType::Invisible || path.points.len() < 2 {
             continue;
         }
-        for pair in path.points.windows(2) {
+        let rendered = rendered_label_route(ir, path);
+        for pair in rendered.points.windows(2) {
             if pair[0] != pair[1] {
                 obstacles.push((
                     path.edge_index,
@@ -1295,7 +1334,7 @@ pub(crate) fn graph_label_attachment_quality(
                 caption.line_count() as f32 * (font_size * 1.2).max(minimum_line_height) + 4.0;
             let center = placer.place(path, width, height);
             let gap = edge_label_route_distance_squared(
-                path,
+                &rendered_label_route(ir, path),
                 LayoutRect {
                     x: center.x - width / 2.0,
                     y: center.y - height / 2.0,
@@ -1432,6 +1471,96 @@ mod tests {
         assert_eq!(
             Some(center),
             closest_clear_touching_route_position(&path, anchor, 80.0, 20.0, &obstacles, bounds,)
+        );
+    }
+
+    #[test]
+    fn short_connector_uses_a_clear_corner_instead_of_detaching_its_caption() {
+        let path = route(&[(0.0, 0.0), (10.0, 0.0)]);
+        let anchor = LayoutPoint { x: 5.0, y: 0.0 };
+        let left = LayoutRect {
+            x: -100.0,
+            y: -100.0,
+            width: 98.0,
+            height: 200.0,
+        };
+        let bottom = LayoutRect {
+            x: -100.0,
+            y: 2.0,
+            width: 300.0,
+            height: 100.0,
+        };
+        let obstacles = [
+            EdgeLabelObstacle::Bounds(left),
+            EdgeLabelObstacle::Bounds(bottom),
+        ];
+        let bounds = LayoutRect {
+            x: -100.0,
+            y: -100.0,
+            width: 300.0,
+            height: 202.0,
+        };
+        assert!(closest_clear_route_position(&path, anchor, 80.0, 20.0, &obstacles).is_none());
+        for (x, y) in [(40.0, 0.0), (-40.0, 0.0), (0.0, 10.0), (0.0, -10.0)] {
+            assert!(
+                closest_clear_route_position_with_offset(
+                    &path,
+                    anchor,
+                    80.0,
+                    20.0,
+                    &obstacles,
+                    LayoutPoint { x, y },
+                )
+                .is_none(),
+                "side-midpoint contact cannot fit in this corner"
+            );
+        }
+        let center =
+            closest_clear_touching_route_position(&path, anchor, 80.0, 20.0, &obstacles, bounds)
+                .expect("a corner-attached caption fits without adding whitespace");
+        let plate = LayoutRect {
+            x: center.x - 40.0,
+            y: center.y - 10.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        assert!(!overlap(plate, left) && !overlap(plate, bottom));
+        assert!(plate.x >= 0.0 && plate.y + plate.height <= 0.0);
+        assert!(edge_label_route_distance_squared(&path, plate) < 0.0001);
+        assert_eq!(
+            Some(center),
+            closest_clear_touching_route_position(&path, anchor, 80.0, 20.0, &obstacles, bounds,)
+        );
+    }
+
+    #[test]
+    fn caption_attachment_distinguishes_a_smoothed_bend_from_its_routing_chord() {
+        let mut ir = fm_parser::parse("stateDiagram-v2\nA --> B: closed\n").ir;
+        let path = route(&[
+            (286.175, 253.0),
+            (286.175, 313.0),
+            (266.175, 333.0),
+            (89.0, 333.0),
+            (69.0, 353.0),
+            (69.0, 413.0),
+        ]);
+        // This caption touches the diagonal routing chord, but leaves a visible gap to the
+        // emitted cubic. It was accepted by the old spacing score in the cyclic-state repro.
+        let plate = LayoutRect {
+            x: 81.59875,
+            y: 340.40125,
+            width: 51.605,
+            height: 22.0,
+        };
+        assert!(edge_label_route_distance_squared(&path, plate) < 0.0001);
+        assert!(
+            edge_label_route_distance_squared(&rendered_label_route(&ir, &path), plate).sqrt()
+                > 4.0
+        );
+
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        assert!(
+            edge_label_route_distance_squared(&rendered_label_route(&ir, &path), plate) < 0.0001
         );
     }
 
@@ -1886,6 +2015,22 @@ mod tests {
             color: None,
             bounds: layout.bounds,
         });
+        // The space below the heading must actually be occupied; otherwise a clear interior
+        // plate satisfies the placement contract without expanding the frame at all.
+        let interior = LayoutRect {
+            x: 0.0,
+            y: 40.0,
+            width: 100.0,
+            height: 60.0,
+        };
+        layout.nodes.push(LayoutNodeBox {
+            node_index: 0,
+            node_id: String::from("interior"),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: interior,
+        });
         let path = route(&[(40.0, 12.0), (60.0, 12.0)]);
         let mut placer = EdgeLabelPlacer::new(&ir, &layout, 0.0);
         let center = placer.place(&path, 80.0, 24.0);
@@ -1902,6 +2047,10 @@ mod tests {
             height: 34.0,
         };
         assert!(!overlap(ink, plate), "fallback lost the heading obstacle");
+        assert!(
+            !overlap(interior, plate),
+            "fallback lost the interior obstacle"
+        );
         assert!(
             plate.x < 0.0 || plate.y < 0.0,
             "a blocked route must find clear space beyond the original frame"
@@ -2427,7 +2576,11 @@ mod tests {
                             .iter()
                             .find(|path| path.edge_index == *index)
                             .unwrap();
-                        let gap = edge_label_route_distance_squared(path, *plate).sqrt();
+                        let gap = edge_label_route_distance_squared(
+                            &rendered_label_route(&ir, path),
+                            *plate,
+                        )
+                        .sqrt();
                         assert!(
                             gap <= 2.0,
                             "{algorithm:?} {direction:?} {routing:?} label {index} detached by {gap}px"

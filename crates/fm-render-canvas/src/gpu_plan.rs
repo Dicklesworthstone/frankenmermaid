@@ -5,6 +5,7 @@
 //! for instanced line-segment rendering. Text remains a separate glyph-atlas pass.
 
 use fm_core::{MermaidDiagramIr, NodeShape};
+use fm_layout::edge_paths::flatten_connector_command;
 use fm_layout::{
     DiagramLayout, LayoutPoint, LayoutRect, MarkerKind, PathCmd, RenderGroup, RenderItem,
     RenderScene,
@@ -4643,126 +4644,8 @@ fn push_er_glyph_segments(
     }
 }
 
-/// Flatten only connector curves into the existing instanced-segment format. A 0.05 layout-unit
-/// flatness bound stays below half a screen pixel at the viewport's maximum 10x zoom. The fixed
-/// subdivision limit bounds work for extreme coordinates; straight legs remain single segments.
-fn flatten_connector_command<F>(command: PathCmd, current: &mut Option<LayoutPoint>, emit: &mut F)
-where
-    F: FnMut(LayoutPoint, LayoutPoint),
-{
-    match command {
-        PathCmd::MoveTo { x, y } => *current = Some(LayoutPoint { x, y }),
-        PathCmd::LineTo { x, y } => {
-            let end = LayoutPoint { x, y };
-            if let Some(start) = current.replace(end) {
-                emit(start, end);
-            }
-        }
-        PathCmd::QuadTo { cx, cy, x, y } => {
-            let end = LayoutPoint { x, y };
-            if let Some(start) = current.replace(end) {
-                let control = LayoutPoint { x: cx, y: cy };
-                if [start, control, end].iter().all(finite_point) {
-                    flatten_connector_quadratic(start, control, end, 0, emit);
-                }
-            }
-        }
-        PathCmd::CubicTo {
-            c1x,
-            c1y,
-            c2x,
-            c2y,
-            x,
-            y,
-        } => {
-            let end = LayoutPoint { x, y };
-            if let Some(start) = current.replace(end) {
-                let first = LayoutPoint { x: c1x, y: c1y };
-                let second = LayoutPoint { x: c2x, y: c2y };
-                if [start, first, second, end].iter().all(finite_point) {
-                    flatten_connector_cubic(start, first, second, end, 0, emit);
-                }
-            }
-        }
-        // Routed connectors are open; the shared emitter never closes one.
-        PathCmd::Close => {}
-    }
-}
-
 fn finite_point(point: &LayoutPoint) -> bool {
     point.x.is_finite() && point.y.is_finite()
-}
-
-fn connector_midpoint(first: LayoutPoint, second: LayoutPoint) -> LayoutPoint {
-    LayoutPoint {
-        x: first.x * 0.5 + second.x * 0.5,
-        y: first.y * 0.5 + second.y * 0.5,
-    }
-}
-
-fn connector_controls_are_flat(
-    start: LayoutPoint,
-    end: LayoutPoint,
-    controls: &[LayoutPoint],
-) -> bool {
-    const FLATNESS_SQUARED: f32 = 0.05 * 0.05;
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
-    let length_squared = dx * dx + dy * dy;
-    controls.iter().all(|control| {
-        let cx = control.x - start.x;
-        let cy = control.y - start.y;
-        if length_squared <= f32::EPSILON {
-            cx * cx + cy * cy <= FLATNESS_SQUARED
-        } else {
-            let cross = cx * dy - cy * dx;
-            cross * cross <= FLATNESS_SQUARED * length_squared
-        }
-    })
-}
-
-fn flatten_connector_quadratic<F>(
-    start: LayoutPoint,
-    control: LayoutPoint,
-    end: LayoutPoint,
-    depth: u8,
-    emit: &mut F,
-) where
-    F: FnMut(LayoutPoint, LayoutPoint),
-{
-    if depth >= 12 || connector_controls_are_flat(start, end, &[control]) {
-        emit(start, end);
-        return;
-    }
-    let left = connector_midpoint(start, control);
-    let right = connector_midpoint(control, end);
-    let middle = connector_midpoint(left, right);
-    flatten_connector_quadratic(start, left, middle, depth + 1, emit);
-    flatten_connector_quadratic(middle, right, end, depth + 1, emit);
-}
-
-fn flatten_connector_cubic<F>(
-    start: LayoutPoint,
-    first: LayoutPoint,
-    second: LayoutPoint,
-    end: LayoutPoint,
-    depth: u8,
-    emit: &mut F,
-) where
-    F: FnMut(LayoutPoint, LayoutPoint),
-{
-    if depth >= 12 || connector_controls_are_flat(start, end, &[first, second]) {
-        emit(start, end);
-        return;
-    }
-    let left = connector_midpoint(start, first);
-    let center = connector_midpoint(first, second);
-    let right = connector_midpoint(second, end);
-    let left_control = connector_midpoint(left, center);
-    let right_control = connector_midpoint(center, right);
-    let middle = connector_midpoint(left_control, right_control);
-    flatten_connector_cubic(start, left, left_control, middle, depth + 1, emit);
-    flatten_connector_cubic(middle, right_control, right, end, depth + 1, emit);
 }
 
 fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInstance>) {
