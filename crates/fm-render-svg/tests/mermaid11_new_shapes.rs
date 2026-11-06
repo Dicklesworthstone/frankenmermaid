@@ -141,14 +141,14 @@ fn assert_triangle_orientation(svg: &str, downward: bool) {
 fn each_new_shape_draws_its_measured_silhouette() {
     let notch = render("notch-rect");
     assert!(
-        notch.contains("L92 112.61 Z") && notch.contains("M112.61 92"),
+        notch.contains("L52 72.61 Z") && notch.contains("M72.61 52"),
         "notch-rect did not cut its top-left corner: {}",
         silhouette(&notch)
     );
 
     let lined = render("lin-rect");
     assert!(
-        lined.contains("M106 92 L106 158.50"),
+        lined.contains("M66 52 L66 118.50"),
         "lin-rect drew no vertical rule: {}",
         silhouette(&lined)
     );
@@ -160,10 +160,10 @@ fn each_new_shape_draws_its_measured_silhouette() {
         silhouette(&small)
     );
 
-    // The rule sits one sixth down: 66.50 * 1/6 = 11.08 below the box top at y=92.
+    // The rule sits one sixth down: 66.50 * 1/6 = 11.08 below the box top at y=52.
     let divided = render("div-rect");
     assert!(
-        divided.contains("M92 103.08 L192 103.08"),
+        divided.contains("M52 63.08 L152 63.08"),
         "div-rect drew no horizontal header rule: {}",
         silhouette(&divided)
     );
@@ -181,15 +181,15 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Cuts of 100*0.1 = 10 horizontally and 66.50*0.2 = 13.30 vertically, on BOTH top corners.
     let pentagon = render("notch-pent");
     assert!(
-        pentagon.contains("M102 92 L182 92 L192 105.30 L192 158.50 L92 158.50 L92 105.30 Z"),
+        pentagon.contains("M62 52 L142 52 L152 65.30 L152 118.50 L52 118.50 L52 65.30 Z"),
         "notch-pent did not cut both top corners: {}",
         silhouette(&pentagon)
     );
 
-    // Top-left drops 66.50/3 = 22.17 below the box top at y=92.
+    // Top-left drops 66.50/3 = 22.17 below the box top at y=52.
     let sloped = render("sl-rect");
     assert!(
-        sloped.contains("M92 114.17 L192 92 L192 158.50 L92 158.50 Z"),
+        sloped.contains("M52 74.17 L152 52 L152 118.50 L52 118.50 Z"),
         "sl-rect has no sloping top edge: {}",
         silhouette(&sloped)
     );
@@ -205,16 +205,16 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Full box, then the fold: 66.50 * 0.2 = 13.30 on each axis at the bottom-right.
     let tagged = render("tag-rect");
     assert!(
-        tagged.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z")
-            && tagged.contains("M178.70 158.50 L192 158.50 L192 145.20 Z"),
+        tagged.contains("M52 52 L152 52 L152 118.50 L52 118.50 Z")
+            && tagged.contains("M138.70 118.50 L152 118.50 L152 105.20 Z"),
         "tag-rect is not a whole box with a corner fold: {}",
         silhouette(&tagged)
     );
 
-    // The extra rim sits at twice the ellipse radius: 92 + 2*6.65 = 105.30.
+    // The extra rim sits at twice the ellipse radius: 52 + 2*6.65 = 65.30.
     let lined_cylinder = render("lin-cyl");
     assert!(
-        lined_cylinder.contains("M92 105.30 A50 6.65"),
+        lined_cylinder.contains("M52 65.30 A50 6.65"),
         "lin-cyl has no second rim: {}",
         silhouette(&lined_cylinder)
     );
@@ -223,48 +223,48 @@ fn each_new_shape_draws_its_measured_silhouette() {
     let document = render("doc");
     assert!(
         document
-            .contains("M92 92 L192 92 L192 145.20 Q167 147.86,142 155.18 Q117 162.49,92 151.85 Z"),
+            .contains("M52 52 L152 52 L152 105.20 Q127 107.86,102 115.18 Q77 122.49,52 111.85 Z"),
         "doc has no wavy bottom edge: {}",
         silhouette(&document)
     );
 
-    // The document body plus a rule 0.045 w in from the left (96.50), down to 0.94 h (154.51).
+    // The document body plus a rule 0.045 w in from the left (56.50), down to 0.94 h (114.51).
     let lined_document = render("lin-doc");
     assert!(
-        lined_document.contains("M96.50 92 L96.50 154.51"),
+        lined_document.contains("M56.50 52 L56.50 114.51"),
         "lin-doc has no vertical rule: {}",
         silhouette(&lined_document)
     );
 
-    // Six vertices, the two waists at 0.55h (128.57) and 0.45h (121.93).
+    // Six vertices, the two waists at 0.55h (88.57) and 0.45h (81.93).
     let lightning = render("bolt");
     assert!(
         lightning.contains(
-            "M192 92 L94.30 128.57 L150.60 128.57 L92 158.50 L189.70 121.93 L133.40 121.93 Z"
+            "M152 52 L54.30 88.57 L110.60 88.57 L52 118.50 L149.70 81.93 L93.40 81.93 Z"
         ),
         "bolt is not the measured six-vertex zigzag: {}",
         silhouette(&lightning)
     );
 
-    // Both edges waved, in opposite phase: bottom control 1.09h (164.49), top control -0.09h (86.01).
+    // Both edges waved, in opposite phase: bottom control 1.09h (124.49), top control -0.09h (46.01).
     let banner = render("flag");
     assert!(
-        banner.contains("Q117 164.49,142 152.51") && banner.contains("Q167 86.01,142 97.99"),
+        banner.contains("Q77 124.49,102 112.51") && banner.contains("Q127 46.01,102 57.99"),
         "flag does not wave both edges: {}",
         silhouette(&banner)
     );
 
-    // Straight to w - h/2 (158.75), then a semicircle of radius h/2 (33.25).
+    // Straight to w - h/2 (118.75), then a semicircle of radius h/2 (33.25).
     let half_rounded = render("delay");
     assert!(
-        half_rounded.contains("M92 92 L158.75 92 A33.25 33.25 0 0 1 158.75 158.50 L92 158.50 Z"),
+        half_rounded.contains("M52 52 L118.75 52 A33.25 33.25 0 0 1 118.75 118.50 L52 118.50 Z"),
         "delay is not a rectangle with a semicircular right end: {}",
         silhouette(&half_rounded)
     );
 
-    // Three documents stepping from the back top-right (x=125) to the front bottom-left (x=92).
+    // Three documents stepping from the back top-right (x=85) to the front bottom-left (x=52).
     let stacked = render("docs");
-    for start in ["M125 92", "M108.50 103.24", "M92 114.48"] {
+    for start in ["M85 52", "M68.50 63.24", "M52 74.48"] {
         assert!(
             stacked.contains(start),
             "docs is missing the copy starting at {start}: {}",
@@ -275,9 +275,9 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Three plain cards, offsets 0.099 w and 0.078 h, back top-right to front bottom-left.
     let stacked_rect = render("st-rect");
     for corner in [
-        "x=\"111.80\" y=\"92\"",
-        "x=\"101.90\" y=\"97.19\"",
-        "x=\"92\" y=\"102.37\"",
+        "x=\"71.80\" y=\"52\"",
+        "x=\"61.90\" y=\"57.19\"",
+        "x=\"52\" y=\"62.37\"",
     ] {
         assert!(
             stacked_rect.contains(corner),
@@ -303,11 +303,11 @@ fn each_new_shape_draws_its_measured_silhouette() {
         silhouette(&crt)
     );
 
-    // Document outline, then the fold, whose base rejoins the outline at (173.80, 147.75).
+    // Document outline, then the fold, whose base rejoins the outline at (133.80, 107.75).
     let tagged_doc = render("tag-doc");
     assert!(
         tagged_doc
-            .contains("M173.80 147.75 L192 130.57 L192 145.20 Q182.90 146.17,173.80 147.75 Z"),
+            .contains("M133.80 107.75 L152 90.57 L152 105.20 Q142.90 106.17,133.80 107.75 Z"),
         "tag-doc has no fold: {}",
         silhouette(&tagged_doc)
     );
@@ -323,7 +323,7 @@ fn each_new_shape_draws_its_measured_silhouette() {
     // Self-crossing bowtie: top-left, top-right, bottom-LEFT, bottom-right, closed.
     let glass = render("hourglass");
     assert!(
-        glass.contains("M92 92 L192 92 L92 158.50 L192 158.50 Z"),
+        glass.contains("M52 52 L152 52 L52 118.50 L152 118.50 Z"),
         "hourglass is not the self-crossing bowtie: {}",
         silhouette(&glass)
     );
@@ -343,15 +343,15 @@ fn each_new_shape_draws_its_measured_silhouette() {
 #[test]
 fn the_hourglass_path_crosses_itself() {
     let glass = render("hourglass");
-    // Third vertex is x=92 (left), not x=192 — that inversion is the crossing.
+    // Third vertex is x=52 (left), not x=152 — that inversion is the crossing.
     assert!(
-        glass.contains("L192 92 L92 158.50 L192 158.50"),
+        glass.contains("L152 52 L52 118.50 L152 118.50"),
         "the hourglass corners are in rectangle order, so the waist is gone: {}",
         silhouette(&glass)
     );
     // One subpath, not two triangles.
     assert_eq!(
-        glass.matches("M92 92 L192 92 L92 158.50").count(),
+        glass.matches("M52 52 L152 52 L52 118.50").count(),
         1,
         "the hourglass was split into separate lobes: {}",
         silhouette(&glass)
@@ -401,21 +401,21 @@ fn the_stored_data_block_bows_both_sides_the_same_way() {
 /// this bead's differs-from-Rect rule passes on it.
 ///
 /// The split point is checked by construction: the outline's first quadratic evaluated at t = 0.364
-/// is (173.80, 147.75), which is exactly where the fold's base begins and ends.
+/// is (133.80, 107.75), which is exactly where the fold's base begins and ends.
 #[test]
 fn the_tagged_document_fold_sits_on_the_wave() {
     let tagged_doc = render("tag-doc");
     let plain_doc = render("doc");
 
     // The outline is shared verbatim with the plain document.
-    let outline = "M92 92 L192 92 L192 145.20 Q167 147.86,142 155.18 Q117 162.49,92 151.85 Z";
+    let outline = "M52 52 L152 52 L152 105.20 Q127 107.86,102 115.18 Q77 122.49,52 111.85 Z";
     assert!(
         tagged_doc.contains(outline) && plain_doc.contains(outline),
         "the tagged document's outline diverged from the plain one"
     );
     // The fold's base is a QUADRATIC, not a line, and it starts and ends on the outline.
     assert!(
-        tagged_doc.contains("Q182.90 146.17,173.80 147.75 Z"),
+        tagged_doc.contains("Q142.90 106.17,133.80 107.75 Z"),
         "the fold's base is not the split wave curve: {}",
         silhouette(&tagged_doc)
     );
@@ -546,7 +546,7 @@ fn the_stacked_document_is_three_offset_copies() {
     );
     // Each copy starts further down-left than the one behind it.
     assert!(
-        stacked.contains("M125 92") && stacked.contains("M92 114.48"),
+        stacked.contains("M85 52") && stacked.contains("M52 74.48"),
         "the copies are not offset from one another: {}",
         silhouette(&stacked)
     );
@@ -574,7 +574,7 @@ fn the_delay_rounds_only_its_right_end() {
     let half_rounded = render("delay");
     let stadium = render("stadium");
     assert!(
-        half_rounded.contains("L92 158.50 Z"),
+        half_rounded.contains("L52 118.50 Z"),
         "the delay lost its straight left edge, so both ends are rounded: {}",
         silhouette(&half_rounded)
     );
@@ -662,12 +662,12 @@ fn the_lined_document_rule_is_not_the_lined_rectangle_rule() {
     let lined_document = render("lin-doc");
     let lined_rect = render("lin-rect");
     assert!(
-        lined_document.contains("M96.50 92"),
+        lined_document.contains("M56.50 52"),
         "the document rule moved off its measured inset: {}",
         silhouette(&lined_document)
     );
     assert!(
-        lined_rect.contains("M106 92"),
+        lined_rect.contains("M66 52"),
         "the rectangle rule moved off its measured inset: {}",
         silhouette(&lined_rect)
     );
@@ -684,7 +684,7 @@ fn the_lined_document_is_the_plain_one_plus_a_rule() {
     let plain = render("doc");
     let lined = render("lin-doc");
     assert!(
-        !plain.contains("M96.50 92 L96.50 154.51"),
+        !plain.contains("M56.50 52 L56.50 114.51"),
         "the plain document grew a rule: {}",
         silhouette(&plain)
     );
@@ -704,15 +704,15 @@ fn the_lined_document_is_the_plain_one_plus_a_rule() {
 #[test]
 fn the_document_bottom_leaves_the_baseline_in_both_directions() {
     let document = render("doc");
-    // The box is y = 92..158.50. The trough control reaches 1.06h (162.49), below the bottom edge;
-    // the right corner sits at 0.80h (145.20), above it.
+    // The box is y = 52..118.50. The trough control reaches 1.06h (122.49), below the bottom edge;
+    // the right corner sits at 0.80h (105.20), above it.
     assert!(
-        document.contains("162.49"),
+        document.contains("122.49"),
         "the wave never dips below the box, so it is not a document: {}",
         silhouette(&document)
     );
     assert!(
-        document.contains("192 145.20"),
+        document.contains("152 105.20"),
         "the right edge does not rise above the bottom, so the wave has no crest: {}",
         silhouette(&document)
     );
@@ -732,12 +732,12 @@ fn the_tagged_rectangle_folds_where_the_notched_one_cuts() {
     let tagged = render("tag-rect");
     let notched = render("notch-rect");
     assert!(
-        tagged.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z"),
+        tagged.contains("M52 52 L152 52 L152 118.50 L52 118.50 Z"),
         "tag-rect lost its complete box, so the fold became a cut: {}",
         silhouette(&tagged)
     );
     assert!(
-        !notched.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z"),
+        !notched.contains("M52 52 L152 52 L152 118.50 L52 118.50 Z"),
         "notch-rect drew a complete box, so its corner is no longer cut: {}",
         silhouette(&notched)
     );
@@ -756,12 +756,12 @@ fn the_lined_cylinder_is_the_plain_one_plus_a_rim() {
     let plain = render("cyl");
     let lined = render("lin-cyl");
     assert!(
-        !plain.contains("M92 105.30 A50 6.65"),
+        !plain.contains("M52 65.30 A50 6.65"),
         "the plain cylinder grew a second rim: {}",
         silhouette(&plain)
     );
     assert!(
-        lined.contains("M92 105.30 A50 6.65"),
+        lined.contains("M52 65.30 A50 6.65"),
         "the lined cylinder lost its second rim: {}",
         silhouette(&lined)
     );
@@ -838,11 +838,11 @@ fn the_vertical_and_horizontal_rules_are_different_shapes() {
     let lined = render("lin-rect");
     let divided = render("div-rect");
     assert!(
-        lined.contains("M106 92 L106 158.50"),
+        lined.contains("M66 52 L66 118.50"),
         "lin-rect lost its VERTICAL rule"
     );
     assert!(
-        divided.contains("M92 103.08 L192 103.08"),
+        divided.contains("M52 63.08 L152 63.08"),
         "div-rect lost its HORIZONTAL rule"
     );
     assert_ne!(

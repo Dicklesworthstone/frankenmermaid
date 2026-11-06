@@ -99,7 +99,7 @@ fn visited_xs(svg: &str) -> Vec<f32> {
 
 /// The six names, and the node box every one of them is drawn into.
 ///
-/// A single-label flowchart node is 100 x 66.50 at (92, 92) — the same box every other shape test
+/// A single-label flowchart node is 100 x 66.50 at (52, 52) — the same box every other shape test
 /// in this crate works from, which is what lets the expected coordinates below be written out.
 const SHAPES: [&str; 6] = [
     "win-pane",
@@ -109,8 +109,8 @@ const SHAPES: [&str; 6] = [
     "brace-r",
     "braces",
 ];
-const BOX_LEFT: f32 = 92.0;
-const BOX_TOP: f32 = 92.0;
+const BOX_LEFT: f32 = 52.0;
+const BOX_TOP: f32 = 52.0;
 const BOX_W: f32 = 100.0;
 const BOX_H: f32 = 66.5;
 
