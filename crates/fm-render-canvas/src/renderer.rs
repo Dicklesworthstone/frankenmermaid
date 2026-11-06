@@ -176,7 +176,8 @@ pub struct CanvasRenderResult {
     pub clusters_drawn: usize,
     /// Number of labels drawn.
     pub labels_drawn: usize,
-    /// The viewport used for rendering.
+    /// Maps the coordinates of the drawn layout or scene to canvas pixels, including its
+    /// measured bounds origin and padding. Use it directly for picking and overlays.
     pub viewport: Viewport,
     /// Clickable areas for the interactive nodes IN THE LAYOUT THAT WAS JUST DRAWN (bd-2u0.2).
     ///
@@ -528,6 +529,12 @@ impl Canvas2dRenderer {
             )
         };
 
+        // Primitives receive this translation before the canvas transform. Report the whole
+        // mapping once, before any specialized chart can return, so picking and overlays use
+        // the measured frame that was actually drawn rather than the unexpanded layout bounds.
+        viewport.offset_x += offset_x * viewport.zoom;
+        viewport.offset_y += offset_y * viewport.zoom;
+
         if let Some(pie) = &pie {
             let mut labels_drawn = 0;
             self.draw_pie_wedges(pie, ir, ctx, offset_x, offset_y, &mut labels_drawn);
@@ -567,10 +574,6 @@ impl Canvas2dRenderer {
             let meta = ir.quadrant_meta.as_ref().expect("quadrant metadata");
             let labels_drawn = self.draw_quadrant_chart(chart, meta, ctx, offset_x, offset_y);
             ctx.restore();
-            // The interaction wrapper accounts for the original layout origin. Include the
-            // extra measured chart margin so fitting long axis captions keeps picking aligned.
-            viewport.offset_x += f64::from(layout.bounds.x - chart.bounds.x) * viewport.zoom;
-            viewport.offset_y += f64::from(layout.bounds.y - chart.bounds.y) * viewport.zoom;
             return CanvasRenderResult {
                 draw_calls: self.draw_calls,
                 nodes_drawn: chart.points.len(),
@@ -702,12 +705,6 @@ impl Canvas2dRenderer {
             self.draw_debug_overlay_hud(layout, ctx, canvas_height);
             labels_drawn += 1;
         }
-
-        // The public entrypoint folds the original layout origin into this viewport. Account
-        // here only for the extra origin shift introduced by labels outside that layout, so
-        // pointer hit regions and selection overlays still follow the nodes that were drawn.
-        viewport.offset_x += f64::from(layout.bounds.x - render_bounds.x) * viewport.zoom;
-        viewport.offset_y += f64::from(layout.bounds.y - render_bounds.y) * viewport.zoom;
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -879,7 +876,7 @@ impl Canvas2dRenderer {
         let canvas_width = ctx.width();
         let canvas_height = ctx.height();
 
-        let viewport = if self.config.auto_fit {
+        let mut viewport = if self.config.auto_fit {
             fit_to_viewport(
                 f64::from(scene.bounds.width),
                 f64::from(scene.bounds.height),
@@ -912,6 +909,11 @@ impl Canvas2dRenderer {
                 self.config.padding - f64::from(scene.bounds.y),
             )
         };
+
+        // Match render(): the result maps original scene coordinates, including the origin
+        // translation applied below, even when the caller bypasses the public helper.
+        viewport.offset_x += offset_x * viewport.zoom;
+        viewport.offset_y += offset_y * viewport.zoom;
 
         let mut stats = SceneRenderStats::default();
         self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);

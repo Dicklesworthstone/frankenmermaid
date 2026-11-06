@@ -87,6 +87,8 @@ pub fn render_to_canvas<C: Canvas2dContext>(
 /// The returned viewport maps ORIGINAL layout coordinates to canvas pixels, including the
 /// renderer's origin normalization and padding. It can therefore be used directly with
 /// [`NodeSelection::select_at_canvas`] and the result's layout-space hit regions.
+/// Layout and render font metrics must match for selection to follow measured chart labels;
+/// use [`render_to_canvas`] to compute both together when no retained layout is needed.
 pub fn render_to_canvas_with_layout<C: Canvas2dContext>(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
@@ -94,14 +96,7 @@ pub fn render_to_canvas_with_layout<C: Canvas2dContext>(
     config: &CanvasRenderConfig,
 ) -> CanvasRenderResult {
     let mut renderer = Canvas2dRenderer::new(config.clone());
-    let mut result = renderer.render(layout, ir, context);
-    // The low-level renderer applies this translation to each primitive before its viewport
-    // transform. Fold it into the reported viewport as well, or pointers/overlays drift whenever
-    // the layout has a nonzero origin (or auto-fit is off). Drawing itself is unchanged.
-    let padding = if config.auto_fit { 0.0 } else { config.padding };
-    result.viewport.offset_x += (padding - f64::from(layout.bounds.x)) * result.viewport.zoom;
-    result.viewport.offset_y += (padding - f64::from(layout.bounds.y)) * result.viewport.zoom;
-    result
+    renderer.render(layout, ir, context)
 }
 
 /// Appearance of the node focus ring. Distances are in canvas pixels, not diagram units.
@@ -249,6 +244,9 @@ pub(crate) fn draw_selection_bounds<C: Canvas2dContext>(
 }
 
 /// Render an explicit shared render scene to a Canvas2D context.
+///
+/// The returned viewport maps original scene coordinates to canvas pixels, including bounds
+/// normalization and padding, just as [`render_to_canvas_with_layout`] does for a layout.
 pub fn render_scene_to_canvas<C: Canvas2dContext>(
     scene: &RenderScene,
     context: &mut C,
@@ -570,6 +568,148 @@ mod tests {
             assert_eq!(low_level.operations(), entry_point.operations());
             assert_eq!(before.draw_calls, after.draw_calls);
             assert_counts_match(&before, &after);
+            assert_eq!(before.viewport, after.viewport);
+            let drawn = drawn_label_position(&low_level, "Alpha");
+            let center = layout.nodes[0].bounds.center();
+            let mapped = before
+                .viewport
+                .diagram_to_canvas(f64::from(center.x), f64::from(center.y));
+            assert!((mapped.0 - drawn.0).abs() < 0.0001);
+            assert!((mapped.1 - drawn.1).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn scene_viewport_maps_drawn_coordinates_with_nonzero_origin_and_padding() {
+        let (ir, layout) = selection_fixture();
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        assert!(scene.bounds.x < 0.0 && scene.bounds.y < 0.0);
+        let center = layout.nodes[0].bounds.center();
+        for auto_fit in [false, true] {
+            let config = CanvasRenderConfig {
+                auto_fit,
+                padding: 17.0,
+                ..Default::default()
+            };
+            let mut context = MockCanvas2dContext::new(240.0, 160.0);
+            let result = render_scene_to_canvas(&scene, &mut context, &config);
+            let drawn = drawn_label_position(&context, "Alpha");
+            let mapped = result
+                .viewport
+                .diagram_to_canvas(f64::from(center.x), f64::from(center.y));
+            assert!(
+                (mapped.0 - drawn.0).abs() < 0.0001,
+                "{auto_fit}: {mapped:?} != {drawn:?}"
+            );
+            assert!(
+                (mapped.1 - drawn.1).abs() < 0.0001,
+                "{auto_fit}: {mapped:?} != {drawn:?}"
+            );
+
+            let mut direct = MockCanvas2dContext::new(240.0, 160.0);
+            let direct_result = Canvas2dRenderer::new(config).render_scene(&scene, &mut direct);
+            assert_eq!(direct.operations(), context.operations());
+            assert_eq!(direct_result.viewport, result.viewport);
+        }
+    }
+
+    #[test]
+    fn treemap_viewport_tracks_measured_titles_and_shifted_tiles() {
+        let ir = fm_parser::parse(
+            "---\ntitle: Capacity by team\n---\ntreemap\n\"Platform\"\n    \"Compute\": 120\n    \"Storage\": 80\n",
+        )
+        .ir;
+        assert_eq!(ir.diagram_type, DiagramType::Treemap);
+        for (origin_x, origin_y) in [(0.0, 0.0), (-140.0, 85.0)] {
+            let mut layout = layout_diagram(&ir);
+            layout.bounds.x += origin_x;
+            layout.bounds.y += origin_y;
+            for tile in &mut layout.extensions.treemap_tiles {
+                tile.bounds.x += origin_x;
+                tile.bounds.y += origin_y;
+            }
+            for auto_fit in [false, true] {
+                let config = CanvasRenderConfig {
+                    auto_fit,
+                    padding: 17.0,
+                    font_size: 28.0,
+                    ..Default::default()
+                };
+                let chart =
+                    fm_layout::TreemapChartLayout::new(&ir, &layout, &config.font_metrics());
+                assert!(
+                    chart.bounds.y < layout.bounds.y,
+                    "title expands the measured frame"
+                );
+                let mut context = MockCanvas2dContext::new(600.0, 400.0);
+                let result = render_to_canvas_with_layout(&ir, &layout, &mut context, &config);
+                let mut checked = 0;
+                for block in &chart.text {
+                    for (label, point) in block.rows() {
+                        if label != "Capacity by team" && label != "Compute" {
+                            continue;
+                        }
+                        let drawn = drawn_label_position(&context, label);
+                        let mapped = result
+                            .viewport
+                            .diagram_to_canvas(f64::from(point.x), f64::from(point.y));
+                        assert!(
+                            (mapped.0 - drawn.0).abs() < 0.0001,
+                            "{label}: {mapped:?} != {drawn:?}"
+                        );
+                        assert!(
+                            (mapped.1 - drawn.1).abs() < 0.0001,
+                            "{label}: {mapped:?} != {drawn:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+                assert_eq!(checked, 2, "check both chart title and quantitative tile");
+            }
+        }
+    }
+
+    #[test]
+    fn pie_viewport_picks_measured_legend_with_reserved_layout_margins() {
+        let mut ir = fm_parser::parse("pie\n title Investment\n \"Alpha\": 8\n \"Beta\": 2\n").ir;
+        assert_eq!(ir.nodes.len(), 2);
+        ir.nodes[0].interaction_mut().tooltip = Some(String::from("Alpha details"));
+        for font_size in [15.0, 30.0] {
+            for auto_fit in [false, true] {
+                let config = CanvasRenderConfig {
+                    auto_fit,
+                    font_size,
+                    padding: 17.0,
+                    ..Default::default()
+                };
+                // Retained selection uses layout boxes: recompute them with the render font
+                // when typography changes, just as CanvasSession's config contract requires.
+                let mut layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        font_metrics: Some(config.font_metrics()),
+                        ..Default::default()
+                    },
+                );
+                // A host can reserve margins around a precomputed layout. The chart renderer
+                // fits its own measured composition, so this unused frame must not move picking.
+                layout.bounds.x -= 70.0;
+                layout.bounds.y -= 45.0;
+                layout.bounds.width += 140.0;
+                layout.bounds.height += 90.0;
+                let mut context = MockCanvas2dContext::new(600.0, 400.0);
+                let result = render_to_canvas_with_layout(&ir, &layout, &mut context, &config);
+                let (x, y) = drawn_label_position(&context, "Alpha");
+                let mut selection = NodeSelection::default();
+                assert!(selection.select_at_canvas(&ir, &layout, &result.viewport, x, y));
+                assert_eq!(selection.selected_node_id(), Some(ir.nodes[0].id.as_str()));
+                let (diagram_x, diagram_y) = result.viewport.canvas_to_diagram(x, y);
+                let region = hit_test(&result.hit_regions, diagram_x as f32, diagram_y as f32)
+                    .expect("the painted legend retains its tooltip hit target");
+                assert_eq!(region.node_index, 0);
+                assert_eq!(region.tooltip.as_deref(), Some("Alpha details"));
+                assert_eq!(region.bounds, layout.nodes[0].bounds);
+            }
         }
     }
 
