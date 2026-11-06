@@ -171,7 +171,19 @@ fn scene_backend_announces_each_packet_field_once_with_all_segments_visible() {
         include_source_spans: true,
         ..Default::default()
     };
-    let ir = fm_parser::parse("packet-beta\n28-70: \"Payload<br/>Details\"\n71: \"Flag\"\n").ir;
+    let mut ir = fm_parser::parse("packet-beta\n28-70: \"Payload<br/>Details\"\n71: \"Flag\"\n").ir;
+    // Pinned Mermaid's packet renderer uses `.text(block.label)`: HTML-like text is literal.
+    // Keep that authored content intact, then supply a multiline IR label explicitly to check
+    // that shared-scene consumers retain every row without duplicating accessible field names.
+    let literal_svg = render_svg_with_config(&ir, &config);
+    assert_eq!(
+        literal_svg
+            .matches(">Payload&lt;br/>Details</text>")
+            .count(),
+        3
+    );
+    let field_label = ir.nodes[0].label.expect("packet field label");
+    ir.labels[field_label.0].text = "Payload\nDetails".to_owned();
     let svg = render_svg_with_config(&ir, &config);
     let tags: Vec<_> = svg
         .split('<')

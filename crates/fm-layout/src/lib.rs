@@ -18850,9 +18850,11 @@ fn cycle_removal_fnx_cycle_aware(
             return hit;
         }
         let computed = crate::fnx_cycle_scorer::compute_criticality_scores(ir, &scoring);
-        cache
-            .borrow_mut()
-            .put_criticality(ir, &proj, &scoring, computed.clone());
+        if computed.budget_exceeded.is_none() {
+            cache
+                .borrow_mut()
+                .put_criticality(ir, &proj, &scoring, computed.clone());
+        }
         computed
     });
 
@@ -34073,9 +34075,35 @@ mod tests {
 
     #[test]
     fn render_scene_packet_continuations_keep_complete_multiline_labels() {
-        let ir =
+        let mut ir =
             parse("packet-beta\n24-47: \"Complete payload description<br/>including details\"\n")
                 .ir;
+        // Packet source labels are literal strings: Mermaid's packet renderer does not
+        // interpret HTML breaks. Preserve that text before exercising the IR's multiline API.
+        let label = ir.nodes[0].label.expect("field label");
+        let literal = "Complete payload description<br/>including details";
+        assert_eq!(ir.labels[label.0].text, literal);
+        let literal_layout = layout_diagram(&ir);
+        let literal_scene = build_render_scene(&ir, &literal_layout);
+        let literal_rows = literal_scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("labels") => Some(group),
+                _ => None,
+            })
+            .expect("literal label layer");
+        assert_eq!(
+            literal_rows
+                .children
+                .iter()
+                .filter(|item| matches!(item, RenderItem::Text(text) if text.text == literal))
+                .count(),
+            2,
+            "literal markup survives on both field segments"
+        );
+        ir.labels[label.0].text = "Complete payload description\nincluding details".to_owned();
         let layout = layout_diagram(&ir);
         assert_eq!(layout.extensions.packet_field_continuations.len(), 1);
         let metrics = fm_core::FontMetrics::monospace(28.0);

@@ -7764,7 +7764,12 @@ mod tests {
                 12,
                 "one smooth four-segment marker per data point"
             );
-            for (index, (endpoints, node)) in circles.chunks_exact(4).zip(&layout.nodes).enumerate()
+            for (index, (endpoints, node)) in circles
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(&layout.nodes)
+                .enumerate()
             {
                 let center = node.bounds.center();
                 let x = f64::from(center.x - scene.bounds.x);

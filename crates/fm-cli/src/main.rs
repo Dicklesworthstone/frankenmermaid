@@ -55,7 +55,9 @@ use fm_core::{
     mermaid_layout_guard_observability, validate_mermaid_config_value,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
+use fm_layout::fnx_diagnostics::{
+    FnxAnalysisPass, FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure,
+};
 use fm_layout::{
     CycleStrategy, EdgeRouting, LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout,
     build_layout_decision_ledger, build_layout_guard_report_with_pressure,
@@ -5660,52 +5662,166 @@ fn build_fnx_validation_witness(
     if !fnx_enabled {
         return None;
     }
-    // fnx_enabled is always true here (early return above)
-    let (fallback_level, fallback_reason) = if results.is_none() {
-        ("fnx_disabled", "not_applicable")
-    } else {
+    let used = results.is_some_and(|result| !result.completed_passes.is_empty());
+    let budget_exceeded = results.and_then(|result| result.budget_exceeded.as_ref());
+    let (fallback_level, fallback_reason) = if let Some(reason) = budget_exceeded {
+        (
+            if used { "fnx_partial" } else { "fnx_disabled" },
+            reason.reason_code(),
+        )
+    } else if used {
         ("fnx_full", "none")
+    } else {
+        ("fnx_disabled", "not_applicable")
     };
     let projection_mode = "undirected";
-    let mut algorithms_invoked = vec!["connected_components", "cycle_basis"];
-    if results.is_some_and(|r| r.is_connected) {
-        algorithms_invoked.push("articulation_points");
-        algorithms_invoked.push("bridges");
-    }
-    let algorithms_invoked = algorithms_invoked
+    let algorithms_invoked = results
         .into_iter()
-        .map(|entry| entry.to_string())
+        .flat_map(|result| &result.completed_passes)
+        .map(|pass| pass.as_str().to_string())
         .collect::<Vec<_>>();
     let component_count = results
+        .filter(|result| result.completed(FnxAnalysisPass::ConnectedComponents))
         .map(|r| r.component_count.to_string())
         .unwrap_or_default();
     let cycle_count = results
+        .filter(|result| result.completed(FnxAnalysisPass::CycleBasis))
         .map(|r| r.cycle_count.to_string())
         .unwrap_or_default();
     let bridge_count = results
+        .filter(|result| result.completed(FnxAnalysisPass::Bridges))
         .map(|r| r.bridge_count.to_string())
         .unwrap_or_default();
-    // fnx_enabled is always true here (early return above)
+    let articulation_point_count = results
+        .filter(|result| result.completed(FnxAnalysisPass::ArticulationPoints))
+        .map(|r| r.articulation_point_count.to_string())
+        .unwrap_or_default();
+    let completed_algorithms = algorithms_invoked.join(",");
     let results_hash = fnx_results_hash(&[
         "enabled",
         projection_mode,
         fnx_fallback.as_str(),
+        fallback_level,
+        fallback_reason,
+        &completed_algorithms,
         &component_count,
+        &articulation_point_count,
         &cycle_count,
         &bridge_count,
     ]);
 
     Some(FnxWitness {
         enabled: true,
-        used: results.is_some(),
+        used,
         projection_mode: projection_mode.to_string(),
         algorithms_invoked,
         analysis_time_us: analysis_time.as_micros().min(u128::from(u64::MAX)) as u64,
-        budget_exceeded: false,
+        budget_exceeded: budget_exceeded.is_some(),
         fallback_level: fallback_level.to_string(),
         fallback_reason: fallback_reason.to_string(),
         results_hash,
     })
+}
+
+#[cfg(all(test, feature = "fnx-integration", not(target_arch = "wasm32")))]
+mod fnx_validation_progress_tests {
+    use super::*;
+    use fm_layout::fnx_budget::AnalysisBudget;
+    use fm_layout::fnx_diagnostics::analyze_structure_with_budget;
+
+    fn analyze(work_budget: u64) -> FnxAnalysisResults {
+        let parsed = parse_with_mode("flowchart LR\nA-->B-->C\n", MermaidParseMode::Strict);
+        analyze_structure_with_budget(
+            &parsed.ir,
+            AnalysisBudget::unlimited().with_work_budget(work_budget),
+        )
+        .into_value()
+        .expect("complete or partial analysis")
+    }
+
+    fn witness(results: &FnxAnalysisResults) -> FnxWitness {
+        build_fnx_validation_witness(
+            true,
+            FnxProjectionArg::Undirected,
+            FnxFallbackArg::Graceful,
+            Some(results),
+            std::time::Duration::from_micros(42),
+        )
+        .expect("enabled analysis has a witness")
+    }
+
+    #[test]
+    fn witness_reports_real_progress_and_budget_cancellation() {
+        let projected_only = witness(&analyze(0));
+        assert!(!projected_only.used);
+        assert!(projected_only.algorithms_invoked.is_empty());
+        assert!(projected_only.budget_exceeded);
+        assert_eq!(projected_only.fallback_level, "fnx_disabled");
+        assert_eq!(projected_only.fallback_reason, "work_exceeded");
+        assert_eq!(projected_only.analysis_time_us, 42);
+
+        let components_only = witness(&analyze(5));
+        assert!(components_only.used);
+        assert_eq!(components_only.algorithms_invoked, ["connected_components"]);
+        assert!(components_only.budget_exceeded);
+        assert_eq!(components_only.fallback_level, "fnx_partial");
+        assert_eq!(components_only.fallback_reason, "work_exceeded");
+
+        let complete = witness(&analyze(25));
+        assert!(complete.used);
+        assert_eq!(
+            complete.algorithms_invoked,
+            [
+                "connected_components",
+                "articulation_points",
+                "bridges",
+                "cycle_basis"
+            ]
+        );
+        assert!(!complete.budget_exceeded);
+        assert_eq!(complete.fallback_level, "fnx_full");
+        assert_eq!(complete.fallback_reason, "none");
+        assert_ne!(projected_only.results_hash, components_only.results_hash);
+        assert_ne!(components_only.results_hash, complete.results_hash);
+    }
+
+    #[test]
+    fn cancelled_analysis_produces_an_actionable_validation_warning() {
+        let diagnostics = collect_fnx_diagnostics(&analyze(5));
+        let budget = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.payload.rule_id.as_deref() == Some("fnx.budget"))
+            .expect("budget warning must survive validation conversion");
+        assert_eq!(budget.stage, "fnx");
+        assert_eq!(budget.payload.error_code, "mermaid/warning/fnx-budget-001");
+        assert!(budget.payload.message.contains("10 > 5"));
+        assert!(budget.payload.message.contains("connected_components"));
+        assert!(budget.payload.remediation_hint.is_some());
+        assert!(should_fail_validation(
+            &diagnostics,
+            FailOnSeverity::Warning
+        ));
+        assert!(!should_fail_validation(&diagnostics, FailOnSeverity::Error));
+    }
+
+    #[test]
+    fn missing_and_empty_analyses_do_not_claim_algorithm_execution() {
+        for results in [None, Some(&FnxAnalysisResults::default())] {
+            let witness = build_fnx_validation_witness(
+                true,
+                FnxProjectionArg::Undirected,
+                FnxFallbackArg::Graceful,
+                results,
+                std::time::Duration::ZERO,
+            )
+            .expect("enabled analysis has a witness");
+            assert!(!witness.used);
+            assert!(witness.algorithms_invoked.is_empty());
+            assert!(!witness.budget_exceeded);
+            assert_eq!(witness.fallback_level, "fnx_disabled");
+            assert_eq!(witness.fallback_reason, "not_applicable");
+        }
+    }
 }
 
 /// Build FNX witness metadata when FNX integration is disabled.
@@ -9198,15 +9314,30 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         fnx_enabled: Some(fnx_enabled),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_component_count: fnx_results.as_ref().map(|r| r.component_count),
+        fnx_component_count: fnx_results
+            .as_ref()
+            .filter(|result| result.completed(FnxAnalysisPass::ConnectedComponents))
+            .map(|r| r.component_count),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_is_connected: fnx_results.as_ref().map(|r| r.is_connected),
+        fnx_is_connected: fnx_results
+            .as_ref()
+            .filter(|result| result.completed(FnxAnalysisPass::ConnectedComponents))
+            .map(|r| r.is_connected),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_articulation_point_count: fnx_results.as_ref().map(|r| r.articulation_point_count),
+        fnx_articulation_point_count: fnx_results
+            .as_ref()
+            .filter(|result| result.completed(FnxAnalysisPass::ArticulationPoints))
+            .map(|r| r.articulation_point_count),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_bridge_count: fnx_results.as_ref().map(|r| r.bridge_count),
+        fnx_bridge_count: fnx_results
+            .as_ref()
+            .filter(|result| result.completed(FnxAnalysisPass::Bridges))
+            .map(|r| r.bridge_count),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_cycle_count: fnx_results.as_ref().map(|r| r.cycle_count),
+        fnx_cycle_count: fnx_results
+            .as_ref()
+            .filter(|result| result.completed(FnxAnalysisPass::CycleBasis))
+            .map(|r| r.cycle_count),
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         fnx_witness: build_fnx_validation_witness(
             fnx_enabled,

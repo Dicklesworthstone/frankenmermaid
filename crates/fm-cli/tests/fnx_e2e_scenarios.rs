@@ -320,6 +320,76 @@ fn fnx_fallback_reports_reason_in_witness() {
     );
 }
 
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn validate_reports_budget_exhaustion_without_inventing_unperformed_findings() {
+    // Two participants keep geometry simple while 3,500 messages exceed the default 10,000
+    // work-unit analysis budget before the bridge and cycle passes. This remains a budget
+    // cancellation on both fast and slow machines; an earlier time limit is also truthful.
+    let input = format!("sequenceDiagram\n{}", "Alice->>Bob: Hello\n".repeat(3_500));
+    let output = run_cli(
+        &[
+            "validate",
+            "-",
+            "--format",
+            "json",
+            "--fnx-mode",
+            "enabled",
+            "--fail-on",
+            "warning",
+        ],
+        &input,
+    );
+    assert!(
+        !output.status.success(),
+        "budget warning must respect --fail-on warning"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid validation JSON: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(json["edge_count"], 3_500);
+    assert_eq!(json["valid"], false);
+    let witness = &json["fnx_witness"];
+    assert_eq!(witness["budget_exceeded"], true);
+    assert_ne!(witness["fallback_level"], "fnx_full");
+    let invoked = witness["algorithms_invoked"]
+        .as_array()
+        .expect("recorded passes");
+    assert!(
+        !invoked
+            .iter()
+            .any(|pass| pass == "bridges" || pass == "cycle_basis")
+    );
+    assert!(
+        json.get("fnx_bridge_count").is_none(),
+        "unperformed bridge analysis is unknown"
+    );
+    assert!(
+        json.get("fnx_cycle_count").is_none(),
+        "unperformed cycle analysis is unknown"
+    );
+    if !invoked.iter().any(|pass| pass == "connected_components") {
+        assert!(json.get("fnx_component_count").is_none());
+        assert!(json.get("fnx_is_connected").is_none());
+    }
+    assert!(
+        json["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .any(|diag| {
+                diag["stage"] == "fnx"
+                    && diag["error_code"] == "mermaid/warning/fnx-budget-001"
+                    && diag["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("budget"))
+            })
+    );
+}
+
 // ============================================================================
 // Pathological Input Scenarios
 // ============================================================================

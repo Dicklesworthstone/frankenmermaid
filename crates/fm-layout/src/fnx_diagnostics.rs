@@ -8,6 +8,7 @@
 //! - FNX-CHOKE-001: Articulation point (single point of failure)
 //! - FNX-BRIDGE-001: Bridge edge (fragile connection)
 //! - FNX-CYCLE-001: Dense cycle detected
+//! - FNX-BUDGET-001: Structural analysis stopped before its budgeted work completed
 //!
 //! # Recommendations
 //!
@@ -24,7 +25,7 @@ use fnx_algorithms::{
 };
 
 use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
-use crate::fnx_budget::{AnalysisBudget, BudgetExecutor, BudgetResult};
+use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
 
 // ============================================================================
 // Diagnostic Codes
@@ -52,6 +53,10 @@ impl FnxDiagnosticCode {
     };
     pub const DENSE_CYCLE: Self = Self {
         category: "CYCLE",
+        number: 1,
+    };
+    pub const BUDGET_EXCEEDED: Self = Self {
+        category: "BUDGET",
         number: 1,
     };
 
@@ -324,7 +329,32 @@ pub struct FnxDiagnostic {
 // Analysis Results
 // ============================================================================
 
-/// Results from running all FNX structural analyses.
+/// A structural analysis pass whose results have been collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FnxAnalysisPass {
+    ConnectedComponents,
+    ArticulationPoints,
+    Bridges,
+    CycleBasis,
+}
+
+impl FnxAnalysisPass {
+    /// Algorithm name used by analysis witnesses.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectedComponents => "connected_components",
+            Self::ArticulationPoints => "articulation_points",
+            Self::Bridges => "bridges",
+            Self::CycleBasis => "cycle_basis",
+        }
+    }
+}
+
+/// Results from FNX structural analysis, including its actual progress.
+///
+/// Counts are meaningful only for passes present in `completed_passes`. In particular, a zero
+/// count for a pass that never ran does not prove the absence of that structural feature.
 #[derive(Debug, Clone, Default)]
 pub struct FnxAnalysisResults {
     /// All diagnostics produced.
@@ -339,6 +369,49 @@ pub struct FnxAnalysisResults {
     pub cycle_count: usize,
     /// Whether the graph is connected.
     pub is_connected: bool,
+    /// Passes that ran to completion, in execution order. Projection is not an analysis pass.
+    pub completed_passes: Vec<FnxAnalysisPass>,
+    /// Cancellation reason, retained even when a caller extracts the partial result.
+    pub budget_exceeded: Option<BudgetExceededReason>,
+}
+
+impl FnxAnalysisResults {
+    /// Whether the result contains findings from this pass.
+    #[must_use]
+    pub fn completed(&self, pass: FnxAnalysisPass) -> bool {
+        self.completed_passes.contains(&pass)
+    }
+
+    fn record_budget_exceeded(&mut self, reason: BudgetExceededReason) {
+        let completed = if self.completed_passes.is_empty() {
+            "none".to_string()
+        } else {
+            self.completed_passes
+                .iter()
+                .map(|pass| pass.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        self.diagnostics.push(FnxDiagnostic {
+            code: FnxDiagnosticCode::BUDGET_EXCEEDED,
+            severity: FnxDiagnosticSeverity::Warning,
+            message: format!(
+                "FNX structural analysis exceeded its budget; unperformed checks have no results. \
+                 {}. Completed analyses: {completed}.",
+                reason.as_diagnostic()
+            ),
+            span: None,
+            related_nodes: Vec::new(),
+            related_edges: Vec::new(),
+            suggestion: Some(
+                "Reduce the diagram size and retry. Library callers can set a larger budget with \
+                 analyze_structure_with_budget before relying on complete FNX structural validation."
+                    .to_string(),
+            ),
+            recommendation: None,
+        });
+        self.budget_exceeded = Some(reason);
+    }
 }
 
 // ============================================================================
@@ -347,7 +420,8 @@ pub struct FnxAnalysisResults {
 
 /// Run all FNX structural analyses on the given IR.
 ///
-/// Returns analysis results with diagnostics that can be surfaced to users.
+/// Returns analysis results with diagnostics that can be surfaced to users. A budget-limited
+/// result retains the cancellation reason and a warning alongside the completed passes' findings.
 #[must_use]
 pub fn analyze_structure(ir: &MermaidDiagramIr) -> FnxAnalysisResults {
     analyze_structure_with_budget(ir, AnalysisBudget::default())
@@ -365,7 +439,10 @@ pub fn analyze_structure_cached(
         return cached;
     }
     let results = analyze_structure(ir);
-    cache.put_diagnostics(ir, config, results.clone());
+    // A transient timeout must not turn an incomplete analysis into the permanent cached answer.
+    if results.budget_exceeded.is_none() {
+        cache.put_diagnostics(ir, config, results.clone());
+    }
     results
 }
 
@@ -380,7 +457,7 @@ pub fn analyze_structure_with_budget(
     budget: AnalysisBudget,
 ) -> BudgetResult<FnxAnalysisResults> {
     let mut executor = BudgetExecutor::new(budget);
-    executor.execute_with_progress(|exec| {
+    let mut outcome = executor.execute_with_progress(|exec| {
         if ir.nodes.is_empty() {
             return FnxAnalysisResults::default();
         }
@@ -396,6 +473,9 @@ pub fn analyze_structure_with_budget(
         // Run connected components analysis
         let comp_result = connected_components(&graph);
         analyze_components(ir, &table, &comp_result, &mut results);
+        results
+            .completed_passes
+            .push(FnxAnalysisPass::ConnectedComponents);
         exec.record_work(base_work);
         if exec.is_exceeded() {
             return results;
@@ -405,6 +485,9 @@ pub fn analyze_structure_with_budget(
         if results.is_connected {
             let art_result = articulation_points(&graph);
             analyze_articulation_points(ir, &table, &art_result, &mut results);
+            results
+                .completed_passes
+                .push(FnxAnalysisPass::ArticulationPoints);
             exec.record_work(base_work);
             if exec.is_exceeded() {
                 return results;
@@ -412,6 +495,7 @@ pub fn analyze_structure_with_budget(
 
             let bridge_result = bridges(&graph);
             analyze_bridges(ir, &table, &bridge_result, &mut results);
+            results.completed_passes.push(FnxAnalysisPass::Bridges);
             exec.record_work(base_work);
             if exec.is_exceeded() {
                 return results;
@@ -421,10 +505,19 @@ pub fn analyze_structure_with_budget(
         // Run cycle analysis
         let cycle_result = cycle_basis(&graph, None);
         analyze_cycles(ir, &table, &cycle_result, &mut results);
+        results.completed_passes.push(FnxAnalysisPass::CycleBasis);
         exec.record_work(base_work);
 
         results
-    })
+    });
+    if let BudgetResult::Cancelled { reason, partial } = &mut outcome {
+        // Preserve cancellation in the value itself: the default entry point and cache return
+        // this value directly, and `.into_value()` must not erase an incomplete-analysis warning.
+        partial
+            .get_or_insert_with(FnxAnalysisResults::default)
+            .record_budget_exceeded(reason.clone());
+    }
+    outcome
 }
 
 fn analyze_components(
@@ -1241,9 +1334,145 @@ mod tests {
     #[test]
     fn analyze_structure_with_budget_enforces_work_limit() {
         let ir = make_simple_chain();
-        let tight = AnalysisBudget::default().with_work_budget(1);
+        let tight = AnalysisBudget::unlimited().with_work_budget(1);
         let result = analyze_structure_with_budget(&ir, tight);
         assert!(result.is_cancelled());
-        assert!(result.into_value().is_some());
+        let partial = result.into_value().expect("partial analysis");
+        assert!(partial.completed_passes.is_empty());
+        assert_eq!(
+            partial.budget_exceeded,
+            Some(BudgetExceededReason::WorkExceeded {
+                budget: 1,
+                consumed: 5,
+            })
+        );
+        assert_eq!(partial.diagnostics.len(), 1);
+        assert_eq!(
+            partial.diagnostics[0].code,
+            FnxDiagnosticCode::BUDGET_EXCEEDED
+        );
+        assert_eq!(
+            partial.diagnostics[0].severity,
+            FnxDiagnosticSeverity::Warning
+        );
+        assert!(
+            partial.diagnostics[0]
+                .message
+                .contains("Completed analyses: none")
+        );
+    }
+
+    #[test]
+    fn budget_progress_records_only_passes_that_actually_ran() {
+        let ir = make_simple_chain();
+        let passes = [
+            FnxAnalysisPass::ConnectedComponents,
+            FnxAnalysisPass::ArticulationPoints,
+            FnxAnalysisPass::Bridges,
+            FnxAnalysisPass::CycleBasis,
+        ];
+        // This graph has three vertices and two edges. Projection and each analysis consume
+        // five work units, so these exact boundaries exercise every possible stopping point.
+        for (limit, completed) in [(0, 0), (5, 1), (10, 2), (15, 3), (20, 4)] {
+            let result = analyze_structure_with_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(limit),
+            );
+            assert!(result.is_cancelled(), "limit {limit}");
+            let partial = result.into_value().expect("partial analysis");
+            assert_eq!(
+                partial.completed_passes,
+                passes[..completed],
+                "limit {limit}"
+            );
+            assert!(partial.budget_exceeded.is_some());
+            assert_eq!(
+                partial
+                    .diagnostics
+                    .iter()
+                    .filter(|diag| diag.code == FnxDiagnosticCode::BUDGET_EXCEEDED)
+                    .count(),
+                1
+            );
+            assert_eq!(partial.completed(FnxAnalysisPass::Bridges), completed >= 3);
+        }
+
+        let result =
+            analyze_structure_with_budget(&ir, AnalysisBudget::unlimited().with_work_budget(25));
+        assert!(result.is_completed());
+        let complete = result.into_value().expect("complete analysis");
+        assert_eq!(complete.completed_passes, passes);
+        assert!(complete.budget_exceeded.is_none());
+        assert_eq!(complete.component_count, 1);
+        assert_eq!(complete.articulation_point_count, 1);
+        assert_eq!(complete.bridge_count, 2);
+        assert_eq!(complete.cycle_count, 0);
+        assert!(
+            complete
+                .diagnostics
+                .iter()
+                .all(|diag| diag.code != FnxDiagnosticCode::BUDGET_EXCEEDED)
+        );
+    }
+
+    #[test]
+    fn cancelled_analysis_preserves_findings_from_completed_passes() {
+        let ir = make_disconnected_graph();
+        let result =
+            analyze_structure_with_budget(&ir, AnalysisBudget::unlimited().with_work_budget(6));
+        assert!(result.is_cancelled());
+        let partial = result.into_value().expect("partial analysis");
+        assert_eq!(
+            partial.completed_passes,
+            [FnxAnalysisPass::ConnectedComponents]
+        );
+        assert_eq!(partial.component_count, 2);
+        assert!(!partial.is_connected);
+        assert_eq!(partial.diagnostics.len(), 2);
+        assert_eq!(
+            partial.diagnostics[0].code,
+            FnxDiagnosticCode::DISCONNECTED_COMPONENT
+        );
+        assert_eq!(
+            partial.diagnostics[1].code,
+            FnxDiagnosticCode::BUDGET_EXCEEDED
+        );
+    }
+
+    #[test]
+    fn default_entry_point_preserves_cancellation_and_does_not_cache_it() {
+        let mut ir = make_simple_chain();
+        // Projection alone exceeds the default work budget, independently of clock speed.
+        ir.edges = vec![ir.edges[0].clone(); 10_001];
+        let results = analyze_structure(&ir);
+        assert!(results.budget_exceeded.is_some());
+        assert!(results.completed_passes.is_empty());
+        assert_eq!(
+            results.diagnostics[0].code,
+            FnxDiagnosticCode::BUDGET_EXCEEDED
+        );
+
+        let mut cache = crate::fnx_cache::AnalysisCache::default();
+        let config = crate::fnx_adapter::ProjectionConfig::default();
+        for _ in 0..2 {
+            let results = analyze_structure_cached(&ir, &config, &mut cache);
+            assert!(results.budget_exceeded.is_some());
+        }
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().misses, 2);
+    }
+
+    #[test]
+    fn empty_analysis_does_not_claim_to_have_invoked_algorithms() {
+        let result = analyze_structure_with_budget(
+            &MermaidDiagramIr::default(),
+            AnalysisBudget::unlimited().with_work_budget(0),
+        );
+        assert!(result.is_completed());
+        let results = result.into_value().expect("empty analysis");
+        assert!(results.completed_passes.is_empty());
+        assert!(results.budget_exceeded.is_none());
+        assert!(results.diagnostics.is_empty());
     }
 }
