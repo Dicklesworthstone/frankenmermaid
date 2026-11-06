@@ -77,6 +77,64 @@ fn a_cloned_ir_serialises_identically() {
     }
 }
 
+/// True if `svg` carries a broken float spelling as a VALUE, not as the letters of a legitimate
+/// token. Rust renders `f32::NAN` as `NaN` and +/-inf as `inf`/`-inf`. 89d6d275's sequence rework
+/// added `dominant-baseline="central"`, whose lowercase `nan` tripped the old case-insensitive
+/// `contains("nan")`; and the old `"infinity"` needle never matched Rust's `inf`.
+fn contains_broken_float(svg: &str) -> bool {
+    // Case-SENSITIVE: `dominant-baseline` carries a lowercase `nan`, so only Rust's exact `NaN`
+    // spelling matches -- and it still catches a glued `MNaN` or a delimited `"NaN"`.
+    if svg.contains("NaN") {
+        return true;
+    }
+    // `inf` is lowercase and sits inside `info` / `fm-info-version`, so require a non-alphanumeric
+    // boundary on each side: a real coordinate is always delimited (`"inf"`, ` inf `, `-inf`, `Minf `).
+    let bytes = svg.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = svg[from..].find("inf") {
+        let at = from + rel;
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let after = at + 3;
+        let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 3;
+    }
+    false
+}
+
+/// Positive and negative controls for [`contains_broken_float`]: a real broken float, however it is
+/// glued into a real rendered SVG, is caught; the legitimate tokens that merely spell the letters
+/// are not (89d6d275 made the sequence text carry `dominant-baseline`).
+#[test]
+fn the_broken_float_guard_has_teeth() {
+    let clean = render_svg(&ir("flowchart TD\n  a[Alpha] --> b[Beta]\n"));
+    assert!(!contains_broken_float(&clean), "a clean render must pass");
+    // A NaN/inf value is caught no matter how it abuts the surrounding markup.
+    assert!(
+        contains_broken_float(&clean.replacen("<path", "<path d=\"MNaN L0 0\"", 1)),
+        "a NaN glued to a path command must be caught"
+    );
+    assert!(
+        contains_broken_float(&format!("{clean}<rect x=\"inf\"/>")),
+        "a delimited inf value must be caught"
+    );
+    assert!(
+        contains_broken_float(&format!("{clean}<rect width=\"-inf\"/>")),
+        "a -inf value must be caught"
+    );
+    // The narrowing: these legitimate tokens must NOT read as a broken float.
+    assert!(
+        !contains_broken_float("<text dominant-baseline=\"central\">x</text>"),
+        "dominant-baseline's lowercase nan is not a NaN value"
+    );
+    assert!(
+        !contains_broken_float("<text class=\"fm-info-version\">v0.5.0</text>"),
+        "fm-info-version's inf is not an inf value"
+    );
+}
+
 /// No output may contain a broken or unportable float spelling.
 ///
 /// `-0` is the interesting one: it is numerically equal to `0`, so no coordinate assertion anywhere
@@ -85,15 +143,11 @@ fn a_cloned_ir_serialises_identically() {
 fn no_output_contains_nan_infinity_or_negative_zero() {
     for (name, source) in DIAGRAMS {
         let svg = render_svg(&ir(source));
-        let lowered = svg.to_lowercase();
-
-        for token in ["nan", "infinity"] {
-            assert!(
-                !lowered.contains(token),
-                "{name}: the SVG contains {token:?}, which means arithmetic broke and was written \
-                 out as a coordinate"
-            );
-        }
+        assert!(
+            !contains_broken_float(&svg),
+            "{name}: the SVG contains a NaN or inf coordinate -- arithmetic broke and was \
+             serialised as a number"
+        );
 
         // ⚠️ A TRAILING DELIMITER IS NOT ENOUGH, and this assertion FAILED ON ITS OWN FIXTURE for
         // that reason. The comment here used to say `-0` followed by a delimiter "is the only shape
