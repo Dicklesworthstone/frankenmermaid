@@ -5428,10 +5428,15 @@ fn split_class_relation_label(statement: &str) -> (&str, Option<&str>) {
                     continue;
                 }
                 let label = trim_fast(&statement[index + 1..]);
-                return (
-                    trim_end_fast(&statement[..index]),
-                    (!label.is_empty()).then_some(label),
-                );
+                if label.is_empty() {
+                    // A trailing `:` with no label is not a label separator. Leave the statement
+                    // (dangling colon and all) intact so the class lens keeps the colon on the
+                    // target and rejects a round-trip that would attach a label the source never
+                    // carried. 6b77cd8f stripped it here, letting the empty-colon form masquerade as
+                    // a plain unlabelled relation (relationship_attachments_reject_ambiguous_empty_colons).
+                    return (statement, None);
+                }
+                return (trim_end_fast(&statement[..index]), Some(label));
             }
             _ => {}
         }
