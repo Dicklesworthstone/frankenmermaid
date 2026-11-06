@@ -413,7 +413,7 @@ fn line(from: LayoutPoint, to: LayoutPoint) -> Vec<PathCmd> {
     ]
 }
 
-fn circle_path(center: LayoutPoint, radius: f32) -> Vec<PathCmd> {
+pub(crate) fn circle_path(center: LayoutPoint, radius: f32) -> Vec<PathCmd> {
     let k = radius * 0.552_284_8;
     let (x, y) = (center.x, center.y);
     vec![

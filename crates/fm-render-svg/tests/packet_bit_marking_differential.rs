@@ -134,3 +134,118 @@ fn other_diagrams_still_fit_their_labels() {
         "a long flowchart label was neither wrapped nor ellipsized, so the packet exemption leaked"
     );
 }
+
+#[test]
+fn scene_backend_draws_the_name_on_every_packet_field_segment() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    let config = SvgRenderConfig {
+        backend: SvgBackend::Scene,
+        embed_theme_css: false,
+        ..Default::default()
+    };
+    for (start, end, segments) in [(0, 63, 2), (28, 70, 3), (31, 32, 2), (0, 31, 1)] {
+        let ir = fm_parser::parse(&format!(
+            "packet-beta\n{start}-{end}: \"Payload\"\n{}: \"Flag\"\n",
+            end + 1
+        ))
+        .ir;
+        let svg = render_svg_with_config(&ir, &config);
+        assert_eq!(
+            svg.matches(">Payload</text>").count(),
+            segments,
+            "the field must retain its identity on every row for bits {start}-{end}"
+        );
+        assert_eq!(svg.matches(">Flag</text>").count(), 1);
+        assert_eq!(svg, render_svg_with_config(&ir, &config));
+    }
+}
+
+#[test]
+fn scene_backend_announces_each_packet_field_once_with_all_segments_visible() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    let config = SvgRenderConfig {
+        backend: SvgBackend::Scene,
+        embed_theme_css: false,
+        include_source_spans: true,
+        ..Default::default()
+    };
+    let ir = fm_parser::parse("packet-beta\n28-70: \"Payload<br/>Details\"\n71: \"Flag\"\n").ir;
+    let svg = render_svg_with_config(&ir, &config);
+    let tags: Vec<_> = svg
+        .split('<')
+        .filter_map(|part| part.split_once('>').map(|(tag, _)| tag))
+        .collect();
+    let fields = &ir.packet_meta.as_ref().expect("packet metadata").fields;
+    for (field, segments, label_rows) in [(&fields[0], 3, 2), (&fields[1], 1, 1)] {
+        let source = format!("data-fm-source-index=\"{}\"", field.node.0);
+        let elements: Vec<_> = tags
+            .iter()
+            .copied()
+            .filter(|tag| tag.contains("data-fm-source-kind=\"node\"") && tag.contains(&source))
+            .collect();
+        assert_eq!(
+            elements
+                .iter()
+                .filter(|tag| tag.starts_with("path "))
+                .count(),
+            segments,
+            "every field segment remains drawn and attributed to its node"
+        );
+        assert_eq!(
+            elements
+                .iter()
+                .filter(|tag| tag.starts_with("text "))
+                .count(),
+            segments * label_rows,
+            "every segment keeps all label rows and source metadata"
+        );
+        assert!(
+            elements
+                .iter()
+                .all(|tag| tag.contains("data-fm-source-span="))
+        );
+        let announced: Vec<_> = elements
+            .iter()
+            .filter(|tag| {
+                tag.contains("role=\"graphics-symbol\"") && !tag.contains("aria-hidden=\"true\"")
+            })
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "a field is announced once across all rows"
+        );
+        assert!(announced[0].starts_with("path "));
+        assert!(announced[0].contains("aria-label="));
+    }
+    assert_eq!(svg.matches(">Payload</text>").count(), 3);
+    assert_eq!(svg.matches(">Details</text>").count(), 3);
+    assert_eq!(svg.matches(">Flag</text>").count(), 1);
+    let mut ids = std::collections::BTreeSet::new();
+    for tag in tags {
+        if let Some((_, value)) = tag.split_once(" id=\"") {
+            let id = value.split('"').next().expect("attribute value");
+            assert!(ids.insert(id), "duplicate SVG id: {id}");
+        }
+    }
+
+    let flowchart = render_svg_with_config(
+        &fm_parser::parse("flowchart LR\nA[Visible label] --> B\n").ir,
+        &config,
+    );
+    let flowchart_labels: Vec<_> = flowchart
+        .split("<text")
+        .skip(1)
+        .filter_map(|part| part.split_once('>'))
+        .filter(|(tag, _)| tag.contains("data-fm-source-kind=\"node\""))
+        .collect();
+    assert_eq!(flowchart_labels.len(), 2);
+    assert!(
+        flowchart_labels
+            .iter()
+            .all(|(tag, _)| !tag.contains("aria-hidden=\"true\"")),
+        "packet deduplication must not change another diagram's label semantics"
+    );
+}

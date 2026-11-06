@@ -727,6 +727,27 @@ fn render_svg_with_layout_impl_reusing(
                 let theme = resolve_theme(Some(ir), config);
                 fm_layout::TreemapChartLayout::new(ir, layout, &config.font_metrics())
                     .to_scene(&theme.colors.text, &theme.colors.node_stroke)
+            } else if ir.diagram_type == DiagramType::QuadrantChart
+                && let Some(meta) = ir.quadrant_meta.as_ref()
+            {
+                let theme = resolve_theme(Some(ir), config);
+                let accents: Vec<_> = theme.colors.accents.iter().map(String::as_str).collect();
+                QuadrantChartLayout::new(
+                    layout,
+                    meta,
+                    diagram_title(ir, meta.title.as_deref()),
+                    (0.0, 0.0),
+                    &config.font_metrics(),
+                    config.min_font_size,
+                    config.avg_char_width,
+                )
+                .to_scene(
+                    meta,
+                    &theme.colors.text,
+                    &theme.colors.edge,
+                    &theme.colors.background,
+                    &accents,
+                )
             } else {
                 build_render_scene_with_metrics(ir, layout, &config.font_metrics())
             };
@@ -2179,7 +2200,7 @@ fn render_scene_document_with_ir(
 ) -> String {
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
-    let planned_title = matches!(scene.root.id.as_deref(), Some("pie-chart" | "radar-chart" | "treemap-chart")) || scene.root.children.iter().any(|item| {
+    let planned_title = matches!(scene.root.id.as_deref(), Some("pie-chart" | "radar-chart" | "treemap-chart" | "quadrant-chart")) || scene.root.children.iter().any(|item| {
         matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
     });
     let visible_title = ir
@@ -2402,7 +2423,10 @@ fn render_scene_group(
 
     if let Some(id) = &group.id {
         elem = elem.id(id);
-        if matches!(id.as_str(), "radar-chart" | "treemap-chart") {
+        if matches!(
+            id.as_str(),
+            "radar-chart" | "treemap-chart" | "quadrant-chart"
+        ) {
             elem = elem.attr("xml:space", "preserve");
         }
         if let Some(ir) = ir
@@ -2460,8 +2484,55 @@ fn render_scene_group(
         Some("gantt-sections" | "sequence-lifelines")
     )
     .then(|| resolve_theme(ir, config));
+    let packet_layer = ir.is_some_and(|ir| ir.diagram_type == DiagramType::PacketBeta)
+        && matches!(group.id.as_deref(), Some("nodes" | "labels"));
+    let mut announced_packet_nodes = std::collections::BTreeSet::new();
     for (index, child) in group.children.iter().enumerate() {
         let mut rendered = render_scene_item(child, config, ir, clip_defs, clip_id_counter);
+        if packet_layer {
+            // A field retains one semantic identity across every wrapped row. Its first path
+            // announces the complete name; continuation paths and all visible label rows are
+            // repetitions, just as in the direct renderer's aria-hidden continuation groups.
+            // Keep their source metadata so styling and source lookup still identify the field.
+            let repeated = match (group.id.as_deref(), child) {
+                (Some("nodes"), RenderItem::Path(path)) => match path.source {
+                    RenderSource::Node(index) => !announced_packet_nodes.insert(index),
+                    _ => false,
+                },
+                (Some("labels"), RenderItem::Text(text)) => {
+                    matches!(text.source, RenderSource::Node(_))
+                }
+                _ => false,
+            };
+            if repeated {
+                rendered = rendered.attr("aria-hidden", "true");
+            }
+        }
+        if matches!(child, RenderItem::Text(_))
+            && group
+                .id
+                .as_deref()
+                .is_some_and(|id| id == "quadrant-title" || id.starts_with("quadrant-heading-"))
+        {
+            rendered = rendered.attr("font-weight", "600");
+        }
+        if matches!(child, RenderItem::Path(_))
+            && let Some(point_index) = group
+                .id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("quadrant-point-"))
+                .and_then(|index| index.parse::<usize>().ok())
+            && let Some(meta) = ir.and_then(|ir| ir.quadrant_meta.as_ref())
+            && let Some(point) = meta.points.get(point_index)
+        {
+            rendered = rendered.class("fm-quadrant-point");
+            if config.a11y.text_alternatives {
+                let name = quadrant_point_accessible_name(point, &meta.quadrant_labels);
+                rendered = rendered
+                    .attr("aria-label", &name)
+                    .child(Element::title(&name));
+            }
+        }
         if matches!(child, RenderItem::Path(_))
             && let Some(theme) = &furniture_theme
         {

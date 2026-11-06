@@ -3732,8 +3732,40 @@ pub fn build_render_scene_with_metrics(
     {
         return build_xychart_render_scene(ir, meta, layout);
     }
-    let (label_layer, label_bounds) = build_label_layer(ir, layout, metrics);
-    let bounds = RenderRect::from(label_bounds);
+    if ir.diagram_type == DiagramType::QuadrantChart
+        && let Some(meta) = ir.quadrant_meta.as_ref()
+    {
+        return QuadrantChartLayout::new(
+            layout,
+            meta,
+            ir.meta.title.as_deref().or(meta.title.as_deref()),
+            (0.0, 0.0),
+            metrics,
+            8.0,
+            metrics.avg_char_width(),
+        )
+        .to_scene(
+            meta,
+            "#1e293b",
+            "#64748b",
+            "#ffffff",
+            &fm_core::mindmap::DEFAULT_BRANCH_ACCENTS,
+        );
+    }
+    let (mut label_layer, label_bounds) = build_label_layer(ir, layout, metrics);
+    let mut node_layer = build_node_layer(ir, layout);
+    let mut content_bounds = Some(label_bounds);
+    if ir.diagram_type == DiagramType::PacketBeta {
+        complete_packet_scene_layers(
+            &mut node_layer,
+            &mut label_layer,
+            &mut content_bounds,
+            ir,
+            layout,
+            metrics,
+        );
+    }
+    let bounds = RenderRect::from(content_bounds.unwrap_or(label_bounds));
 
     let mut root =
         RenderGroup::new(Some(String::from("diagram-root"))).with_source(RenderSource::Diagram);
@@ -3757,8 +3789,7 @@ pub fn build_render_scene_with_metrics(
     }
     root.children
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
-    root.children
-        .push(RenderItem::Group(build_node_layer(ir, layout)));
+    root.children.push(RenderItem::Group(node_layer));
     root.children.push(RenderItem::Group(label_layer));
     if ir.diagram_type == DiagramType::Sequence {
         let markers = build_sequence_lifecycle_layer(layout);
@@ -3780,6 +3811,92 @@ pub fn build_render_scene_with_metrics(
     }
 
     RenderScene { bounds, root }
+}
+
+/// A packet field can occupy several rows while retaining one semantic node. Project every
+/// continuation at its layout coordinates, or the rendered width understates its bit count.
+fn complete_packet_scene_layers(
+    nodes: &mut RenderGroup,
+    labels: &mut RenderGroup,
+    bounds: &mut Option<LayoutRect>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) {
+    // Bit counts determine box widths, so a field's complete name can legitimately overflow
+    // its first segment. Include those original rows as well as continuation labels in the clip.
+    for item in std::mem::take(&mut labels.children) {
+        if let RenderItem::Text(text) = item {
+            let text_metrics = match text.source {
+                RenderSource::Node(index) => ir.effective_node_font_metrics(index, metrics),
+                _ => std::borrow::Cow::Borrowed(metrics),
+            };
+            append_measured_scene_text(labels, bounds, text, &text_metrics);
+        } else {
+            labels.children.push(item);
+        }
+    }
+    for continuation in &layout.extensions.packet_field_continuations {
+        let Some(node) = ir.nodes.get(continuation.node_index) else {
+            continue;
+        };
+        let rect = continuation.bounds;
+        if !rect.x.is_finite()
+            || !rect.y.is_finite()
+            || !rect.width.is_finite()
+            || !rect.height.is_finite()
+            || rect.width <= 0.0
+            || rect.height <= 0.0
+        {
+            continue;
+        }
+        let source = RenderSource::Node(continuation.node_index);
+        nodes.children.push(scene_path(
+            source,
+            node_path(rect, fm_core::NodeShape::Rect),
+            Some(FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            }),
+            Some(StrokeStyle::solid("#94a3b8", 1.5)),
+        ));
+        // The continuation may be the leftmost or bottommost piece of the diagram. Include
+        // its complete outline, not just the path centerline, in the root clip.
+        include_packing_bounds(
+            bounds,
+            LayoutRect {
+                x: rect.x - 0.75,
+                y: rect.y - 0.75,
+                width: rect.width + 1.5,
+                height: rect.height + 1.5,
+            },
+        );
+
+        let metrics = ir.effective_node_font_metrics(continuation.node_index, metrics);
+        let declared = ir.resolved_node_style(continuation.node_index);
+        let center = rect.center();
+        append_measured_scene_text(
+            labels,
+            bounds,
+            RenderText {
+                source,
+                text: ir.node_layout_text(node, &metrics).into_owned(),
+                x: center.x,
+                y: center.y,
+                font_size: metrics.font_size(),
+                align: TextAlign::Middle,
+                baseline: TextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: declared
+                        .get("color")
+                        .and_then(|paint| scene_paint(paint))
+                        .unwrap_or_else(|| String::from("#0f172a")),
+                    opacity: 1.0,
+                },
+            },
+            &metrics,
+        );
+    }
 }
 
 /// Status fills shared by direct SVG and target-agnostic Gantt scenes.
@@ -3822,7 +3939,7 @@ fn build_gantt_render_scene(
             }),
             None,
         ));
-        append_gantt_scene_text(
+        append_measured_scene_text(
             &mut labels,
             &mut bounds,
             RenderText {
@@ -3868,7 +3985,7 @@ fn build_gantt_render_scene(
                 &mut bounds,
                 gantt_axis_label_bounds(tick, *axis, axis_label_rows[index], metrics),
             );
-            append_gantt_scene_text(
+            append_measured_scene_text(
                 &mut axes,
                 &mut bounds,
                 RenderText {
@@ -3975,7 +4092,7 @@ fn build_gantt_render_scene(
             ));
         }
         let placement = placements.get(&node.node_index);
-        append_gantt_scene_text(
+        append_measured_scene_text(
             &mut labels,
             &mut bounds,
             RenderText {
@@ -4042,7 +4159,7 @@ fn build_gantt_render_scene(
     let mut title = RenderGroup::new(Some(String::from("gantt-title")));
     if let Some(text) = ir.declared_title_if_drawn() {
         let content_bounds = bounds.unwrap_or(layout.bounds);
-        append_gantt_scene_text(
+        append_measured_scene_text(
             &mut title,
             &mut bounds,
             RenderText {
@@ -4075,7 +4192,7 @@ fn build_gantt_render_scene(
     RenderScene { bounds, root }
 }
 
-fn append_gantt_scene_text(
+fn append_measured_scene_text(
     layer: &mut RenderGroup,
     bounds: &mut Option<LayoutRect>,
     label: RenderText,
@@ -33869,6 +33986,126 @@ mod tests {
                 .all(|w| w[1].bounds.y > w[0].bounds.y),
             "each continuation is on a lower row than the last: {continuations:?}"
         );
+    }
+
+    #[test]
+    fn render_scene_packet_preserves_every_row_and_bit_width() {
+        use super::PathCmd;
+
+        for (start, end) in [(0, 63), (28, 70), (31, 32), (0, 31)] {
+            let ir = parse(&format!(
+                "packet-beta\n{start}-{end}: \"Payload\"\n{}: \"Flag\"\n",
+                end + 1
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let layer = |id: &str| {
+                scene.root.children.iter().find_map(|item| match item {
+                    RenderItem::Group(group) if group.id.as_deref() == Some(id) => Some(group),
+                    _ => None,
+                })
+            };
+            let fields = &ir.packet_meta.as_ref().expect("packet metadata").fields;
+            let payload = fields[0].node.0;
+            let flag = fields[1].node.0;
+            let expected_segments = (end / 32 - start / 32 + 1) as usize;
+            let paths: Vec<_> = layer("nodes")
+                .expect("node layer")
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Path(path) if path.source == RenderSource::Node(payload) => {
+                        Some(path)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(paths.len(), expected_segments, "bits {start}-{end}");
+            let mut total_width = 0.0;
+            let mut previous_y = f32::NEG_INFINITY;
+            for path in paths {
+                let mut min_x = f32::INFINITY;
+                let mut max_x = f32::NEG_INFINITY;
+                let mut min_y = f32::INFINITY;
+                for command in &path.commands {
+                    let (x, y) = match command {
+                        PathCmd::MoveTo { x, y }
+                        | PathCmd::LineTo { x, y }
+                        | PathCmd::QuadTo { x, y, .. }
+                        | PathCmd::CubicTo { x, y, .. } => (*x, *y),
+                        PathCmd::Close => continue,
+                    };
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    assert!(x >= scene.bounds.x && x <= scene.bounds.x + scene.bounds.width);
+                    assert!(y >= scene.bounds.y && y <= scene.bounds.y + scene.bounds.height);
+                }
+                assert!(min_y > previous_y, "each segment occupies its own row");
+                previous_y = min_y;
+                assert!(max_x - min_x <= 32.0 * 32.0);
+                total_width += max_x - min_x;
+            }
+            assert_eq!(total_width, (end - start + 1) as f32 * 32.0);
+            for continuation in &layout.extensions.packet_field_continuations {
+                assert!(scene.bounds.x <= continuation.bounds.x - 0.75);
+                assert!(
+                    scene.bounds.y + scene.bounds.height
+                        >= continuation.bounds.y + continuation.bounds.height + 0.75
+                );
+            }
+            let labels = layer("labels").expect("label layer");
+            let count = |node, name| {
+                labels.children.iter().filter(|item| {
+                    matches!(item, RenderItem::Text(text) if text.source == RenderSource::Node(node) && text.text == name)
+                }).count()
+            };
+            assert_eq!(count(payload, "Payload"), expected_segments);
+            assert_eq!(
+                count(flag, "Flag"),
+                1,
+                "a one-bit field must not be repeated"
+            );
+            assert_eq!(scene, build_render_scene(&ir, &layout));
+        }
+    }
+
+    #[test]
+    fn render_scene_packet_continuations_keep_complete_multiline_labels() {
+        let ir =
+            parse("packet-beta\n24-47: \"Complete payload description<br/>including details\"\n")
+                .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.packet_field_continuations.len(), 1);
+        let metrics = fm_core::FontMetrics::monospace(28.0);
+        let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        let labels = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("labels") => Some(group),
+                _ => None,
+            })
+            .expect("label layer");
+        for expected in ["Complete payload description", "including details"] {
+            let rows: Vec<_> = labels
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Text(text) if text.text == expected => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rows.len(), 2, "every row keeps the complete field identity");
+            assert!(rows.iter().all(|row| row.font_size == 28.0));
+            let half_width = metrics.estimate_width(expected) * 0.5;
+            for row in rows {
+                assert!(scene.bounds.x <= row.x - half_width);
+                assert!(scene.bounds.x + scene.bounds.width >= row.x + half_width);
+            }
+        }
     }
 
     /// The `packet-beta` connection form declares no bit ranges, so there is no ruler and the

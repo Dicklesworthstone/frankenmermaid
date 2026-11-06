@@ -5,7 +5,11 @@
 
 use fm_core::{FontMetrics, FontMetricsConfig, IrQuadrantMeta, IrQuadrantPoint};
 
-use crate::{DiagramLayout, LayoutPoint, LayoutRect, TextAlign};
+use crate::{
+    DiagramLayout, FillStyle, LayoutPoint, LayoutRect, MarkerKind, PathCmd, RenderClip,
+    RenderGroup, RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
+    StrokeStyle, TextAlign, TextBaseline,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadrantPointLabel {
@@ -212,6 +216,276 @@ impl QuadrantChartLayout {
             label_font_size,
         }
     }
+
+    /// Project the measured composition without moving any data point or reflowing its caption.
+    ///
+    /// The scene keeps the same paint order as the direct renderers: chart furniture and label
+    /// plates precede the markers, so even a crowded caption cannot cover an authored value.
+    #[must_use]
+    pub fn to_scene(
+        &self,
+        meta: &IrQuadrantMeta,
+        label_color: &str,
+        axis_color: &str,
+        background: &str,
+        accents: &[&str],
+    ) -> RenderScene {
+        let mut root = RenderGroup::new(Some("quadrant-chart".to_owned()));
+        root.clip = Some(RenderClip::Rect(RenderRect::from(self.bounds)));
+        let accent = |index: usize| {
+            accents
+                .get(index.checked_rem(accents.len()).unwrap_or(0))
+                .copied()
+                .unwrap_or("#3b82f6")
+        };
+        let plot = self.plot;
+        let mid_x = plot.x + plot.width / 2.0;
+        let mid_y = plot.y + plot.height / 2.0;
+        let mut backgrounds = RenderGroup::new(Some("quadrant-backgrounds".to_owned()));
+        for (index, (x, y)) in [
+            (mid_x, plot.y),
+            (plot.x, plot.y),
+            (plot.x, mid_y),
+            (mid_x, mid_y),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            backgrounds.children.push(path_item(
+                RenderSource::Diagram,
+                crate::shapes::rounded_rect_path(
+                    LayoutRect {
+                        x,
+                        y,
+                        width: plot.width / 2.0,
+                        height: plot.height / 2.0,
+                    },
+                    0.0,
+                ),
+                Some(FillStyle::Solid {
+                    color: accent(index).to_owned(),
+                    opacity: 0.10,
+                }),
+                None,
+            ));
+        }
+        root.children.push(RenderItem::Group(backgrounds));
+
+        for (index, heading) in self.headings.iter().enumerate() {
+            let mut group = RenderGroup::new(Some(format!("quadrant-heading-{index}")));
+            for (line, text) in heading.lines.iter().enumerate() {
+                group.children.push(text_item(
+                    text,
+                    LayoutPoint {
+                        x: heading.bounds.x,
+                        y: heading.bounds.y + heading.font_size * (0.65 + line as f32 * 1.3),
+                    },
+                    heading.font_size,
+                    TextAlign::Start,
+                    TextBaseline::Middle,
+                    label_color,
+                ));
+            }
+            root.children.push(RenderItem::Group(group));
+        }
+
+        let mut axes = RenderGroup::new(Some("quadrant-axes".to_owned()));
+        for (start, end) in [
+            (
+                LayoutPoint {
+                    x: mid_x,
+                    y: plot.y,
+                },
+                LayoutPoint {
+                    x: mid_x,
+                    y: plot.y + plot.height,
+                },
+            ),
+            (
+                LayoutPoint {
+                    x: plot.x,
+                    y: mid_y,
+                },
+                LayoutPoint {
+                    x: plot.x + plot.width,
+                    y: mid_y,
+                },
+            ),
+        ] {
+            axes.children
+                .push(line_item(start, end, StrokeStyle::solid(axis_color, 1.0)));
+        }
+        root.children.push(RenderItem::Group(axes));
+        let mut grid = RenderGroup::new(Some("quadrant-grid".to_owned()));
+        let mut grid_stroke = StrokeStyle::solid(axis_color, 0.5);
+        grid_stroke.opacity = 0.3;
+        grid_stroke.dash_array = vec![4.0, 4.0];
+        for fraction in [0.25, 0.75] {
+            let x = plot.x + plot.width * fraction;
+            let y = plot.y + plot.height * fraction;
+            for (start, end) in [
+                (
+                    LayoutPoint { x, y: plot.y },
+                    LayoutPoint {
+                        x,
+                        y: plot.y + plot.height,
+                    },
+                ),
+                (
+                    LayoutPoint { x: plot.x, y },
+                    LayoutPoint {
+                        x: plot.x + plot.width,
+                        y,
+                    },
+                ),
+            ] {
+                grid.children
+                    .push(line_item(start, end, grid_stroke.clone()));
+            }
+        }
+        root.children.push(RenderItem::Group(grid));
+
+        for annotation in &self.annotations {
+            let id = match annotation.role {
+                QuadrantTextRole::Title => "quadrant-title",
+                QuadrantTextRole::XAxisLeft => "quadrant-x-axis-left",
+                QuadrantTextRole::XAxisRight => "quadrant-x-axis-right",
+                QuadrantTextRole::YAxisBottom => "quadrant-y-axis-bottom",
+                QuadrantTextRole::YAxisTop => "quadrant-y-axis-top",
+            };
+            let mut group = RenderGroup::new(Some(id.to_owned()));
+            for (text, position) in annotation.rows() {
+                group.children.push(text_item(
+                    text,
+                    position,
+                    annotation.font_size,
+                    annotation.align,
+                    TextBaseline::Alphabetic,
+                    label_color,
+                ));
+            }
+            root.children.push(RenderItem::Group(group));
+        }
+
+        let mut leaders = RenderGroup::new(Some("quadrant-leaders".to_owned()));
+        let mut leader_stroke = StrokeStyle::solid(axis_color, 0.75);
+        leader_stroke.opacity = 0.65;
+        for leader in &self.leaders {
+            leaders
+                .children
+                .push(line_item(leader.start, leader.end, leader_stroke.clone()));
+        }
+        root.children.push(RenderItem::Group(leaders));
+        for (index, label) in self.labels.iter().enumerate() {
+            let mut group = RenderGroup::new(Some(format!("quadrant-point-label-{index}")));
+            group.children.push(path_item(
+                RenderSource::Diagram,
+                crate::shapes::rounded_rect_path(label.bounds, 3.0),
+                Some(FillStyle::Solid {
+                    color: background.to_owned(),
+                    opacity: 0.92,
+                }),
+                None,
+            ));
+            for (line, text) in label.lines.iter().enumerate() {
+                group.children.push(text_item(
+                    text,
+                    LayoutPoint {
+                        x: label.bounds.x + 3.0,
+                        y: label.bounds.y + 2.0 + self.label_font_size * (0.65 + line as f32 * 1.3),
+                    },
+                    self.label_font_size,
+                    TextAlign::Start,
+                    TextBaseline::Middle,
+                    label_color,
+                ));
+            }
+            root.children.push(RenderItem::Group(group));
+        }
+        for (index, point) in self.points.iter().enumerate() {
+            let style = meta
+                .points
+                .get(index)
+                .and_then(|point| point.style.as_ref());
+            let fill = style
+                .and_then(|style| style.color.as_deref())
+                .and_then(crate::scene_paint)
+                .unwrap_or_else(|| accent(index).to_owned());
+            let stroke = style
+                .and_then(|style| style.stroke_color.as_deref())
+                .and_then(crate::scene_paint)
+                .unwrap_or_else(|| background.to_owned());
+            let mut group = RenderGroup::new(Some(format!("quadrant-point-{index}")));
+            group.children.push(path_item(
+                RenderSource::Node(point.node_index),
+                crate::radar::circle_path(point.center, point.radius),
+                Some(FillStyle::Solid {
+                    color: fill,
+                    opacity: 1.0,
+                }),
+                (point.stroke_width > 0.0).then(|| StrokeStyle::solid(&stroke, point.stroke_width)),
+            ));
+            root.children.push(RenderItem::Group(group));
+        }
+        RenderScene {
+            bounds: RenderRect::from(self.bounds),
+            root,
+        }
+    }
+}
+
+fn path_item(
+    source: RenderSource,
+    commands: Vec<PathCmd>,
+    fill: Option<FillStyle>,
+    stroke: Option<StrokeStyle>,
+) -> RenderItem {
+    RenderItem::Path(RenderPath {
+        source,
+        commands,
+        fill,
+        stroke,
+        marker_start: MarkerKind::None,
+        marker_end: MarkerKind::None,
+    })
+}
+
+fn line_item(start: LayoutPoint, end: LayoutPoint, stroke: StrokeStyle) -> RenderItem {
+    path_item(
+        RenderSource::Diagram,
+        vec![
+            PathCmd::MoveTo {
+                x: start.x,
+                y: start.y,
+            },
+            PathCmd::LineTo { x: end.x, y: end.y },
+        ],
+        None,
+        Some(stroke),
+    )
+}
+
+fn text_item(
+    text: &str,
+    position: LayoutPoint,
+    font_size: f32,
+    align: TextAlign,
+    baseline: TextBaseline,
+    color: &str,
+) -> RenderItem {
+    RenderItem::Text(RenderText {
+        source: RenderSource::Diagram,
+        text: text.to_owned(),
+        x: position.x,
+        y: position.y,
+        font_size,
+        align,
+        baseline,
+        fill: FillStyle::Solid {
+            color: color.to_owned(),
+            opacity: 1.0,
+        },
+    })
 }
 
 fn clamp_font_size(candidate: f32, min_font_size: f32) -> f32 {
@@ -570,6 +844,187 @@ mod tests {
             && inner.y >= outer.y - 0.001
             && inner.x + inner.width <= outer.x + outer.width + 0.001
             && inner.y + inner.height <= outer.y + outer.height + 0.001
+    }
+
+    fn scene_group<'a>(scene: &'a RenderScene, id: &str) -> &'a RenderGroup {
+        scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some(id) => Some(group),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing chart layer {id}"))
+    }
+
+    #[test]
+    fn quadrant_scene_dispatch_keeps_regions_axes_and_exact_styled_data() {
+        let ir = fm_parser::parse(concat!(
+            "quadrantChart\n",
+            "title Deployment priorities\n",
+            "x-axis Low effort --> High effort\n",
+            "y-axis Low impact --> High impact\n",
+            "quadrant-1 Schedule\nquadrant-2 Do first\nquadrant-3 Delegate\nquadrant-4 Reconsider\n",
+            "Customer onboarding 東京: [0.73, 0.77] radius: 18, color: #ef4444, stroke-color: #111827, stroke-width: 4px\n",
+            "International deployment: [0.73, 0.78]\n",
+        )).ir;
+        let layout = crate::layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 2);
+        for font_size in [15.0, 30.0] {
+            let metrics = FontMetrics::new(FontMetricsConfig {
+                font_size,
+                ..Default::default()
+            });
+            let scene = crate::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            assert_eq!(scene.root.id.as_deref(), Some("quadrant-chart"));
+            assert_eq!(
+                scene,
+                crate::build_render_scene_with_metrics(&ir, &layout, &metrics)
+            );
+            assert_eq!(
+                scene_group(&scene, "quadrant-backgrounds").children.len(),
+                4
+            );
+            assert_eq!(scene_group(&scene, "quadrant-axes").children.len(), 2);
+            let grid = scene_group(&scene, "quadrant-grid");
+            assert_eq!(grid.children.len(), 4);
+            assert!(
+                grid.children
+                    .iter()
+                    .all(|item| matches!(item, RenderItem::Path(path)
+                if path.stroke.as_ref().is_some_and(|stroke| stroke.dash_array == [4.0, 4.0])))
+            );
+            assert_eq!(scene_group(&scene, "quadrant-title").children.len(), 1);
+            let mut visible = Vec::new();
+            for group in &scene.root.children {
+                if let RenderItem::Group(group) = group {
+                    for item in &group.children {
+                        if let RenderItem::Text(text) = item {
+                            visible.push(text.text.as_str());
+                        }
+                    }
+                }
+            }
+            let compact = |text: &str| {
+                text.chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>()
+            };
+            let visible = compact(&visible.join(" "));
+            for required in [
+                "Deployment priorities",
+                "Low effort",
+                "High effort",
+                "Low impact",
+                "High impact",
+                "Schedule",
+                "Do first",
+                "Delegate",
+                "Reconsider",
+                "Customer onboarding 東京",
+                "International deployment",
+            ] {
+                assert!(visible.contains(&compact(required)), "lost {required}");
+            }
+            for (index, node) in layout.nodes.iter().enumerate() {
+                let group = scene_group(&scene, &format!("quadrant-point-{index}"));
+                let [RenderItem::Path(path)] = group.children.as_slice() else {
+                    panic!("each point must remain a single smooth marker")
+                };
+                let center = node.bounds.center();
+                let radius = if index == 0 { 18.0 } else { 6.0 };
+                assert_eq!(path.source, RenderSource::Node(node.node_index));
+                assert_eq!(
+                    path.commands[0],
+                    PathCmd::MoveTo {
+                        x: center.x + radius,
+                        y: center.y
+                    }
+                );
+                let endpoints: Vec<_> = path
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        PathCmd::CubicTo { x, y, .. } => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    endpoints,
+                    [
+                        (center.x, center.y + radius),
+                        (center.x - radius, center.y),
+                        (center.x, center.y - radius),
+                        (center.x + radius, center.y),
+                    ]
+                );
+                assert_eq!(
+                    (path.marker_start, path.marker_end),
+                    (MarkerKind::None, MarkerKind::None)
+                );
+                if index == 0 {
+                    assert_eq!(
+                        path.fill,
+                        Some(FillStyle::Solid {
+                            color: "#ef4444".to_owned(),
+                            opacity: 1.0
+                        })
+                    );
+                    let stroke = path.stroke.as_ref().unwrap();
+                    assert_eq!(stroke.color, "#111827");
+                    assert_eq!(stroke.width, 4.0);
+                }
+            }
+            assert!(
+                matches!(scene.root.children.last(), Some(RenderItem::Group(group))
+                if group.id.as_deref() == Some("quadrant-point-1")),
+                "markers must stay above caption plates"
+            );
+        }
+    }
+
+    #[test]
+    fn quadrant_scene_keeps_empty_chart_furniture_and_rejects_resource_paints() {
+        let empty =
+            fm_parser::parse("quadrantChart\nx-axis Low --> High\ny-axis Small --> Large\n").ir;
+        assert!(empty.nodes.is_empty());
+        let scene = crate::build_render_scene(&empty, &crate::layout_diagram(&empty));
+        assert_eq!(
+            scene_group(&scene, "quadrant-backgrounds").children.len(),
+            4
+        );
+        assert_eq!(scene_group(&scene, "quadrant-axes").children.len(), 2);
+        assert!(
+            !scene_group(&scene, "quadrant-x-axis-left")
+                .children
+                .is_empty()
+        );
+
+        let mut ir = fm_parser::parse("quadrantChart\nA: [0.25, 0.75]\n").ir;
+        ir.quadrant_meta.as_mut().unwrap().points[0].style = Some(fm_core::IrQuadrantPointStyle {
+            color: Some("url(https://example.com/fill.svg#paint)".to_owned()),
+            stroke_color: Some("url(#external-paint)".to_owned()),
+            stroke_width: Some(0.0),
+            ..Default::default()
+        });
+        let scene = crate::build_render_scene(&ir, &crate::layout_diagram(&ir));
+        let [RenderItem::Path(point)] = scene_group(&scene, "quadrant-point-0").children.as_slice()
+        else {
+            panic!("missing data marker")
+        };
+        assert!(
+            point.stroke.is_none(),
+            "zero-width borders must not become the canvas's previous stroke"
+        );
+        assert!(!format!("{scene:?}").contains("url("));
+        assert_eq!(
+            point.fill,
+            Some(FillStyle::Solid {
+                color: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS[0].to_owned(),
+                opacity: 1.0,
+            })
+        );
     }
 
     #[test]

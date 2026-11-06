@@ -964,6 +964,11 @@ impl Canvas2dRenderer {
                     let font_weight = match group.id.as_deref() {
                         Some(id) if id.starts_with("fm-cluster-caption-") => "600 ",
                         Some(id) if id.starts_with("fm-cluster-type-caption-") => "400 ",
+                        Some(id)
+                            if id == "quadrant-title" || id.starts_with("quadrant-heading-") =>
+                        {
+                            "600 "
+                        }
                         _ => "",
                     };
                     self.render_text_item(text, ctx, offset_x, offset_y, stats, font_weight);
@@ -7663,6 +7668,141 @@ mod tests {
     }
 
     #[test]
+    fn quadrant_scene_canvas_matches_direct_chart_content_and_data_coordinates() {
+        let ir = fm_parser::parse(concat!(
+            "quadrantChart\n",
+            "title Product investment priorities\n",
+            "x-axis Low effort --> High effort\n",
+            "y-axis Low impact --> High impact\n",
+            "quadrant-1 Invest next\nquadrant-2 Quick wins\nquadrant-3 Reconsider\nquadrant-4 Research first\n",
+            "Customer onboarding 東京: [0.52, 0.52] radius: 18, color: #ef4444, stroke-color: #111827, stroke-width: 4px\n",
+            "Reliable customer exports: [0.52, 0.52]\n",
+            "Accessible product labels: [0.52, 0.52]\n",
+        )).ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 3);
+        for font_size in [15.0, 30.0] {
+            let config = CanvasRenderConfig {
+                font_size,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let scene =
+                fm_layout::build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+            let mut direct = MockCanvas2dContext::new(1400.0, 1000.0);
+            Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut direct);
+            let mut projected = MockCanvas2dContext::new(1400.0, 1000.0);
+            let result = Canvas2dRenderer::new(config.clone()).render_scene(&scene, &mut projected);
+            assert_eq!(result.nodes_drawn, 3);
+            assert_eq!(
+                result.edges_drawn, 0,
+                "chart axes and leaders are not graph edges"
+            );
+            let (_, direct_texts) = record_gantt_canvas_paint(direct.operations());
+            let (fills, projected_texts) = record_gantt_canvas_paint(projected.operations());
+            assert_eq!(direct_texts.len(), projected_texts.len());
+            for (expected, actual) in direct_texts.iter().zip(&projected_texts) {
+                assert_eq!(actual.text, expected.text);
+                assert!(
+                    (actual.x - expected.x).abs() < 0.01,
+                    "{} moved horizontally",
+                    actual.text
+                );
+                assert!(
+                    (actual.y - expected.y).abs() < 0.01,
+                    "{} moved vertically",
+                    actual.text
+                );
+                assert_eq!(actual.paint.fill, expected.paint.fill);
+                assert_eq!(actual.paint.align, expected.paint.align);
+                assert_eq!(actual.paint.baseline, expected.paint.baseline);
+                assert_eq!(
+                    actual.paint.font.contains("600 "),
+                    expected.paint.font.contains("600 ")
+                );
+            }
+            assert_eq!(
+                fills
+                    .iter()
+                    .filter(|fill| (fill.paint.alpha - 0.10).abs() < 1e-6)
+                    .count(),
+                4
+            );
+            assert_eq!(
+                fills
+                    .iter()
+                    .filter(|fill| (fill.paint.alpha - 0.92).abs() < 1e-6)
+                    .count(),
+                3
+            );
+            assert!(
+                projected
+                    .operations()
+                    .contains(&DrawOperation::SetFillStyle("#ef4444".to_owned()))
+            );
+            assert!(
+                projected
+                    .operations()
+                    .contains(&DrawOperation::SetStrokeStyle("#111827".to_owned()))
+            );
+            assert!(
+                projected
+                    .operations()
+                    .contains(&DrawOperation::SetLineWidth(4.0))
+            );
+            let circles: Vec<_> = projected
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::BezierCurveTo(_, _, _, _, x, y) => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                circles.len(),
+                12,
+                "one smooth four-segment marker per data point"
+            );
+            for (index, (endpoints, node)) in circles.chunks_exact(4).zip(&layout.nodes).enumerate()
+            {
+                let center = node.bounds.center();
+                let x = f64::from(center.x - scene.bounds.x);
+                let y = f64::from(center.y - scene.bounds.y);
+                let radius = if index == 0 { 18.0 } else { 6.0 };
+                for (actual, expected) in endpoints.iter().zip([
+                    (x, y + radius),
+                    (x - radius, y),
+                    (x, y - radius),
+                    (x + radius, y),
+                ]) {
+                    assert!((actual.0 - expected.0).abs() < 0.001);
+                    assert!((actual.1 - expected.1).abs() < 0.001);
+                }
+            }
+            let last_text = projected
+                .operations()
+                .iter()
+                .rposition(|operation| matches!(operation, DrawOperation::FillText(_, _, _)))
+                .unwrap();
+            let first_marker = projected
+                .operations()
+                .iter()
+                .position(|operation| {
+                    matches!(operation, DrawOperation::BezierCurveTo(_, _, _, _, _, _))
+                })
+                .unwrap();
+            assert!(
+                last_text < first_marker,
+                "labels may not paint over the data"
+            );
+            let mut repeated = MockCanvas2dContext::new(1400.0, 1000.0);
+            Canvas2dRenderer::new(config).render_scene(&scene, &mut repeated);
+            assert_eq!(projected.operations(), repeated.operations());
+        }
+    }
+
+    #[test]
     fn quadrant_canvas_draws_small_styled_markers_and_fits_all_captions() {
         let mut ir = fm_parser::parse(
             "quadrantChart\n\
@@ -11756,6 +11896,62 @@ mod tests {
         // field twice would satisfy the assertion above while corrupting the rest of the packet.
         assert_eq!(count("SourcePort"), 1, "an unwrapped field was duplicated");
         assert_eq!(count("Checksum"), 1, "an unwrapped field was duplicated");
+    }
+
+    #[test]
+    fn canvas_scene_draws_every_packet_continuation_at_its_layout_position() {
+        for (start, end) in [(0, 63), (28, 70), (31, 32), (0, 31)] {
+            let ir = fm_parser::parse(&format!(
+                "packet-beta\n{start}-{end}: \"Payload\"\n{}: \"Flag\"\n",
+                end + 1
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+            let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+            let rows: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::FillText(text, x, y) if text == "Payload" => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            let segments = (end / 32 - start / 32 + 1) as usize;
+            assert_eq!(rows.len(), segments);
+            for continuation in &layout.extensions.packet_field_continuations {
+                let center = continuation.bounds.center();
+                let expected = (
+                    f64::from(center.x - scene.bounds.x),
+                    f64::from(center.y - scene.bounds.y),
+                );
+                assert!(
+                    rows.iter().any(|(x, y)| {
+                        (x - expected.0).abs() < 0.001 && (y - expected.1).abs() < 0.001
+                    }),
+                    "missing continuation at {expected:?}: {rows:?}"
+                );
+            }
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| {
+                        matches!(op, DrawOperation::FillText(text, _, _) if text == "Flag")
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                result.nodes_drawn, 2,
+                "segments retain one semantic field identity"
+            );
+        }
     }
 
     /// A packet whose fields all fit one row gains no continuation.
