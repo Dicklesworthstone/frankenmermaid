@@ -11,11 +11,11 @@
 //! declares `dash_phase` before `dash`, `EDGE_WGSL` binds `dash` before `dash_phase`), so a
 //! positional check would certify exactly the bug this file exists to catch.
 
-use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
 use fm_render_canvas::gpu_pipeline::{
     DrawBatch, PipelineDescriptor, PrimitiveFamily, VertexFormat, draw_batches, edge_pipeline,
     node_pipeline, pie_pipeline, pipelines, text_pipeline, xy_area_pipeline,
 };
+use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
 
 /// The stroke width the plan is built with, taken from the Canvas2D config rather than written as
 /// a literal. `GpuRenderPlan::from_layout` documents that this is how a plan and a raster render of
@@ -462,6 +462,8 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::Node,
             PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text,
+            PrimitiveFamily::SequenceNumber,
+            PrimitiveFamily::SequenceNumberText,
             PrimitiveFamily::LifecycleMarker,
         ],
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
@@ -481,7 +483,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
         ),
         (
             "sequence",
-            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n participant Alice\n participant Bob\n rect rgb(220,240,255)\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n end\n",
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n autonumber\n participant Alice\n participant Bob\n rect rgb(220,240,255)\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n end\n",
             &[
                 Family::SequenceBackground,
                 Family::BandLane,
@@ -489,6 +491,8 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
                 Family::Activation,
                 Family::LifecycleMarker,
                 Family::SequenceNote,
+                Family::SequenceNumber,
+                Family::SequenceNumberText,
             ],
         ),
         (
@@ -514,7 +518,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
         (
             "Sankey columns",
             include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
-            &[Family::BandColumn],
+            &[Family::BandSection],
         ),
         (
             "treemap",
@@ -550,6 +554,35 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
                 "{name} planned no executable {family:?} geometry"
             );
         }
+        if ir.diagram_type == fm_core::DiagramType::Sankey {
+            // Canvas draws column bands as filled panels. Require each panel's actual geometry
+            // in the executable family, not the obsolete separator-only representation.
+            let columns: Vec<_> = layout
+                .extensions
+                .bands
+                .iter()
+                .enumerate()
+                .filter(|(_, band)| band.kind == fm_layout::LayoutBandKind::Column)
+                .collect();
+            assert!(!columns.is_empty());
+            assert_eq!(plan.band_section_instances.len(), columns.len());
+            for (index, column) in columns {
+                let panel = plan
+                    .band_section_instances
+                    .iter()
+                    .find(|panel| panel.node_index as usize == index)
+                    .expect("each Sankey column must reach the panel buffer");
+                assert_eq!(
+                    panel.center,
+                    [column.bounds.center().x, column.bounds.center().y]
+                );
+                assert_eq!(
+                    panel.half_extent,
+                    [column.bounds.width * 0.5, column.bounds.height * 0.5]
+                );
+                assert!(panel.fill[3] > 0.0);
+            }
+        }
         let planned: usize = [
             plan.xy_plot_instances.len(),
             plan.xy_axis_segments.len(),
@@ -580,6 +613,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
             plan.node_instances.len(),
             plan.node_border_segments.len(),
             plan.text_quads.len(),
+            plan.sequence_number_instances.len(),
         ]
         .into_iter()
         .sum();
@@ -983,11 +1017,92 @@ fn xy_charts_submit_axes_and_filled_areas_before_series_and_labels() {
     assert_eq!(bars.instance_count, 2);
 }
 
-/// Interaction fragments use two executable GPU families: an SDF fill followed by EDGE-shader
+#[test]
+fn sequence_numbers_submit_between_ordinary_labels_and_foreground_destruction_crosses() {
+    use PrimitiveFamily as Family;
+
+    let ir = fm_parser::parse(
+        "sequenceDiagram\nautonumber 4294967295 4294967295\nA->>B: request\nB-->>A: response\ndestroy B\nA->>B: goodbye\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    let batches = draw_batches(&plan);
+    let ordinary = batches
+        .iter()
+        .position(|batch| batch.family == Family::Text)
+        .unwrap();
+    let badge = batches
+        .iter()
+        .position(|batch| batch.family == Family::SequenceNumber)
+        .unwrap();
+    let digits = batches
+        .iter()
+        .position(|batch| batch.family == Family::SequenceNumberText)
+        .unwrap();
+    let crosses = batches
+        .iter()
+        .position(|batch| batch.family == Family::LifecycleMarker)
+        .unwrap();
+    assert!(ordinary < badge && badge < digits && digits < crosses);
+    assert_eq!(
+        batches[ordinary].instance_count as usize,
+        plan.sequence_number_quad_start
+    );
+    assert_eq!(
+        batches[badge].instance_count as usize,
+        plan.sequence_number_instances.len()
+    );
+    assert_eq!(batches[badge].instance_count, 3);
+    assert_eq!(
+        batches[digits].instance_count as usize,
+        plan.text_quads.len() - plan.sequence_number_quad_start
+    );
+    assert!(
+        batches[digits].instance_count >= 30,
+        "all exact multi-digit values must reach a text batch"
+    );
+    assert_eq!(
+        batches[ordinary].instance_count + batches[digits].instance_count,
+        plan.text_quads.len() as u32,
+        "each shared text quad is uploaded once, with its original run index"
+    );
+}
+
+#[test]
+fn ordinary_plan_constructors_keep_all_text_in_the_ordinary_pass() {
+    for source in [
+        "flowchart LR\nA[Alpha] --> B[Beta]\n",
+        "xychart-beta\nx-axis [A, B]\ny-axis 0 --> 10\nbar [3, 7]\n",
+        "quadrantChart\nx-axis Low --> High\ny-axis Low --> High\nAlpha: [0.2, 0.8]\n",
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        assert!(!plan.text_quads.is_empty());
+        assert!(plan.sequence_number_instances.is_empty());
+        assert_eq!(plan.sequence_number_quad_start, plan.text_quads.len());
+        let batches = draw_batches(&plan);
+        assert_eq!(
+            batches
+                .iter()
+                .find(|batch| batch.family == PrimitiveFamily::Text)
+                .unwrap()
+                .instance_count as usize,
+            plan.text_quads.len()
+        );
+        assert!(!batches.iter().any(|batch| matches!(
+            batch.family,
+            PrimitiveFamily::SequenceNumber | PrimitiveFamily::SequenceNumberText
+        )));
+    }
+}
+
+/// Interaction fragments use two executable GPU families: an SDF keyword tab followed by EDGE-shader
 /// dashed segments. Keeping the two batches distinct is what prevents the known wrong rendering
 /// where a plain rect's solid SDF outline pretended to be a dashed sequence frame.
 #[test]
-fn an_alt_fragment_submits_fill_and_dashed_border_batches() {
+fn an_alt_fragment_submits_keyword_tab_and_dashed_border_batches() {
     let ir = fm_parser::parse(
         "sequenceDiagram\n  Alice->>Bob: request\n  alt approved\n    Bob-->>Alice: yes\n  else rejected\n    Bob-->>Alice: no\n  end\n",
     )

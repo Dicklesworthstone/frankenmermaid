@@ -154,12 +154,16 @@ pub enum PrimitiveFamily {
     /// the draw order: edges go under the boxes they connect, a border goes on top of the box it
     /// outlines. Same shader, same layout, different moment.
     NodeBorder,
-    /// Sequence interaction-frame fills, before their dashed boundaries and message edges.
+    /// Filled sequence keyword tabs, before their dashed frame boundaries and message edges.
     SequenceFragment,
     /// Dashed interaction-frame borders and branch dividers, drawn after their fills.
     SequenceFragmentBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
+    /// Sequence-counter capsules, above ordinary labels.
+    SequenceNumber,
+    /// Exact counter digits, drawn above their capsules and below destruction crosses.
+    SequenceNumberText,
 }
 
 /// Borrowed geometry for one submission layer. Both the batch count and the device upload read
@@ -224,7 +228,13 @@ impl PrimitiveFamily {
             Self::Pie => PrimitiveInstances::Pies(&plan.pie_wedges),
             Self::Node => PrimitiveInstances::Nodes(&plan.node_instances),
             Self::NodeBorder => PrimitiveInstances::Edges(&plan.node_border_segments),
-            Self::Text => PrimitiveInstances::Text(&plan.text_quads),
+            Self::Text => PrimitiveInstances::Text(
+                &plan.text_quads[..plan.sequence_number_quad_start.min(plan.text_quads.len())],
+            ),
+            Self::SequenceNumber => PrimitiveInstances::Nodes(&plan.sequence_number_instances),
+            Self::SequenceNumberText => PrimitiveInstances::Text(
+                &plan.text_quads[plan.sequence_number_quad_start.min(plan.text_quads.len())..],
+            ),
         }
     }
 }
@@ -529,7 +539,7 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 29] {
+pub const fn pipelines() -> [PipelineDescriptor; 31] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
@@ -565,6 +575,12 @@ pub const fn pipelines() -> [PipelineDescriptor; 29] {
         node_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
+        node_family(PrimitiveFamily::SequenceNumber, "fm-sequence-number"),
+        PipelineDescriptor {
+            family: PrimitiveFamily::SequenceNumberText,
+            label: "fm-sequence-number-text",
+            ..text_pipeline()
+        },
         edge_family(PrimitiveFamily::LifecycleMarker, "fm-lifecycle-marker"),
     ]
 }

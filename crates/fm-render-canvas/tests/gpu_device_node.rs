@@ -1061,11 +1061,10 @@ fn one_submission_composes_every_family_into_a_single_image() {
     }
 }
 
-/// A sequence interaction frame must survive the whole device path, not merely exist in a CPU plan.
-/// The sample is deliberately in the lower-right interior: it is away from the caption, dashed
-/// perimeter, participants, and message rows, so opacity there can only come from the fragment fill.
+/// Interaction interiors must remain transparent after real submission; only the keyword tab
+/// supplies a solid surface above the conversation's background.
 #[test]
-fn one_submission_paints_a_sequence_fragment_interior() {
+fn one_submission_paints_a_sequence_keyword_tab_without_tinting_the_frame_interior() {
     let Some(gpu) = device_or_skip() else {
         return;
     };
@@ -1084,7 +1083,7 @@ fn one_submission_paints_a_sequence_fragment_interior() {
     assert_eq!(
         plan.sequence_fragment_instances.len(),
         1,
-        "CONTROL FAILED: fragment has no GPU fill instance"
+        "CONTROL FAILED: fragment has no GPU keyword-tab instance"
     );
     assert!(
         plan.sequence_fragment_border_segments.len() >= 5,
@@ -1099,10 +1098,72 @@ fn one_submission_paints_a_sequence_fragment_interior() {
     let sample_y = fragment.bounds.y + (fragment.bounds.height * 0.8);
     let (x, y) = image.pixel_for(&plan.bounds, sample_x, sample_y);
     let pixel = image.pixel(x, y).expect("interior maps inside the image");
+    assert_eq!(
+        pixel[3], 0,
+        "a transparent interaction frame must not tint its conversation"
+    );
+    let tab = plan.sequence_fragment_instances[0];
+    let (x, y) = image.pixel_for(
+        &plan.bounds,
+        tab.center[0] + tab.half_extent[0] * 0.8,
+        tab.center[1] + tab.half_extent[1] * 0.7,
+    );
     assert!(
-        pixel[3] > 0,
-        "fragment interior at ({sample_x}, {sample_y}) is transparent after full device submission; \
-         the frame was planned but not uploaded or drawn"
+        image.pixel(x, y).unwrap()[3] > 0,
+        "keyword tab was planned but never drawn"
+    );
+}
+
+/// Number capsules must survive whole-diagram submission with the geometry layout measured.
+#[test]
+fn sequence_number_capsules_reach_the_device_with_semicircular_ends() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let ir = fm_parser::parse("sequenceDiagram\nautonumber 4294967295\nA->>B: request\n").ir;
+    let config = CanvasRenderConfig {
+        font_size: 48.0,
+        ..Default::default()
+    };
+    let layout = fm_layout::layout_diagram_with_config(
+        &ir,
+        fm_layout::LayoutConfig {
+            font_metrics: Some(config.font_metrics()),
+            ..Default::default()
+        },
+    );
+    let mut plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    assert_eq!(plan.sequence_number_instances.len(), 1);
+    // Synthetic coverage makes every digit cell a solid square, hiding the entire capsule.
+    // Retain ordinary labels while isolating the capsule from that intentionally fake digit ink.
+    plan.text_quads.truncate(plan.sequence_number_quad_start);
+    let badge = plan.sequence_number_instances[0];
+    assert!(badge.half_extent[0] > badge.half_extent[1] * 2.0);
+    let atlas = GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &solid_coverage(&plan.glyph_atlas));
+    let pipelines = DiagramPipelines::new(&gpu);
+    let image = render_diagram(&gpu, &pipelines, &plan, Some(&atlas), 1024, 512).unwrap();
+    let mut omitted = plan.clone();
+    omitted.sequence_number_instances.clear();
+    let without_badge =
+        render_diagram(&gpu, &pipelines, &omitted, Some(&atlas), 1024, 512).unwrap();
+    assert_ne!(
+        image.rgba, without_badge.rgba,
+        "number capsules were planned but never submitted"
+    );
+
+    let left = badge.center[0] - badge.half_extent[0];
+    let top = badge.center[1] - badge.half_extent[1];
+    let radius = badge.half_extent[1];
+    let (inside_x, inside_y) =
+        image.pixel_for(&plan.bounds, left + radius, badge.center[1] - radius * 0.4);
+    assert!(image.pixel(inside_x, inside_y).unwrap()[3] > 0);
+    assert_eq!(without_badge.pixel(inside_x, inside_y).unwrap()[3], 0);
+    let (corner_x, corner_y) =
+        image.pixel_for(&plan.bounds, left + radius * 0.2, top + radius * 0.2);
+    assert_eq!(
+        image.pixel(corner_x, corner_y).unwrap()[3],
+        0,
+        "a number capsule must have semicircular ends, not a small-radius rounded rectangle"
     );
 }
 
@@ -1127,6 +1188,11 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
             "sequence region",
             "sequenceDiagram\n participant Alice\n participant Bob\n rect rgb(30,70,110)\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n end\n",
             |plan| plan.sequence_background_instances.clear(),
+        ),
+        (
+            "sequence number digits",
+            "sequenceDiagram\nautonumber 4294967295 4294967295\nA->>B: request\nB-->>A: response\n",
+            |plan| plan.text_quads.truncate(plan.sequence_number_quad_start),
         ),
         ("lifelines", SEQUENCE, |plan| {
             plan.band_lane_segments.clear()
@@ -1170,9 +1236,9 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
             |plan| plan.axis_tick_segments.clear(),
         ),
         (
-            "column separators",
+            "Sankey column panels",
             include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
-            |plan| plan.band_column_segments.clear(),
+            |plan| plan.band_section_instances.clear(),
         ),
         (
             "treemap tiles",
