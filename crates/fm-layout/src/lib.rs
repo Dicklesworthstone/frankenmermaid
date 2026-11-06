@@ -2559,6 +2559,59 @@ impl LayoutSequenceMessage {
     }
 }
 
+/// A message's exact sequence counter and the badge needed to keep all its digits readable.
+/// Numbering is independent of captions: an unlabeled or self-directed message still has an ordinal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutSequenceNumber {
+    pub edge_index: usize,
+    pub text: String,
+    pub bounds: LayoutRect,
+    pub font_size: f32,
+}
+
+impl LayoutSequenceNumber {
+    pub const FONT_SCALE: f32 = 0.8;
+
+    /// Resolve directive-scoped numbering for a visible message at its actual source endpoint.
+    #[must_use]
+    pub fn for_edge(
+        ir: &MermaidDiagramIr,
+        edge: &LayoutEdgePath,
+        metrics: &fm_core::FontMetrics,
+    ) -> Option<Self> {
+        if ir.diagram_type != DiagramType::Sequence
+            || edge.bundled
+            || edge.points.len() < 2
+            || ir.edges.get(edge.edge_index)?.arrow == fm_core::ArrowType::Invisible
+        {
+            return None;
+        }
+        let number = ir
+            .sequence_meta
+            .as_ref()?
+            .autonumber_value(edge.edge_index)?;
+        let center = *edge.points.first()?;
+        if !center.x.is_finite() || !center.y.is_finite() {
+            return None;
+        }
+        let text = number.to_string();
+        let font_size = metrics.font_size() * Self::FONT_SCALE;
+        let height = font_size.max(12.0);
+        let width = (metrics.estimate_width(&text) * Self::FONT_SCALE + 4.0).max(height);
+        Some(Self {
+            edge_index: edge.edge_index,
+            text,
+            bounds: LayoutRect {
+                x: center.x - width * 0.5,
+                y: center.y - height * 0.5,
+                width,
+                height,
+            },
+            font_size,
+        })
+    }
+}
+
 impl LayoutExtensions {
     #[must_use]
     pub fn sequence_message(&self, edge_index: usize) -> Option<&LayoutSequenceMessage> {
@@ -3765,6 +3818,15 @@ pub fn build_render_scene_with_metrics(
             metrics,
         );
     }
+    if ir.diagram_type == DiagramType::Sequence {
+        for number in layout
+            .edges
+            .iter()
+            .filter_map(|edge| LayoutSequenceNumber::for_edge(ir, edge, metrics))
+        {
+            include_packing_bounds(&mut content_bounds, number.bounds);
+        }
+    }
     let bounds = RenderRect::from(content_bounds.unwrap_or(label_bounds));
 
     let mut root =
@@ -3792,6 +3854,10 @@ pub fn build_render_scene_with_metrics(
     root.children.push(RenderItem::Group(node_layer));
     root.children.push(RenderItem::Group(label_layer));
     if ir.diagram_type == DiagramType::Sequence {
+        let numbers = build_sequence_number_layer(ir, layout, metrics);
+        if !numbers.children.is_empty() {
+            root.children.push(RenderItem::Group(numbers));
+        }
         let markers = build_sequence_lifecycle_layer(layout);
         if !markers.children.is_empty() {
             root.children.push(RenderItem::Group(markers));
@@ -4997,6 +5063,47 @@ fn build_sequence_lifecycle_layer(layout: &DiagramLayout) -> RenderGroup {
                 ));
             }
         }
+    }
+    layer
+}
+
+fn build_sequence_number_layer(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("sequence-numbers")));
+    for number in layout
+        .edges
+        .iter()
+        .filter_map(|edge| LayoutSequenceNumber::for_edge(ir, edge, metrics))
+    {
+        let source = RenderSource::Edge(number.edge_index);
+        let center = number.bounds.center();
+        layer.children.push(RenderItem::Path(RenderPath {
+            source,
+            commands: rounded_rect_path(number.bounds, number.bounds.height * 0.5),
+            fill: Some(FillStyle::Solid {
+                color: String::from("#475569"),
+                opacity: 1.0,
+            }),
+            stroke: None,
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        }));
+        layer.children.push(RenderItem::Text(RenderText {
+            source,
+            text: number.text,
+            x: center.x,
+            y: center.y,
+            font_size: number.font_size,
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            },
+        }));
     }
     layer
 }
@@ -11340,6 +11447,9 @@ fn layout_diagram_sequence_traced_with_metrics(
         .chain(sequence_notes.iter().map(|note| note.bounds))
         .chain(sequence_messages.iter().map(|message| message.bounds))
         .chain(sequence_fragments.iter().map(|fragment| fragment.bounds))
+        .chain(edges.iter().filter_map(|edge| {
+            LayoutSequenceNumber::for_edge(ir, edge, metrics).map(|number| number.bounds)
+        }))
         .chain(edges.iter().flat_map(|edge| {
             edge.points.iter().map(|point| LayoutRect {
                 x: point.x - 2.0,
@@ -35307,6 +35417,137 @@ mod tests {
                 .children
                 .iter()
                 .any(|item| { matches!(item, RenderItem::Text(text) if text.text == "[busy]") })
+        );
+    }
+
+    #[test]
+    fn render_scene_sequence_numbers_preserve_ranges_and_exact_values() {
+        use super::RenderSource;
+        let ir = parse(
+            "sequenceDiagram\nautonumber 10 5\nA->>B: first\nB->>B: self\n\
+             autonumber off\nB-->>A: skipped\nautonumber 16777217 3\n\
+             A->>B:\nB-->>A: last\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 5);
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let numbers = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("sequence-numbers") => {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .expect("numbered sequence foreground");
+        let texts: Vec<_> = numbers
+            .children
+            .iter()
+            .filter_map(|item| match item {
+                RenderItem::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 4);
+        for (text, (edge_index, expected)) in
+            texts
+                .iter()
+                .zip([(0, "10"), (1, "15"), (3, "16777217"), (4, "16777220")])
+        {
+            assert_eq!(text.text, expected);
+            assert_eq!(text.source, RenderSource::Edge(edge_index));
+            let start = layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .unwrap()
+                .points[0];
+            assert!((text.x - start.x).abs() < 0.01 && (text.y - start.y).abs() < 0.01);
+        }
+        assert_eq!(
+            numbers.children.len(),
+            8,
+            "every counter has its own background"
+        );
+        let number_layer_index = scene.root.children.iter().position(|item| {
+            matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("sequence-numbers"))
+        }).unwrap();
+        let labels_index = scene.root.children.iter().position(|item| {
+            matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("labels"))
+        }).unwrap();
+        assert!(number_layer_index > labels_index);
+    }
+
+    #[test]
+    fn sequence_numbers_reserve_room_for_full_u64_counters() {
+        use super::LayoutSequenceNumber;
+        let ir = parse(
+            "sequenceDiagram\nautonumber 4294967295 4294967295\nA->>B: first\nB->>A: second\n",
+        )
+        .ir;
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 64.0,
+            ..Default::default()
+        });
+        let layout = super::layout_diagram_with_config(
+            &ir,
+            super::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        let values: Vec<_> = layout
+            .edges
+            .iter()
+            .filter_map(|edge| LayoutSequenceNumber::for_edge(&ir, edge, &metrics))
+            .collect();
+        assert_eq!(
+            values
+                .iter()
+                .map(|number| number.text.as_str())
+                .collect::<Vec<_>>(),
+            ["4294967295", "8589934590"]
+        );
+        for number in values {
+            assert!(number.bounds.width > number.bounds.height);
+            assert!(number.bounds.x >= layout.bounds.x - 0.01);
+            assert!(number.bounds.y >= layout.bounds.y - 0.01);
+            assert!(
+                number.bounds.x + number.bounds.width
+                    <= layout.bounds.x + layout.bounds.width + 0.01
+            );
+            assert!(
+                number.bounds.y + number.bounds.height
+                    <= layout.bounds.y + layout.bounds.height + 0.01
+            );
+            let digit_width =
+                metrics.estimate_width(&number.text) * LayoutSequenceNumber::FONT_SCALE;
+            assert!(number.bounds.width >= digit_width + 4.0);
+        }
+    }
+
+    #[test]
+    fn render_scene_sequence_numbers_skip_hidden_and_absorbed_messages() {
+        let mut ir = parse("sequenceDiagram\nautonumber\nA->>B: hidden\nB->>A: absorbed\n").ir;
+        let mut layout = layout_diagram(&ir);
+        ir.edges[0].arrow = fm_core::ArrowType::Invisible;
+        layout.edges[1].bundled = true;
+        let scene = build_render_scene(&ir, &layout);
+        assert!(!scene.root.children.iter().any(|item| {
+            matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("sequence-numbers"))
+        }));
+        let plain = parse("sequenceDiagram\nA->>B: unnumbered\n").ir;
+        assert!(
+            super::LayoutSequenceNumber::for_edge(
+                &plain,
+                &layout_diagram(&plain).edges[0],
+                &fm_core::FontMetrics::default_metrics(),
+            )
+            .is_none()
         );
     }
 

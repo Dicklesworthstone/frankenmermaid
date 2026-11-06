@@ -2484,11 +2484,24 @@ fn render_scene_group(
         Some("gantt-sections" | "sequence-lifelines")
     )
     .then(|| resolve_theme(ir, config));
+    let sequence_number_theme =
+        (group.id.as_deref() == Some("sequence-numbers")).then(|| resolve_theme(ir, config));
     let packet_layer = ir.is_some_and(|ir| ir.diagram_type == DiagramType::PacketBeta)
         && matches!(group.id.as_deref(), Some("nodes" | "labels"));
     let mut announced_packet_nodes = std::collections::BTreeSet::new();
     for (index, child) in group.children.iter().enumerate() {
         let mut rendered = render_scene_item(child, config, ir, clip_defs, clip_id_counter);
+        if let Some(theme) = &sequence_number_theme {
+            rendered = match child {
+                RenderItem::Path(_) => rendered
+                    .fill(&theme.colors.edge)
+                    .class("fm-sequence-number-background"),
+                RenderItem::Text(_) => rendered
+                    .fill(&theme.colors.background)
+                    .class("fm-sequence-number"),
+                RenderItem::Group(_) => rendered,
+            };
+        }
         if packet_layer {
             // A field retains one semantic identity across every wrapped row. Its first path
             // announces the complete name; continuation paths and all visible label rows are
@@ -4918,6 +4931,21 @@ fn svg_geometry(
         bounds.width = right - bounds.x;
         bounds.height = bottom - bounds.y;
     }
+    if ir.diagram_type == DiagramType::Sequence {
+        let metrics = config.font_metrics();
+        for number in layout
+            .edges
+            .iter()
+            .filter_map(|edge| fm_layout::LayoutSequenceNumber::for_edge(ir, edge, &metrics))
+        {
+            let right = (bounds.x + bounds.width).max(number.bounds.x + number.bounds.width);
+            let bottom = (bounds.y + bounds.height).max(number.bounds.y + number.bounds.height);
+            bounds.x = bounds.x.min(number.bounds.x);
+            bounds.y = bounds.y.min(number.bounds.y);
+            bounds.width = right - bounds.x;
+            bounds.height = bottom - bounds.y;
+        }
+    }
 
     let mut frame = SvgFrame {
         viewbox_width: (bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
@@ -5502,6 +5530,13 @@ fn render_layout_to_svg(
         write_treemap_tiles_into(&mut tiles_svg, ir, chart, offset_x, offset_y, config);
         doc = doc.child(Element::raw_svg(tiles_svg));
     }
+    // Participant-group clusters must precede all sequence furniture. Keep sequence layers aside
+    // until those backgrounds are emitted; opaque `box` and `rect` colors must never cover a
+    // lifeline, activation or note.
+    let mut sequence_backgrounds = Vec::new();
+    let mut sequence_furniture = Vec::new();
+    let mut sequence_foreground = Vec::new();
+
     // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
     // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
     // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
@@ -5565,7 +5600,11 @@ fn render_layout_to_svg(
                 );
             }
         }
-        doc = doc.child(Element::raw_svg(bands_svg));
+        if ir.diagram_type == DiagramType::Sequence {
+            sequence_furniture.push(Element::raw_svg(bands_svg));
+        } else {
+            doc = doc.child(Element::raw_svg(bands_svg));
+        }
     }
     // Continuation boxes for packet-beta fields that cross a 32-bit row boundary (bd-8vr0). Empty
     // for every other diagram and for any packet whose fields are row-aligned, so this costs
@@ -5637,7 +5676,7 @@ fn render_layout_to_svg(
         if bar.depth > 0 {
             rect = rect.class("fm-activation-nested");
         }
-        doc = doc.child(rect);
+        sequence_furniture.push(rect);
     }
 
     for marker in &layout.extensions.sequence_lifecycle_markers {
@@ -5648,7 +5687,7 @@ fn render_layout_to_svg(
                 let y0 = marker.center.y + offset_y - half;
                 let x1 = marker.center.x + offset_x + half;
                 let y1 = marker.center.y + offset_y + half;
-                doc = doc.child(
+                sequence_foreground.push(
                     Element::line()
                         .x1(x0)
                         .y1(y0)
@@ -5658,7 +5697,7 @@ fn render_layout_to_svg(
                         .stroke_width(1.5)
                         .class("fm-sequence-destroy-marker"),
                 );
-                doc = doc.child(
+                sequence_foreground.push(
                     Element::line()
                         .x1(x0)
                         .y1(y1)
@@ -5672,8 +5711,8 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render sequence diagram interaction fragments (loop, alt, par, etc.). Notes come AFTER them:
-    // a `rect` is an opaque background band, and a note inside one was painted over by it.
+    // Render transparent sequence frames above the lifelines. Their authored background colors
+    // are emitted in a separate earlier layer, including all nested `rect` regions.
     //
     // The frame is CLAMPED to the diagram's own bounds (bd-zwh3). `build_sequence_fragment_geometry`
     // anchors it at `-padding` and widens it by `2 * padding`, but the padding it uses comes from the
@@ -5715,7 +5754,18 @@ fn render_layout_to_svg(
             } else {
                 fill.clone()
             };
-            fragment_rect = fragment_rect.fill(&fill).stroke(&stroke).stroke_width(1.0);
+            sequence_backgrounds.push(
+                Element::rect()
+                    .x(fx)
+                    .y(fy)
+                    .width(fw)
+                    .height(fh)
+                    .rx(2.0)
+                    .ry(2.0)
+                    .fill(&fill)
+                    .class("fm-sequence-background"),
+            );
+            fragment_rect = fragment_rect.fill("none").stroke(&stroke).stroke_width(1.0);
         } else {
             fragment_rect = fragment_rect
                 .fill("none")
@@ -5723,7 +5773,7 @@ fn render_layout_to_svg(
                 .stroke_width(1.0)
                 .stroke_dasharray("6,4");
         }
-        doc = doc.child(fragment_rect);
+        sequence_furniture.push(fragment_rect);
 
         if fragment.kind == fm_core::FragmentKind::Rect {
             continue;
@@ -5764,7 +5814,7 @@ fn render_layout_to_svg(
         // Label background tab. Sized to the KEYWORD alone now, which is what makes it a tab.
         let label_width = label_text.len() as f32 * config.avg_char_width + 16.0;
         let label_height = config.font_size + 8.0;
-        doc = doc.child(
+        sequence_furniture.push(
             Element::rect()
                 .x(fx)
                 .y(fy)
@@ -5775,7 +5825,7 @@ fn render_layout_to_svg(
                 .stroke_width(1.0)
                 .class("fm-sequence-fragment-label-bg"),
         );
-        doc = doc.child(
+        sequence_furniture.push(
             Element::text()
                 .x(fx + 6.0)
                 .y(fy + label_height / 2.0)
@@ -5795,7 +5845,7 @@ fn render_layout_to_svg(
         // `loopText` the plain condition), so a shared class would make them impossible to theme
         // apart and would let a selector meant for one silently catch the other.
         if let Some(condition_text) = condition_text.as_deref() {
-            doc = doc.child(
+            sequence_furniture.push(
                 Element::text()
                     .x(fx + fw / 2.0)
                     .y(fy + label_height + config.font_size * 0.75)
@@ -5862,7 +5912,7 @@ fn render_layout_to_svg(
                 };
                 // The divider spans the frame, so it inherits the same out-of-canvas hazard the
                 // frame border did (bd-zwh3) and is drawn between the SAME clamped edges.
-                doc = doc.child(
+                sequence_furniture.push(
                     Element::line()
                         .x1(fx)
                         .y1(divider_y)
@@ -5874,7 +5924,7 @@ fn render_layout_to_svg(
                         .class("fm-sequence-fragment-divider"),
                 );
                 if !alternative.label.is_empty() {
-                    doc = doc.child(
+                    sequence_furniture.push(
                         Element::text()
                             .x(fx + 6.0)
                             .y(divider_y - 3.0)
@@ -5901,7 +5951,7 @@ fn render_layout_to_svg(
         let nh = note.bounds.height;
 
         // Note background with rounded corners.
-        doc = doc.child(
+        sequence_furniture.push(
             Element::rect()
                 .x(nx)
                 .y(ny)
@@ -5918,7 +5968,7 @@ fn render_layout_to_svg(
         // Note text.
         if !note.text.is_empty() {
             let note_font_size = config.font_size * fm_layout::LayoutSequenceNote::FONT_SCALE;
-            doc = doc.child(
+            sequence_furniture.push(
                 TextBuilder::new(&note.text)
                     .x(nx + fm_layout::LayoutSequenceNote::PADDING_X)
                     .y(ny + fm_layout::LayoutSequenceNote::PADDING_Y)
@@ -6155,6 +6205,10 @@ fn render_layout_to_svg(
         }
     }
 
+    doc = doc
+        .children(sequence_backgrounds)
+        .children(sequence_furniture);
+
     for divider in &layout.extensions.cluster_dividers {
         let cluster_span = ir
             .clusters
@@ -6390,6 +6444,9 @@ fn render_layout_to_svg(
                 .class("fm-sequence-mirror-header")
                 .write_to_string(out);
             }
+            for marker in &sequence_foreground {
+                marker.write_to_string(out);
+            }
         });
     }
 
@@ -6624,6 +6681,8 @@ fn render_layout_to_svg(
         ));
         doc = doc.child(node_elem.class("fm-sequence-mirror-header"));
     }
+
+    doc = doc.children(sequence_foreground);
 
     if legend_enabled {
         doc = doc.child(render_c4_legend(
@@ -16628,10 +16687,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 /// `10 Ping` and why two tests in this repo disagreed about whether a period belonged after the
 /// number. Neither spelling was the incumbent's, because the incumbent does not build a prefix.
 ///
-/// Positioned at the message's START point, which is where mermaid draws it, rather than at the
-/// label midpoint. NOT claimed as pixel parity: mermaid also draws a filled circle behind the digits
-/// and themes them via `sequenceNumberColor`, and neither is replicated here — this is the element
-/// and its content, not the decoration.
+/// Positioned at the message's source endpoint, with a filled badge and contrasting digits.
+/// Counter text stays integer-valued throughout; floating-point formatting loses large ordinals.
 ///
 /// Emitted from a WRAPPER around the edge body rather than from inside it, deliberately: the
 /// labeled-edge fast fragments are byte-identity-pinned by `golden_svg_test` and
@@ -16642,37 +16699,39 @@ fn write_sequence_number_into(
     edge_path: &LayoutEdgePath,
     context: &EdgeRenderContext<'_>,
 ) {
-    let Some(number) = context
-        .ir
-        .sequence_meta
-        .as_ref()
-        .and_then(|meta| meta.autonumber_value(edge_path.edge_index))
-    else {
+    if context.ir.diagram_type != DiagramType::Sequence {
         return;
-    };
-    let Some(start) = edge_path.points.first() else {
-        return;
-    };
-    let Some(end) = edge_path.points.last() else {
+    }
+    let Some(number) = fm_layout::LayoutSequenceNumber::for_edge(
+        context.ir,
+        edge_path,
+        &context.config.font_metrics(),
+    ) else {
         return;
     };
 
-    // ON the message's start point, as mermaid's `marker-start` circle sits.
-    let number_x = start.x + context.offset_x;
-    let number_y = start.y + context.offset_y;
-    let _ = end;
-
-    // Mermaid 11.15.0 anchors a filled `sequencenumber` marker behind every emitted number.  Keep
-    // the decoration beside the number writer so the guard is identical: a sequence message without
-    // an autonumber value emits neither element.  The text uses `dominant-baseline="central"`, so
-    // its y coordinate is already its visual center (unlike Mermaid's baseline-plus-four spelling).
-    out.push_str("<circle cx=\"");
-    let _ = crate::attributes::write_number_into(out, number_x);
-    out.push_str("\" cy=\"");
-    let _ = crate::attributes::write_number_into(out, number_y);
-    out.push_str("\" r=\"6\" fill=\"");
-    let _ = crate::attributes::write_escaped_attr(out, &context.colors.edge);
-    out.push_str("\" class=\"fm-sequence-number-background\"/>");
+    let center = number.bounds.center();
+    let number_x = center.x + context.offset_x;
+    let number_y = center.y + context.offset_y;
+    // A short ordinal keeps its circle. Longer counters get a measured capsule instead of
+    // overflowing that disc and becoming unreadable against the surrounding diagram.
+    let badge = if number.bounds.width <= number.bounds.height {
+        Element::circle()
+            .cx(number_x)
+            .cy(number_y)
+            .r(number.bounds.height * 0.5)
+    } else {
+        Element::rect()
+            .x(number.bounds.x + context.offset_x)
+            .y(number.bounds.y + context.offset_y)
+            .width(number.bounds.width)
+            .height(number.bounds.height)
+            .rx(number.bounds.height * 0.5)
+    };
+    badge
+        .fill(&context.colors.edge)
+        .class("fm-sequence-number-background")
+        .write_to_string(out);
 
     out.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(out, number_x);
@@ -16692,11 +16751,11 @@ fn write_sequence_number_into(
     // fill, class — because in this file order is output, and a sibling writer disagreeing about it
     // is how byte-identity tests start failing for reasons nobody can read.
     out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
-    let _ = crate::attributes::write_number_into(out, context.config.font_size * 0.8);
+    let _ = crate::attributes::write_number_into(out, number.font_size);
     out.push_str("\" fill=\"");
     let _ = crate::attributes::write_escaped_attr(out, &context.colors.background);
     out.push_str("\" class=\"fm-sequence-number\">");
-    let _ = crate::attributes::write_number_into(out, number as f32);
+    out.push_str(&number.text);
     out.push_str("</text>");
 }
 
@@ -23091,6 +23150,70 @@ mod tests {
     }
 
     #[test]
+    fn sequence_opaque_regions_keep_conversation_geometry_visible() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box rgb(210,220,230) Workers\nparticipant A\nparticipant B\nend\n\
+             rect rgb(250,240,220)\nA->>+B: request\n\
+             rect rgb(240,230,210)\nNote over A,B: inspecting\nB-->>A: answer\nend\n\
+             B-->>-A: done\nend\ndestroy B\nB->>A: bye\n",
+        )
+        .ir;
+        let original = fm_layout::layout_diagram(&ir);
+        assert_eq!(original.clusters.len(), 1);
+        assert_eq!(original.extensions.activation_bars.len(), 1);
+        assert_eq!(original.extensions.sequence_notes.len(), 1);
+        assert_eq!(original.extensions.sequence_lifecycle_markers.len(), 1);
+        for streaming in [true, false] {
+            let mut layout = original.clone();
+            if !streaming {
+                // Bundle labels select the retained-document path. Its sequence furniture and
+                // destruction markers must have exactly the same visibility as the streaming path.
+                layout.edges[0].bundle_count = 2;
+            }
+            for embed_theme_css in [true, false] {
+                let svg = render_svg_with_layout(
+                    &ir,
+                    &layout,
+                    &SvgRenderConfig {
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                let position = |needle: &str| svg.find(needle).expect(needle);
+                let group = position("fill=\"rgb(210,220,230)\"");
+                let outer = position("fill=\"rgb(250,240,220)\"");
+                let inner = position("fill=\"rgb(240,230,210)\"");
+                let lifeline = position("class=\"fm-sequence-lifeline\"");
+                let activation = position("class=\"fm-activation-bar\"");
+                let note = position("class=\"fm-sequence-note\"");
+                let destroy = position("class=\"fm-sequence-destroy-marker\"");
+                assert!(group < outer && outer < inner);
+                assert!(inner < lifeline && lifeline < activation && activation < note);
+                assert!(position(">bye<") < destroy);
+                assert_eq!(svg.matches("class=\"fm-sequence-background\"").count(), 2);
+                assert_eq!(
+                    svg.matches("class=\"fm-sequence-destroy-marker\"").count(),
+                    2
+                );
+                for tag in svg
+                    .split('<')
+                    .filter(|tag| tag.contains("class=\"fm-sequence-fragment\""))
+                {
+                    assert!(
+                        tag.contains("fill=\"none\""),
+                        "late frames must not hide the conversation"
+                    );
+                }
+                for label in ["request", "answer", "done", "inspecting", "bye"] {
+                    assert_eq!(issue14_drawn_text(&svg).get(label), Some(&1));
+                }
+                assert!(!issue14_drawn_text(&svg).contains_key("rect"));
+            }
+        }
+    }
+
+    #[test]
     fn renders_sequence_rect_fragment_transparent_without_opaque_fill() {
         let layout = DiagramLayout {
             nodes: Vec::new(),
@@ -26764,6 +26887,68 @@ marker#arrow-open path {
             .find(|group| group.contains(">Web</text>") && group.contains("fm-node"))
             .expect("participant group");
         assert!(!participant.contains("fm-sequence-actor-figure"));
+    }
+
+    #[test]
+    fn sequence_autonumber_ranges_render_exact_digits_on_both_svg_backends() {
+        for (source, expected) in [
+            (
+                "sequenceDiagram\nautonumber 10 5\nA->>B: first\nB->>B: self\n\
+                 autonumber off\nB-->>A: skipped\nautonumber 16777217 3\n\
+                 A->>B:\nB-->>A: last\n",
+                vec!["10", "15", "16777217", "16777220"],
+            ),
+            (
+                "sequenceDiagram\nautonumber 4294967295 4294967295\nA->>B: first\nB->>A: last\n",
+                vec!["4294967295", "8589934590"],
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        theme,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_config(&ir, &config);
+                    let drawn = issue14_drawn_text(&svg);
+                    for value in &expected {
+                        assert_eq!(
+                            drawn.get(*value),
+                            Some(&1),
+                            "missing exact counter {value} on {backend:?}"
+                        );
+                    }
+                    let number_tags: Vec<_> = svg
+                        .split('<')
+                        .filter(|tag| {
+                            tag.starts_with("text ") && tag.contains("class=\"fm-sequence-number\"")
+                        })
+                        .collect();
+                    assert_eq!(number_tags.len(), expected.len());
+                    assert_eq!(
+                        svg.matches("class=\"fm-sequence-number-background\"")
+                            .count(),
+                        expected.len()
+                    );
+                    let colors = resolve_theme(Some(&ir), &config).colors;
+                    assert!(
+                        number_tags
+                            .iter()
+                            .all(|tag| tag.contains(&format!("fill=\"{}\"", colors.background)))
+                    );
+                    assert!(
+                        !drawn.contains_key("16777216"),
+                        "f32 rounding changed the ordinal"
+                    );
+                    assert!(
+                        !drawn.contains_key("20"),
+                        "autonumber off must suppress that message"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

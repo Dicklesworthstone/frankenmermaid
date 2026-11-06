@@ -472,7 +472,7 @@ impl Canvas2dRenderer {
                     self.config.font_size as f32 * 0.5,
                 )
             });
-        let render_bounds = quadrant
+        let mut render_bounds = quadrant
             .as_ref()
             .map(|chart| chart.bounds)
             .or_else(|| treemap.as_ref().map(|chart| chart.bounds))
@@ -487,6 +487,24 @@ impl Canvas2dRenderer {
                     |pie| pie.bounds,
                 )
             });
+
+        if ir.diagram_type == DiagramType::Sequence {
+            let metrics = self.config.font_metrics();
+            for number in layout
+                .edges
+                .iter()
+                .filter_map(|edge| fm_layout::LayoutSequenceNumber::for_edge(ir, edge, &metrics))
+            {
+                let right = (render_bounds.x + render_bounds.width)
+                    .max(number.bounds.x + number.bounds.width);
+                let bottom = (render_bounds.y + render_bounds.height)
+                    .max(number.bounds.y + number.bounds.height);
+                render_bounds.x = render_bounds.x.min(number.bounds.x);
+                render_bounds.y = render_bounds.y.min(number.bounds.y);
+                render_bounds.width = right - render_bounds.x;
+                render_bounds.height = bottom - render_bounds.y;
+            }
+        }
 
         // Compute viewport to fit diagram
         let mut viewport = if self.config.auto_fit {
@@ -611,6 +629,10 @@ impl Canvas2dRenderer {
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
+        // Authored sequence `rect` regions are backgrounds. Paint every nested region before
+        // lifelines and activations so an opaque color cannot erase the conversation inside it.
+        self.draw_sequence_backgrounds(layout, ctx, offset_x, offset_y);
+
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
         self.draw_bands(layout, ir, ctx, offset_x, offset_y);
         // Paint each timeline section caption above every background, in the same order as GPU.
@@ -660,11 +682,8 @@ impl Canvas2dRenderer {
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
-        // Draw sequence lifecycle markers (destroy crosses).
-        self.draw_sequence_lifecycle_markers(layout, ctx, offset_x, offset_y);
-
         // Draw sequence notes and fragments.
-        self.draw_sequence_fragments(layout, ir, ctx, offset_x, offset_y);
+        labels_drawn += self.draw_sequence_fragments(layout, ir, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
 
         // Draw edges
@@ -672,6 +691,12 @@ impl Canvas2dRenderer {
 
         // Draw nodes
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
+
+        labels_drawn += self.draw_sequence_numbers(layout, ir, ctx, offset_x, offset_y);
+
+        // A destruction cross terminates the lifeline and must remain visible above the last
+        // message, its label, and any activation that reaches the same position.
+        self.draw_sequence_lifecycle_markers(layout, ctx, offset_x, offset_y);
 
         if let Some(journey) = &layout.extensions.journey {
             ctx.set_fill_style(&self.config.label_color);
@@ -2557,7 +2582,87 @@ impl Canvas2dRenderer {
         }
     }
 
-    /// Draw sequence diagram interaction fragment boxes (loop, alt, par, etc.).
+    /// Draw exact counters independently of message captions, including self messages.
+    fn draw_sequence_numbers<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> usize {
+        if ir.diagram_type != DiagramType::Sequence {
+            return 0;
+        }
+        let metrics = self.config.font_metrics();
+        let mut count = 0;
+        let mut number_font = None;
+        for number in layout
+            .edges
+            .iter()
+            .filter_map(|edge| fm_layout::LayoutSequenceNumber::for_edge(ir, edge, &metrics))
+        {
+            let bounds = number.bounds;
+            let center = bounds.center();
+            ctx.set_fill_style(&self.config.edge_stroke);
+            trace_rounded_rect(
+                ctx,
+                f64::from(bounds.x) + offset_x,
+                f64::from(bounds.y) + offset_y,
+                f64::from(bounds.width),
+                f64::from(bounds.height),
+                f64::from(bounds.height) * 0.5,
+            );
+            ctx.fill();
+            ctx.set_fill_style(
+                self.config
+                    .background
+                    .as_deref()
+                    .unwrap_or(&self.config.node_fill),
+            );
+            ctx.set_font(number_font.get_or_insert_with(|| {
+                format!("{}px {}", number.font_size, self.config.font_family)
+            }));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            ctx.fill_text(
+                &number.text,
+                f64::from(center.x) + offset_x,
+                f64::from(center.y) + offset_y,
+            );
+            self.draw_calls += 2;
+            count += 1;
+        }
+        count
+    }
+
+    /// Paint authored sequence regions beneath all conversation geometry.
+    fn draw_sequence_backgrounds<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        for fragment in &layout.extensions.sequence_fragments {
+            if fragment.kind != fm_core::FragmentKind::Rect {
+                continue;
+            }
+            let Some(color) = fragment.color.as_deref().and_then(sanitize_canvas_paint) else {
+                continue;
+            };
+            ctx.set_fill_style(&color);
+            ctx.fill_rect(
+                f64::from(fragment.bounds.x) + offset_x,
+                f64::from(fragment.bounds.y) + offset_y,
+                f64::from(fragment.bounds.width),
+                f64::from(fragment.bounds.height),
+            );
+            self.draw_calls += 1;
+        }
+    }
+
+    /// Draw transparent interaction frames, keyword tabs, and branch conditions.
     fn draw_sequence_fragments<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -2565,8 +2670,12 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
-    ) {
+    ) -> usize {
+        let mut labels_drawn = 0;
         let mut fragment_font = None;
+        let mut condition_font = None;
+        let label_font_size = self.config.font_size * 0.75;
+        let label_height = self.config.font_size + 8.0;
 
         for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
             let x = f64::from(fragment.bounds.x) + offset_x;
@@ -2574,53 +2683,63 @@ impl Canvas2dRenderer {
             let w = f64::from(fragment.bounds.width);
             let h = f64::from(fragment.bounds.height);
 
-            // Semi-transparent background, or the author's own (bd-lvj3).
-            //
-            // `rect rgb(255,0,0)` in a sequence diagram becomes a FRAGMENT, not a cluster, and the
-            // fill here was a hardcoded literal while `fragment.color` sat unread on the very struct
-            // this loop iterates. This is the last row of that bead's measured table
-            // (seq_rect_color svg=true canvas=FALSE).
-            let declared = fragment.color.as_deref().and_then(sanitize_canvas_paint);
-            ctx.set_fill_style(declared.as_deref().unwrap_or("rgba(226,232,240,0.2)"));
-            ctx.fill_rect(x, y, w, h);
+            // Only the frame belongs above lifelines. A `rect` has its authored background
+            // in the early pass and neither a dashed border nor a keyword/condition tab.
+            if fragment.kind == fm_core::FragmentKind::Rect {
+                let declared = fragment.color.as_deref().and_then(sanitize_canvas_paint);
+                ctx.set_stroke_style(
+                    declared
+                        .as_deref()
+                        .filter(|color| !color.eq_ignore_ascii_case("transparent"))
+                        .unwrap_or(&self.config.node_stroke),
+                );
+                ctx.set_line_width(1.0);
+                ctx.set_line_dash(&[]);
+                ctx.stroke_rect(x, y, w, h);
+                self.draw_calls += 1;
+                continue;
+            }
 
-            // Dashed border.
             ctx.set_stroke_style(&self.config.node_stroke);
             ctx.set_line_width(1.0);
-            ctx.set_line_dash(&[4.0, 4.0]);
+            ctx.set_line_dash(&[6.0, 4.0]);
             ctx.stroke_rect(x, y, w, h);
             ctx.set_line_dash(&[]);
 
-            // Kind label in top-left corner.
-            if fragment.label.is_empty() {
-                let label = fragment_kind_label(fragment.kind);
-                ctx.set_fill_style(&self.config.label_color);
-                let fragment_font =
-                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
-                ctx.set_font(fragment_font.as_str());
-                ctx.set_text_align(TextAlign::Left);
-                ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(label, x + 6.0, y + 4.0);
-            } else {
-                let label = format!(
-                    "[{}] {}",
-                    fragment_kind_label(fragment.kind),
-                    fragment.label
-                );
-                ctx.set_fill_style(&self.config.label_color);
-                let fragment_font =
-                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
-                ctx.set_font(fragment_font.as_str());
-                ctx.set_text_align(TextAlign::Left);
-                ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(&label, x + 6.0, y + 4.0);
-            }
-            self.draw_calls += 3;
+            // The keyword is a small tab, while its condition is centered on a separate row.
+            let keyword = fragment_kind_label(fragment.kind);
+            let tab_width = keyword.chars().count() as f64 * self.config.font_size * 0.5 + 12.0;
+            ctx.set_fill_style(&self.config.cluster_fill);
+            ctx.fill_rect(x, y, tab_width, label_height);
+            ctx.stroke_rect(x, y, tab_width, label_height);
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_font(
+                fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config)),
+            );
+            ctx.set_text_align(TextAlign::Left);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            ctx.fill_text(keyword, x + 6.0, y + label_height / 2.0);
+            self.draw_calls += 4;
+            labels_drawn += 1;
 
-            // An `else`/`and` branch is part of the sequence's meaning, not decoration. Layout
-            // preserves the branch's first message edge, so place its divider at the same lead from
-            // that message that the frame has from its own first message. A fixed frame fraction
-            // drifts when branches contain different numbers of messages.
+            if !fragment.label.is_empty() {
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_font(condition_font.get_or_insert_with(|| {
+                    format!("{label_font_size}px {}", self.config.font_family)
+                }));
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.fill_text(
+                    &format!("[{}]", fragment.label),
+                    x + w / 2.0,
+                    y + label_height + label_font_size,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+
+            // Source-order rows preserve empty and note-only branches. External layouts may
+            // omit those rows, in which case the first message still supplies a useful fallback.
             let Some(ir_fragment) = ir
                 .sequence_meta
                 .as_ref()
@@ -2637,14 +2756,18 @@ impl Canvas2dRenderer {
                     .map(|point| f64::from(point.y) + offset_y)
             };
             let lead = message_y(ir_fragment.start_edge).map_or(0.0, |first_y| first_y - y);
-            for alternative in &ir_fragment.alternatives {
-                let Some(branch_y) = message_y(alternative.start_edge) else {
+            for (branch_index, alternative) in ir_fragment.alternatives.iter().enumerate() {
+                let Some(divider_y) = fragment
+                    .branch_tops
+                    .get(branch_index)
+                    .map(|top| f64::from(*top) + offset_y)
+                    .or_else(|| message_y(alternative.start_edge).map(|branch_y| branch_y - lead))
+                else {
                     continue;
                 };
-                let divider_y = branch_y - lead;
                 ctx.set_stroke_style(&self.config.node_stroke);
                 ctx.set_line_width(1.0);
-                ctx.set_line_dash(&[4.0, 4.0]);
+                ctx.set_line_dash(&[6.0, 4.0]);
                 ctx.begin_path();
                 ctx.move_to(x, divider_y);
                 ctx.line_to(x + w, divider_y);
@@ -2665,9 +2788,11 @@ impl Canvas2dRenderer {
                         divider_y - 3.0,
                     );
                     self.draw_calls += 1;
+                    labels_drawn += 1;
                 }
             }
         }
+        labels_drawn
     }
 
     /// Draw sequence diagram notes.
@@ -5007,7 +5132,7 @@ fn secondary_label_font_css(config: &CanvasRenderConfig) -> String {
 }
 
 fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
-    format!("bold {}px {}", config.font_size * 0.8, config.font_family)
+    format!("bold {}px {}", config.font_size * 0.75, config.font_family)
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
@@ -5083,8 +5208,8 @@ mod tests {
     use crate::context::{DrawOperation, MockCanvas2dContext};
     use fm_core::{DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId};
     use fm_layout::{
-        LayoutActivationBar, LayoutEdgePath, LayoutExtensions, LayoutRect, LayoutStats,
-        build_render_scene, layout_diagram,
+        LayoutActivationBar, LayoutEdgePath, LayoutExtensions, LayoutPoint, LayoutRect,
+        LayoutStats, build_render_scene, layout_diagram,
     };
 
     fn owned_legacy_edge_stroke_reference(
@@ -7260,8 +7385,8 @@ mod tests {
     fn sequence_fragment_font_preserves_canvas_css_format() {
         for (font_size, font_family, expected) in [
             (0.0, "sans-serif", "bold 0px sans-serif"),
-            (10.0, "Test Sans", "bold 8px Test Sans"),
-            (20.0, "'Inter', Arial", "bold 16px 'Inter', Arial"),
+            (10.0, "Test Sans", "bold 7.5px Test Sans"),
+            (20.0, "'Inter', Arial", "bold 15px 'Inter', Arial"),
         ] {
             let config = CanvasRenderConfig {
                 font_size,
@@ -10962,9 +11087,8 @@ mod tests {
 
     /// A Canvas sequence `alt` must show both branches, rather than presenting one undivided frame.
     ///
-    /// The alternative's `start_edge` is intentionally not at the midpoint of this frame: the first
-    /// branch has two messages and the second has one. This rejects an implementation that guesses a
-    /// divider from the frame height instead of deriving it from the message geometry layout published.
+    /// The branches have different lengths. The divider belongs on the source-order row reserved
+    /// by layout, rather than at a fraction of the frame or an offset guessed from its messages.
     #[test]
     fn canvas_draws_sequence_alt_branch_divider_and_condition() {
         let ir = fm_parser::parse(
@@ -10986,18 +11110,7 @@ mod tests {
             .expect("CONTROL FAILED: this alt has no else branch to render");
         assert_eq!(alternative.label, "is bad");
 
-        let message_y = |edge_index: usize| {
-            layout
-                .edges
-                .iter()
-                .find(|edge| edge.edge_index == edge_index)
-                .and_then(|edge| edge.points.first())
-                .map(|point| f64::from(point.y) - f64::from(layout.bounds.y))
-                .unwrap_or_else(|| panic!("layout published no message edge {edge_index}"))
-        };
-        let frame_y = f64::from(fragment.bounds.y) - f64::from(layout.bounds.y);
-        let divider_y =
-            message_y(alternative.start_edge) - (message_y(ir_fragment.start_edge) - frame_y);
+        let divider_y = f64::from(fragment.branch_tops[0]) - f64::from(layout.bounds.y);
         let frame_x = f64::from(fragment.bounds.x) - f64::from(layout.bounds.x);
         let frame_right = frame_x + f64::from(fragment.bounds.width);
 
@@ -11028,6 +11141,156 @@ mod tests {
             }),
             "the branch divider was not drawn at the geometry-derived location"
         );
+    }
+
+    #[test]
+    fn canvas_sequence_backgrounds_preserve_lifelines_activations_and_notes() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box rgb(210,220,230) Workers\nparticipant A\nparticipant B\nend\n\
+             rect rgb(250,240,220)\nA->>+B: request\n\
+             rect rgb(240,230,210)\nNote over A,B: inspecting\nB-->>A: answer\nend\n\
+             B-->>-A: done\nend\ndestroy B\nB->>A: bye\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 1);
+        assert_eq!(layout.extensions.activation_bars.len(), 1);
+        assert_eq!(layout.extensions.sequence_notes.len(), 1);
+        assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        let mut ctx = MockCanvas2dContext::new(1200.0, 1000.0);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+        let operations = ctx.operations();
+        let color_position = |color: &str| {
+            operations
+                .windows(2)
+                .position(|pair| {
+                    matches!(&pair[0], DrawOperation::SetFillStyle(value) if value == color)
+                        && matches!(pair[1], DrawOperation::FillRect(..))
+                })
+                .expect("authored sequence background")
+        };
+        let filled_rect_position = |bounds: fm_layout::LayoutRect| {
+            operations
+                .iter()
+                .position(|operation| {
+                    matches!(operation, DrawOperation::FillRect(x, y, w, h)
+                    if (*x - f64::from(bounds.x - layout.bounds.x)).abs() < 0.01
+                        && (*y - f64::from(bounds.y - layout.bounds.y)).abs() < 0.01
+                        && (*w - f64::from(bounds.width)).abs() < 0.01
+                        && (*h - f64::from(bounds.height)).abs() < 0.01)
+                })
+                .expect("measured sequence rectangle")
+        };
+        let segment_position = |start: LayoutPoint, end: LayoutPoint| {
+            operations
+                .windows(2)
+                .position(|pair| {
+                    matches!((&pair[0], &pair[1]),
+                    (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1))
+                        if (*x0 - f64::from(start.x - layout.bounds.x)).abs() < 0.01
+                            && (*y0 - f64::from(start.y - layout.bounds.y)).abs() < 0.01
+                            && (*x1 - f64::from(end.x - layout.bounds.x)).abs() < 0.01
+                            && (*y1 - f64::from(end.y - layout.bounds.y)).abs() < 0.01)
+                })
+                .expect("sequence path segment")
+        };
+        let outer = color_position("rgb(250,240,220)");
+        let inner = color_position("rgb(240,230,210)");
+        assert!(outer < inner, "nested regions retain source paint order");
+        for band in &layout.extensions.bands {
+            let x = band.bounds.center().x;
+            let lifeline = segment_position(
+                LayoutPoint {
+                    x,
+                    y: band.bounds.y,
+                },
+                LayoutPoint {
+                    x,
+                    y: band.bounds.y + band.bounds.height,
+                },
+            );
+            assert!(
+                inner < lifeline,
+                "opaque regions must remain behind lifelines"
+            );
+        }
+        let activation = filled_rect_position(layout.extensions.activation_bars[0].bounds);
+        let note = filled_rect_position(layout.extensions.sequence_notes[0].bounds);
+        assert!(inner < activation && inner < note);
+        let marker = &layout.extensions.sequence_lifecycle_markers[0];
+        let half = marker.size * 0.5;
+        let destroy = segment_position(
+            LayoutPoint {
+                x: marker.center.x - half,
+                y: marker.center.y - half,
+            },
+            LayoutPoint {
+                x: marker.center.x + half,
+                y: marker.center.y + half,
+            },
+        );
+        let last_message = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::FillText(text, _, _) if text == "bye")
+        }).expect("last message label");
+        assert!(
+            last_message < destroy,
+            "destruction remains in the foreground"
+        );
+        assert!(!operations.iter().any(|operation| {
+            matches!(operation, DrawOperation::FillText(text, _, _) if text == "rect")
+        }));
+    }
+
+    #[test]
+    fn canvas_sequence_empty_and_note_only_branches_keep_their_conditions() {
+        for (keyword, alternative_keyword) in
+            [("alt", "else"), ("par", "and"), ("critical", "option")]
+        {
+            let source = format!(
+                "sequenceDiagram\nparticipant A\nparticipant B\n\
+                 {keyword} pending\nNote over A,B: waiting\n\
+                 {alternative_keyword} empty\nend\n",
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            assert!(layout.edges.is_empty(), "neither branch has a message");
+            let fragment = &layout.extensions.sequence_fragments[0];
+            assert_eq!(fragment.branch_tops.len(), 1);
+            let divider_y = f64::from(fragment.branch_tops[0] - layout.bounds.y);
+            let left = f64::from(fragment.bounds.x - layout.bounds.x);
+            let right = left + f64::from(fragment.bounds.width);
+            let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+            crate::render_to_canvas_with_layout(
+                &ir,
+                &layout,
+                &mut ctx,
+                &CanvasRenderConfig {
+                    auto_fit: false,
+                    padding: 0.0,
+                    ..Default::default()
+                },
+            );
+            for label in [keyword, "[pending]", "[empty]", "waiting"] {
+                assert_eq!(ctx.operations().iter().filter(|operation| {
+                    matches!(operation, DrawOperation::FillText(text, _, _) if text == label)
+                }).count(), 1, "missing separate label {label:?} in {keyword}");
+            }
+            assert!(
+                ctx.operations().windows(2).any(|pair| {
+                    matches!((&pair[0], &pair[1]),
+                    (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1))
+                        if (*x0 - left).abs() < 0.01 && (*x1 - right).abs() < 0.01
+                            && (*y0 - divider_y).abs() < 0.01 && (*y1 - divider_y).abs() < 0.01)
+                }),
+                "the {keyword} divider must use the empty branch's reserved layout row"
+            );
+        }
     }
 
     /// A fragment without an alternative must not acquire a meaningless branch divider.
