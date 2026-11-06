@@ -10883,9 +10883,13 @@ mod tests {
 
         let _result = renderer.render(&layout, &ir, &mut ctx);
 
+        // Re-blessed for af9d2b27 ("Measure group headings consistently across layout and
+        // renderers"): the title baseline moved from y+4 (14) to the measured heading position (26).
+        // "Backend" is still emitted and (13, 26) is inside the cluster frame (x 5..105, y 10..70),
+        // so this blesses the deliberate measured placement rather than a detached coordinate.
         assert!(ctx.operations().iter().any(|operation| {
             matches!(operation, DrawOperation::FillText(text, x, y)
-                if text == "Backend" && (*x - 13.0).abs() < 0.001 && (*y - 14.0).abs() < 0.001)
+                if text == "Backend" && (*x - 13.0).abs() < 0.001 && (*y - 26.0).abs() < 0.001)
         }));
     }
     /// A destroyed participant's lifeline must be terminated with a CROSS on the canvas backend

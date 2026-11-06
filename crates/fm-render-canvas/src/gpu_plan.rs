@@ -1412,16 +1412,9 @@ pub struct GpuRenderPlan {
     /// `node_index` here is the PARTICIPANT node index the bar sits on, which is a genuine index
     /// into `ir.nodes` -- unlike the cluster instances, where it indexes clusters.
     pub activation_instances: Vec<GpuNodeInstance>,
-    /// Destroy-marker crosses, as line segments (bd-adabx).
-    ///
-    /// Two segments per marker. Reuses `GpuEdgeSegment` because a cross is two lines and that is
-    /// what the type describes -- their `edge_index` is [`NO_EDGE_INDEX`], since no edge produced
-    /// them.
-    ///
-    /// Its own field rather than a shared "decorations" buffer: the remaining line sources (cluster
-    /// dividers, axis ticks, state-note leaders) are drawn at DIFFERENT points in the raster pass,
-    /// and one buffer submitted at one point cannot match several positions in the draw order.
-    pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
+    /// Authored `rect` background fills behind the sequence, drawn before lifelines (bd-adabx, 89d6d275).
+    /// Mirrors `draw_sequence_backgrounds`: only Rect fragments with a parseable authored colour.
+    pub sequence_background_instances: Vec<GpuNodeInstance>,
     /// Sequence interaction fragment fills, before their dashed outlines and all message edges.
     ///
     /// The node SDF cannot carry a perimeter dash phase, so its stroke is transparent; the border
@@ -1470,6 +1463,16 @@ pub struct GpuRenderPlan {
     /// Pinned by `the_plan_field_order_matches_the_raster_draw_order`, which reads the call order
     /// out of renderer.rs rather than trusting this comment to stay true.
     pub node_instances: Vec<GpuNodeInstance>,
+    /// Destroy-marker crosses, as line segments (bd-adabx).
+    ///
+    /// Two segments per marker. Reuses `GpuEdgeSegment` because a cross is two lines and that is
+    /// what the type describes -- their `edge_index` is [`NO_EDGE_INDEX`], since no edge produced
+    /// them.
+    ///
+    /// Moved after `node_instances` to match 89d6d275's deliberate paint-order move of
+    /// `draw_sequence_lifecycle_markers` to the end of the raster pass (field order must equal the
+    /// Canvas2D draw order, per `the_plan_field_order_matches_the_raster_draw_order`).
+    pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
     /// Dashed node borders, as edge segments (bd-l3nsf).
     ///
     /// ⚠️ DECLARED AFTER `node_instances` BECAUSE THAT IS THE DRAW ORDER: a border sits on top of the
@@ -1943,6 +1946,34 @@ impl GpuRenderPlan {
         // transparent and represent every visible border as an EDGE segment, whose shader carries
         // a real dash pattern. Planning only the rect would turn a dashed scope boundary into a
         // solid one, a different diagram rather than a harmless approximation.
+        // Authored `rect` backgrounds (bd-adabx, 89d6d275): `draw_sequence_backgrounds` fills these
+        // before the lifelines. Only Rect fragments with a parseable authored colour contribute, so
+        // the GPU path carries the same early fill the Canvas2D pass draws instead of omitting it.
+        let mut sequence_background_instances = Vec::new();
+        for fragment in &layout.extensions.sequence_fragments {
+            if fragment.kind != fm_core::FragmentKind::Rect {
+                continue;
+            }
+            let Some(fill) = fragment.color.as_deref().and_then(parse_paint_rgba) else {
+                continue;
+            };
+            let bounds = fragment.bounds;
+            if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                continue;
+            }
+            sequence_background_instances.push(GpuNodeInstance {
+                center: [
+                    bounds.x + (bounds.width * 0.5),
+                    bounds.y + (bounds.height * 0.5),
+                ],
+                half_extent: [bounds.width * 0.5, bounds.height * 0.5],
+                fill,
+                stroke: [0.0, 0.0, 0.0, 0.0],
+                stroke_width: 0.0,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::MAX,
+            });
+        }
         let mut sequence_fragment_instances =
             Vec::with_capacity(layout.extensions.sequence_fragments.len());
         let mut sequence_fragment_border_segments = Vec::new();
@@ -3539,6 +3570,7 @@ impl GpuRenderPlan {
             mirror_header_instances,
             packet_field_continuation_instances,
             activation_instances,
+            sequence_background_instances,
             lifecycle_marker_segments,
             sequence_fragment_instances,
             sequence_fragment_border_segments,
@@ -3874,6 +3906,7 @@ impl GpuRenderPlan {
             mirror_header_instances: Vec::new(),
             packet_field_continuation_instances: Vec::new(),
             activation_instances: Vec::new(),
+            sequence_background_instances: Vec::new(),
             lifecycle_marker_segments: Vec::new(),
             sequence_fragment_instances: Vec::new(),
             sequence_fragment_border_segments: Vec::new(),
@@ -4214,6 +4247,7 @@ impl GpuRenderPlan {
             mirror_header_instances: Vec::new(),
             packet_field_continuation_instances: Vec::new(),
             activation_instances: Vec::new(),
+            sequence_background_instances: Vec::new(),
             lifecycle_marker_segments: Vec::new(),
             sequence_fragment_instances: Vec::new(),
             sequence_fragment_border_segments: Vec::new(),
@@ -8692,6 +8726,7 @@ mod tests {
             "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
             "draw_sequence_fragments",
+            "draw_sequence_backgrounds",
             "draw_sequence_notes",
             "draw_state_notes",
             "draw_bands",
@@ -8720,6 +8755,7 @@ mod tests {
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
+            ("draw_sequence_numbers", "bd-adabx: sequence autonumber text"),
             (
                 "draw_path_markers",
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",
