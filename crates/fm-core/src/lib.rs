@@ -939,7 +939,7 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             dedicated_parser: true,
             layout: "sequence",
             svg_render: true,
-            runtime: MermaidSupportLevel::Supported,
+            runtime: MermaidSupportLevel::Partial,
             parity: MermaidParityLevel::Partial,
             notes: "Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups",
         },
@@ -17019,9 +17019,9 @@ mod tests {
 
         assert_eq!(
             DiagramType::Sequence.support_level(),
-            MermaidSupportLevel::Supported
+            MermaidSupportLevel::Partial
         );
-        assert_eq!(DiagramType::Sequence.support_label(), "full");
+        assert_eq!(DiagramType::Sequence.support_label(), "partial");
 
         assert_eq!(
             DiagramType::Unknown.support_level(),

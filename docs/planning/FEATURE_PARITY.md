@@ -42,7 +42,7 @@ Current status in this file is grounded in:
 | Diagram family | Detection | Dedicated parser | Dedicated layout | SVG render | Runtime | Parity | Notes |
 |---|---|---|---|---|---|---|---|
 | flowchart | Yes | Yes | `auto` | Yes | Full | Partial | Most advanced path; recursive document AST, edge bundling, layout constraints |
-| sequence | Yes | Yes | `sequence` | Yes | Full | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
+| sequence | Yes | Yes | `sequence` | Yes | Partial | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
 | class | Yes | Yes | `auto` | Yes | Full | Partial | Members, inheritance, stereotypes, generics, compartment rendering |
 | state | Yes | Yes | `auto` | Yes | Full | Partial | Transitions, composites, fork/join, history states, choice |
 | er | Yes | Yes | `auto` | Yes | Full | Partial | Entity attributes with PK/FK/UK, crow's-foot cardinality markers (bd-b1sy2) |

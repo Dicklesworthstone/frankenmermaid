@@ -189,7 +189,7 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | Diagram Type | Runtime Status |
 |--------------|----------------|
 | `flowchart` | Implemented |
-| `sequence` | Implemented |
+| `sequence` | Partial |
 | `class` | Implemented |
 | `state` | Implemented |
 | `er` | Implemented |
