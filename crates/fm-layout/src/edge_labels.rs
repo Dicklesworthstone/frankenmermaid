@@ -590,9 +590,43 @@ fn closest_clear_route_position_with_offset(
     obstacles: &[EdgeLabelObstacle],
     offset: LayoutPoint,
 ) -> Option<LayoutPoint> {
-    let mut best = None;
-    let mut best_distance = f32::INFINITY;
-    for pair in path.points.windows(2) {
+    // Level 1 cull: obstacles whose AABB cannot reach the route band return None for every segment.
+    let (band_hw, band_hh) = (width / 2.0 + 5.0, height / 2.0 + 5.0);
+    let (mut bx_lo, mut bx_hi, mut by_lo, mut by_hi) = (
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for point in &path.points {
+        let (x, y) = (point.x + offset.x, point.y + offset.y);
+        bx_lo = bx_lo.min(x);
+        bx_hi = bx_hi.max(x);
+        by_lo = by_lo.min(y);
+        by_hi = by_hi.max(y);
+    }
+    let near: Vec<EdgeLabelObstacle> = obstacles
+        .iter()
+        .copied()
+        .filter(|obstacle| {
+            let (a_lo_x, a_hi_x, a_lo_y, a_hi_y) = match *obstacle {
+                EdgeLabelObstacle::Bounds(rect) => {
+                    (rect.x, rect.x + rect.width, rect.y, rect.y + rect.height)
+                }
+                EdgeLabelObstacle::Segment(a, b) => {
+                    (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y))
+                }
+            };
+            a_lo_x - band_hw <= bx_hi
+                && a_hi_x + band_hw >= bx_lo
+                && a_lo_y - band_hh <= by_hi
+                && a_hi_y + band_hh >= by_lo
+        })
+        .collect();
+    // Order segments best-first by a lower bound on the squared distance from `anchor` to the
+    // segment's AABB (see the proof in this file's fix note); degenerate segments are dropped.
+    let mut segments: Vec<(usize, LayoutPoint, LayoutPoint, f32, f32, f32, f32)> = Vec::new();
+    for (index, pair) in path.points.windows(2).enumerate() {
         let from = LayoutPoint {
             x: pair[0].x + offset.x,
             y: pair[0].y + offset.y,
@@ -606,18 +640,54 @@ fn closest_clear_route_position_with_offset(
         if length_squared <= f32::EPSILON {
             continue;
         }
+        let clamped_x = anchor.x.clamp(from.x.min(to.x), from.x.max(to.x));
+        let clamped_y = anchor.y.clamp(from.y.min(to.y), from.y.max(to.y));
+        let lower_bound = (anchor.x - clamped_x).powi(2) + (anchor.y - clamped_y).powi(2);
+        segments.push((index, from, to, dx, dy, length_squared, lower_bound));
+    }
+    segments.sort_unstable_by(|a, b| a.6.total_cmp(&b.6).then(a.0.cmp(&b.0)));
+
+    let mut best = None;
+    // Key = (distance, original segment index, in-segment interval order): its lexicographic minimum
+    // is exactly the linear scan's route-order-first pick under `distance < best_distance`.
+    let mut best_key = (f32::INFINITY, usize::MAX, u32::MAX);
+    for &(index, from, to, dx, dy, length_squared, lower_bound) in &segments {
+        if lower_bound > best_key.0 {
+            break;
+        }
         let preferred = (((anchor.x - from.x) * dx + (anchor.y - from.y) * dy) / length_squared)
             .clamp(0.0, 1.0);
-        let mut intervals: Vec<_> = obstacles
-            .iter()
-            .filter_map(|&obstacle| forbidden_route_interval(from, to, obstacle, width, height))
-            .collect();
+        // Level 2 cheap reject before the ~30ns forbidden_route_interval.
+        let (seg_x_lo, seg_x_hi) = (from.x.min(to.x), from.x.max(to.x));
+        let (seg_y_lo, seg_y_hi) = (from.y.min(to.y), from.y.max(to.y));
+        let mut intervals: Vec<(f32, f32)> = Vec::new();
+        for &obstacle in &near {
+            let (o_lo_x, o_hi_x, o_lo_y, o_hi_y) = match obstacle {
+                EdgeLabelObstacle::Bounds(rect) => {
+                    (rect.x, rect.x + rect.width, rect.y, rect.y + rect.height)
+                }
+                EdgeLabelObstacle::Segment(a, b) => {
+                    (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y))
+                }
+            };
+            if o_lo_x - band_hw > seg_x_hi
+                || o_hi_x + band_hw < seg_x_lo
+                || o_lo_y - band_hh > seg_y_hi
+                || o_hi_y + band_hh < seg_y_lo
+            {
+                continue;
+            }
+            if let Some(interval) = forbidden_route_interval(from, to, obstacle, width, height) {
+                intervals.push(interval);
+            }
+        }
         intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
         // Advance a fraction of a pixel past an exclusion boundary so f32 rounding cannot
         // turn a tangency into an overlap when a renderer reconstructs the plate.
         let epsilon = 0.01 / length_squared.sqrt();
         let mut cursor = 0.0_f32;
-        let mut consider = |lo: f32, hi: f32| {
+        let mut gap_order = 0u32;
+        let mut consider = |lo: f32, hi: f32, order: u32| {
             if lo > hi {
                 return;
             }
@@ -627,16 +697,18 @@ fn closest_clear_route_position_with_offset(
                 y: dy.mul_add(t, from.y),
             };
             let distance = (candidate.x - anchor.x).powi(2) + (candidate.y - anchor.y).powi(2);
-            if distance < best_distance {
+            let key = (distance, index, order);
+            if key < best_key {
+                best_key = key;
                 best = Some(candidate);
-                best_distance = distance;
             }
         };
         for (lo, hi) in intervals {
-            consider(cursor, lo - epsilon);
+            consider(cursor, lo - epsilon, gap_order);
+            gap_order += 1;
             cursor = cursor.max(hi + epsilon);
         }
-        consider(cursor, 1.0);
+        consider(cursor, 1.0, gap_order);
     }
     best
 }
@@ -1245,11 +1317,61 @@ pub(crate) fn can_refine_graph_label_spacing(ir: &MermaidDiagramIr) -> bool {
 
 /// Evaluate the final routes with the graphical surfaces' measured plate footprints. The
 /// bounded layout refinement uses this same placer; it does not invent a second collision rule.
+/// Decide, from a partial quality score, whether a refine candidate is already rejected. The scan
+/// accumulates (detached, worst_gap, area) monotonically: detached only increments, worst_gap is a
+/// running max, area is a running max that starts at the layout-bounds area. So the partial score is
+/// <= the final score field by field and lexicographically. refine_graph_label_spacing keeps a
+/// candidate only if `final.0 < initial.0 && final.2 <= initial.2 * 1.8 && final < best`; each test
+/// is monotone in a field, so once it fails for the partial score it fails for the final one, and
+/// the candidate can be abandoned without changing which candidate wins. Comparisons decide only on
+/// a definite (non-NaN) answer: worst_gap is always finite (a NaN gap never passes `gap > 2.25`);
+/// area can start NaN, and a NaN never triggers an early reject -- such a candidate is scored in full
+/// and rejected by the normal keep test instead.
+fn candidate_is_rejected(
+    partial: (usize, f32, f32),
+    initial: (usize, f32, f32),
+    best: (usize, f32, f32),
+) -> bool {
+    if partial.0 >= initial.0 {
+        return true;
+    }
+    if partial.2 > initial.2 * 1.8 {
+        return true;
+    }
+    partial.0 > best.0
+        || (partial.0 == best.0 && partial.1 > best.1)
+        || (partial.0 == best.0 && partial.1 == best.1 && partial.2 >= best.2)
+}
+
 pub(crate) fn graph_label_attachment_quality(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     base_metrics: &fm_core::FontMetrics,
 ) -> (usize, f32, f32) {
+    // No cutoff: the scan always runs to completion, so this is the original behaviour unchanged.
+    graph_label_attachment_quality_impl(ir, layout, base_metrics, None)
+        .expect("a scan with no cutoff always produces a score")
+}
+
+/// Like [`graph_label_attachment_quality`] but abandons a refine candidate (returns None) as soon as
+/// [`candidate_is_rejected`] proves its partial score cannot be kept. Rejected candidates never touch
+/// `best`/`best_quality`, so the chosen candidate and every output byte match the full scan.
+pub(crate) fn graph_label_attachment_quality_bounded(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    base_metrics: &fm_core::FontMetrics,
+    initial: (usize, f32, f32),
+    best: (usize, f32, f32),
+) -> Option<(usize, f32, f32)> {
+    graph_label_attachment_quality_impl(ir, layout, base_metrics, Some((initial, best)))
+}
+
+fn graph_label_attachment_quality_impl(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    base_metrics: &fm_core::FontMetrics,
+    cutoff: Option<((usize, f32, f32), (usize, f32, f32))>,
+) -> Option<(usize, f32, f32)> {
     let mut detached = 0;
     let mut worst_gap = 0.0_f32;
     let mut area = layout.bounds.width * layout.bounds.height;
@@ -1296,6 +1418,13 @@ pub(crate) fn graph_label_attachment_quality(
             let Some(caption) = ir.graph_edge_caption(path.edge_index) else {
                 continue;
             };
+            // Monotone cutoff: drop this candidate before any more placement work once its partial
+            // score (which only grows) already fails the keep test (see candidate_is_rejected).
+            if let Some((initial, best)) = cutoff
+                && candidate_is_rejected((detached, worst_gap, area), initial, best)
+            {
+                return None;
+            }
             let style = edge_label_style(ir, path.edge_index);
             let font_size = style
                 .get("font-size")
@@ -1349,8 +1478,13 @@ pub(crate) fn graph_label_attachment_quality(
         }
         let bounds = placer.bounds();
         area = area.max(bounds.width * bounds.height);
+        if let Some((initial, best)) = cutoff
+            && candidate_is_rejected((detached, worst_gap, area), initial, best)
+        {
+            return None;
+        }
     }
-    (detached, worst_gap, area)
+    Some((detached, worst_gap, area))
 }
 
 #[cfg(test)]

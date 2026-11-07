@@ -6771,7 +6771,16 @@ fn refine_graph_label_spacing(
                 ),
                 &captions,
             );
-            let quality = edge_labels::graph_label_attachment_quality(ir, layout, &metrics);
+            let Some(quality) = edge_labels::graph_label_attachment_quality_bounded(
+                ir,
+                layout,
+                &metrics,
+                initial,
+                best_quality,
+            ) else {
+                // Partial score already failed the keep test; this candidate cannot win.
+                continue;
+            };
             if quality.0 < initial.0 && quality.2 <= initial.2 * 1.8 && quality < best_quality {
                 best_quality = quality;
                 best = Some(candidate);
