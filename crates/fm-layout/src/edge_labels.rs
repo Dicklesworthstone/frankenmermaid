@@ -1327,11 +1327,10 @@ pub(crate) fn can_refine_graph_label_spacing(ir: &MermaidDiagramIr) -> bool {
 /// a definite (non-NaN) answer: worst_gap is always finite (a NaN gap never passes `gap > 2.25`);
 /// area can start NaN, and a NaN never triggers an early reject -- such a candidate is scored in full
 /// and rejected by the normal keep test instead.
-fn candidate_is_rejected(
-    partial: (usize, f32, f32),
-    initial: (usize, f32, f32),
-    best: (usize, f32, f32),
-) -> bool {
+/// (detached, worst_gap, area) -- a refine candidate's quality score.
+pub(crate) type QualityScore = (usize, f32, f32);
+
+fn candidate_is_rejected(partial: QualityScore, initial: QualityScore, best: QualityScore) -> bool {
     if partial.0 >= initial.0 {
         return true;
     }
@@ -1360,9 +1359,9 @@ pub(crate) fn graph_label_attachment_quality_bounded(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     base_metrics: &fm_core::FontMetrics,
-    initial: (usize, f32, f32),
-    best: (usize, f32, f32),
-) -> Option<(usize, f32, f32)> {
+    initial: QualityScore,
+    best: QualityScore,
+) -> Option<QualityScore> {
     graph_label_attachment_quality_impl(ir, layout, base_metrics, Some((initial, best)))
 }
 
@@ -1370,8 +1369,8 @@ fn graph_label_attachment_quality_impl(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     base_metrics: &fm_core::FontMetrics,
-    cutoff: Option<((usize, f32, f32), (usize, f32, f32))>,
-) -> Option<(usize, f32, f32)> {
+    cutoff: Option<(QualityScore, QualityScore)>,
+) -> Option<QualityScore> {
     let mut detached = 0;
     let mut worst_gap = 0.0_f32;
     let mut area = layout.bounds.width * layout.bounds.height;

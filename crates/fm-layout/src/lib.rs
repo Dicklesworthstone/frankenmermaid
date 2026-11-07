@@ -8976,6 +8976,10 @@ pub(crate) fn cycle_preparation(
 /// copy of these calls once cost 34 KB of wasm, because every phase that had been inlined into its
 /// single caller was then compiled a second time out of line.
 #[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cross_anchors joins the seven existing geometric inputs of one placement solve"
+)]
 pub(crate) fn flat_placement(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
