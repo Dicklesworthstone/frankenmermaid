@@ -313,7 +313,21 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 #    sort_by_key/sort_unstable, 0 trim_end_matches, 0 from_iter, 0 BTreeMap/HashMap collect (the 3
 #    new collect::<> sites collect into Vec/String, not maps) -- no in-delta lever applies.
 #  1094K (1120256) is the smallest whole-KiB ceiling fitting 1119802, leaving 454 bytes. bd-p4k9c.
-MAX_GZIP_BYTES=$((1094 * 1024))
+# Raised 1094K -> 1095K on 2026-11-07 for the 0.5.0 release fixes: the 1094K package was rebuilt
+# before the release's layout and CLI fixes landed. Rebuilt with this script, nightly-2026-08-31,
+# wasm-bindgen 0.2.129 and Binaryen 125; measured with the same gzip command below:
+#  1119802 gzip / 2832956 raw  committed package, built from d501eac4 (source digest e89267e4)
+#  1121070 gzip / 2838609 raw  rebuild at a4be6c87 (source digest f6fc13da)
+# The 1268 gzip bytes (0.11%) come from the 8 source commits between those builds: a4be6c87 satisfy
+# clippy on the step-5 layout, 8b45ec6d regenerate the capability matrix, b3c128ff cut edge-label
+# refine placement cost, d02cdd10 class-card rows from effective metrics, 63d50c89 assert Tree
+# level-edge rank gap, 5cb55776 nested_boundary_ports heading from caption rect, 008ded7d keep
+# chained subgraph members centred, bd355776 re-pin cross-target digests.
+# No shrink that would drop behavior was applied; wasm-opt still runs -Oz --converge with LTO, one
+# codegen unit and immediate-abort std. 1095K is the smallest whole-KiB ceiling fitting 1121070,
+# leaving 210 bytes. Render equivalence, package provenance, and source-freshness assertions are
+# unchanged.
+MAX_GZIP_BYTES=$((1095 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
