@@ -41370,11 +41370,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unprotected, LayoutPoint { x: 290.0, y: 0.0 });
+        // af9d2b27 ("measure group headings consistently") measures the heading band from just
+        // below the frame edge, so the naive top-edge anchor sits a hair above the caption rather
+        // than inside it. Derive the obstacle premise from the caption rect: a heading spans the
+        // member's column and lies between the frame's top edge and the member, so the short route
+        // up to the edge crosses it -- which is what the protected anchors below must avoid.
         assert!(captions.iter().any(|caption| {
             unprotected.x > caption.x
                 && unprotected.x < caption.x + caption.width
-                && unprotected.y > caption.y
-                && unprotected.y < caption.y + caption.height
+                && caption.y < member.y
+                && caption.y + caption.height > frame.y
         }));
         for reverse in [false, true] {
             let (source, target) = if reverse {
