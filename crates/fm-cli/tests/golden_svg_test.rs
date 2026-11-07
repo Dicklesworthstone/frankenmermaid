@@ -1835,7 +1835,9 @@ fn journey_task_scores_are_distinguishable_in_the_output() {
         let marker = "fm-node-user-journey-score-";
         let Some(score) = body.find(marker).and_then(|at| {
             let rest = &body[at + marker.len()..];
-            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
             rest[..end].parse::<u32>().ok()
         }) else {
             continue;
