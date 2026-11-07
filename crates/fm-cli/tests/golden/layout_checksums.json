@@ -45,11 +45,11 @@
       "edge_count": 2,
       "edges_checksum": "71f5727426e4f4a9",
       "layout_algorithm": "auto",
-      "layout_checksum": "c556c157aa776a05",
-      "layout_height": 518.575012,
+      "layout_checksum": "72662c9b141bdde3",
+      "layout_height": 501.025024,
       "layout_width": 236.0,
       "node_count": 3,
-      "nodes_checksum": "f635c2f34691983b"
+      "nodes_checksum": "d407640a9691e624"
     },
     "c4_component": {
       "edge_count": 4,
@@ -63,13 +63,13 @@
     },
     "c4_container": {
       "edge_count": 4,
-      "edges_checksum": "6ca73031be883401",
+      "edges_checksum": "f439d1cf6d411baa",
       "layout_algorithm": "auto",
-      "layout_checksum": "1d82f485c09ea37f",
-      "layout_height": 1281.792969,
+      "layout_checksum": "61db384b572bbeeb",
+      "layout_height": 1264.24292,
       "layout_width": 373.257172,
       "node_count": 5,
-      "nodes_checksum": "31427f364c0d584d"
+      "nodes_checksum": "5b6644f5ef27268c"
     },
     "c4_deployment": {
       "edge_count": 2,
