@@ -1289,7 +1289,7 @@
         }
       ],
       "notes": [
-        "General graphs (flowchart, class, state, ER, requirement, DOT)"
+        "General graphs (flowchart, class, state, ER, C4, requirement, DOT)"
       ]
     },
     {
@@ -1709,7 +1709,7 @@
         }
       ],
       "notes": [
-        "Architecture-beta, C4 (conditional)"
+        "Architecture-beta"
       ]
     },
     {
