@@ -197,7 +197,11 @@ fn gpu_long_unicode_labels_use_the_configured_monospace_or_proportional_metrics(
                 .find(|run| run.source == GpuTextSource::Node)
                 .unwrap();
             let rows = canvas_rows(&ir, &layout, &config);
-            let reference = rows.iter().find(|row| row.text == label).unwrap();
+            // 1e0dc058 composes long node labels into wrapped paragraphs, so the label can
+            // span several canvas rows. Match the reference to the Node run under test (its
+            // first row) instead of the whole label, keeping the centring + glyph-metric checks.
+            let run_glyphs = run_text(&plan, run);
+            let reference = rows.iter().find(|row| row.text == run_glyphs).unwrap();
             assert_centered_row(&plan, run, reference, &config, size as f32);
             assert!(reference.font.ends_with(family));
             let glyphs = quads(&plan, run);
