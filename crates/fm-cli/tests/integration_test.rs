@@ -1188,7 +1188,10 @@ fn render_strict_rejection_preserves_existing_artifacts() {
         "rejected input emitted success metadata"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid init directive payload"), "{stderr}");
+    assert!(
+        stderr.contains("invalid init directive payload"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("line 1, col 1"),
         "source location was lost: {stderr}"

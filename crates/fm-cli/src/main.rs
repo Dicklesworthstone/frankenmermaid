@@ -5299,7 +5299,10 @@ fn terminal_style_directive_note(ir: &MermaidDiagramIr) -> Option<String> {
 /// Honor parser rejection before layout or artifact writes on every rendering path, including
 /// borrowed batch parse results. Compatibility and recovery modes intentionally retain their
 /// best-effort behavior; warnings alone never reject an otherwise usable strict-mode diagram.
-fn enforce_render_parse_contract(ir: &MermaidDiagramIr, parse_mode: MermaidParseMode) -> Result<()> {
+fn enforce_render_parse_contract(
+    ir: &MermaidDiagramIr,
+    parse_mode: MermaidParseMode,
+) -> Result<()> {
     if parse_mode != MermaidParseMode::Strict {
         return Ok(());
     }
