@@ -356,3 +356,57 @@ fn franken_tui_fixture_cases_match_parser_and_svg_expectations() {
         }
     }
 }
+
+#[test]
+fn sequence_return_shorthand_ends_the_activation_before_later_messages() {
+    // Mermaid's documented shortcut is equivalent to activating Server after the
+    // request and deactivating Server after the response, not deactivating Client.
+    let source = "sequenceDiagram\nparticipant Client\nparticipant Server\n\
+                  Client->>+Server: Request\nServer-->>-Client: Response\n\
+                  Note over Server: Finished\nClient->>Server: Later message\n";
+    let parsed = parse(source);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let layout = layout_diagram(&parsed.ir);
+    assert_eq!(layout.edges.len(), 3);
+    assert_eq!(layout.extensions.activation_bars.len(), 1);
+
+    let request_y = layout.edges[0].points[0].y;
+    let response_y = layout.edges[1].points[0].y;
+    let later_y = layout.edges[2].points[0].y;
+    let bar = &layout.extensions.activation_bars[0];
+    assert_eq!(bar.participant_index, 1);
+    assert_eq!(bar.depth, 0);
+    assert!((bar.bounds.y - request_y).abs() < 0.01);
+    assert!((bar.bounds.y + bar.bounds.height - response_y).abs() < 0.01);
+    assert!(bar.bounds.y + bar.bounds.height < later_y);
+
+    let explicit = parse(
+        "sequenceDiagram\nparticipant Client\nparticipant Server\n\
+         Client->>Server: Request\nactivate Server\n\
+         Server-->>Client: Response\ndeactivate Server\n\
+         Note over Server: Finished\nClient->>Server: Later message\n",
+    );
+    assert_eq!(
+        layout.extensions.activation_bars,
+        layout_diagram(&explicit.ir).extensions.activation_bars,
+        "shorthand and explicit activation lifetimes must produce the same geometry"
+    );
+
+    let svg = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
+    let attributes = svg
+        .split("<rect")
+        .skip(1)
+        .filter_map(|element| element.split_once('>').map(|(attributes, _)| attributes))
+        .find(|attributes| attributes.contains("fm-activation-bar"))
+        .expect("SVG activation rectangle");
+    let height: f32 = attributes
+        .split_once("height=\"")
+        .and_then(|(_, value)| value.split_once('"').map(|(number, _)| number))
+        .expect("activation height")
+        .parse()
+        .expect("numeric activation height");
+    assert!(
+        (height - (response_y - request_y)).abs() < 0.01,
+        "the exported activation must end at the response, not the diagram's last message"
+    );
+}

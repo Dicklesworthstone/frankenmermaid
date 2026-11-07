@@ -14865,7 +14865,8 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
     let left = strip_sequence_central_suffix(left);
     let target_raw = strip_sequence_central_prefix(target_raw);
 
-    // +/- activation modifiers on the target.
+    // Both modifiers follow the arrow, but + activates the receiver while -
+    // deactivates the sender after its message has been delivered.
     let (target_clean, activate, deactivate) = if let Some(stripped) = target_raw.strip_prefix('+')
     {
         (stripped, true, false)
@@ -14943,7 +14944,7 @@ fn lower_sequence_message(
                 builder.activate_participant(&data.to_id);
             }
             if data.deactivate {
-                builder.deactivate_participant(&data.to_id);
+                builder.deactivate_participant(&data.from_id);
             }
             true
         }
@@ -24661,28 +24662,126 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn sequence_activate_plus_minus_syntax() {
-        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>+Bob: Request\n  Bob-->>-Alice: Response";
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>+Bob: Request\n  Bob-->>-Alice: Response\n  Alice->>Bob: Later message";
         let parsed = parse_mermaid(input);
         let meta = parsed
             .ir
             .sequence_meta
             .expect("sequence_meta should be set");
         assert_eq!(
-            meta.activations.len(),
-            1,
-            "Should have one activation from +/- syntax"
+            meta.activations,
+            vec![fm_core::IrActivation {
+                participant: fm_core::IrNodeId(1),
+                start_edge: 0,
+                end_edge: 1,
+                depth: 0,
+            }],
+            "the response closes Bob before the later message"
         );
     }
 
     #[test]
     fn sequence_nested_activations() {
-        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>+Bob: First\n  Alice->>+Bob: Second\n  Bob-->>-Alice: Reply2\n  Bob-->>-Alice: Reply1";
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>+Bob: First\n  Alice->>+Bob: Second\n  Bob-->>-Alice: Reply2\n  Bob-->>-Alice: Reply1\n  Alice->>Bob: Later message";
         let parsed = parse_mermaid(input);
         let meta = parsed
             .ir
             .sequence_meta
             .expect("sequence_meta should be set");
-        assert_eq!(meta.activations.len(), 2, "Should have two activations");
+        assert_eq!(
+            meta.activations,
+            vec![
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(1),
+                    start_edge: 1,
+                    end_edge: 2,
+                    depth: 1,
+                },
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(1),
+                    start_edge: 0,
+                    end_edge: 3,
+                    depth: 0,
+                },
+            ],
+            "nested activations close at their own responses in stack order"
+        );
+    }
+
+    #[test]
+    fn sequence_deactivation_shorthand_preserves_the_receivers_activation() {
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  participant Carol\n  Carol->>+Alice: Start\n  Alice->>+Bob: Request\n  Bob-->>-Alice: Response\n  Alice->>Carol: Still working\n  Alice-->>-Carol: Complete\n  Carol->>Bob: Later message";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        assert_eq!(
+            meta.activations,
+            vec![
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(1),
+                    start_edge: 1,
+                    end_edge: 2,
+                    depth: 0,
+                },
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(0),
+                    start_edge: 0,
+                    end_edge: 4,
+                    depth: 0,
+                },
+            ],
+            "Bob's response must not close Alice's still-active invocation"
+        );
+    }
+
+    #[test]
+    fn sequence_self_message_activation_shorthand_closes_nested_invocations() {
+        let input = "sequenceDiagram\n  participant Worker\n  participant Observer\n  Worker->>+Worker: Outer\n  Worker->>+Worker: Inner\n  Worker-->>-Worker: Inner result\n  Worker-->>-Worker: Outer result\n  Worker->>Observer: Later message";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        assert_eq!(
+            meta.activations,
+            vec![
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(0),
+                    start_edge: 1,
+                    end_edge: 2,
+                    depth: 1,
+                },
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(0),
+                    start_edge: 0,
+                    end_edge: 3,
+                    depth: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_quoted_activation_shorthand_resolves_the_sending_participant() {
+        let input = "sequenceDiagram\n  participant \"Alice Client\"\n  participant \"Bob Service\"\n  \"Alice Client\"->>+\"Bob Service\": Request\n  \"Bob Service\"-->>-\"Alice Client\": Response\n  \"Alice Client\"->>\"Bob Service\": Later message";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        assert_eq!(
+            meta.activations,
+            vec![fm_core::IrActivation {
+                participant: fm_core::IrNodeId(1),
+                start_edge: 0,
+                end_edge: 1,
+                depth: 0,
+            }]
+        );
     }
 
     #[test]
