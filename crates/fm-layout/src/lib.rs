@@ -8975,6 +8975,7 @@ pub(crate) fn flat_placement(
     cycle_result: &CycleRemovalResult,
     node_priority: &[usize],
     trace: &mut LayoutTrace,
+    cross_anchors: &[f32],
 ) -> (usize, usize, Vec<LayoutNodeBox>) {
     let mut ranks = rank_assignment(ir, cycle_result, node_priority);
     if config.lp_relaxation_layers
@@ -9021,7 +9022,15 @@ pub(crate) fn flat_placement(
         .font_metrics
         .clone()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
-    let nodes = coordinate_assignment(ir, node_sizes, &ranks, &ordering_by_rank, spacing, &metrics);
+    let nodes = coordinate_assignment(
+        ir,
+        node_sizes,
+        &ranks,
+        &ordering_by_rank,
+        spacing,
+        &metrics,
+        cross_anchors,
+    );
     (crossing_count_before, crossing_count, nodes)
 }
 
@@ -9075,6 +9084,7 @@ fn layout_diagram_sugiyama_traced_with_config(
             &cycle_result,
             &node_priority,
             &mut trace,
+            &[],
         );
         apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
         separate_disjoint_subgraphs(ir, &mut nodes, spacing);
@@ -21526,6 +21536,7 @@ fn coordinate_assignment(
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     spacing: LayoutSpacing,
     metrics: &fm_core::FontMetrics,
+    cross_anchors: &[f32],
 ) -> Vec<LayoutNodeBox> {
     let fallback_nodes_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
@@ -21591,7 +21602,15 @@ fn coordinate_assignment(
         .filter_map(|node| {
             let centre = *secondary_coords.get(node)?;
             let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
-            Some(centre - if horizontal_ranks { height } else { width } / 2.0)
+            // Fold the caption half-band into the floor so a captioned cluster that is the
+            // top-most element re-anchors its own box without shifting the whole diagram.
+            let anchor = if horizontal_ranks {
+                cross_anchors.get(node).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let half_extent = (if horizontal_ranks { height } else { width }) / 2.0;
+            Some(centre - half_extent - anchor)
         })
         .fold(f32::INFINITY, f32::min);
     let secondary_floor = if secondary_floor.is_finite() {
@@ -21620,8 +21639,13 @@ fn coordinate_assignment(
             // between a narrow and a wide node jogged) and could overlap them. Along the rank axis
             // a node stays on its band's leading edge, which gives every edge into the rank one
             // shared channel for the orthogonal router.
+            // Captioned clusters: pull the stand-in up by half its caption band so the
+            // cluster's CONTENTS -- not its taller caption frame -- sit on the chain line.
+            // Cross axis only (the caption band is vertical); for TB/BT the band lies on the
+            // primary axis and the box height already reserves it, so anchor stays 0 there.
+            let anchor = cross_anchors.get(node_index).copied().unwrap_or(0.0);
             let (x, y) = if horizontal_ranks {
-                (primary, secondary - height / 2.0 - secondary_floor)
+                (primary, secondary - height / 2.0 - secondary_floor - anchor)
             } else {
                 (secondary - width / 2.0 - secondary_floor, primary)
             };
@@ -43833,6 +43857,66 @@ mod tests {
     /// aligned the chain's LEFT edges instead, which bent every edge between a narrow and a wide
     /// node. In a left-to-right chain through a subgraph, the outside nodes line up with the
     /// subgraph's middle.
+    /// Members-on-rank invariant for the chains slot-reservation fix: a chain through a captioned
+    /// subgraph keeps the subgraph's members on the same centre line as the outside nodes (Y for
+    /// LR/RL, X for TB/BT). Asserted for single-level clusters in all four rank directions and both
+    /// font sizes -- the caption band, and so the cross-axis re-anchor, scales with the font -- and
+    /// for nested subgraphs in TB/BT (where the band lies on the primary axis and the box height
+    /// reserves it). Nested LR/RL is exercised but NOT asserted: a second, inner caption band stays
+    /// uncorrected (one level of correction, matching the pre-regression baseline); that residual
+    /// is tracked in a separate issue and must not be frozen here as an expected value.
+    #[test]
+    fn chains_through_clusters_stay_on_the_centre_line() {
+        let default_font = fm_core::FontMetrics::default_metrics();
+        let large_font = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: default_font.config().font_size * 1.8,
+            ..default_font.config().clone()
+        });
+        for font in [default_font.clone(), large_font.clone()] {
+            for direction in ["LR", "RL", "TB", "BT"] {
+                let horizontal = matches!(direction, "LR" | "RL");
+                let single = fm_parser::parse(&format!(
+                    "flowchart {direction}\n  start --> gate\n  gate --> core1\n  subgraph core\n    core1 --> core2\n  end\n  core2 --> done\n"
+                ))
+                .ir;
+                let nested = fm_parser::parse(&format!(
+                    "flowchart {direction}\n  start --> gate\n  gate --> core1\n  subgraph outer\n    subgraph inner\n      core1 --> core2\n    end\n  end\n  core2 --> done\n"
+                ))
+                .ir;
+                for (shape, ir) in [("single", &single), ("nested", &nested)] {
+                    // Nested LR/RL leaves one inner band uncorrected (tracked separately); do not
+                    // assert a residual there. Every other case must be exactly on the line.
+                    if shape == "nested" && horizontal {
+                        continue;
+                    }
+                    let config = LayoutConfig {
+                        font_metrics: Some(font.clone()),
+                        ..LayoutConfig::default()
+                    };
+                    let layout = layout_diagram_with_config(ir, config);
+                    let cross = |id: &str| {
+                        let b = layout.nodes[ir.nodes.iter().position(|n| n.id == id).expect(id)]
+                            .bounds;
+                        if horizontal {
+                            b.y + b.height / 2.0
+                        } else {
+                            b.x + b.width / 2.0
+                        }
+                    };
+                    let line = cross("core1");
+                    for id in ["start", "gate", "core2", "done"] {
+                        assert!(
+                            (cross(id) - line).abs() < 0.01,
+                            "{direction}/{shape} (font {}): {id} off core1's centre line by {}",
+                            font.config().font_size,
+                            (cross(id) - line).abs()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn chains_align_on_centres() {
         let tb = fm_parser::parse(
