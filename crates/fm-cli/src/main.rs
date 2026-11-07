@@ -5296,6 +5296,49 @@ fn terminal_style_directive_note(ir: &MermaidDiagramIr) -> Option<String> {
         .map(|diagnostic| diagnostic.message.clone())
 }
 
+/// Honor parser rejection before layout or artifact writes on every rendering path, including
+/// borrowed batch parse results. Compatibility and recovery modes intentionally retain their
+/// best-effort behavior; warnings alone never reject an otherwise usable strict-mode diagram.
+fn enforce_render_parse_contract(ir: &MermaidDiagramIr, parse_mode: MermaidParseMode) -> Result<()> {
+    if parse_mode != MermaidParseMode::Strict {
+        return Ok(());
+    }
+
+    // Configuration/directive errors and ordinary parser diagnostics live in separate collections.
+    // Checking only has_errors() would let malformed init/deck directives silently render.
+    let mut errors = ir
+        .meta
+        .init
+        .errors
+        .iter()
+        .map(StructuredDiagnostic::from_error)
+        .chain(
+            ir.diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.is_error())
+                .map(StructuredDiagnostic::from_diagnostic),
+        )
+        .peekable();
+    if errors.peek().is_none() {
+        return Ok(());
+    }
+
+    let mut message = String::from("strict parsing rejected the input; rendering aborted");
+    for error in errors {
+        message.push_str(&format!("\n  [{}] {}", error.error_code, error.message));
+        if let Some(span) = error.span.filter(|span| !span.is_unknown()) {
+            message.push_str(&format!(
+                " (line {}, col {})",
+                span.start.line, span.start.col
+            ));
+        }
+        if let Some(hint) = error.remediation_hint {
+            message.push_str(&format!("\n    {hint}"));
+        }
+    }
+    anyhow::bail!(message)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_parsed_ir_with_pressure(
     source: &str,
@@ -5308,6 +5351,8 @@ fn render_parsed_ir_with_pressure(
     batch_renderer: Option<(&mut SvgBatchRenderer, Option<CertifiedSvgBatchPrefix>)>,
     engine: Option<&mut fm_layout::IncrementalLayoutEngine>,
 ) -> Result<RenderOutcome> {
+    enforce_render_parse_contract(ir, options.parse_mode)?;
+
     let RenderTiming {
         parse_time,
         total_start,

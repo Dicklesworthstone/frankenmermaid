@@ -1121,6 +1121,217 @@ fn render_json_requires_output_path() {
 }
 
 #[test]
+fn render_strict_rejects_parser_errors_on_every_output_surface() {
+    for (source, expected_error) in [
+        (
+            "some random text\nmore text\n",
+            "Unable to detect a supported diagram family",
+        ),
+        (
+            "%%{init: {not_json}}%%\nflowchart LR\nA-->B\n",
+            "invalid init directive payload",
+        ),
+    ] {
+        // Rejection must precede rendering, including PNG's optional rasterizer setup.
+        for format in ["svg", "term", "ascii", "png"] {
+            let output = run_cli(
+                &["render", "-", "--parse-mode", "strict", "--format", format],
+                source,
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{format}: {stderr}");
+            assert!(
+                output.stdout.is_empty(),
+                "{format} emitted a rejected diagram"
+            );
+            assert!(
+                stderr.contains("strict parsing rejected the input"),
+                "{format}: {stderr}"
+            );
+            assert!(stderr.contains(expected_error), "{format}: {stderr}");
+        }
+    }
+}
+
+#[test]
+fn render_strict_rejection_preserves_existing_artifacts() {
+    let dir = TempDir::new().expect("render artifacts");
+    let svg = dir.path().join("diagram.svg");
+    let source_map = dir.path().join("source-map.json");
+    let manifest = dir.path().join("deck.json");
+    let html = dir.path().join("talk.html");
+    for path in [&svg, &source_map, &manifest, &html] {
+        std::fs::write(path, "previous successful artifact").expect("seed artifact");
+    }
+    let source = format!("%%{{init: {{not_json}}}}%%\n{DECK_FIXTURE}");
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--parse-mode",
+            "strict",
+            "--format",
+            "svg",
+            "--json",
+            "--output",
+            svg.to_str().unwrap(),
+            "--source-map-out",
+            source_map.to_str().unwrap(),
+            "--deck-manifest-out",
+            manifest.to_str().unwrap(),
+        ],
+        &source,
+    );
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "rejected input emitted success metadata"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid init directive payload"), "{stderr}");
+    assert!(
+        stderr.contains("line 1, col 1"),
+        "source location was lost: {stderr}"
+    );
+
+    // Deck export uses the shared renderer directly, bypassing cmd_render's front-end checks.
+    let deck = run_cli(
+        &[
+            "deck",
+            "-",
+            "--parse-mode",
+            "strict",
+            "--output",
+            html.to_str().unwrap(),
+            "--manifest-out",
+            manifest.to_str().unwrap(),
+        ],
+        &source,
+    );
+    assert!(!deck.status.success());
+    assert!(deck.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&deck.stderr).contains("strict parsing rejected the input"),
+        "{}",
+        String::from_utf8_lossy(&deck.stderr)
+    );
+    for path in [&svg, &source_map, &manifest, &html] {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read preserved artifact"),
+            "previous successful artifact",
+            "strict rejection overwrote {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn render_strict_accepts_valid_diagrams_and_non_error_diagnostics() {
+    // Headerless arrows have a detection warning but remain accepted by the parser's strict
+    // contract. The renderer must honor errors without promoting warnings into rejections.
+    for source in ["flowchart LR\nA-->B\n", "A --> B\n"] {
+        let output = run_cli(
+            &["render", "-", "--parse-mode", "strict", "--format", "svg"],
+            source,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = String::from_utf8(output.stdout).expect("SVG text");
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.contains("id=\"fm-node-a-0\""));
+        assert!(svg.contains("id=\"fm-node-b-1\""));
+    }
+}
+
+#[test]
+fn render_compat_and_recover_keep_best_effort_output_after_parse_errors() {
+    let source = "%%{init: {not_json}}%%\nflowchart LR\nA[Alpha]-->B[Beta]\n";
+    for mode in ["compat", "recover"] {
+        let output = run_cli(
+            &["render", "-", "--parse-mode", mode, "--format", "svg"],
+            source,
+        );
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = String::from_utf8(output.stdout).expect("SVG text");
+        assert!(svg.starts_with("<svg"));
+        assert!(
+            svg.contains("Alpha") && svg.contains("Beta"),
+            "{mode} lost salvageable nodes"
+        );
+    }
+}
+
+#[test]
+fn render_batch_strict_keep_going_reports_rejections_and_renders_valid_inputs() {
+    let dir = TempDir::new().expect("batch fixtures");
+    let invalid = dir.path().join("invalid.mmd");
+    let valid = dir.path().join("valid.mmd");
+    let out = dir.path().join("out");
+    std::fs::write(&invalid, "%%{init: {not_json}}%%\nflowchart LR\nA-->B\n")
+        .expect("invalid fixture");
+    std::fs::write(&valid, "flowchart LR\nC[Complete]-->D[Done]\n").expect("valid fixture");
+
+    let batch = |mode: &str| {
+        run_cli(
+            &[
+                "render-batch",
+                invalid.to_str().unwrap(),
+                valid.to_str().unwrap(),
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--parse-mode",
+                mode,
+                "--format",
+                "svg",
+                "--jobs",
+                "1",
+                "--keep-going",
+                "--json",
+            ],
+            "",
+        )
+    };
+    // Warm the persistent cache in compatibility mode. Strict mode must not mistake the cached
+    // best-effort artifact for a successful strict parse or overwrite it after rejecting input.
+    let compat = batch("compat");
+    assert!(
+        compat.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compat.stderr)
+    );
+    let previous = std::fs::read(out.join("invalid.svg")).expect("compatibility artifact");
+
+    let strict = batch("strict");
+    assert!(!strict.status.success());
+    let records: Vec<serde_json::Value> = String::from_utf8(strict.stdout)
+        .expect("batch JSONL")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("batch result"))
+        .collect();
+    assert_eq!(records.len(), 2, "keep-going must report both inputs");
+    assert_eq!(records[0]["input"], invalid.to_str().unwrap());
+    assert_eq!(records[0]["status"], "error");
+    assert!(
+        records[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("strict parsing rejected the input")
+    );
+    assert_eq!(records[1]["input"], valid.to_str().unwrap());
+    assert_eq!(records[1]["status"], "ok");
+    assert_eq!(std::fs::read(out.join("invalid.svg")).unwrap(), previous);
+    let svg = std::fs::read_to_string(out.join("valid.svg")).expect("valid artifact");
+    assert!(svg.contains("Complete") && svg.contains("Done"));
+}
+
+#[test]
 fn render_json_writes_artifact_and_stdout_metadata() {
     let output_file = NamedTempFile::new().expect("temp render output file");
     let output_path = output_file
