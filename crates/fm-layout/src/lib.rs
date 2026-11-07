@@ -50462,13 +50462,26 @@ mod tests {
             metrics.config().line_height,
             Some("40px"),
         );
+        // The box is measured with the node's EFFECTIVE font metrics: compute_node_size applies
+        // the font-size:40px override via `effective_node_font_metrics`, which scales
+        // avg_char_width. Mirror the production member-row measurement -- same effective metrics,
+        // the row's own font size, avg as production passes it, and the box's own PADDING_X*2 -- so
+        // this compares like with like. Estimating with the base metrics (and a retyped 16.0)
+        // missed the effective-metrics box width by one f32 step.
+        let effective_metrics = expanded.effective_node_font_metrics(0, &metrics);
+        let effective_metrics = effective_metrics.as_ref();
         for row in &card.rows {
             assert_eq!(row.font_size, 40.0);
             assert!(row.center_y - 20.0 > 0.0);
             assert!(row.center_y + 20.0 < bounds.height);
-            let needed_width =
-                metrics.estimate_preserved_width(&row.text, 40.0, metrics.avg_char_width());
-            assert!(bounds.width >= needed_width + 16.0);
+            let needed_width = effective_metrics.estimate_preserved_width(
+                &row.text,
+                row.font_size,
+                effective_metrics.avg_char_width(),
+            );
+            assert!(
+                bounds.width >= needed_width + fm_core::ClassCompartmentLayout::PADDING_X * 2.0
+            );
         }
         for rows in card.rows.windows(2) {
             assert!(rows[0].center_y + 20.0 < rows[1].center_y - 20.0);
