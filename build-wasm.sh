@@ -299,7 +299,21 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # applied; wasm-opt still runs -Oz --converge with LTO, one codegen unit and immediate-abort std.
 # 1089K is the smallest whole-KiB ceiling fitting 1114286, leaving 850 bytes. Render equivalence,
 # package provenance, and source-freshness assertions are unchanged.
-MAX_GZIP_BYTES=$((1089 * 1024))
+#  2026-11-06 ceiling raise 1089K -> 1094K (gzip -c | wc -c measurements):
+#  1114263 gzip / 2823712 raw  committed pkg at 0c988006 (A, the 9e7c34dc build), 873 under 1089K.
+#  1119462 gzip / 2832894 raw  fresh rebuild of PRISTINE 0c988006 (B), 4326 OVER 1089K. The 5199-byte
+#    B-A growth is the render/layout work landed since the last pkg rebuild 9e7c34dc: owner features
+#    02aecae1 (sequence numbering + interaction frames), c7c53f35 (nested regions + GPU layers),
+#    d09665d4 (caption->connector routing), and the release's own fixes auto-committed ahead of this
+#    batch -- 53f12ea3 (sequence background + lifecycle order), a195a6d0 (parser trailing colon).
+#  1119802 gzip / 2832956 raw  the 0.5.0 release build (C), +340 over B: this batch's 9 code fixes,
+#    most test-only. No third-party dependency moved; wasm-opt still runs -Oz --converge with LTO,
+#    one codegen unit, immediate-abort std -- no behavior-dropping shrink was applied. Shrink-lever
+#    DELTA (added lines in 9e7c34dc..0c988006 over the 6 wasm crates, grep-only): 0 sort_by/
+#    sort_by_key/sort_unstable, 0 trim_end_matches, 0 from_iter, 0 BTreeMap/HashMap collect (the 3
+#    new collect::<> sites collect into Vec/String, not maps) -- no in-delta lever applies.
+#  1094K (1120256) is the smallest whole-KiB ceiling fitting 1119802, leaving 454 bytes. bd-p4k9c.
+MAX_GZIP_BYTES=$((1094 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
