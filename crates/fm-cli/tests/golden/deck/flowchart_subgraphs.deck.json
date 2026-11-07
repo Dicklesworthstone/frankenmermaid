@@ -22,7 +22,7 @@
       "caption": "where it starts",
       "bounds": {
         "x": 52.0,
-        "y": 72.47,
+        "y": 82.49,
         "width": 292.16,
         "height": 81.61
       },
@@ -236,19 +236,19 @@
     },
     "fm-node-done-5": {
       "x": 976.76,
-      "y": 80.03,
+      "y": 90.05,
       "width": 105.0,
       "height": 66.5
     },
     "fm-node-gate-1": {
       "x": 219.35,
-      "y": 72.47,
+      "y": 82.49,
       "width": 124.81,
       "height": 81.61
     },
     "fm-node-start-0": {
       "x": 52.0,
-      "y": 90.03,
+      "y": 100.05,
       "width": 103.35,
       "height": 46.5
     }
