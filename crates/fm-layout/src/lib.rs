@@ -37463,19 +37463,55 @@ mod tests {
                         );
                         assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
                         let layout = &traced.layout;
+                        // Each depth level is sized by its WIDEST node and centred on its
+                        // depth line, so a narrower node (the chain's N1 when the branch "Side"
+                        // widens level 1) sits (level_max - node_width)/2 inside the level edge.
+                        // rank_spacing is the gap between LEVEL EDGES, so assert that exact
+                        // level-edge gap; for a same-width level it equals the per-node gap.
+                        let depth_of = |id: &str| -> usize {
+                            if id == "Side" {
+                                1
+                            } else {
+                                id[1..].parse::<usize>().expect("node index")
+                            }
+                        };
+                        let mut level_lo: std::collections::BTreeMap<usize, f32> =
+                            std::collections::BTreeMap::new();
+                        let mut level_hi: std::collections::BTreeMap<usize, f32> =
+                            std::collections::BTreeMap::new();
+                        let mut member_ids: Vec<String> =
+                            (0..=10).map(|k| format!("N{k}")).collect();
+                        if branching {
+                            member_ids.push(String::from("Side"));
+                        }
+                        for id in &member_ids {
+                            let bnd = node_bounds(layout, id);
+                            let (lo, hi) = if horizontal {
+                                (bnd.x, bnd.x + bnd.width)
+                            } else {
+                                (bnd.y, bnd.y + bnd.height)
+                            };
+                            let depth = depth_of(id);
+                            level_lo
+                                .entry(depth)
+                                .and_modify(|v| *v = v.min(lo))
+                                .or_insert(lo);
+                            level_hi
+                                .entry(depth)
+                                .and_modify(|v| *v = v.max(hi))
+                                .or_insert(hi);
+                        }
+                        let reverse = matches!(direction, "RL" | "BT");
                         for index in 0..10 {
-                            let a = node_bounds(layout, &format!("N{index}"));
-                            let b = node_bounds(layout, &format!("N{}", index + 1));
-                            let gap = match direction {
-                                "LR" => b.x - a.x - a.width,
-                                "RL" => a.x - b.x - b.width,
-                                "BT" => a.y - b.y - b.height,
-                                _ => b.y - a.y - a.height,
+                            let gap = if reverse {
+                                level_lo[&index] - level_hi[&(index + 1)]
+                            } else {
+                                level_lo[&(index + 1)] - level_hi[&index]
                             };
                             assert!(
                                 (gap - expected_rank_gap).abs() < 0.01,
                                 "{algorithm:?}/{direction}, branching={branching}, authored={authored}: \
-                                 rank gap {gap} must be {expected_rank_gap}"
+                                 level-edge rank gap {gap} must be {expected_rank_gap}"
                             );
                         }
                         if branching {
