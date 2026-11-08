@@ -2849,6 +2849,36 @@ fn e2e_pipeline_sequence() {
 }
 
 #[test]
+fn sequence_semicolon_cli_parse_and_render_keep_the_complete_diagram() {
+    // The README's one-line sequence example must survive the public CLI, as must the
+    // following messages and notes when the author uses the same statement delimiter.
+    let source =
+        "sequenceDiagram; Alice->>Bob: hello; Note over Bob: waiting; Bob-->>Alice: goodbye";
+    let parsed = run_cli(&["parse", "-", "--pretty"], source);
+    assert!(
+        parsed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&parsed.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&parsed.stdout).expect("parse JSON");
+    assert_eq!(summary["diagram_type"], "sequence");
+    assert_eq!(summary["node_count"], 2);
+    assert_eq!(summary["edge_count"], 2);
+
+    let rendered = run_cli(&["render", "-", "--format", "svg"], source);
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    let svg = String::from_utf8(rendered.stdout).expect("SVG output");
+    assert!(svg.starts_with("<svg"));
+    for text in ["Alice", "Bob", "hello", "waiting", "goodbye"] {
+        assert!(svg.contains(text), "sequence SVG lost {text:?}");
+    }
+}
+
+#[test]
 fn e2e_pipeline_class() {
     assert_pipeline_roundtrip(
         "classDiagram\n  Animal <|-- Duck\n  Animal <|-- Fish\n  Animal : +int age\n  Animal : +String gender",

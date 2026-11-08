@@ -2272,7 +2272,14 @@ fn exact_diagram_type_with(
 ) -> Option<DiagramType> {
     if matches(line, "flowchart") || matches(line, "graph") {
         Some(DiagramType::Flowchart)
-    } else if matches(line, "sequencediagram") {
+    } else if matches(line, "sequencediagram")
+        || line
+            .get(.."sequencediagram;".len())
+            .and_then(|header| header.strip_suffix(';'))
+            .is_some_and(|header| matches(header, "sequencediagram"))
+    {
+        // A semicolon ends a sequence header just like a newline. It must be an exact match:
+        // fuzzy-header recovery would otherwise blank every statement on the physical line.
         Some(DiagramType::Sequence)
     } else if matches(line, "classdiagram") {
         Some(DiagramType::Class)
@@ -4047,6 +4054,36 @@ mod tests {
             detect_type("sequenceDiagram\nAlice->>Bob: Hello"),
             DiagramType::Sequence
         );
+    }
+
+    #[test]
+    fn sequence_semicolon_header_is_exact_even_without_intent_inference() {
+        let config = ParserConfig {
+            intent_inference: false,
+            ..ParserConfig::default()
+        };
+        for source in [
+            "sequenceDiagram;Alice->>Bob: hello",
+            "sequenceDiagram ; Alice->>Bob: hello",
+            "%% comment\n  SEQUENCEDIAGRAM; Alice->>Bob: hello",
+        ] {
+            let detected = super::detect_type_with_confidence_and_config(source, &config);
+            assert_eq!(detected.diagram_type, DiagramType::Sequence, "{source}");
+            assert_eq!(
+                detected.method,
+                super::DetectionMethod::ExactKeyword,
+                "{source}"
+            );
+            assert!((detected.confidence - 1.0).abs() < f32::EPSILON);
+            assert!(detected.warnings.is_empty(), "{:?}", detected.warnings);
+            let parsed =
+                super::parse_with_mode_and_config(source, MermaidParseMode::Strict, &config);
+            assert_eq!(parsed.ir.nodes.len(), 2, "{source}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{source}");
+            assert!(!parsed.ir.has_errors(), "{:?}", parsed.ir.diagnostics);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+        assert!(super::exact_keyword_match("sequenceDiagrammer; Alice->>Bob: hello").is_none());
     }
 
     #[test]

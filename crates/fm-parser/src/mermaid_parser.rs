@@ -455,7 +455,10 @@ enum SequenceStatement {
         label: String,
         color: Option<String>,
     },
-    CreateParticipant(String),
+    CreateParticipant {
+        declaration: String,
+        actor_keyword: bool,
+    },
     Destroy(String),
     FragmentStart {
         kind: fm_core::FragmentKind,
@@ -656,7 +659,7 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     }
 
     // Extract accessibility directives (accTitle / accDescr) from any diagram type.
-    extract_accessibility_directives(content, &mut builder);
+    extract_accessibility_directives(content, &mut builder, diagram_type == DiagramType::Sequence);
 
     // Promote a `title` directive that the statement loop dropped rather than promoted (bd-193x
     // sibling). No-op when a type-specific parser already set one.
@@ -4121,34 +4124,125 @@ fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
+    let mut in_acc_descr_block = false;
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(line);
+        if in_acc_descr_block {
+            if trimmed == "}" {
+                in_acc_descr_block = false;
+            }
+            continue;
+        }
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
-        if trimmed.starts_with("sequenceDiagram") {
-            continue;
+        for source_statement in split_sequence_statements(trimmed) {
+            if in_acc_descr_block {
+                if source_statement == "}" {
+                    in_acc_descr_block = false;
+                }
+                continue;
+            }
+            if source_statement.eq_ignore_ascii_case("sequenceDiagram") {
+                continue;
+            }
+
+            // The shared accessibility pass consumes these directives. They must not also be
+            // reported as unsupported sequence statements (bd-xym5x).
+            if is_accessibility_directive_statement(source_statement) {
+                if source_statement.starts_with("accDescr") && source_statement.ends_with('{') {
+                    in_acc_descr_block = true;
+                }
+                continue;
+            }
+
+            let Some(statement) = parse_sequence_statement(source_statement) else {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported sequence syntax: {source_statement}"
+                ));
+                continue;
+            };
+
+            // Keep physical source lines in spans even when several statements share one line.
+            lower_sequence_statement(statement, line_number, line, builder);
         }
-
-        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
-        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
-        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
-        // working directive unsupported (bd-xym5x).
-        if is_accessibility_directive_statement(trimmed) {
-            continue;
-        }
-
-        let Some(statement) = parse_sequence_statement(trimmed) else {
-            builder.add_warning(format!(
-                "Line {line_number}: unsupported sequence syntax: {trimmed}"
-            ));
-            continue;
-        };
-
-        lower_sequence_statement(statement, line_number, line, builder);
     }
+}
+
+/// Sequence statements end at an unquoted `;` or an inline `%%` comment.
+///
+/// Unlike flowchart tokens, message prose has no bracket nesting: `retry (later; B->>A: ok`
+/// still contains two messages. Apostrophes inside words are prose too, not opening quotes.
+/// Quoted participant names, aliases and JSON strings retain their punctuation, and entity
+/// terminators are left to the same decoder used by sequence labels.
+fn split_sequence_statements(line: &str) -> SplitStatements<'_> {
+    if memchr::memchr2(b';', b'%', line.as_bytes()).is_none() {
+        return SplitStatements::Single(std::iter::once(line));
+    }
+
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut quote_end = None;
+    let mut previous: Option<char> = None;
+    let mut chars = line.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        if let Some(end) = quote_end {
+            if index == end {
+                quote_end = None;
+            }
+        } else if matches!(ch, '"' | '\'' | '`')
+            && previous.is_none_or(|prev| !prev.is_alphanumeric() && !matches!(prev, '_' | '\\'))
+        {
+            // An unmatched prose quote must not consume the rest of a compact diagram.
+            quote_end = sequence_closing_quote(line, index, ch);
+        } else if ch == '%' && chars.peek().is_some_and(|(_, next)| *next == '%') {
+            let statement = line[start..index].trim();
+            if !statement.is_empty() {
+                statements.push(statement);
+            }
+            return SplitStatements::Multiple(statements.into_iter());
+        } else if ch == ';' && !closes_entity_token(line, index) {
+            let statement = line[start..index].trim();
+            if !statement.is_empty() {
+                statements.push(statement);
+            }
+            start = index + 1;
+            previous = None;
+            continue;
+        }
+        previous = Some(ch);
+    }
+
+    let statement = line[start..].trim();
+    if !statement.is_empty() {
+        statements.push(statement);
+    }
+    SplitStatements::Multiple(statements.into_iter())
+}
+
+fn sequence_closing_quote(line: &str, start: usize, quote: char) -> Option<usize> {
+    let offset = start + quote.len_utf8();
+    let mut chars = line[offset..].char_indices().peekable();
+    let mut escaped = false;
+    let mut previous: Option<char> = None;
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && quote != '`' {
+            escaped = true;
+        } else if ch == quote
+            && !(quote == '\''
+                && previous.is_some_and(char::is_alphanumeric)
+                && chars.peek().is_some_and(|(_, next)| next.is_alphanumeric()))
+        {
+            return Some(offset + index);
+        }
+        previous = Some(ch);
+    }
+    None
 }
 
 fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
@@ -4250,14 +4344,20 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
     if let Some(rest) = line.strip_prefix("create participant ") {
         let name = rest.trim();
         if !name.is_empty() {
-            return Some(SequenceStatement::CreateParticipant(name.to_string()));
+            return Some(SequenceStatement::CreateParticipant {
+                declaration: name.to_string(),
+                actor_keyword: false,
+            });
         }
     }
 
     if let Some(rest) = line.strip_prefix("create actor ") {
         let name = rest.trim();
         if !name.is_empty() {
-            return Some(SequenceStatement::CreateParticipant(name.to_string()));
+            return Some(SequenceStatement::CreateParticipant {
+                declaration: name.to_string(),
+                actor_keyword: true,
+            });
         }
     }
 
@@ -4871,9 +4971,10 @@ fn lower_sequence_statement(
         SequenceStatement::BoxStart { label, color } => {
             builder.begin_participant_group(label, color);
         }
-        SequenceStatement::CreateParticipant(declaration) => {
-            let span = span_for(line_number, source_line);
-            let actor_keyword = source_line.trim_start().starts_with("create actor ");
+        SequenceStatement::CreateParticipant {
+            declaration,
+            actor_keyword,
+        } => {
             if register_participant(
                 &declaration,
                 actor_keyword,
@@ -4891,7 +4992,6 @@ fn lower_sequence_statement(
                     "Line {line_number}: unable to parse create participant: {}",
                     source_line.trim()
                 ));
-                let _ = span; // suppress unused warning
             }
         }
         SequenceStatement::Destroy(name) => {
@@ -20050,7 +20150,11 @@ fn extract_generic_diagram_title(input: &str, builder: &mut IrBuilder) {
 /// - `accTitle: My Title`
 /// - `accDescr: Single-line description`
 /// - `accDescr { multi-line description }`
-fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
+fn extract_accessibility_directives(
+    input: &str,
+    builder: &mut IrBuilder,
+    sequence_statements: bool,
+) {
     // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
     // appears, bail before the per-line scan (run on every parse of every diagram type).
     // Output-identical: with neither substring no directive line matches and no accDescr
@@ -20067,35 +20171,44 @@ fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     let mut descr_lines: Vec<&str> = Vec::new();
 
     for line in input.lines() {
-        let trimmed = trim_fast(line);
+        // Compact sequence directives use the same boundaries as the diagram body. Description
+        // block contents remain literal physical lines, including semicolons and comment text.
+        let statements = if sequence_statements && !in_acc_descr_block {
+            split_sequence_statements(line)
+        } else {
+            SplitStatements::Single(std::iter::once(line))
+        };
+        for statement in statements {
+            let trimmed = trim_fast(statement);
 
-        if in_acc_descr_block {
-            if trimmed == "}" {
-                in_acc_descr_block = false;
-                let descr = descr_lines.join("\n");
-                if !descr.is_empty() {
-                    builder.set_acc_descr(descr);
+            if in_acc_descr_block {
+                if trimmed == "}" {
+                    in_acc_descr_block = false;
+                    let descr = descr_lines.join("\n");
+                    if !descr.is_empty() {
+                        builder.set_acc_descr(descr);
+                    }
+                    descr_lines.clear();
+                } else {
+                    descr_lines.push(trimmed);
                 }
-                descr_lines.clear();
-            } else {
-                descr_lines.push(trimmed);
+                continue;
             }
-            continue;
-        }
 
-        if let Some(rest) = trimmed.strip_prefix("accTitle:") {
-            let title = rest.trim();
-            if !title.is_empty() {
-                builder.set_acc_title(title.to_string());
+            if let Some(rest) = trimmed.strip_prefix("accTitle:") {
+                let title = rest.trim();
+                if !title.is_empty() {
+                    builder.set_acc_title(title.to_string());
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("accDescr:") {
+                let descr = rest.trim();
+                if !descr.is_empty() {
+                    builder.set_acc_descr(descr.to_string());
+                }
+            } else if trimmed.starts_with("accDescr") && trimmed.ends_with('{') {
+                in_acc_descr_block = true;
+                descr_lines.clear();
             }
-        } else if let Some(rest) = trimmed.strip_prefix("accDescr:") {
-            let descr = rest.trim();
-            if !descr.is_empty() {
-                builder.set_acc_descr(descr.to_string());
-            }
-        } else if trimmed.starts_with("accDescr") && trimmed.ends_with('{') {
-            in_acc_descr_block = true;
-            descr_lines.clear();
         }
     }
 
@@ -21621,6 +21734,292 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn sequence_semicolon_header_and_messages_are_not_discarded() {
+        for input in [
+            "sequenceDiagram; Alice->>Bob: hello",
+            "sequenceDiagram; participant Alice; participant Bob; Alice->>Bob: hello;",
+        ] {
+            let parsed = parse_mermaid(input);
+            assert_eq!(parsed.ir.diagram_type, DiagramType::Sequence);
+            assert_eq!(parsed.ir.nodes.len(), 2, "{input}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{input}");
+            assert_eq!(parsed.ir.nodes[0].id, "Alice");
+            assert_eq!(parsed.ir.nodes[1].id, "Bob");
+            let edge = &parsed.ir.edges[0];
+            assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(0)));
+            assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(1)));
+            assert_eq!(
+                parsed.ir.labels[edge.label.expect("message label").0].text,
+                "hello"
+            );
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_keep_actor_lifecycle_and_physical_spans() {
+        let first = "sequenceDiagram; participant Alice; autonumber 10 5; create actor Bob as Bob's Client; Alice->>+Bob: Bienvenue à bord";
+        let second = "Bob-->>-Alice: Ready; destroy Bob; Alice-xBob: Bye; hide footbox";
+        let parsed = parse_mermaid(&format!("%% heading\r\n{first}\r\n{second}\r\n"));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        let bob = &parsed.ir.nodes[1];
+        assert_eq!(bob.id, "Bob");
+        assert_eq!(bob.shape, NodeShape::Stadium);
+        assert!(bob.classes.iter().any(|class| class == "sequence-actor"));
+        assert_eq!(
+            parsed.ir.labels[bob.label.expect("actor label").0].text,
+            "Bob's Client"
+        );
+        assert_eq!(
+            bob.span_primary,
+            fm_core::Span::at_line(2, first.chars().count())
+        );
+        assert_eq!(
+            parsed.ir.edges[0].span,
+            fm_core::Span::at_line(2, first.chars().count())
+        );
+        for edge in &parsed.ir.edges[1..] {
+            assert_eq!(edge.span, fm_core::Span::at_line(3, second.chars().count()));
+        }
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert_eq!(meta.autonumber_start, 10);
+        assert_eq!(meta.autonumber_increment, 5);
+        assert!(meta.hide_footbox);
+        assert_eq!(meta.activations.len(), 1);
+        assert_eq!(meta.activations[0].participant, fm_core::IrNodeId(1));
+        assert_eq!(
+            (meta.activations[0].start_edge, meta.activations[0].end_edge),
+            (0, 1)
+        );
+        assert_eq!(meta.lifecycle_events.len(), 2);
+        assert_eq!(
+            meta.lifecycle_events[0].kind,
+            fm_core::LifecycleEventKind::Create
+        );
+        assert_eq!(meta.lifecycle_events[0].at_edge, 0);
+        assert_eq!(
+            meta.lifecycle_events[1].kind,
+            fm_core::LifecycleEventKind::Destroy
+        );
+        assert_eq!(meta.lifecycle_events[1].at_edge, 2);
+        assert!(
+            meta.lifecycle_events
+                .iter()
+                .all(|event| event.participant == fm_core::IrNodeId(1))
+        );
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_preserve_quotes_and_participant_json() {
+        let parsed = parse_mermaid(
+            r#"sequenceDiagram; participant "Client; UI"; participant DB {"type":"database","alias":"DB; reports %% current"}; "Client; UI"->>DB: "quoted; message %% literal"; DB-->>"Client; UI": done"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        let client = &parsed.ir.nodes[0];
+        let db = &parsed.ir.nodes[1];
+        assert_eq!(
+            parsed.ir.labels[client.label.expect("client label").0].text,
+            "Client; UI"
+        );
+        assert_eq!(
+            parsed.ir.labels[db.label.expect("database label").0].text,
+            "DB; reports %% current"
+        );
+        assert_eq!(db.shape, NodeShape::Cylinder);
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(0)));
+        assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(1)));
+        assert_eq!(
+            parsed.ir.labels[edge.label.expect("message label").0].text,
+            "quoted; message %% literal"
+        );
+        assert_eq!(
+            parsed.ir.edges[1].to,
+            IrEndpoint::Node(fm_core::IrNodeId(0))
+        );
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_do_not_treat_prose_as_nesting() {
+        for label in [
+            "don't retry (yet",
+            "users' requests [pending",
+            "Alice's {pending request",
+            "O'Reilly's team",
+            "値 can't close (",
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "sequenceDiagram; Alice->>Bob: {label}; Bob-->>Alice: next"
+            ));
+            assert!(parsed.warnings.is_empty(), "{label}: {:?}", parsed.warnings);
+            assert_eq!(parsed.ir.nodes.len(), 2, "{label}");
+            assert_eq!(parsed.ir.edges.len(), 2, "{label}");
+            let first = parsed.ir.edges[0].label.expect("first message");
+            let second = parsed.ir.edges[1].label.expect("second message");
+            assert_eq!(parsed.ir.labels[first.0].text, label);
+            assert_eq!(parsed.ir.labels[second.0].text, "next");
+        }
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_recover_after_unmatched_prose_quotes() {
+        for label in ["say \"hello", "'tis ready", "`unfinished code"] {
+            let parsed = parse_mermaid(&format!(
+                "sequenceDiagram; Alice->>Bob: {label}; Bob-->>Alice: next"
+            ));
+            assert!(parsed.warnings.is_empty(), "{label}: {:?}", parsed.warnings);
+            assert_eq!(parsed.ir.nodes.len(), 2, "{label}");
+            assert_eq!(parsed.ir.edges.len(), 2, "{label}");
+            let reply = &parsed.ir.edges[1];
+            assert_eq!(reply.from, IrEndpoint::Node(fm_core::IrNodeId(1)));
+            assert_eq!(reply.to, IrEndpoint::Node(fm_core::IrNodeId(0)));
+            assert_eq!(
+                parsed.ir.labels[reply.label.expect("reply label").0].text,
+                "next"
+            );
+        }
+
+        let quoted = parse_mermaid(
+            r#"sequenceDiagram; Alice->>Bob: 'don't split; this'; Bob-->>Alice: "say \"yes; please\""; Alice->>Bob: next"#,
+        );
+        assert!(quoted.warnings.is_empty(), "{:?}", quoted.warnings);
+        assert_eq!(quoted.ir.edges.len(), 3);
+        let first = quoted.ir.edges[0].label.expect("quoted message");
+        assert_eq!(quoted.ir.labels[first.0].text, "don't split; this");
+    }
+
+    #[test]
+    fn sequence_semicolon_accessibility_directives_keep_source_order() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram; accTitle: Initial; accDescr: old; Alice->>Bob: hello\n\
+             accTitle: Checkout; accDescr: Purchase summary; Bob-->>Alice: goodbye",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Checkout"));
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("Purchase summary")
+        );
+    }
+
+    #[test]
+    fn sequence_semicolon_accessibility_keeps_multiline_description_contents_literal() {
+        let source = "sequenceDiagram; accTitle: Checkout; accDescr: old\n\
+                      accDescr {\n\
+                      A description; with semicolons\n\
+                      %% literal description content\n\
+                      Alice->>Bob: narrative, not a message\n\
+                      }\n\
+                      Alice->>Bob: actual; Bob-->>Alice: reply";
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Checkout"));
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some(
+                "A description; with semicolons\n%% literal description content\nAlice->>Bob: narrative, not a message"
+            )
+        );
+        let replaced = parse_mermaid(&format!("{source}; accDescr: final description"));
+        assert_eq!(
+            replaced.ir.meta.acc_descr.as_deref(),
+            Some("final description")
+        );
+        assert_eq!(replaced.ir.edges.len(), 2);
+
+        let compact = parse_mermaid(
+            "sequenceDiagram; accDescr {; Alice->>Bob: description only; }; Alice->>Bob: real",
+        );
+        assert!(compact.warnings.is_empty(), "{:?}", compact.warnings);
+        assert_eq!(compact.ir.edges.len(), 1);
+        assert_eq!(
+            compact.ir.meta.acc_descr.as_deref(),
+            Some("Alice->>Bob: description only")
+        );
+        let label = compact.ir.edges[0].label.expect("actual message");
+        assert_eq!(compact.ir.labels[label.0].text, "real");
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_preserve_entity_terminators() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram; Alice->>Bob: Value #quot;yes#quot; &amp; #amp; #semi; #35; &#35; &#x1f642; #9829; #infin;; Note over Bob: Keep #semi; literal; Bob-->>Alice: next",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        let first = parsed.ir.edges[0].label.expect("first message");
+        assert_eq!(
+            parsed.ir.labels[first.0].text,
+            "Value \"yes\" & & ; # # 🙂 ♥ ∞"
+        );
+        let second = parsed.ir.edges[1].label.expect("second message");
+        assert_eq!(parsed.ir.labels[second.0].text, "next");
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert_eq!(meta.notes.len(), 1);
+        assert_eq!(meta.notes[0].text, "Keep ; literal");
+    }
+
+    #[test]
+    fn sequence_semicolon_statements_stop_at_inline_comments() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram; participant Alice; participant Bob %% comment; participant Ghost\n\
+             Alice->>Bob: don't drop this %% comment; Bob->>Ghost: hidden\n\
+             Bob-->>Alice: 100% done; %% hidden; participant Another\n\
+             Note over Alice: the client's note %% comment; Note over Bob: hidden\n\
+             Alice->>Bob: final%%comment; Bob->>Ghost: hidden",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        let labels: Vec<_> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                parsed.ir.labels[edge.label.expect("message label").0]
+                    .text
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(labels, ["don't drop this", "100% done", "final"]);
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert_eq!(meta.notes.len(), 1);
+        assert_eq!(meta.notes[0].text, "the client's note");
+    }
+
+    #[test]
+    fn sequence_semicolon_fragments_have_the_same_timeline_as_physical_lines() {
+        let compact = "sequenceDiagram; participant Alice; participant Bob; Alice->>Bob: before; alt ready; Note over Bob: waiting; Bob-->>Alice: yes; else later; loop retries; Alice->>Bob: retry; end; end; Bob-->>Alice: after";
+        let compact_result = parse_mermaid(compact);
+        let expanded_result = parse_mermaid(&compact.replace("; ", "\n"));
+        assert!(
+            compact_result.warnings.is_empty(),
+            "{:?}",
+            compact_result.warnings
+        );
+        assert!(
+            expanded_result.warnings.is_empty(),
+            "{:?}",
+            expanded_result.warnings
+        );
+        assert_eq!(compact_result.ir.edges.len(), 4);
+        let compact_meta = compact_result.ir.sequence_meta.expect("compact metadata");
+        assert_eq!(compact_meta.fragments.len(), 2);
+        assert_eq!(compact_meta.notes.len(), 1);
+        assert_eq!(
+            compact_meta,
+            expanded_result.ir.sequence_meta.expect("expanded metadata")
+        );
     }
 
     #[test]
