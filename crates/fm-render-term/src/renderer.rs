@@ -498,6 +498,10 @@ impl TermRenderer {
             return self.render_pie(ir, meta, layout, (cell_width, cell_height));
         }
 
+        if ir.diagram_type == fm_core::DiagramType::Sankey {
+            return self.render_sankey(ir, layout, (cell_width, cell_height, scale_x, scale_y));
+        }
+
         // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
         // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The legacy
         // id-marker skeleton is retained only for direct unit-test coverage.
@@ -5989,6 +5993,254 @@ impl TermRenderer {
         clipped
     }
 
+    /// Preserve flow quantities on the terminal's raster. The shared route carries cubic
+    /// controls, and its width is data; joining the controls with a one-pixel line loses both.
+    fn render_sankey(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        dimensions: (usize, usize, f32, f32),
+    ) -> TermRenderResult {
+        let (width, height, scale_x, scale_y) = dimensions;
+        let width = width.min(self.config.cols);
+        let height = height.min(self.config.rows);
+        let mode = if self.config.tier == MermaidTier::Compact {
+            MermaidRenderMode::CellOnly
+        } else {
+            self.config.render_mode
+        };
+        if width == 0 || height == 0 {
+            return TermRenderResult {
+                output: String::new(),
+                width,
+                height,
+                tier: self.config.tier,
+                render_mode: mode,
+                node_count: layout.nodes.len(),
+                edge_count: layout.edges.len(),
+                occluded_node_count: layout.nodes.len(),
+                occluded_edge_label_count: 0,
+                debug_metrics: None,
+            };
+        }
+        let (mult_x, mult_y) = crate::canvas::subcell_multiplier(mode);
+        let pixel_scale = (scale_x * mult_x as f32, scale_y * mult_y as f32);
+        let offset = (
+            (self.config.padding * mult_x) as f32,
+            (self.config.padding * mult_y) as f32,
+        );
+        let mut canvas = Canvas::new(width, height, mode);
+        let widest = fm_layout::sankey_widest_flow(ir);
+        for edge in &layout.edges {
+            if edge.bundled || is_invisible_edge(ir, edge) {
+                continue;
+            }
+            // Invalid or absent weights retain a plain connector, just as on the graphical
+            // backends. They never acquire a fabricated positive contribution to a node total.
+            let stroke_width =
+                fm_layout::sankey_flow_stroke_width(ir, ir.edges.get(edge.edge_index), widest)
+                    .unwrap_or(1.5);
+            raster_sankey_edge(&mut canvas, ir, edge, stroke_width, pixel_scale, offset);
+        }
+
+        // Node cards mask their incoming ribbons. Bound every clear operation to the actual
+        // canvas, including supplied layouts whose coordinates extend outside the viewport.
+        let (pixel_width, pixel_height) = canvas.pixel_dimensions();
+        for node in &layout.nodes {
+            let bounds = node.bounds;
+            let x0 = (bounds.x * pixel_scale.0 + offset.0).max(0.0) as usize;
+            let y0 = (bounds.y * pixel_scale.1 + offset.1).max(0.0) as usize;
+            let x1 = ((bounds.x + bounds.width) * pixel_scale.0 + offset.0).max(0.0) as usize;
+            let y1 = ((bounds.y + bounds.height) * pixel_scale.1 + offset.1).max(0.0) as usize;
+            for y in y0.min(pixel_height)..y1.min(pixel_height) {
+                for x in x0.min(pixel_width)..x1.min(pixel_width) {
+                    canvas.unset_pixel(x, y);
+                }
+            }
+            if mode != MermaidRenderMode::CellOnly {
+                self.render_node_canvas(
+                    &mut canvas,
+                    ir,
+                    node,
+                    pixel_scale.0,
+                    pixel_scale.1,
+                    self.config.padding * mult_x,
+                    self.config.padding * mult_y,
+                    0,
+                );
+            }
+        }
+        let mut buffer = CellBuffer {
+            cells: canvas
+                .render_char_grid()
+                .into_iter()
+                .flatten()
+                .map(|ch| match ch {
+                    '\u{2800}' => ' ',
+                    '█' if mode == MermaidRenderMode::CellOnly => self.box_glyphs.block_full,
+                    other => other,
+                })
+                .collect(),
+            width,
+            height,
+        };
+        if mode == MermaidRenderMode::CellOnly {
+            for node in &layout.nodes {
+                let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+                if x < width && y < height {
+                    self.draw_shape_border(
+                        &mut buffer,
+                        x,
+                        y,
+                        w.min(width - x),
+                        h.min(height - y),
+                        NodeShape::Rect,
+                    );
+                }
+            }
+        }
+
+        // Cycles and self-flows need their direction even on a monochrome raster. Derive
+        // each marker from the shared curve's endpoint tangent, never from a control polygon.
+        for edge in &layout.edges {
+            if edge.bundled || is_invisible_edge(ir, edge) {
+                continue;
+            }
+            let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
+                ir,
+                edge.edge_index,
+                &edge.points,
+                |_| {},
+            ) else {
+                continue;
+            };
+            let Some(source) = ir.edges.get(edge.edge_index) else {
+                continue;
+            };
+            let (start, end) = edge_marker_ends(source.arrow);
+            let (co_start, co_end) = source.co_arrow().map_or((false, false), edge_marker_ends);
+            for (enabled, endpoint, sign) in [
+                (start || co_start, endpoints.start, 1.0),
+                (end || co_end, endpoints.end, -1.0),
+            ] {
+                if !enabled {
+                    continue;
+                }
+                let dx = -f64::from(endpoint.tangent.x) * sign * f64::from(scale_x);
+                let dy = -f64::from(endpoint.tangent.y) * sign * f64::from(scale_y);
+                if !endpoint.point.x.is_finite()
+                    || !endpoint.point.y.is_finite()
+                    || !dx.is_finite()
+                    || !dy.is_finite()
+                    || (dx == 0.0 && dy == 0.0)
+                {
+                    continue;
+                }
+                let x =
+                    f64::from(endpoint.point.x) * f64::from(scale_x) + self.config.padding as f64;
+                let y =
+                    f64::from(endpoint.point.y) * f64::from(scale_y) + self.config.padding as f64;
+                if x < 0.0 || y < 0.0 || x >= width as f64 || y >= height as f64 {
+                    continue;
+                }
+                // Quantizing two nearby endpoints can erase a valid tangent. Pick its
+                // projected direction first, then reuse the configured marker vocabulary.
+                let (to_x, to_y) = if dx.abs() > dy.abs() {
+                    (if dx > 0.0 { 2 } else { 0 }, 1)
+                } else {
+                    (1, if dy > 0.0 { 2 } else { 0 })
+                };
+                let marker =
+                    self.arrowhead_for_direction(1, 1, to_x, to_y, &self.edge_glyphs, source.arrow);
+                buffer.set(x as usize, y as usize, marker);
+            }
+        }
+
+        let mut grid: Vec<Vec<char>> = buffer.cells.chunks(width).map(<[char]>::to_vec).collect();
+        let mut captions: Vec<CellLabel> = Vec::new();
+        if self.config.show_labels {
+            for node in &layout.nodes {
+                let Some(name) =
+                    self.node_display_label(ir, ir.nodes.get(node.node_index), &node.node_id)
+                else {
+                    continue;
+                };
+                let rendered = fm_layout::sankey_node_label(ir, node.node_index);
+                let total = rendered.as_deref().and_then(|text| text.rsplit_once('\n'));
+                let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+                if x >= width || y >= height {
+                    continue;
+                }
+                let available = w.saturating_sub(2).max(1).min(width);
+                let mut rows = wrap_cell_label(&name, available, self.config.max_label_lines);
+                // A quantity is never shortened to fit a name's character/line budget. When
+                // the viewport cannot hold it, omit the whole value rather than print a
+                // different number. At useful sizes layout reserves this extra data row.
+                if let Some((_, value)) = total.filter(|(_, value)| value.width() <= width) {
+                    rows.push(value.to_owned());
+                }
+                let mut caption = CellLabel::new(node.node_index, false, rows);
+                if caption.width == 0 || caption.width > width || caption.lines.len() > height {
+                    continue;
+                }
+                caption.x = (x + w / 2)
+                    .saturating_sub(caption.width / 2)
+                    .min(width - caption.width);
+                caption.y = (y + h / 2)
+                    .saturating_sub(caption.lines.len() / 2)
+                    .min(height - caption.lines.len());
+                if captions.iter().any(|other| {
+                    caption.x < other.x + other.width
+                        && other.x < caption.x + caption.width
+                        && caption.y < other.y + other.lines.len()
+                        && other.y < caption.y + caption.lines.len()
+                }) {
+                    continue;
+                }
+                for row in &mut grid[caption.y..caption.y + caption.lines.len()] {
+                    row[caption.x..caption.x + caption.width].fill(' ');
+                }
+                captions.push(caption);
+            }
+            if let Some(title) = generic_terminal_diagram_title(ir) {
+                let text = self.pie_text_to_width(&self.truncate_label(title), width);
+                let mut title = CellLabel::new(usize::MAX, false, vec![text]);
+                title.x = width.saturating_sub(title.width) / 2;
+                if !captions.iter().any(|caption| caption.y == 0) {
+                    captions.push(title);
+                }
+            }
+        }
+        let mut output = serialize_cell_labels(&grid, &captions, true);
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, width, height, metrics);
+        }
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        TermRenderResult {
+            output,
+            width: width.max(links_width),
+            height: height + links_rows,
+            tier: self.config.tier,
+            render_mode: mode,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                width,
+                height,
+            ),
+            occluded_edge_label_count: 0,
+            debug_metrics,
+        }
+    }
+
     /// Project XY marks onto a terminal raster without changing their common numeric scale.
     fn render_xychart(
         &self,
@@ -6383,6 +6635,159 @@ impl TermRenderer {
     }
 }
 
+/// Rasterize the same connector commands used by SVG and Canvas. Sampling is bounded by the
+/// displayed curve length; offscreen or malformed coordinates cannot trigger an unbounded walk.
+fn raster_sankey_edge(
+    canvas: &mut Canvas,
+    ir: &MermaidDiagramIr,
+    edge: &LayoutEdgePath,
+    stroke_width: f32,
+    scale: (f32, f32),
+    offset: (f32, f32),
+) {
+    use fm_layout::PathCmd;
+
+    if !scale.0.is_finite() || !scale.1.is_finite() || scale.0 <= 0.0 || scale.1 <= 0.0 {
+        return;
+    }
+    let project = |x: f32, y: f32| {
+        (
+            f64::from(x) * f64::from(scale.0) + f64::from(offset.0),
+            f64::from(y) * f64::from(scale.1) + f64::from(offset.1),
+        )
+    };
+    // A subpixel ribbon remains visible, but larger flows keep their proportional width in
+    // BOTH axes. Terminal cells are anisotropic, so one pixel-space radius is insufficient.
+    let radius = (
+        (f64::from(stroke_width) * f64::from(scale.0) * 0.5).max(0.75),
+        (f64::from(stroke_width) * f64::from(scale.1) * 0.5).max(0.75),
+    );
+    let mut current = None;
+    let mut first = None;
+    let _ =
+        fm_layout::edge_paths::emit_diagram_edge_path(ir, edge.edge_index, &edge.points, |cmd| {
+            match cmd {
+                PathCmd::MoveTo { x, y } => {
+                    let point = project(x, y);
+                    current = Some(point);
+                    first = Some(point);
+                }
+                PathCmd::LineTo { x, y } => {
+                    let next = project(x, y);
+                    if let Some(previous) = current {
+                        raster_sankey_segment(canvas, previous, next, radius);
+                    }
+                    current = Some(next);
+                }
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    let next = project(x, y);
+                    if let Some(previous) = current {
+                        raster_sankey_curve(
+                            canvas,
+                            [previous, project(c1x, c1y), project(c2x, c2y), next],
+                            radius,
+                        );
+                    }
+                    current = Some(next);
+                }
+                PathCmd::QuadTo { cx, cy, x, y } => {
+                    let next = project(x, y);
+                    let control = project(cx, cy);
+                    if let Some(previous) = current {
+                        let c1 = (
+                            previous.0 + (control.0 - previous.0) * (2.0 / 3.0),
+                            previous.1 + (control.1 - previous.1) * (2.0 / 3.0),
+                        );
+                        let c2 = (
+                            next.0 + (control.0 - next.0) * (2.0 / 3.0),
+                            next.1 + (control.1 - next.1) * (2.0 / 3.0),
+                        );
+                        raster_sankey_curve(canvas, [previous, c1, c2, next], radius);
+                    }
+                    current = Some(next);
+                }
+                PathCmd::Close => {
+                    if let (Some(previous), Some(next)) = (current, first) {
+                        raster_sankey_segment(canvas, previous, next, radius);
+                    }
+                    current = first;
+                }
+            }
+        });
+}
+
+fn raster_sankey_curve(canvas: &mut Canvas, control: [(f64, f64); 4], radius: (f64, f64)) {
+    if !control.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        return;
+    }
+    let length: f64 = control
+        .windows(2)
+        .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
+        .sum();
+    let steps = (length.ceil() as usize).clamp(8, 2048).next_multiple_of(4);
+    let mut previous = control[0];
+    for step in 1..=steps {
+        let t = step as f64 / steps as f64;
+        let s = 1.0 - t;
+        let weights = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
+        let next = control
+            .iter()
+            .zip(weights)
+            .fold((0.0, 0.0), |(x, y), (point, weight)| {
+                (x + point.0 * weight, y + point.1 * weight)
+            });
+        raster_sankey_segment(canvas, previous, next, radius);
+        previous = next;
+    }
+}
+
+/// A round stroke becomes an elliptical capsule after projection onto terminal pixels.
+/// Test only pixels inside its clipped bounds, never iterate toward an offscreen endpoint.
+fn raster_sankey_segment(
+    canvas: &mut Canvas,
+    from: (f64, f64),
+    to: (f64, f64),
+    radius: (f64, f64),
+) {
+    if ![from.0, from.1, to.0, to.1, radius.0, radius.1]
+        .into_iter()
+        .all(f64::is_finite)
+        || radius.0 <= 0.0
+        || radius.1 <= 0.0
+    {
+        return;
+    }
+    let (width, height) = canvas.pixel_dimensions();
+    let left = (from.0.min(to.0) - radius.0).floor().max(0.0) as usize;
+    let top = (from.1.min(to.1) - radius.1).floor().max(0.0) as usize;
+    let right = ((from.0.max(to.0) + radius.0).ceil().max(0.0) as usize).min(width);
+    let bottom = ((from.1.max(to.1) + radius.1).ceil().max(0.0) as usize).min(height);
+    let dx = (to.0 - from.0) / radius.0;
+    let dy = (to.1 - from.1) / radius.1;
+    let length_squared = dx * dx + dy * dy;
+    for y in top.min(height)..bottom {
+        for x in left.min(width)..right {
+            let px = (x as f64 + 0.5 - from.0) / radius.0;
+            let py = (y as f64 + 0.5 - from.1) / radius.1;
+            let t = if length_squared > f64::EPSILON {
+                ((px * dx + py * dy) / length_squared).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if (px - t * dx).hypot(py - t * dy) <= 1.0 {
+                canvas.set_pixel(x, y);
+            }
+        }
+    }
+}
+
 /// Hatch each strip between an area series and its zero baseline. Working along the category
 /// axis avoids self-intersecting fill polygons when successive values cross zero.
 fn fill_xychart_area(
@@ -6697,6 +7102,378 @@ mod tests {
                     "the class member was lost when its generic heading was drawn:\n{out}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sankey_all_terminal_modes_keep_names_and_full_throughput() {
+        let ir =
+            fm_parser::parse("sankey-beta\nSource,Hub,1200.5\nHub,Left,400.25\nHub,Right,34.75\n")
+                .ir;
+        assert_eq!(ir.nodes.len(), 4);
+        assert_eq!(ir.edges.len(), 3);
+        let layout = layout_diagram(&ir);
+        for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    tier,
+                    render_mode: mode,
+                    max_width: 220,
+                    max_height: 80,
+                    ..TermRenderConfig::rich()
+                };
+                let result =
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, 220, 80);
+                for name in ["Source", "Hub", "Left", "Right"] {
+                    assert_eq!(
+                        result.output.matches(name).count(),
+                        1,
+                        "{tier:?}/{mode:?} lost or duplicated {name}:\n{}",
+                        result.output
+                    );
+                }
+                // Hub's throughput is max(in, out), not 1635.5 (their sum) or 435 (out).
+                // Values occur on cards only, never again as generic edge captions.
+                assert_eq!(
+                    result.output.matches("1200.5").count(),
+                    2,
+                    "{}",
+                    result.output
+                );
+                assert_eq!(
+                    result.output.matches("400.25").count(),
+                    1,
+                    "{}",
+                    result.output
+                );
+                assert_eq!(
+                    result.output.matches("34.75").count(),
+                    1,
+                    "{}",
+                    result.output
+                );
+                assert!(!result.output.contains("1635.5"));
+                assert_eq!(
+                    result.output,
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, 220, 80,)
+                        .output
+                );
+                assert_eq!(
+                    result.render_mode,
+                    if tier == MermaidTier::Compact {
+                        MermaidRenderMode::CellOnly
+                    } else {
+                        mode
+                    }
+                );
+                assert_eq!((result.node_count, result.edge_count), (4, 3));
+                assert_eq!(result.occluded_node_count, 0);
+            }
+        }
+
+        let config = TermRenderConfig {
+            max_label_chars: 3,
+            max_label_lines: 1,
+            max_width: 220,
+            max_height: 80,
+            ..TermRenderConfig::compact()
+        };
+        let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 220, 80);
+        assert_eq!(
+            result.output.matches("1200.5").count(),
+            2,
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            result.output.matches("400.25").count(),
+            1,
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            result.output.matches("34.75").count(),
+            1,
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn sankey_raster_preserves_quantity_ratios_and_anisotropic_widths() {
+        let ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,25\n").ir;
+        let layout = layout_diagram(&ir);
+        let widest = fm_layout::sankey_widest_flow(&ir);
+        let mut path = layout.edges[0].clone();
+        path.points = vec![
+            fm_layout::LayoutPoint { x: 20.0, y: 30.0 },
+            fm_layout::LayoutPoint { x: 140.0, y: 30.0 },
+        ]
+        .into();
+        let widths: Vec<_> = ir
+            .edges
+            .iter()
+            .map(|edge| fm_layout::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap())
+            .collect();
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut thickness = Vec::new();
+            for width in &widths {
+                let mut canvas = Canvas::new(160, 80, mode);
+                raster_sankey_edge(&mut canvas, &ir, &path, *width, (1.0, 1.0), (0.0, 0.0));
+                thickness.push(
+                    (0..canvas.pixel_dimensions().1)
+                        .filter(|&y| canvas.get_pixel(80, y))
+                        .count(),
+                );
+            }
+            assert_eq!(thickness, [24, 6], "{mode:?} changed a 4:1 flow ratio");
+        }
+
+        let mut canvas = Canvas::new(100, 100, MermaidRenderMode::CellOnly);
+        raster_sankey_edge(&mut canvas, &ir, &path, 24.0, (0.5, 2.0), (0.0, 0.0));
+        assert_eq!((0..100).filter(|&y| canvas.get_pixel(40, y)).count(), 48);
+        path.points = vec![
+            fm_layout::LayoutPoint { x: 80.0, y: 10.0 },
+            fm_layout::LayoutPoint { x: 80.0, y: 40.0 },
+        ]
+        .into();
+        let mut vertical = Canvas::new(100, 100, MermaidRenderMode::CellOnly);
+        raster_sankey_edge(&mut vertical, &ir, &path, 24.0, (0.5, 2.0), (0.0, 0.0));
+        assert_eq!((0..100).filter(|&x| vertical.get_pixel(x, 50)).count(), 12);
+    }
+
+    #[test]
+    fn sankey_public_render_keeps_wide_and_narrow_flows_distinct() {
+        let ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,25\n").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        layout.nodes.clear();
+        for (edge, y) in layout.edges.iter_mut().zip([80.0, 240.0]) {
+            edge.points = vec![
+                fm_layout::LayoutPoint { x: 40.0, y },
+                fm_layout::LayoutPoint { x: 600.0, y },
+            ]
+            .into();
+        }
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            max_width: 160,
+            max_height: 100,
+            padding: 0,
+            show_labels: false,
+            ..TermRenderConfig::rich()
+        };
+        let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 160, 100);
+        let middle_column: Vec<_> = result
+            .output
+            .lines()
+            .map(|line| line.chars().nth(80))
+            .collect();
+        let ink = |rows: &[Option<char>]| rows.iter().filter(|cell| **cell == Some('█')).count();
+        assert_eq!(ink(&middle_column[..40]), 6);
+        assert_eq!(ink(&middle_column[40..]), 2);
+    }
+
+    #[test]
+    fn sankey_raster_uses_shared_cubic_controls_and_respects_linear_override() {
+        let mut ir = fm_parser::parse("sankey-beta\nA,B,1\n").ir;
+        let mut path = layout_diagram(&ir).edges[0].clone();
+        path.points = vec![
+            fm_layout::LayoutPoint { x: 10.0, y: 10.0 },
+            fm_layout::LayoutPoint {
+                x: 120.0_f32.mul_add(0.45, 10.0),
+                y: 10.0,
+            },
+            fm_layout::LayoutPoint {
+                x: 120.0_f32.mul_add(0.55, 10.0),
+                y: 70.0,
+            },
+            fm_layout::LayoutPoint { x: 130.0, y: 70.0 },
+        ]
+        .into();
+        let mut curve = Canvas::new(150, 90, MermaidRenderMode::CellOnly);
+        raster_sankey_edge(&mut curve, &ir, &path, 1.5, (1.0, 1.0), (0.0, 0.0));
+        // Independent cubic evaluation at t=1/4 gives (43.9375, 19.375). The control
+        // polygon instead runs horizontally through (44, 10); only the curve belongs here.
+        assert!(curve.get_pixel(43, 19));
+        assert!(!curve.get_pixel(43, 10));
+        assert!(!curve.get_pixel(63, 10));
+
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        let mut linear = Canvas::new(150, 90, MermaidRenderMode::CellOnly);
+        raster_sankey_edge(&mut linear, &ir, &path, 1.5, (1.0, 1.0), (0.0, 0.0));
+        assert!(linear.get_pixel(43, 10));
+        assert!(!linear.get_pixel(43, 19));
+    }
+
+    #[test]
+    fn sankey_raster_clips_extreme_routes_and_rejects_nonfinite_geometry() {
+        let ir = fm_parser::parse("sankey-beta\nA,B,1\n").ir;
+        let mut path = layout_diagram(&ir).edges[0].clone();
+        path.points = vec![
+            fm_layout::LayoutPoint {
+                x: -f32::MAX,
+                y: 5.0,
+            },
+            fm_layout::LayoutPoint {
+                x: f32::MAX,
+                y: 5.0,
+            },
+        ]
+        .into();
+        let mut canvas = Canvas::new(12, 10, MermaidRenderMode::CellOnly);
+        raster_sankey_edge(&mut canvas, &ir, &path, 2.0, (1.0, 1.0), (0.0, 0.0));
+        assert!((0..12).all(|x| canvas.get_pixel(x, 5)));
+        assert!((0..12).all(|x| !canvas.get_pixel(x, 0)));
+
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            path.points[0].x = value;
+            let mut canvas = Canvas::new(12, 10, MermaidRenderMode::CellOnly);
+            raster_sankey_edge(&mut canvas, &ir, &path, 2.0, (1.0, 1.0), (0.0, 0.0));
+            assert!((0..10).all(|y| (0..12).all(|x| !canvas.get_pixel(x, y))));
+        }
+
+        let mut layout = layout_diagram(&ir);
+        layout.nodes.clear();
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 80.0,
+        };
+        // A marker outside the frame must neither saturate onto its nearest border nor
+        // overflow when padding is added to an enormous finite projected coordinate.
+        for (from, to) in [(-f32::MAX, -f32::MAX / 2.0), (f32::MAX / 2.0, f32::MAX)] {
+            layout.edges[0].points = vec![
+                fm_layout::LayoutPoint { x: from, y: 5.0 },
+                fm_layout::LayoutPoint { x: to, y: 5.0 },
+            ]
+            .into();
+            let result = crate::render_term_with_layout_and_config(
+                &ir,
+                &layout,
+                &TermRenderConfig::rich(),
+                100,
+                50,
+            );
+            assert!(result.output.chars().all(char::is_whitespace));
+        }
+    }
+
+    #[test]
+    fn sankey_outline_tiny_viewports_and_invalid_values_remain_bounded() {
+        let ir = fm_parser::parse("sankey-beta\nAlpha,Beta,3\nBeta,Gamma,2\nGamma,Alpha,1\n").ir;
+        let layout = layout_diagram(&ir);
+        let config = TermRenderConfig {
+            max_width: 160,
+            max_height: 60,
+            ..TermRenderConfig::outline()
+        };
+        let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 160, 60);
+        assert!(!result.output.chars().any(char::is_alphanumeric));
+        assert!(
+            result
+                .output
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .count()
+                > 20
+        );
+        for (cols, rows) in [(0, 0), (0, 4), (4, 0), (1, 1), (8, 4), (20, 8)] {
+            for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    ..TermRenderConfig::rich()
+                };
+                let result =
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, cols, rows);
+                assert!(result.width <= cols && result.height <= rows);
+                assert!(result.output.lines().count() <= rows);
+                assert!(result.output.lines().all(|line| line.width() <= cols));
+            }
+        }
+
+        for value in ["0", "-3", "NaN", "inf", "1e100"] {
+            let mut invalid = ir.clone();
+            for edge in &invalid.edges {
+                invalid.labels[edge.label.unwrap().0].text = value.to_owned();
+            }
+            let result = crate::render_term_with_layout_and_config(
+                &invalid,
+                &layout,
+                &TermRenderConfig::rich(),
+                160,
+                60,
+            );
+            for name in ["Alpha", "Beta", "Gamma"] {
+                assert!(result.output.contains(name), "{value}:\n{}", result.output);
+            }
+            assert!(!result.output.chars().any(|ch| ch.is_ascii_digit()));
+            assert!(!result.output.contains("NaN") && !result.output.contains("inf"));
+        }
+    }
+
+    #[test]
+    fn sankey_unicode_captions_use_display_columns() {
+        let ir = fm_parser::parse("sankey-beta\n東京,é,12345\n").ir;
+        let config = TermRenderConfig {
+            max_width: 100,
+            max_height: 50,
+            ..TermRenderConfig::rich()
+        };
+        let result = crate::render_term_with_config(&ir, &config, 100, 50);
+        assert!(result.output.contains("東京"));
+        assert!(result.output.contains("é"));
+        assert_eq!(result.output.matches("12345").count(), 2);
+        assert!(
+            result
+                .output
+                .lines()
+                .all(|line| line.width() <= result.width)
+        );
+    }
+
+    #[test]
+    fn sankey_throughput_survives_a_sum_larger_than_f32() {
+        // Each branch is exactly 2^127 and finite in f32; the hub's total is exactly 2^128.
+        // Accumulating the two individually valid flows in f32 would display `inf` instead.
+        let branch = "170141183460469231731687303715884105728";
+        let total = "340282366920938463463374607431768211456";
+        let ir = fm_parser::parse(&format!(
+            "sankey-beta\nHub,Left,{branch}\nHub,Right,{branch}\n"
+        ))
+        .ir;
+        for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                max_width: 240,
+                max_height: 80,
+                ..TermRenderConfig::rich()
+            };
+            let result = crate::render_term_with_config(&ir, &config, 240, 80);
+            assert_eq!(result.output.matches(total).count(), 1, "{}", result.output);
+            assert_eq!(
+                result.output.matches(branch).count(),
+                2,
+                "{}",
+                result.output
+            );
+            assert!(!result.output.contains("inf") && !result.output.contains("NaN"));
         }
     }
 

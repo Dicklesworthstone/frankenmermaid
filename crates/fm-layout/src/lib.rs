@@ -13882,17 +13882,19 @@ pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<Str
         return None;
     }
     let node = ir.nodes.get(node_index)?;
-    let mut inflow = 0.0_f32;
-    let mut outflow = 0.0_f32;
+    // Every accepted flow is finite f32, but their sum need not fit in f32. Keep the aggregate
+    // finite without changing which individual labels count as valid flow quantities.
+    let mut inflow = 0.0_f64;
+    let mut outflow = 0.0_f64;
     for edge in &ir.edges {
         let Some(value) = sankey_flow_value(ir, edge) else {
             continue;
         };
         if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            inflow += value;
+            inflow += f64::from(value);
         }
         if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            outflow += value;
+            outflow += f64::from(value);
         }
     }
     let total = inflow.max(outflow);
@@ -13902,7 +13904,13 @@ pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<Str
     Some(format!(
         "{}\n{}",
         ir.node_display_text(node),
-        format_sankey_total(total)
+        if total <= f64::from(f32::MAX) {
+            format_sankey_total(total as f32)
+        } else {
+            // At this magnitude a fractional cent cannot be represented. Fixed notation
+            // keeps the full finite quantity instead of exposing `inf` or an exponent.
+            format!("{total:.0}")
+        }
     ))
 }
 
