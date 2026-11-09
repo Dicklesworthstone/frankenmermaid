@@ -12503,16 +12503,15 @@ fn layout_diagram_gantt_from_meta(
         let row_index = per_section_counts[section_idx];
         let start_offset_days =
             (i64::from(start_days[task_idx]) - i64::from(min_start_day)).max(0) as f32;
-        let duration_days = (i64::from(end_exclusive_days[task_idx])
-            - i64::from(start_days[task_idx]))
-        .max(1) as f32;
+        let duration_days =
+            (i64::from(end_exclusive_days[task_idx]) - i64::from(start_days[task_idx])) as f32;
         // A gantt bar's position and length ARE the data: where it starts is its start date and how
         // long it is is its duration. Both were wrong (bd-h9gx).
         //
         // The width used to be `max(label_width, duration * col, 156)`, so a long task NAME lengthened
         // the bar — a 1-day task with a 68-character name measured 524.10px against a 10-day task's
         // 480.00px, inverting the one comparison a gantt chart exists to support. Width is now purely
-        // temporal, and the 156px floor goes with it: the span is clamped to >= 1 above, so the
+        // temporal, and the 156px floor goes with it: a bar's span is clamped to >= 1 below, so the
         // narrowest task bar is one column (48px), visible without lying about length.
         //
         // The centre used to be `start_offset_days * col`, and `node_boxes_from_centers` derives
@@ -12520,15 +12519,19 @@ fn layout_diagram_gantt_from_meta(
         // bar-width BEFORE the day it starts on. Offsetting the centre by half the width puts the LEFT
         // EDGE on the start day, which is what a reader measures from.
         //
-        // A milestone is an instant, not a span, so it keeps a fixed marker width and stays centred ON
-        // its day — correct geometry for a point event, not an exception.
+        // Mermaid places a milestone at the midpoint of its authored interval. Zero-duration
+        // milestones remain on their start date; a nonzero interval must not silently move its
+        // marker to the beginning. Dependencies still use the interval's resolved start/end.
         //
         // The task name no longer sizes the bar; it is placed by `gantt_task_label_placements` below,
         // mirroring mermaid-js.
         let (bar_width, bar_center_x) = if milestones[task_idx] {
-            (72.0, start_offset_days * base_col_width)
+            (
+                72.0,
+                (start_offset_days + duration_days / 2.0) * base_col_width,
+            )
         } else {
-            let width = duration_days * base_col_width;
+            let width = duration_days.max(1.0) * base_col_width;
             (
                 width,
                 start_offset_days.mul_add(base_col_width, width / 2.0),
@@ -13551,7 +13554,13 @@ fn gantt_task_end_day(
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
     let duration = match task.end.as_ref() {
-        Some(GanttDate::DurationDays(days)) => i32::try_from(*days).unwrap_or(i32::MAX),
+        Some(GanttDate::DurationDays(days)) => i64::from(*days),
+        Some(GanttDate::DurationMonths(months)) => {
+            gantt_calendar_duration_days(start, i64::from(*months))
+        }
+        Some(GanttDate::DurationYears(years)) => {
+            gantt_calendar_duration_days(start, i64::from(*years) * 12)
+        }
         Some(GanttDate::Absolute(end)) => {
             // A calendar deadline is already an end date, including when its start comes from
             // a predecessor. Exclusions extend durations, never an explicitly authored deadline.
@@ -13568,18 +13577,37 @@ fn gantt_task_end_day(
                 // working-day duration. Exclusions were already applied to the target's start.
                 return end.max(start);
             }
-            i32::from(!matches!(
+            i64::from(!matches!(
                 task.flags.primary_type(),
                 GanttTaskType::Milestone
             ))
         }
         Some(GanttDate::AfterTask(_)) => 1,
-        None => i32::from(!matches!(
+        None => i64::from(!matches!(
             task.flags.primary_type(),
             GanttTaskType::Milestone
         )),
     };
     advance_gantt_end_day(start, duration, excluded_weekdays, excluded_dates)
+}
+
+/// Resolve a month/year duration only after its start is known. Calendar addition clamps at
+/// the target month's last day, as Mermaid's Day.js arithmetic does; it is never a 30/365-day
+/// approximation. Exclusions then extend this duration through the same working-day scheduler.
+fn gantt_calendar_duration_days(start: i32, months: i64) -> i64 {
+    let (year, month, day) = gantt_civil_from_days(start);
+    let target_month = i64::from(year) * 12 + i64::from(month - 1) + months;
+    let target_year = target_month.div_euclid(12);
+    let target_month = (target_month.rem_euclid(12) + 1) as i32;
+    let last_supported_span = i64::from(i32::MAX) - i64::from(start);
+    let Ok(target_year) = i32::try_from(target_year) else {
+        return last_supported_span;
+    };
+    let target_day = day.min(i32::from(
+        iso_days_in_month(target_year, target_month as u8).unwrap_or(31),
+    ));
+    let end = gantt_days_from_civil(target_year, target_month, target_day);
+    (end - i64::from(start)).clamp(0, last_supported_span)
 }
 
 fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
@@ -13612,7 +13640,7 @@ fn advance_gantt_start_day(
 
 fn advance_gantt_end_day(
     start: i32,
-    duration_days: i32,
+    duration_days: i64,
     excluded_weekdays: u8,
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
@@ -13635,14 +13663,14 @@ fn advance_gantt_end_day(
 }
 
 /// Advance a working-day duration without scanning every calendar day in a large input.
-fn advance_gantt_duration(mut day: i32, duration_days: i32, excluded_weekdays: u8) -> i32 {
+fn advance_gantt_duration(mut day: i32, duration_days: i64, excluded_weekdays: u8) -> i32 {
     if duration_days <= 0 {
         return day;
     }
     if excluded_weekdays == 0 {
-        return day.saturating_add(duration_days);
+        return (i64::from(day) + duration_days).min(i64::from(i32::MAX)) as i32;
     }
-    let working_days_per_week = 7 - (excluded_weekdays & 0x7f).count_ones() as i32;
+    let working_days_per_week = 7 - i64::from((excluded_weekdays & 0x7f).count_ones());
     if working_days_per_week == 0 {
         return i32::MAX;
     }
@@ -13652,7 +13680,7 @@ fn advance_gantt_duration(mut day: i32, duration_days: i32, excluded_weekdays: u
     // Leave at least one working day for the tail so the end stays immediately after the final
     // occupied day. Only the next task's START advances through an intervening nonworking run.
     let full_weeks = (duration_days - 1) / working_days_per_week;
-    let shifted = i64::from(day) + i64::from(full_weeks) * 7;
+    let shifted = i64::from(day) + full_weeks * 7;
     if shifted >= i64::from(i32::MAX) {
         return i32::MAX;
     }
@@ -33092,7 +33120,7 @@ mod tests {
         );
         for excluded_weekdays in [0, 0b100_0001, 0b111_1110, 0b111_1111] {
             assert_eq!(
-                super::advance_gantt_end_day(1, i32::MAX, excluded_weekdays, &excluded),
+                super::advance_gantt_end_day(1, i64::from(i32::MAX), excluded_weekdays, &excluded),
                 i32::MAX
             );
         }

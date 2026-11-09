@@ -8130,6 +8130,16 @@ fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -
         Some(fm_core::GanttDate::DurationDays(days)) => {
             let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
         }
+        Some(fm_core::GanttDate::DurationMonths(months)) => {
+            let _ = write!(
+                name,
+                ", {months} month{}",
+                if *months == 1 { "" } else { "s" }
+            );
+        }
+        Some(fm_core::GanttDate::DurationYears(years)) => {
+            let _ = write!(name, ", {years} year{}", if *years == 1 { "" } else { "s" });
+        }
         Some(fm_core::GanttDate::UntilTasks(targets)) if !targets.is_empty() => {
             if targets.len() == 1 {
                 name.push_str(", ends when ");

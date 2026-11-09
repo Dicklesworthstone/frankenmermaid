@@ -199,6 +199,102 @@ fn gantt_calendar_deadlines_after_dependencies_are_not_workday_durations() {
 }
 
 #[test]
+fn gantt_calendar_months_and_years_clamp_at_the_target_month_end() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\n\
+         Leap month :Month, 2024-01-31, 1M\n\
+         Nonleap year :Year, after Month, 1y\n\
+         Next month :Next, after Year, 1M\n\
+         Direct two months :Direct, 2024-01-31, 2M\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2024-01-31", "2024-02-29");
+    assert_task_dates(&ir, &layout, 1, "2024-02-29", "2025-02-28");
+    assert_task_dates(&ir, &layout, 2, "2025-02-28", "2025-03-28");
+    // Add the whole period at once: advancing through February must not lose January's day 31.
+    assert_task_dates(&ir, &layout, 3, "2024-01-31", "2024-03-31");
+    assert_eq!(
+        layout.extensions.axis_ticks.last().unwrap().label,
+        "2025-03-28"
+    );
+}
+
+#[test]
+fn gantt_calendar_periods_resolve_forward_dependencies_before_choosing_their_length() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\n\
+         February :February, after January, 1M\n\
+         January :January, 2026-01-01, 1M\n\
+         March :March, after February, 1M\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-02-01", "2026-03-01");
+    assert_task_dates(&ir, &layout, 1, "2026-01-01", "2026-02-01");
+    assert_task_dates(&ir, &layout, 2, "2026-03-01", "2026-04-01");
+    assert_eq!(layout.nodes[0].bounds.width, 28.0 * 48.0);
+    assert_eq!(layout.nodes[1].bounds.width, 31.0 * 48.0);
+    assert_eq!(layout.nodes[2].bounds.width, 31.0 * 48.0);
+}
+
+#[test]
+fn gantt_calendar_durations_use_the_shared_exclusion_schedule() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\nexcludes weekends, 2026-02-16\n\
+         Month :Month, 2026-01-30, 1M\n\
+         Ship :Ship, after Month, 1d\n\
+         Fixed deadline :Fixed, 2026-01-30, 2026-02-28\n",
+    );
+    // Jan 30 -> Feb 28 is 29 days. Counting 29 working days and the holiday reaches March 13.
+    assert_task_dates(&ir, &layout, 0, "2026-01-30", "2026-03-13");
+    assert_task_dates(&ir, &layout, 1, "2026-03-13", "2026-03-14");
+    assert_task_dates(&ir, &layout, 2, "2026-01-30", "2026-02-28");
+}
+
+#[test]
+fn gantt_reduced_dates_create_calendar_roadmaps() {
+    for (format, first, following, expected) in [
+        (
+            "YYYY",
+            "2024, 2y",
+            "2028",
+            ["2024-01-01", "2026-01-01", "2028-01-01"],
+        ),
+        (
+            "YYYY-MM",
+            "2024-02, 3M",
+            "2024-08",
+            ["2024-02-01", "2024-05-01", "2024-08-01"],
+        ),
+    ] {
+        let (ir, layout) = parse_and_layout(&format!(
+            "gantt\ndateFormat {format}\nFirst :First, {first}\nSecond :{following}\n"
+        ));
+        assert_task_dates(&ir, &layout, 0, expected[0], expected[1]);
+        assert_task_dates(&ir, &layout, 1, expected[1], expected[2]);
+    }
+}
+
+#[test]
+fn gantt_nonzero_milestones_use_interval_midpoints_without_moving_successors() {
+    for (duration, endpoint) in [(0, "2026-03-01"), (1, "2026-03-02"), (4, "2026-03-05")] {
+        let (ir, layout) = parse_and_layout(&format!(
+            "gantt\nGate :milestone, Gate, 2026-03-01, {duration}d\n\
+             Follow :Follow, after Gate, 1d\n"
+        ));
+        let axis = layout.extensions.gantt_day_axis.unwrap();
+        let start = axis
+            .x_for_day(fm_layout::parse_iso_day_number("2026-03-01").unwrap())
+            .unwrap();
+        let end = axis
+            .x_for_day(fm_layout::parse_iso_day_number(endpoint).unwrap())
+            .unwrap();
+        let gate = &layout.nodes[ir.gantt_meta.as_ref().unwrap().tasks[0].node.0];
+        let follow = &layout.nodes[ir.gantt_meta.as_ref().unwrap().tasks[1].node.0];
+        assert!((gate.bounds.center().x - (start + end) / 2.0).abs() < 0.01);
+        assert!((follow.bounds.x - end).abs() < 0.01);
+        assert_eq!(gate.bounds.width, 72.0);
+    }
+}
+
+#[test]
 fn gantt_until_uses_the_earliest_forward_start_and_keeps_exact_boundaries() {
     let (ir, layout) = parse_and_layout(
         "gantt\ninclusiveEndDates\n\
@@ -379,5 +475,20 @@ fn gantt_large_duration_bounds_tick_work_without_truncating_the_date_axis() {
                 .iter()
                 .all(|tick| tick.position.is_finite())
         );
+    }
+}
+
+#[test]
+fn gantt_large_calendar_periods_saturate_without_wrapping_or_scanning_years() {
+    for (start, duration) in [
+        ("2026-01-01", "4294967295M"),
+        ("2026-01-01", "4294967295y"),
+        ("1969-12-26", "4294967295d"),
+    ] {
+        let (_, layout) = parse_and_layout(&format!("gantt\nLarge :Large, {start}, {duration}\n"));
+        let axis = layout.extensions.gantt_day_axis.unwrap();
+        assert_eq!(axis.last_day, i32::MAX);
+        assert!(layout.extensions.axis_ticks.len() <= 4096);
+        assert!(layout.bounds.width.is_finite());
     }
 }

@@ -8085,6 +8085,10 @@ pub enum GanttDate {
     /// End at the earliest start among the named tasks, without inclusive-end adjustment.
     UntilTasks(Vec<String>),
     DurationDays(u32),
+    /// Calendar months, preserving the starting day where possible and clamping at month end.
+    DurationMonths(u32),
+    /// Calendar years, with February 29 clamped to February 28 in a non-leap target year.
+    DurationYears(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -11848,6 +11848,18 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         scheduling_tokens.push(token);
     }
 
+    // Mermaid's three-item form is `id, start, end`. Bind the id by position before
+    // interpreting dates or durations: numeric ids remain ids even under `dateFormat YYYY`.
+    let scheduling_tokens = if scheduling_tokens.len() == 3 {
+        let task_id = normalize_compound_identifier(scheduling_tokens[0]);
+        if !task_id.is_empty() {
+            parsed.task_id = Some(task_id);
+        }
+        &scheduling_tokens[1..]
+    } else {
+        scheduling_tokens.as_slice()
+    };
+
     // With one scheduling item Mermaid specifies an end, using the preceding task's end as
     // the start. In particular, a lone absolute date is not an explicit start date. The permissive
     // `id, end` form follows the same rule when its first item cannot be a start expression.
@@ -11858,7 +11870,7 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
                 .split_once(char::is_whitespace)
                 .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("after")));
     let scheduling_token_count = scheduling_tokens.len();
-    for (token_index, token) in scheduling_tokens.into_iter().enumerate() {
+    for (token_index, token) in scheduling_tokens.iter().copied().enumerate() {
         let (keyword, references) = token.split_once(char::is_whitespace).unwrap_or((token, ""));
         if keyword.eq_ignore_ascii_case("until")
             && (!references.is_empty() || token_index + 1 == scheduling_token_count)
@@ -11905,9 +11917,9 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         }
 
         if parsed.end.is_none()
-            && let Some(duration_days) = parse_gantt_duration_days(token)
+            && let Some(duration) = parse_gantt_duration(token)
         {
-            parsed.end = Some(GanttDate::DurationDays(duration_days));
+            parsed.end = Some(duration);
             continue;
         }
 
@@ -11958,32 +11970,50 @@ fn parse_gantt_absolute_date_checked(
 }
 
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
-    let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
+    // This normalizer handles numeric calendar formats. In a reduced format such as `YYYY`,
+    // silently stripping letters would turn the duration `1M` into the absolute year 0001.
+    if token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
 
     // Fast path for the default/most-common format: `"YYYY-MM-DD"` always splits to
     // `["YYYY","MM","DD"]`, so skip re-splitting the (constant) format string on EVERY date —
     // `split_gantt_date_parts(date_format, …)` ran once per task otherwise. Byte-identical to the
     // general zip+match below for this format (year = part 0, month = part 1, day = part 2).
     let (year, month, day) = if date_format == "YYYY-MM-DD" {
+        let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
         (
             token_parts[0].parse::<u32>().ok()?,
             token_parts[1].parse::<u32>().ok()?,
             token_parts[2].parse::<u32>().ok()?,
         )
     } else {
-        let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
+        let format_parts = date_format
+            .trim()
+            .split(|ch: char| !ch.is_ascii_alphabetic())
+            .filter(|part| !part.is_empty());
+        let mut token_parts = token
+            .trim()
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|part| !part.is_empty());
         let mut year = None;
         let mut month = None;
         let mut day = None;
-        for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
-            match *format_part {
-                "YYYY" => year = token_part.parse::<u32>().ok(),
-                "MM" => month = token_part.parse::<u32>().ok(),
-                "DD" => day = token_part.parse::<u32>().ok(),
+        for format_part in format_parts {
+            let token_part = token_parts.next()?;
+            match format_part {
+                "YYYY" if year.is_none() => year = Some(token_part.parse::<u32>().ok()?),
+                "M" | "MM" if month.is_none() => month = Some(token_part.parse::<u32>().ok()?),
+                "D" | "DD" if day.is_none() => day = Some(token_part.parse::<u32>().ok()?),
                 _ => return None,
             }
         }
-        (year?, month?, day?)
+        if token_parts.next().is_some() {
+            return None;
+        }
+        // Year-only and year/month input denotes the first day of that calendar period.
+        // Requiring a year keeps parsing deterministic instead of consulting today's date.
+        (year?, month.unwrap_or(1), day.unwrap_or(1))
     };
 
     if !is_valid_gantt_calendar_date(year, month, day) {
@@ -12061,7 +12091,7 @@ where
     Some([a, b, c])
 }
 
-fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
+fn parse_gantt_duration(raw: &str) -> Option<GanttDate> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -12070,10 +12100,31 @@ fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
     // Strip the unit suffix from the ORIGINAL (case-insensitively) rather than allocating a lowercased
     // copy — the leading digits are ASCII and parse identically regardless of the suffix's case.
     if let Some(days) = trimmed.strip_suffix(['d', 'D']) {
-        return days.trim().parse::<u32>().ok();
+        return days.trim().parse::<u32>().ok().map(GanttDate::DurationDays);
     }
     if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
-        return weeks.trim().parse::<u32>().ok()?.checked_mul(7);
+        return weeks
+            .trim()
+            .parse::<u32>()
+            .ok()?
+            .checked_mul(7)
+            .map(GanttDate::DurationDays);
+    }
+    // Mermaid distinguishes capital `M` (months) from lowercase `m` (minutes).
+    // Calendar periods cannot be reduced to a fixed number of days until their start is known.
+    if let Some(months) = trimmed.strip_suffix('M') {
+        return months
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .map(GanttDate::DurationMonths);
+    }
+    if let Some(years) = trimmed.strip_suffix('y') {
+        return years
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .map(GanttDate::DurationYears);
     }
     None
 }
@@ -28214,8 +28265,98 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn gantt_week_durations_reject_overflow() {
-        assert_eq!(super::parse_gantt_duration_days("2w"), Some(14));
-        assert_eq!(super::parse_gantt_duration_days("4294967295w"), None);
+        assert_eq!(
+            super::parse_gantt_duration("2w"),
+            Some(GanttDate::DurationDays(14))
+        );
+        assert_eq!(super::parse_gantt_duration("4294967295w"), None);
+    }
+
+    #[test]
+    fn gantt_calendar_durations_keep_their_units_and_case() {
+        for (token, expected) in [
+            ("0M", GanttDate::DurationMonths(0)),
+            ("3M", GanttDate::DurationMonths(3)),
+            ("2y", GanttDate::DurationYears(2)),
+            ("4294967295y", GanttDate::DurationYears(u32::MAX)),
+        ] {
+            assert_eq!(super::parse_gantt_duration(token), Some(expected));
+        }
+        // A minute must never silently become a month, and overflow must not wrap.
+        for invalid in ["2m", "2MY", "-1M", "4294967296M", "4294967296y"] {
+            assert_eq!(super::parse_gantt_duration(invalid), None, "{invalid}");
+        }
+        let parsed = parse_mermaid("gantt\nFirst :A, 2024-01-31, 1M\nSecond :B, after A, 1y\n");
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].end, Some(GanttDate::DurationMonths(1)));
+        assert_eq!(meta.tasks[1].end, Some(GanttDate::DurationYears(1)));
+        assert_eq!(meta.tasks[1].depends_on, ["A"]);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_reduced_calendar_dates_preserve_explicit_and_implicit_starts() {
+        for (format, source, expected_start, expected_end) in [
+            ("YYYY", "2024, 2026", "2024-01-01", "2026-01-01"),
+            ("YYYY-MM", "2024-02, 2024-05", "2024-02-01", "2024-05-01"),
+            ("M/YYYY", "2/2024, 5/2024", "2024-02-01", "2024-05-01"),
+            (
+                "YYYY-M-D",
+                "2024-2-29, 2024-3-1",
+                "2024-02-29",
+                "2024-03-01",
+            ),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "gantt\ndateFormat {format}\nFirst :A, {source}\nSecond :B, after A, 1M\n"
+            ));
+            let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+            assert_eq!(meta.tasks[0].task_id.as_deref(), Some("A"));
+            assert_eq!(
+                meta.tasks[0].start,
+                Some(GanttDate::Absolute(expected_start.into()))
+            );
+            assert_eq!(
+                meta.tasks[0].end,
+                Some(GanttDate::Absolute(expected_end.into()))
+            );
+            assert_eq!(meta.tasks[1].end, Some(GanttDate::DurationMonths(1)));
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+        let end_only = super::parse_gantt_task_metadata("2028", Some("YYYY"));
+        assert_eq!(end_only.start, None);
+        assert_eq!(end_only.end, Some(GanttDate::Absolute("2028-01-01".into())));
+        for (token, format) in [
+            ("1M", "YYYY"),
+            ("2026-13", "YYYY-MM"),
+            ("2026-00", "YYYY-MM"),
+            ("2026-02-03", "YYYY-MM"),
+            ("2026", "YYYY-MM"),
+            ("2026-02", "YYYY-YYYY"),
+        ] {
+            assert_eq!(super::normalize_gantt_date_with_format(token, format), None);
+        }
+    }
+
+    #[test]
+    fn gantt_three_item_metadata_keeps_numeric_and_duration_shaped_ids() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat YYYY\nFirst :1900, 2024, 1y\n\
+             Second :1M, after 1900, 2M\nThird :Third, after 1M, 1d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("1900"));
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::Absolute("2024-01-01".into()))
+        );
+        assert_eq!(meta.tasks[0].end, Some(GanttDate::DurationYears(1)));
+        assert_eq!(meta.tasks[1].task_id.as_deref(), Some("1M"));
+        assert_eq!(meta.tasks[1].end, Some(GanttDate::DurationMonths(2)));
+        assert_eq!(meta.tasks[1].depends_on, ["1900"]);
+        assert_eq!(meta.tasks[2].depends_on, ["1M"]);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     #[test]
