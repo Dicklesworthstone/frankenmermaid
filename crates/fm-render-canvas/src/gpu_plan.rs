@@ -10552,27 +10552,87 @@ mod tests {
     /// Scene path markers carry the same UML endpoint shape that the SVG backend renders.
     #[test]
     fn scene_path_markers_match_the_svg_reference_output() {
-        let ir = fm_parser::parse(
-            "classDiagram\n  class Owner\n  class Part\n  Owner o-- Part : owns\n",
-        )
-        .ir;
-        let layout = fm_layout::layout_diagram(&ir);
-        let scene = fm_layout::build_render_scene(&ir, &layout);
-        let svg =
-            fm_render_svg::render_scene_to_svg(&scene, &fm_render_svg::SvgRenderConfig::default());
-        assert!(
-            svg.contains("marker-start=\"url(#arrow-diamond-open)\""),
-            "SVG reference did not render the aggregation marker:\n{svg}"
-        );
+        fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+            tag.split_once(&format!(" {name}=\""))
+                .and_then(|(_, value)| value.split_once('"').map(|(value, _)| value))
+        }
 
-        let plan = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.0);
-        let marker = plan
-            .arrowheads
-            .iter()
-            .find(|marker| marker.kind == super::GpuMarkerKind::DiamondOpen as u32)
-            .expect("GPU plan omitted the SVG aggregation marker");
-        assert_eq!(marker.edge_index, 0);
-        assert_eq!(marker.fill, super::DEFAULT_NODE_FILL_RGBA);
-        assert!(marker.size > 0.0);
+        for (link, slot, other_slot, at_start) in [
+            ("o--", "marker-start", "marker-end", true),
+            ("--o", "marker-end", "marker-start", false),
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "classDiagram\n  class Owner\n  class Part\n  Owner {link} Part : owns\n",
+            ))
+            .ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let scene = fm_layout::build_render_scene(&ir, &layout);
+            let svg = fm_render_svg::render_scene_to_svg(
+                &scene,
+                &fm_render_svg::SvgRenderConfig::default(),
+            );
+            let edge = svg
+                .split('<')
+                .filter_map(|element| element.split_once('>').map(|(tag, _)| tag))
+                .find(|tag| {
+                    tag.starts_with("path ")
+                        && attribute(tag, "data-fm-source-kind") == Some("edge")
+                        && attribute(tag, "data-fm-source-index") == Some("0")
+                })
+                .expect("SVG reference must draw the relationship shaft");
+            let marker_id = attribute(edge, slot)
+                .and_then(|reference| reference.strip_prefix("url(#"))
+                .and_then(|reference| reference.strip_suffix(')'))
+                .expect("SVG relationship must reference its aggregation marker");
+            assert_eq!(attribute(edge, other_slot), None, "{link}: {edge}");
+            let definition = svg
+                .split("<marker ")
+                .find(|fragment| fragment.starts_with(&format!("id=\"{marker_id}\"")))
+                .and_then(|fragment| fragment.split_once("</marker>").map(|(marker, _)| marker))
+                .expect("the referenced aggregation definition must exist");
+            let (marker_tag, content) = definition.split_once('>').unwrap();
+            assert_eq!(attribute(marker_tag, "orient"), Some("auto-start-reverse"));
+            assert_eq!(attribute(marker_tag, "markerUnits"), Some("strokeWidth"));
+            for (name, expected) in [
+                ("markerWidth", "8"),
+                ("markerHeight", "8"),
+                ("refX", "8"),
+                ("refY", "4"),
+            ] {
+                assert_eq!(
+                    attribute(marker_tag, name),
+                    Some(expected),
+                    "{link}: {name}"
+                );
+            }
+            let glyph = content
+                .split('<')
+                .filter_map(|element| element.split_once('>').map(|(tag, _)| tag))
+                .find(|tag| tag.starts_with("path "))
+                .expect("aggregation marker must draw a diamond path");
+            assert_eq!(attribute(glyph, "d"), Some("M4 0 L8 4 L4 8 L0 4 Z"));
+            assert_eq!(attribute(glyph, "fill"), Some("none"));
+            let stroke = attribute(edge, "stroke").expect("relationship stroke paint");
+            assert_eq!(attribute(glyph, "stroke"), Some(stroke));
+            assert_eq!(attribute(glyph, "stroke-width"), Some("1"));
+
+            let plan = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.0);
+            assert_eq!(plan.arrowheads.len(), 1, "{link}");
+            let marker = plan
+                .arrowheads
+                .iter()
+                .find(|marker| marker.kind == super::GpuMarkerKind::DiamondOpen as u32)
+                .expect("GPU plan omitted the SVG aggregation marker");
+            assert_eq!(marker.edge_index, 0);
+            assert_eq!(marker.fill, super::DEFAULT_NODE_FILL_RGBA);
+            assert!(marker.size > 0.0);
+            let endpoint = if at_start {
+                layout.edges[0].points.first()
+            } else {
+                layout.edges[0].points.last()
+            }
+            .unwrap();
+            assert_eq!(marker.position, [endpoint.x, endpoint.y], "{link}");
+        }
     }
 }

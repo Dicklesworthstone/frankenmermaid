@@ -2374,17 +2374,21 @@ fn render_scene_document_with_ir(
 
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
+    let mut scene_state = SceneInteractionState::default();
     let scene_root = render_scene_group(
         &scene.root,
         config,
         ir,
         &mut clip_defs,
         &mut clip_id_counter,
-        &mut SceneInteractionState::default(),
+        &mut scene_state,
     );
 
     for clip in clip_defs {
         defs = defs.custom(clip);
+    }
+    for marker in scene_state.markers.definitions {
+        defs = defs.custom(marker);
     }
 
     doc = doc.defs(defs);
@@ -2400,6 +2404,62 @@ fn render_scene_document_with_ir(
 struct SceneInteractionState {
     announced: std::collections::BTreeSet<usize>,
     inherited_node: Option<usize>,
+    paints_resolved: bool,
+    markers: SceneMarkerRegistry,
+}
+
+/// Endpoint paint belongs to its connector. Shared, theme-colored marker definitions cannot
+/// represent two differently colored or translucent edges in the same standalone scene.
+#[derive(Default)]
+struct SceneMarkerRegistry {
+    ids: BTreeMap<(&'static str, String, u32, bool, bool), String>,
+    definitions: Vec<Element>,
+}
+
+impl SceneMarkerRegistry {
+    fn reference(
+        &mut self,
+        kind: MarkerKind,
+        stroke: &StrokeStyle,
+        at_start: bool,
+        sankey: bool,
+    ) -> Option<String> {
+        let base = map_marker_kind(kind)
+            .strip_prefix("url(#")?
+            .strip_suffix(')')?;
+        let opacity = clamp_unit_interval(stroke.opacity);
+        let key = (
+            base,
+            stroke.color.clone(),
+            opacity.to_bits(),
+            at_start,
+            sankey,
+        );
+        if let Some(id) = self.ids.get(&key) {
+            return Some(format!("url(#{id})"));
+        }
+        let id = format!("fm-scene-{}-{base}", self.ids.len());
+        let marker =
+            crate::defs::scene_arrowhead(kind, &id, &stroke.color, opacity, at_start, sankey)
+                .or_else(|| {
+                    // Reuse the exact reference-backed ER geometry instead of maintaining another
+                    // copy. Both the id and opacity are generated here; accept only color paints before
+                    // inserting a value into this internally serialized fragment.
+                    let color = fm_layout::scene_paint(&stroke.color)?;
+                    let definition = er_marker_def(kind, &color)?;
+                    let (opening, body) = definition.split_once('>')?;
+                    let body = body.strip_suffix("</marker>")?;
+                    let opening =
+                        opening.replacen(&format!("id=\"{base}\""), &format!("id=\"{id}\""), 1);
+                    Some(Element::raw_svg(format!(
+                        "{opening}><g opacity=\"{}\">{body}</g></marker>",
+                        fmt_svg_number(opacity),
+                    )))
+                })?;
+        self.definitions.push(marker);
+        self.ids.insert(key, id.clone());
+        Some(format!("url(#{id})"))
+    }
 }
 
 fn scene_node_has_interaction(
@@ -2506,6 +2566,8 @@ fn render_scene_group(
     interactions: &mut SceneInteractionState,
 ) -> Element {
     let inherited_node = interactions.inherited_node;
+    let inherited_paints = interactions.paints_resolved;
+    interactions.paints_resolved |= group.paints_resolved;
     interactions.inherited_node = match group.source {
         RenderSource::Node(index) => Some(index),
         RenderSource::Diagram => inherited_node,
@@ -2711,6 +2773,7 @@ fn render_scene_group(
     }
 
     interactions.inherited_node = inherited_node;
+    interactions.paints_resolved = inherited_paints;
     elem
 }
 
@@ -2779,6 +2842,7 @@ fn render_scene_item(
                 config.include_source_spans,
                 ir,
                 !scene_source_has_interaction(path.source, ir, config),
+                interactions.paints_resolved,
             );
             if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Sankey) {
                 let theme = resolve_theme(Some(ir), config);
@@ -2793,20 +2857,37 @@ fn render_scene_item(
                             config,
                             &theme.colors,
                         ) {
-                            element = element.fill(&style.fill).stroke(&style.stroke);
+                            if path.fill.is_some()
+                                && (!interactions.paints_resolved
+                                    || !scene_has_authored_paint(ir, path.source, "fill"))
+                            {
+                                element = element.fill(&style.fill);
+                            }
+                            if path.stroke.is_some()
+                                && (!interactions.paints_resolved
+                                    || !scene_has_authored_paint(ir, path.source, "stroke"))
+                            {
+                                element = element.stroke(&style.stroke);
+                            }
                         }
                     }
                     RenderSource::Edge(index) if path.stroke.is_some() => {
                         let color = sankey_edge_color(ir, index, &theme.colors);
-                        element = element.stroke(color.unwrap_or(&theme.colors.edge));
-                        if let Some(color) = color
-                            && path.marker_end == MarkerKind::Arrow
+                        if !interactions.paints_resolved
+                            || !scene_has_authored_paint(ir, path.source, "stroke")
                         {
-                            element = element.marker_end(
-                                SANKEY_MARKER_URLS[sankey_marker_index(color, &theme.colors)],
-                            );
+                            element = element.stroke(color.unwrap_or(&theme.colors.edge));
+                            if let Some(color) = color
+                                && path.marker_end == MarkerKind::Arrow
+                            {
+                                element = element.marker_end(
+                                    SANKEY_MARKER_URLS[sankey_marker_index(color, &theme.colors)],
+                                );
+                            }
                         }
-                        if let Some(style) = resolve_edge_inline_style(ir, index) {
+                        if !interactions.paints_resolved
+                            && let Some(style) = resolve_edge_inline_style(ir, index)
+                        {
                             element = element.attr("style", &style);
                         }
                     }
@@ -2829,6 +2910,36 @@ fn render_scene_item(
                     });
                 }
             }
+            if (interactions.paints_resolved || ir.is_none())
+                && let Some(stroke) = &path.stroke
+                && (path.marker_start != MarkerKind::None || path.marker_end != MarkerKind::None)
+            {
+                let sankey = ir.is_some_and(|ir| ir.diagram_type == DiagramType::Sankey);
+                let mut stroke = stroke.clone();
+                if let Some(ir) = ir.filter(|_| sankey)
+                    && let RenderSource::Edge(index) = path.source
+                    && !scene_has_authored_paint(ir, path.source, "stroke")
+                {
+                    let theme = resolve_theme(Some(ir), config);
+                    stroke.color = sankey_edge_color(ir, index, &theme.colors)
+                        .unwrap_or(&theme.colors.edge)
+                        .to_owned();
+                }
+                if let Some(reference) =
+                    interactions
+                        .markers
+                        .reference(path.marker_start, &stroke, true, sankey)
+                {
+                    element = element.marker_start(&reference);
+                }
+                if let Some(reference) =
+                    interactions
+                        .markers
+                        .reference(path.marker_end, &stroke, false, sankey)
+                {
+                    element = element.marker_end(&reference);
+                }
+            }
             element
         }
         RenderItem::Text(text) => {
@@ -2837,15 +2948,41 @@ fn render_scene_item(
                 config,
                 ir,
                 !scene_source_has_interaction(text.source, ir, config),
+                interactions.paints_resolved,
             );
             if let Some(ir) =
                 ir.filter(|ir| matches!(ir.diagram_type, DiagramType::Pie | DiagramType::Sankey))
+                && (!interactions.paints_resolved
+                    || !scene_has_authored_paint(ir, text.source, "color"))
             {
                 element = element.fill(&resolve_theme(Some(ir), config).colors.text);
             }
             element
         }
     }
+}
+
+/// Theme defaults may recolor a scene, but an author's valid paint has already won the
+/// cascade in a resolved layer. Keep that decision while applying backend theme defaults.
+fn scene_has_authored_paint(ir: &MermaidDiagramIr, source: RenderSource, property: &str) -> bool {
+    let style = match source {
+        RenderSource::Node(index) => ir.resolved_node_style(index),
+        RenderSource::Edge(index) => fm_layout::edge_labels::edge_label_style(ir, index),
+        RenderSource::Cluster(index) => {
+            let mut style = BTreeMap::new();
+            for reference in &ir.style_refs {
+                if reference.target == fm_core::IrStyleTarget::Cluster(index) {
+                    style.extend(fm_core::parse_style_string(&reference.style).properties);
+                }
+            }
+            style
+        }
+        RenderSource::Diagram => return false,
+    };
+    style.get(property).is_some_and(|paint| {
+        (property != "color" && paint.trim().eq_ignore_ascii_case("none"))
+            || fm_layout::scene_paint(paint).is_some()
+    })
 }
 
 fn scene_source_has_interaction(
@@ -2868,6 +3005,7 @@ fn render_scene_path(
     include_source_spans: bool,
     ir: Option<&MermaidDiagramIr>,
     announce: bool,
+    paints_resolved: bool,
 ) -> Element {
     let mut elem = Element::path().d(&path_cmds_to_d(&path.commands));
     elem = apply_source_metadata(elem, path.source, include_source_spans, ir, announce);
@@ -2900,12 +3038,13 @@ fn render_scene_path(
             {
                 elem = elem.opacity(opacity.clamp(0.0, 1.0));
             }
-        } else if let Some(style) = resolve_scene_node_inline_styles(ir, index).0 {
+        } else if let Some(style) = resolve_scene_node_inline_styles(ir, index, paints_resolved).0 {
             elem = elem.attr("style", &style);
-            if ir
-                .nodes
-                .get(index)
-                .is_some_and(|node| node.requirement_meta.is_some())
+            if !paints_resolved
+                && ir
+                    .nodes
+                    .get(index)
+                    .is_some_and(|node| node.requirement_meta.is_some())
                 && ir.resolved_node_style(index).contains_key("opacity")
             {
                 // Requirement scenes carry node opacity in their paint for Canvas. The SVG
@@ -3139,6 +3278,7 @@ fn render_scene_text(
     config: &SvgRenderConfig,
     ir: Option<&MermaidDiagramIr>,
     announce: bool,
+    paints_resolved: bool,
 ) -> Element {
     let mut elem = TextBuilder::new(&text.text)
         .x(text.x)
@@ -3156,6 +3296,7 @@ fn render_scene_text(
             ir.diagram_type,
             DiagramType::Journey | DiagramType::Gantt | DiagramType::Requirement
         )
+        && (!paints_resolved || !scene_has_authored_paint(ir, text.source, "color"))
     {
         let theme = resolve_theme(Some(ir), config);
         let color = if let RenderSource::Node(index) = text.source
@@ -3194,7 +3335,7 @@ fn render_scene_text(
     if let Some(ir) = ir
         && let RenderSource::Node(index) = text.source
     {
-        let mut style = resolve_scene_node_inline_styles(ir, index).1;
+        let mut style = resolve_scene_node_inline_styles(ir, index, paints_resolved).1;
         if ir.nodes.get(index).is_some_and(|node| {
             node.c4_meta.is_some() || node.requirement_meta.is_some() || !node.members.is_empty()
         }) && ir.resolved_node_style(index).contains_key("font-size")
@@ -3203,10 +3344,11 @@ fn render_scene_text(
         }
         if let Some(style) = style {
             elem = elem.attr("style", &style);
-            if ir
-                .nodes
-                .get(index)
-                .is_some_and(|node| node.requirement_meta.is_some())
+            if !paints_resolved
+                && ir
+                    .nodes
+                    .get(index)
+                    .is_some_and(|node| node.requirement_meta.is_some())
                 && ir.resolved_node_style(index).contains_key("opacity")
             {
                 // The shared paint already carries the node opacity. Keep the inline author
@@ -3226,7 +3368,10 @@ fn render_scene_text(
             text.font_size,
         );
         let theme = resolve_theme(Some(ir), config);
-        elem = elem.fill(&theme.colors.text).attr("xml:space", "preserve");
+        if !paints_resolved || !scene_has_authored_paint(ir, text.source, "color") {
+            elem = elem.fill(&theme.colors.text);
+        }
+        elem = elem.attr("xml:space", "preserve");
         if let Some(family) = caption.font_family.as_deref() {
             elem = elem.attr("font-family", family);
         }
@@ -3236,7 +3381,7 @@ fn render_scene_text(
         if let Some(style) = caption.font_style {
             elem = elem.attr("font-style", style);
         }
-        if let Some(style) = resolve_cluster_inline_styles(ir, index).1 {
+        if let Some(style) = resolve_cluster_inline_styles(ir, index, paints_resolved).1 {
             let style = if style.contains("font-size:") {
                 measured_card_font_style(Some(&style), text.font_size)
             } else {
@@ -4059,9 +4204,28 @@ fn collect_classdef_css(ir: &MermaidDiagramIr) -> String {
 
 /// Scene paths and labels are separate layers, so they cannot inherit the legacy node group's
 /// CSS classes. Resolve the same author cascade and attach only the matching shape/text half.
+/// Projected scene layers already contain their final paint, including multiplied opacity;
+/// applying author paint again would fade them twice or repaint structural decorations.
+fn is_scene_paint_property(property: &str) -> bool {
+    matches!(
+        property,
+        "fill"
+            | "stroke"
+            | "color"
+            | "opacity"
+            | "fill-opacity"
+            | "stroke-opacity"
+            | "stroke-width"
+            | "stroke-dasharray"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+    )
+}
+
 fn resolve_scene_node_inline_styles(
     ir: &MermaidDiagramIr,
     node_index: usize,
+    paints_resolved: bool,
 ) -> (Option<String>, Option<String>) {
     // Structured IR is also a public input. Validate its properties just as parser-originated
     // declarations are validated, before exposing this channel as an SVG style attribute.
@@ -4069,7 +4233,10 @@ fn resolve_scene_node_inline_styles(
         .resolved_node_style(node_index)
         .into_iter()
         .filter_map(|(property, value)| {
-            if !fm_core::is_allowed_style_property(&property) || value.contains(';') {
+            if !fm_core::is_allowed_style_property(&property)
+                || value.contains(';')
+                || (paints_resolved && is_scene_paint_property(&property))
+            {
                 return None;
             }
             fm_core::sanitize_style_value(&value).map(|value| (property, value))
@@ -4147,6 +4314,7 @@ fn resolve_node_inline_styles(
 fn resolve_cluster_inline_styles(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
+    paints_resolved: bool,
 ) -> (Option<String>, Option<String>) {
     use fm_core::IrStyleTarget;
     if ir.style_refs.is_empty() {
@@ -4162,6 +4330,9 @@ fn resolve_cluster_inline_styles(
         }
     }
 
+    if paints_resolved {
+        merged.retain(|property, _| !is_scene_paint_property(property));
+    }
     let (shape, text) = split_style_properties(&merged);
     (style_map_to_css(&shape), style_map_to_css(&text))
 }
@@ -5651,7 +5822,7 @@ fn render_layout_to_svg(
             let mut text = row.to_render_text(RenderSource::Diagram, &theme.colors.text);
             text.x += offset_x;
             text.y += offset_y;
-            doc = doc.child(render_scene_text(&text, config, Some(ir), true));
+            doc = doc.child(render_scene_text(&text, config, Some(ir), true, false));
         }
     }
 
@@ -6193,7 +6364,7 @@ fn render_layout_to_svg(
             || ir.diagram_type.as_str() == "kanban";
 
         let (declared_cluster_style, declared_cluster_label_style) =
-            resolve_cluster_inline_styles(ir, cluster.cluster_index);
+            resolve_cluster_inline_styles(ir, cluster.cluster_index, false);
         let declares_cluster_fill = declared_cluster_style
             .as_deref()
             .is_some_and(|style| style.contains("fill:"));
@@ -7010,7 +7181,7 @@ fn write_radar_into(
             fm_layout::RadarPathRole::Legend(_) => "fm-radar-legend-box",
             _ => continue,
         };
-        let mut element = render_scene_path(&entry.path, false, None, true)
+        let mut element = render_scene_path(&entry.path, false, None, true, false)
             .class(class)
             .transform(&format!("translate({offset_x},{offset_y})"));
         if entry.role == fm_layout::RadarPathRole::Leader {
@@ -9909,7 +10080,7 @@ fn write_journey_steps_into(
             .or_else(|| fm_layout::journey_score_fill(ir, step.node_index))
             .unwrap_or(&colors.node_fill);
         let color = fm_core::readable_label_color(fill, &colors.text, &colors.background);
-        let (_, text_style) = resolve_scene_node_inline_styles(ir, step.node_index);
+        let (_, text_style) = resolve_scene_node_inline_styles(ir, step.node_index, false);
         for row in &step.rows {
             let center = row.bounds.center();
             let mut text = TextBuilder::new(&row.text)
@@ -11141,7 +11312,7 @@ fn write_requirement_node_content_into(
             .stroke(&colors.node_stroke)
             .stroke_width(0.8)
             .class("fm-req-divider");
-        if let Some(style) = resolve_scene_node_inline_styles(ir, node_index).0 {
+        if let Some(style) = resolve_scene_node_inline_styles(ir, node_index, false).0 {
             divider = divider.attr("style", &style);
         }
         divider.write_to_string(out);
@@ -11945,7 +12116,7 @@ fn render_node(
     let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey
         || ir_node.is_some_and(|node| node.requirement_meta.is_some())
     {
-        resolve_scene_node_inline_styles(ir, node_box.node_index)
+        resolve_scene_node_inline_styles(ir, node_box.node_index, false)
     } else {
         resolve_node_inline_styles(ir, node_box.node_index)
     };
@@ -22335,6 +22506,214 @@ mod tests {
         assert!(scene_svg.starts_with("<svg"));
         assert!(scene_svg.contains("data-type=\"flowchart\""));
         assert!(scene_svg.contains("fm-source-kind=\"node\""));
+    }
+
+    fn scene_tag_for_source<'a>(svg: &'a str, tag: &str, kind: &str, index: usize) -> &'a str {
+        let start = format!("{tag} ");
+        let kind = format!("data-fm-source-kind=\"{kind}\"");
+        let index = format!("data-fm-source-index=\"{index}\"");
+        svg.split('<')
+            .filter_map(|element| element.split_once('>').map(|(attributes, _)| attributes))
+            .find(|attributes| {
+                attributes.starts_with(&start)
+                    && attributes.contains(&kind)
+                    && attributes.contains(&index)
+            })
+            .unwrap_or_else(|| panic!("missing {start}{kind} {index}"))
+    }
+
+    fn scene_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        tag.split_once(&format!(" {name}=\""))
+            .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value))
+    }
+
+    #[test]
+    fn scene_svg_preserves_resolved_paints_with_and_without_semantic_ir() {
+        let ir = fm_parser::parse(
+            "flowchart LR\nsubgraph G[Styled group]\nA[Alpha] -->|request| B[Beta]\nend\n\
+             classDef default fill:#aabbcc,stroke:#112233,color:#223344,opacity:0.5\n\
+             classDef hot fill:#ffcc00,stroke-width:3px,font-weight:700,font-style:italic\n\
+             class A hot\nstyle A fill:#abcdef,fill-opacity:0.4,stroke-opacity:0.8\n\
+             style G fill:#fedcba,stroke:#654321,color:#123456,opacity:0.5,fill-opacity:0.6,stroke-opacity:0.4\n\
+             linkStyle default stroke:#224466,color:#334455,stroke-width:4px,stroke-dasharray:7 3,opacity:0.5,stroke-opacity:0.6\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene_with_metrics(
+            &ir,
+            &layout,
+            &SvgRenderConfig::default().font_metrics(),
+        );
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            };
+            for with_ir in [false, true] {
+                let svg = if with_ir {
+                    render_scene_document_with_ir(&scene, &config, Some(&ir))
+                } else {
+                    render_scene_to_svg(&scene, &config)
+                };
+                let node = scene_tag_for_source(&svg, "path", "node", 0);
+                let edge = scene_tag_for_source(&svg, "path", "edge", 0);
+                let cluster = scene_tag_for_source(&svg, "path", "cluster", 0);
+                let node_text = scene_tag_for_source(&svg, "text", "node", 0);
+                let edge_text = scene_tag_for_source(&svg, "text", "edge", 0);
+                let cluster_text = scene_tag_for_source(&svg, "text", "cluster", 0);
+                for (tag, name, expected) in [
+                    (node, "fill", "#abcdef"),
+                    (node, "stroke", "#112233"),
+                    (edge, "stroke", "#224466"),
+                    (edge, "stroke-dasharray", "7,3"),
+                    (cluster, "fill", "#fedcba"),
+                    (cluster, "stroke", "#654321"),
+                    (node_text, "fill", "#223344"),
+                    (edge_text, "fill", "#334455"),
+                    (cluster_text, "fill", "#123456"),
+                ] {
+                    assert_eq!(scene_attribute(tag, name), Some(expected), "{tag}");
+                }
+                for (tag, name, expected) in [
+                    (node, "fill-opacity", 0.2_f32),
+                    (node, "stroke-opacity", 0.4),
+                    (node, "stroke-width", 3.0),
+                    (edge, "stroke-opacity", 0.3),
+                    (edge, "stroke-width", 4.0),
+                    (cluster, "fill-opacity", 0.3),
+                    (cluster, "stroke-opacity", 0.2),
+                    (node_text, "fill-opacity", 0.5),
+                    (edge_text, "fill-opacity", 0.5),
+                    (cluster_text, "fill-opacity", 0.5),
+                ] {
+                    let actual: f32 = scene_attribute(tag, name).unwrap().parse().unwrap();
+                    assert!((actual - expected).abs() < 0.001, "{name} in {tag}");
+                    assert_eq!(
+                        scene_attribute(tag, "opacity"),
+                        None,
+                        "opacity applied twice: {tag}"
+                    );
+                    if let Some(style) = scene_attribute(tag, "style") {
+                        assert!(
+                            !style.split(';').any(|entry| {
+                                entry
+                                    .split_once(':')
+                                    .is_some_and(|(key, _)| is_scene_paint_property(key.trim()))
+                            }),
+                            "paint cascade applied twice: {tag}"
+                        );
+                    }
+                }
+                if with_ir {
+                    let typography = scene_attribute(node_text, "style").unwrap();
+                    assert!(typography.contains("font-weight:700"));
+                    assert!(typography.contains("font-style:italic"));
+                }
+                let marker_id = scene_attribute(edge, "marker-end")
+                    .and_then(|value| value.strip_prefix("url(#"))
+                    .and_then(|value| value.strip_suffix(')'))
+                    .unwrap();
+                let marker = svg
+                    .split("<marker ")
+                    .find(|part| part.starts_with(&format!("id=\"{marker_id}\"")))
+                    .and_then(|part| part.split_once("</marker>").map(|(marker, _)| marker))
+                    .unwrap();
+                assert!(marker.contains("fill=\"#224466\""), "{marker}");
+                let glyph = marker.split("<path ").nth(1).unwrap();
+                let opacity: f32 = scene_attribute(glyph, "opacity").unwrap().parse().unwrap();
+                assert!(
+                    (opacity - 0.3).abs() < 0.001,
+                    "arrowheads must match their connector: {marker}"
+                );
+                assert_eq!(
+                    svg,
+                    render_scene_document_with_ir(&scene, &config, with_ir.then_some(&ir))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scene_svg_resolved_paints_keep_sankey_overrides_and_disabled_channels() {
+        let mut ir = fm_parser::parse("sankey-beta\nSource,Target,12\n").ir;
+        // Sankey's source grammar is CSV; structured IR is its public author-style input.
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:none,stroke:none,color:#123456,opacity:0.5",
+        )));
+        ir.nodes[1].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:none,stroke-width:0",
+        )));
+        ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "stroke:#654321,color:#234567,opacity:0.4,stroke-opacity:0.5",
+        )));
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        let source = scene_tag_for_source(&svg, "path", "node", 0);
+        assert_eq!(scene_attribute(source, "fill"), Some("none"));
+        assert_eq!(scene_attribute(source, "stroke"), Some("none"));
+        let target = scene_tag_for_source(&svg, "path", "node", 1);
+        assert_eq!(scene_attribute(target, "fill"), Some("none"));
+        assert_eq!(scene_attribute(target, "stroke"), Some("none"));
+        let text = scene_tag_for_source(&svg, "text", "node", 0);
+        assert_eq!(scene_attribute(text, "fill"), Some("#123456"));
+        let alpha: f32 = scene_attribute(text, "fill-opacity")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((alpha - 0.5).abs() < 0.001);
+        let edge = scene_tag_for_source(&svg, "path", "edge", 0);
+        assert_eq!(scene_attribute(edge, "stroke"), Some("#654321"));
+        let alpha: f32 = scene_attribute(edge, "stroke-opacity")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((alpha - 0.2).abs() < 0.001);
+        assert_eq!(scene_attribute(edge, "style"), None);
+    }
+
+    #[test]
+    fn standalone_scene_svg_keeps_styled_er_markers_and_reuses_their_definitions() {
+        let mut ir = fm_parser::parse("erDiagram\nA ||--o{ B : owns\nA ||--o{ C : owns\n").ir;
+        for edge in &mut ir.edges {
+            edge.inline_style = Some(Box::new(fm_core::parse_style_string(
+                "stroke:#123abc,opacity:0.5,stroke-opacity:0.6",
+            )));
+        }
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene_with_metrics(
+            &ir,
+            &layout,
+            &SvgRenderConfig::default().font_metrics(),
+        );
+        let config = SvgRenderConfig::default();
+        let svg = render_scene_to_svg(&scene, &config);
+        assert_eq!(svg, render_scene_to_svg(&scene, &config));
+        let first = scene_tag_for_source(&svg, "path", "edge", 0);
+        let second = scene_tag_for_source(&svg, "path", "edge", 1);
+        for attribute in ["marker-start", "marker-end"] {
+            let reference = scene_attribute(first, attribute).unwrap();
+            assert_eq!(Some(reference), scene_attribute(second, attribute));
+            let id = reference
+                .strip_prefix("url(#")
+                .unwrap()
+                .strip_suffix(')')
+                .unwrap();
+            let definition = svg
+                .split("<marker ")
+                .find(|part| part.starts_with(&format!("id=\"{id}\"")))
+                .and_then(|part| part.split_once("</marker>").map(|(marker, _)| marker))
+                .unwrap();
+            assert!(definition.contains("stroke=\"#123abc\""));
+            assert!(definition.contains("<g opacity=\"0.30\">"));
+            assert!(definition.contains("markerUnits=\"userSpaceOnUse\""));
+        }
+        assert_eq!(svg.matches("<marker id=\"fm-scene-").count(), 2);
     }
 
     #[test]

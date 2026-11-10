@@ -412,6 +412,10 @@ impl ArrowheadMarker {
     /// Render the marker to an SVG element.
     #[must_use]
     pub fn to_element(&self) -> Element {
+        self.to_element_with_opacity(1.0)
+    }
+
+    fn to_element_with_opacity(&self, opacity: f32) -> Element {
         let mut marker = Element::marker()
             .id(&self.id)
             .attr_num("markerWidth", self.marker_width)
@@ -429,10 +433,79 @@ impl ArrowheadMarker {
         if let Some(width) = self.stroke_width {
             path_elem = path_elem.stroke_width(width);
         }
+        if opacity < 1.0 {
+            // Marker contents do not inherit the referencing path's stroke-opacity. Put the
+            // resolved alpha on the drawable glyph, where it covers both filled and open heads.
+            path_elem = path_elem.opacity(opacity);
+        }
 
         marker = marker.child(path_elem);
         marker
     }
+}
+
+/// Build a scene endpoint using the same geometry as the regular arrowhead definitions, but
+/// retain the shaft's resolved color and opacity after the author's style cascade has run.
+pub(crate) fn scene_arrowhead(
+    kind: fm_layout::MarkerKind,
+    id: &str,
+    color: &str,
+    opacity: f32,
+    at_start: bool,
+    sankey: bool,
+) -> Option<Element> {
+    use fm_layout::MarkerKind;
+
+    let mut marker = match kind {
+        MarkerKind::Arrow | MarkerKind::DottedArrow => ArrowheadMarker::standard(id, color),
+        MarkerKind::ThickArrow => ArrowheadMarker::filled(id, color),
+        MarkerKind::HalfArrowTop => ArrowheadMarker::half_top(id, color),
+        MarkerKind::HalfArrowBottom => ArrowheadMarker::half_bottom(id, color),
+        MarkerKind::StickArrowTop => ArrowheadMarker::stick_top(id, color),
+        MarkerKind::StickArrowBottom => ArrowheadMarker::stick_bottom(id, color),
+        MarkerKind::Circle => ArrowheadMarker::circle_marker(id, color),
+        MarkerKind::Cross => ArrowheadMarker::cross_marker(id, color),
+        MarkerKind::Diamond => ArrowheadMarker::diamond_marker(id, color),
+        MarkerKind::DiamondOpen => ArrowheadMarker::diamond_open_marker(id, color),
+        MarkerKind::TriangleOpen => ArrowheadMarker::triangle_open_marker(id, color),
+        MarkerKind::TriangleOpenStart => ArrowheadMarker::triangle_open_marker(id, color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+        MarkerKind::Lollipop => ArrowheadMarker::lollipop_marker(id, color, 1.0),
+        MarkerKind::LollipopStart => ArrowheadMarker::lollipop_marker(id, color, 13.0),
+        MarkerKind::Open => ArrowheadMarker::open(id, color),
+        MarkerKind::None
+        | MarkerKind::ErOnlyOneStart
+        | MarkerKind::ErOnlyOneEnd
+        | MarkerKind::ErZeroOrOneStart
+        | MarkerKind::ErZeroOrOneEnd
+        | MarkerKind::ErOneOrMoreStart
+        | MarkerKind::ErOneOrMoreEnd
+        | MarkerKind::ErZeroOrMoreStart
+        | MarkerKind::ErZeroOrMoreEnd => return None,
+    };
+    if at_start
+        && matches!(
+            kind,
+            MarkerKind::Arrow
+                | MarkerKind::DottedArrow
+                | MarkerKind::ThickArrow
+                | MarkerKind::Open
+                | MarkerKind::TriangleOpen
+        )
+    {
+        marker.orient = MarkerOrient::AutoStartReverse;
+    }
+    let mut element = marker.to_element_with_opacity(crate::clamp_unit_interval(opacity));
+    if sankey && matches!(kind, MarkerKind::Arrow | MarkerKind::DottedArrow) {
+        // Sankey ribbons encode value through width. Their heads keep a fixed user-space size
+        // so a wide ribbon does not multiply its direction glyph by the ribbon's stroke width.
+        element = element
+            .attr("markerUnits", "userSpaceOnUse")
+            .attr("viewBox", "0 0 8 7")
+            .attr_num("markerWidth", 32.0)
+            .attr_num("markerHeight", 28.0);
+    }
+    Some(element)
 }
 
 /// A gradient stop.
@@ -881,6 +954,111 @@ mod tests {
         assert_eq!(marker.fill, "none");
         assert_eq!(marker.stroke.as_deref(), Some("#666"));
         assert_eq!(marker.stroke_width, Some(1.2));
+    }
+
+    #[test]
+    fn scene_arrowheads_preserve_paint_on_filled_and_open_glyphs() {
+        use fm_layout::MarkerKind;
+
+        for (kind, property) in [
+            (MarkerKind::Arrow, "fill"),
+            (MarkerKind::DottedArrow, "fill"),
+            (MarkerKind::ThickArrow, "fill"),
+            (MarkerKind::HalfArrowTop, "fill"),
+            (MarkerKind::HalfArrowBottom, "fill"),
+            (MarkerKind::Circle, "fill"),
+            (MarkerKind::Diamond, "fill"),
+            (MarkerKind::StickArrowTop, "stroke"),
+            (MarkerKind::StickArrowBottom, "stroke"),
+            (MarkerKind::Cross, "stroke"),
+            (MarkerKind::DiamondOpen, "stroke"),
+            (MarkerKind::TriangleOpen, "stroke"),
+            (MarkerKind::TriangleOpenStart, "stroke"),
+            (MarkerKind::Lollipop, "stroke"),
+            (MarkerKind::LollipopStart, "stroke"),
+            (MarkerKind::Open, "stroke"),
+        ] {
+            let svg = scene_arrowhead(kind, "styled", "#b91c1c", 0.3, false, false)
+                .expect("a non-ER endpoint has an arrowhead definition")
+                .render();
+            let (marker, glyph) = svg.split_once("<path").unwrap();
+            assert!(marker.contains("id=\"styled\""));
+            assert!(!marker.contains("opacity="));
+            assert!(
+                glyph.contains(&format!("{property}=\"#b91c1c\"")),
+                "{kind:?}"
+            );
+            assert!(glyph.contains("opacity=\"0.30\""), "{kind:?}: {svg}");
+            if property == "stroke" {
+                assert!(glyph.contains("fill=\"none\""), "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn scene_arrowheads_keep_endpoint_orientation_and_socket_offsets() {
+        use fm_layout::MarkerKind;
+
+        for kind in [
+            MarkerKind::Arrow,
+            MarkerKind::DottedArrow,
+            MarkerKind::ThickArrow,
+            MarkerKind::Open,
+            MarkerKind::TriangleOpen,
+        ] {
+            let start = scene_arrowhead(kind, "start", "#333", 1.0, true, false)
+                .unwrap()
+                .render();
+            let end = scene_arrowhead(kind, "end", "#333", 1.0, false, false)
+                .unwrap()
+                .render();
+            assert!(start.contains("orient=\"auto-start-reverse\""), "{kind:?}");
+            assert!(end.contains("orient=\"auto\""), "{kind:?}");
+            assert!(!start.contains("opacity="));
+        }
+        for (kind, offset) in [
+            (MarkerKind::Lollipop, "1"),
+            (MarkerKind::LollipopStart, "13"),
+        ] {
+            let svg = scene_arrowhead(kind, "socket", "#333", 1.0, false, false)
+                .unwrap()
+                .render();
+            assert!(svg.contains(&format!("refX=\"{offset}\"")));
+            assert!(svg.contains("orient=\"auto\""));
+        }
+    }
+
+    #[test]
+    fn scene_arrowheads_keep_sankey_size_and_clamp_invalid_alpha() {
+        use fm_layout::MarkerKind;
+
+        let sankey = scene_arrowhead(MarkerKind::Arrow, "ribbon", "#123456", 0.4, false, true)
+            .unwrap()
+            .render();
+        for attribute in [
+            "markerUnits=\"userSpaceOnUse\"",
+            "viewBox=\"0 0 8 7\"",
+            "markerWidth=\"32\"",
+            "markerHeight=\"28\"",
+            "opacity=\"0.40\"",
+        ] {
+            assert!(sankey.contains(attribute), "{attribute}");
+        }
+        let invalid = scene_arrowhead(
+            MarkerKind::Arrow,
+            "valid",
+            "#123456",
+            f32::NAN,
+            false,
+            false,
+        )
+        .unwrap()
+        .render();
+        assert!(!invalid.contains("opacity="));
+        assert!(scene_arrowhead(MarkerKind::None, "none", "#333", 1.0, false, false).is_none());
+        assert!(
+            scene_arrowhead(MarkerKind::ErOneOrMoreStart, "er", "#333", 1.0, true, false).is_none()
+        );
     }
 
     #[test]

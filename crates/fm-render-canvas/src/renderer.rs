@@ -1134,6 +1134,19 @@ impl Canvas2dRenderer {
             fallback_color.as_str()
         };
 
+        // The shaft pass restores alpha before drawing the endpoint glyphs. Markers belong
+        // to that same stroke, so restore its resolved opacity for both ends without leaking
+        // the faded state into the following path or label.
+        let marker_opacity = path
+            .stroke
+            .as_ref()
+            .map(|stroke| stroke.opacity)
+            .filter(|opacity| *opacity != 1.0);
+        if let Some(opacity) = marker_opacity {
+            ctx.save();
+            ctx.set_global_alpha(f64::from(opacity));
+        }
+
         if path.marker_start != MarkerKind::None
             && let Some((x, y, angle)) = path_marker_start_geometry(&path.commands)
         {
@@ -1158,6 +1171,10 @@ impl Canvas2dRenderer {
                 angle,
                 stroke_color,
             );
+        }
+
+        if marker_opacity.is_some() {
+            ctx.restore();
         }
     }
 
@@ -5232,6 +5249,202 @@ mod tests {
         LayoutStats, build_render_scene, layout_diagram,
     };
 
+    #[derive(Clone, Debug)]
+    struct CanvasStrokePaint {
+        color: String,
+        width: f64,
+        opacity: f64,
+        dashes: Vec<f64>,
+    }
+
+    fn recorded_canvas_strokes(operations: &[DrawOperation]) -> Vec<CanvasStrokePaint> {
+        let mut paint = CanvasStrokePaint {
+            color: String::from("#000000"),
+            width: 1.0,
+            opacity: 1.0,
+            dashes: Vec::new(),
+        };
+        let mut stack = Vec::new();
+        let mut strokes = Vec::new();
+        for operation in operations {
+            match operation {
+                DrawOperation::Save => stack.push(paint.clone()),
+                DrawOperation::Restore => paint = stack.pop().expect("balanced canvas state"),
+                DrawOperation::SetStrokeStyle(value) => paint.color.clone_from(value),
+                DrawOperation::SetLineWidth(value) => paint.width = *value,
+                DrawOperation::SetGlobalAlpha(value) => paint.opacity = *value,
+                DrawOperation::SetLineDash(value) => paint.dashes.clone_from(value),
+                DrawOperation::Stroke | DrawOperation::StrokeRect(..) => {
+                    strokes.push(paint.clone())
+                }
+                _ => {}
+            }
+        }
+        assert!(stack.is_empty());
+        strokes
+    }
+
+    #[test]
+    fn canvas_scene_preserves_node_style_cascade_and_independent_paint_opacity() {
+        let ir = fm_parser::parse(
+            "flowchart LR\n A[Alert] --> B[Base]\n\
+             classDef default fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:2px\n\
+             classDef emphasized fill:#bfdbfe,stroke:#1d4ed8,color:#1e3a8a,opacity:0.5\n\
+             class A emphasized\n\
+             style A fill:#fca5a5,stroke-width:4px,stroke-dasharray:7 3,fill-opacity:0.4,stroke-opacity:0.8\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 2);
+        let scene = build_render_scene(&ir, &layout_diagram(&ir));
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let result =
+            crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+        assert_eq!(result.nodes_drawn, 2);
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        for (color, opacity) in [("#fca5a5", 0.2), ("#fef3c7", 1.0)] {
+            let matching: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == color)
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "missing or duplicated node paint {color}"
+            );
+            assert!((matching[0].paint.alpha - opacity).abs() < 1e-6);
+        }
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        for (color, width, opacity, dashes) in [
+            ("#1d4ed8", 4.0, 0.4, &[7.0, 3.0][..]),
+            ("#b45309", 2.0, 1.0, &[][..]),
+        ] {
+            let matching: Vec<_> = strokes
+                .iter()
+                .filter(|stroke| stroke.color == color)
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "missing or duplicated node border {color}"
+            );
+            assert_eq!(matching[0].width, width);
+            assert!((matching[0].opacity - opacity).abs() < 1e-6);
+            assert_eq!(matching[0].dashes, dashes);
+        }
+        for (label, color, opacity) in [("Alert", "#1e3a8a", 0.5), ("Base", "#78350f", 1.0)] {
+            let text = texts.iter().find(|text| text.text == label).unwrap();
+            assert_eq!(text.paint.fill, color);
+            assert!((text.paint.alpha - opacity).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn canvas_scene_link_styles_reach_shafts_markers_and_labels() {
+        let ir = fm_parser::parse(
+            "flowchart LR\n A -->|first| B\n B -->|second| C\n\
+             linkStyle default stroke:#0f766e,color:#134e4a,stroke-width:2px,stroke-dasharray:6 2,opacity:0.5\n\
+             linkStyle 0 stroke:#b91c1c,color:#7f1d1d,stroke-width:4px,stroke-dasharray:3 5,opacity:0.75,stroke-opacity:0.4\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 2);
+        let scene = build_render_scene(&ir, &layout_diagram(&ir));
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let result =
+            crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+        assert_eq!(result.edges_drawn, 2);
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        for (color, width, opacity, dashes) in [
+            ("#b91c1c", 4.0, 0.3, &[3.0, 5.0][..]),
+            ("#0f766e", 2.0, 0.5, &[6.0, 2.0][..]),
+        ] {
+            let shaft = strokes.iter().find(|stroke| stroke.color == color).unwrap();
+            assert_eq!(shaft.width, width);
+            assert_eq!(shaft.dashes, dashes);
+            assert!((shaft.opacity - opacity).abs() < 1e-6);
+            let markers: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == color)
+                .collect();
+            assert_eq!(
+                markers.len(),
+                1,
+                "the authored arrowhead must be drawn for {color}"
+            );
+            assert!((markers[0].paint.alpha - opacity).abs() < 1e-6);
+            assert!(markers[0].paint.dash.is_empty(), "arrowheads stay solid");
+        }
+        for (label, color, opacity) in [("first", "#7f1d1d", 0.75), ("second", "#134e4a", 0.5)] {
+            let text = texts.iter().find(|text| text.text == label).unwrap();
+            assert_eq!(text.paint.fill, color);
+            assert!((text.paint.alpha - opacity).abs() < 1e-6);
+        }
+        assert!(
+            texts
+                .iter()
+                .filter(|text| ["A", "B", "C"].contains(&text.text.as_str()))
+                .all(|text| text.paint.alpha == 1.0)
+        );
+    }
+
+    #[test]
+    fn canvas_scene_preserves_cluster_paints_and_resets_them_for_member_nodes() {
+        let ir = fm_parser::parse(
+            "flowchart TD\n subgraph frame[System]\n A[Service]\n end\n\
+             style frame fill:#ddd6fe,stroke:#6d28d9,color:#4c1d95,stroke-width:3px,stroke-dasharray:8 2,opacity:0.6,fill-opacity:0.5,stroke-opacity:0.75\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 1);
+        let scene = build_render_scene(&ir, &layout);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let result =
+            crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+        assert_eq!(result.clusters_drawn, 1);
+        assert_eq!(result.nodes_drawn, 1);
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        let background = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#ddd6fe")
+            .unwrap();
+        assert!((background.paint.alpha - 0.3).abs() < 1e-6);
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        let border = strokes
+            .iter()
+            .find(|stroke| stroke.color == "#6d28d9")
+            .unwrap();
+        assert_eq!(border.width, 3.0);
+        assert_eq!(border.dashes, [8.0, 2.0]);
+        assert!((border.opacity - 0.45).abs() < 1e-6);
+        let title = texts.iter().find(|text| text.text == "System").unwrap();
+        assert_eq!(title.paint.fill, "#4c1d95");
+        assert!((title.paint.alpha - 0.6).abs() < 1e-6);
+        let member = texts.iter().find(|text| text.text == "Service").unwrap();
+        assert_eq!(member.paint.alpha, 1.0);
+        assert_ne!(member.paint.fill, title.paint.fill);
+    }
+
+    #[test]
+    fn canvas_scene_explicitly_hidden_edge_strokes_do_not_leave_arrowheads() {
+        for style in ["stroke:none", "stroke-width:0px"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n A -.->|still labelled| B\n linkStyle 0 {style}\n"
+            ))
+            .ir;
+            let scene = build_render_scene(&ir, &layout_diagram(&ir));
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+            assert!(
+                !ctx.operations()
+                    .iter()
+                    .any(|operation| matches!(operation, DrawOperation::Rotate(_))),
+                "{style}: an invisible connector must not leave an endpoint glyph"
+            );
+            let (_, texts) = record_gantt_canvas_paint(ctx.operations());
+            assert!(texts.iter().any(|text| text.text == "still labelled"));
+        }
+    }
+
     fn owned_legacy_edge_stroke_reference(
         arrow: ArrowType,
         default_width: f64,
@@ -8947,6 +9160,71 @@ mod tests {
     }
 
     #[test]
+    fn canvas_scene_mirrored_sequence_headers_preserve_participant_paints() {
+        let mut ir = fm_parser::parse(
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+             sequenceDiagram\nparticipant A as Client\nparticipant B as Server\n\
+             A->>B: request\n",
+        )
+        .ir;
+        let participant = ir.nodes.iter().position(|node| node.id == "A").unwrap();
+        ir.nodes[participant].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs(
+            [
+                ("fill", "#fca5a5"),
+                ("stroke", "#1d4ed8"),
+                ("color", "#1e3a8a"),
+                ("stroke-width", "4px"),
+                ("stroke-dasharray", "7 3"),
+                ("opacity", "0.5"),
+                ("fill-opacity", "0.4"),
+                ("stroke-opacity", "0.8"),
+            ]
+            .map(|(property, value)| (property.to_owned(), value.to_owned())),
+        )));
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_mirror_headers.len(), 2);
+        let scene = build_render_scene(&ir, &layout);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let result =
+            crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+        assert_eq!(result.nodes_drawn, 2);
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        let headers: Vec<_> = fills
+            .iter()
+            .filter(|fill| fill.paint.fill == "#fca5a5")
+            .collect();
+        assert_eq!(headers.len(), 2, "both participant headers must be styled");
+        assert!(
+            headers
+                .iter()
+                .all(|fill| (fill.paint.alpha - 0.2).abs() < 1e-6)
+        );
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        let borders: Vec<_> = strokes
+            .iter()
+            .filter(|stroke| stroke.color == "#1d4ed8")
+            .collect();
+        assert_eq!(borders.len(), 2);
+        for border in borders {
+            assert_eq!(border.width, 4.0);
+            assert_eq!(border.dashes, [7.0, 3.0]);
+            assert!((border.opacity - 0.4).abs() < 1e-6);
+        }
+        let client_labels: Vec<_> = texts.iter().filter(|text| text.text == "Client").collect();
+        assert_eq!(client_labels.len(), 2);
+        for text in client_labels {
+            assert_eq!(text.paint.fill, "#1e3a8a");
+            assert!((text.paint.alpha - 0.5).abs() < 1e-6);
+        }
+        let other_labels: Vec<_> = texts
+            .iter()
+            .filter(|text| text.text == "Server" || text.text == "request")
+            .collect();
+        assert_eq!(other_labels.len(), 3);
+        assert!(other_labels.iter().all(|text| text.paint.alpha == 1.0));
+    }
+
+    #[test]
     fn render_scene_draws_path_markers() {
         let scene = RenderScene {
             bounds: fm_layout::RenderRect {
@@ -8960,6 +9238,7 @@ mod tests {
                 source: RenderSource::Diagram,
                 transform: None,
                 clip: None,
+                paints_resolved: false,
                 children: vec![RenderItem::Path(RenderPath {
                     source: RenderSource::Edge(0),
                     commands: vec![

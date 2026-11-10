@@ -3304,6 +3304,9 @@ pub enum RenderClip {
 pub struct RenderGroup {
     pub id: Option<String>,
     pub source: RenderSource,
+    /// Descendant primitives already include the author's paint cascade and opacity. Backends
+    /// with access to the semantic IR must not apply those paints again; typography is separate.
+    pub paints_resolved: bool,
     pub transform: Option<RenderTransform>,
     pub clip: Option<RenderClip>,
     pub children: Vec<RenderItem>,
@@ -3315,6 +3318,7 @@ impl RenderGroup {
         Self {
             id,
             source: RenderSource::Diagram,
+            paints_resolved: false,
             transform: None,
             clip: None,
             children: Vec::new(),
@@ -3324,6 +3328,12 @@ impl RenderGroup {
     #[must_use]
     pub const fn with_source(mut self, source: RenderSource) -> Self {
         self.source = source;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_resolved_paints(mut self) -> Self {
+        self.paints_resolved = true;
         self
     }
 }
@@ -3888,7 +3898,7 @@ pub fn build_render_scene_with_metrics(
     });
     root.clip = Some(RenderClip::Rect(bounds));
     root.children
-        .push(RenderItem::Group(build_cluster_layer(layout)));
+        .push(RenderItem::Group(build_cluster_layer(ir, layout)));
     if ir.diagram_type == DiagramType::Sequence {
         append_sequence_scene_layers(&mut root, ir, layout, metrics);
     }
@@ -3964,29 +3974,37 @@ fn complete_packet_scene_layers(
             continue;
         }
         let source = RenderSource::Node(continuation.node_index);
-        nodes.children.push(scene_path(
+        let declared = ir.resolved_node_style(continuation.node_index);
+        let mut path = RenderPath {
             source,
-            node_path(rect, fm_core::NodeShape::Rect),
-            Some(FillStyle::Solid {
+            commands: node_path(rect, fm_core::NodeShape::Rect),
+            fill: Some(FillStyle::Solid {
                 color: String::from("#ffffff"),
                 opacity: 1.0,
             }),
-            Some(StrokeStyle::solid("#94a3b8", 1.5)),
-        ));
+            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        };
+        apply_scene_path_style(&mut path, &declared);
+        let half_stroke = path
+            .stroke
+            .as_ref()
+            .map_or(0.0, |stroke| stroke.width * 0.5);
+        nodes.children.push(RenderItem::Path(path));
         // The continuation may be the leftmost or bottommost piece of the diagram. Include
         // its complete outline, not just the path centerline, in the root clip.
         include_packing_bounds(
             bounds,
             LayoutRect {
-                x: rect.x - 0.75,
-                y: rect.y - 0.75,
-                width: rect.width + 1.5,
-                height: rect.height + 1.5,
+                x: rect.x - half_stroke,
+                y: rect.y - half_stroke,
+                width: rect.width + 2.0 * half_stroke,
+                height: rect.height + 2.0 * half_stroke,
             },
         );
 
         let metrics = ir.effective_node_font_metrics(continuation.node_index, metrics);
-        let declared = ir.resolved_node_style(continuation.node_index);
         let center = rect.center();
         append_measured_scene_text(
             labels,
@@ -4004,7 +4022,7 @@ fn complete_packet_scene_layers(
                         .get("color")
                         .and_then(|paint| scene_paint(paint))
                         .unwrap_or_else(|| String::from("#0f172a")),
-                    opacity: 1.0,
+                    opacity: scene_style_opacity(&declared, "opacity"),
                 },
             },
             &metrics,
@@ -5159,7 +5177,8 @@ fn build_sequence_number_layer(
 /// Accept colors without admitting resource-loading paint such as `url(...)` into a scene.
 /// SVG and Canvas both consume these strings, so use the common CSS color vocabulary and numeric
 /// color functions rather than depending on a browser retaining its last valid paint value.
-fn scene_paint(value: &str) -> Option<String> {
+#[must_use]
+pub fn scene_paint(value: &str) -> Option<String> {
     let value = fm_core::sanitize_style_value(value)?;
     let lower = value.to_ascii_lowercase();
     if fm_core::is_css_named_color(&lower) {
@@ -5175,16 +5194,188 @@ fn scene_paint(value: &str) -> Option<String> {
         if let Some(arguments) = lower
             .strip_prefix(prefix)
             .and_then(|rest| rest.strip_suffix(')'))
-            && !arguments.is_empty()
-            && arguments.bytes().all(|byte| {
-                byte.is_ascii_digit()
-                    || matches!(byte, b',' | b'.' | b'%' | b'/' | b' ' | b'+' | b'-')
-            })
+            && scene_color_arguments(arguments, prefix.starts_with('h'))
         {
             return Some(value);
         }
     }
     None
+}
+
+fn scene_color_arguments(arguments: &str, hsl: bool) -> bool {
+    let legacy = arguments.contains(',');
+    let mut fields = Vec::new();
+    if legacy {
+        if arguments.contains('/') {
+            return false;
+        }
+        fields.extend(arguments.split(',').map(str::trim));
+    } else {
+        let mut parts = arguments.split('/');
+        fields.extend(parts.next().unwrap_or_default().split_ascii_whitespace());
+        if fields.len() != 3 {
+            return false;
+        }
+        if let Some(alpha) = parts.next() {
+            fields.push(alpha.trim());
+        }
+        if parts.next().is_some() {
+            return false;
+        }
+    }
+    if !matches!(fields.len(), 3 | 4) {
+        return false;
+    }
+    let finite = |value: &str| value.parse::<f32>().is_ok_and(f32::is_finite);
+    let component = |value: &str| finite(value.strip_suffix('%').unwrap_or(value));
+    if fields.get(3).is_some_and(|alpha| !component(alpha)) {
+        return false;
+    }
+    if hsl {
+        let hue = ["deg", "grad", "rad", "turn"]
+            .into_iter()
+            .find_map(|unit| fields[0].strip_suffix(unit))
+            .unwrap_or(fields[0]);
+        finite(hue)
+            && fields[1..3]
+                .iter()
+                .all(|value| value.strip_suffix('%').is_some_and(finite))
+    } else {
+        fields[..3].iter().all(|value| component(value))
+            && (!legacy
+                || fields[..3]
+                    .iter()
+                    .all(|value| value.ends_with('%') == fields[0].ends_with('%')))
+    }
+}
+
+/// Resolve paint declarations before the IR is discarded. A scene consumer has no CSS cascade
+/// or semantic IR to recover them from; the primitive's paint is the complete drawing contract.
+fn scene_style_opacity(style: &BTreeMap<String, String>, property: &str) -> f32 {
+    style
+        .get(property)
+        .and_then(|value| scene_opacity(value))
+        .unwrap_or(1.0)
+}
+
+fn scene_opacity(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let (number, divisor) = value
+        .strip_suffix('%')
+        .map_or((value, 1.0), |number| (number.trim(), 100.0));
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| (value / divisor).clamp(0.0, 1.0))
+}
+
+fn scene_declares_paint(style: &BTreeMap<String, String>, property: &str) -> bool {
+    style.get(property).is_some_and(|value| {
+        value.trim().eq_ignore_ascii_case("none") || scene_paint(value).is_some()
+    })
+}
+
+fn scene_style_dash_array(value: &str) -> Option<Vec<f32>> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let mut pattern = Vec::new();
+    for part in value
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        let length = part
+            .trim_end_matches("px")
+            .parse::<f32>()
+            .ok()
+            .filter(|length| length.is_finite() && *length >= 0.0)?;
+        pattern.push(length);
+    }
+    if pattern.is_empty() {
+        return None;
+    }
+    if pattern.iter().all(|length| *length == 0.0) {
+        pattern.clear();
+    }
+    Some(pattern)
+}
+
+fn scene_cluster_style(ir: &MermaidDiagramIr, index: usize) -> BTreeMap<String, String> {
+    let mut style = BTreeMap::new();
+    for reference in &ir.style_refs {
+        if reference.target == fm_core::IrStyleTarget::Cluster(index) {
+            style.extend(fm_core::parse_style_string(&reference.style).properties);
+        }
+    }
+    style
+}
+
+/// Apply author paint only to channels that the primitive actually draws. A label underline or
+/// an edge has no fill, and a decorative card surface has no outline; styling must not invent one.
+fn apply_scene_path_style(path: &mut RenderPath, style: &BTreeMap<String, String>) {
+    let opacity = scene_style_opacity(style, "opacity");
+    if let Some(FillStyle::Solid {
+        color,
+        opacity: fill_opacity,
+    }) = &mut path.fill
+    {
+        if let Some(declared) = style.get("fill").and_then(|value| scene_paint(value)) {
+            *color = declared;
+        }
+        *fill_opacity *= opacity * scene_style_opacity(style, "fill-opacity");
+    }
+    if style
+        .get("fill")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("none"))
+    {
+        path.fill = None;
+    }
+    let width = style.get("stroke-width").and_then(|value| {
+        value
+            .trim()
+            .trim_end_matches("px")
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|width| width.is_finite() && *width >= 0.0)
+    });
+    if let Some(stroke) = &mut path.stroke {
+        if let Some(color) = style.get("stroke").and_then(|value| scene_paint(value)) {
+            stroke.color = color;
+        }
+        stroke.opacity *= opacity * scene_style_opacity(style, "stroke-opacity");
+        if let Some(width) = width {
+            stroke.width = width;
+        }
+        if let Some(pattern) = style
+            .get("stroke-dasharray")
+            .and_then(|value| scene_style_dash_array(value))
+        {
+            stroke.dash_array = pattern;
+        }
+        stroke.line_cap = match style.get("stroke-linecap").map(|value| value.trim()) {
+            Some("butt") => LineCap::Butt,
+            Some("round") => LineCap::Round,
+            Some("square") => LineCap::Square,
+            _ => stroke.line_cap,
+        };
+        stroke.line_join = match style.get("stroke-linejoin").map(|value| value.trim()) {
+            Some("miter") => LineJoin::Miter,
+            Some("round") => LineJoin::Round,
+            Some("bevel") => LineJoin::Bevel,
+            _ => stroke.line_join,
+        };
+    }
+    if width == Some(0.0)
+        || style
+            .get("stroke")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("none"))
+    {
+        path.stroke = None;
+        path.marker_start = MarkerKind::None;
+        path.marker_end = MarkerKind::None;
+    }
 }
 
 #[must_use]
@@ -5324,29 +5515,38 @@ fn build_state_note_layer(layout: &DiagramLayout, metrics: &fm_core::FontMetrics
     layer
 }
 
-fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
-    let mut layer =
-        RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
+fn build_cluster_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("clusters")))
+        .with_source(RenderSource::Diagram)
+        .with_resolved_paints();
 
     for cluster in &layout.clusters {
+        let style = scene_cluster_style(ir, cluster.cluster_index);
         let declared_color = cluster.color.as_deref().and_then(scene_paint);
-        layer.children.push(RenderItem::Path(RenderPath {
+        let declared_fill = style.get("fill").and_then(|value| scene_paint(value));
+        let mut path = RenderPath {
             source: RenderSource::Cluster(cluster.cluster_index),
             commands: rounded_rect_path(cluster.bounds, 8.0),
             fill: Some(FillStyle::Solid {
-                opacity: if declared_color.is_some() { 1.0 } else { 0.24 },
+                opacity: if declared_color.is_some() || declared_fill.is_some() {
+                    1.0
+                } else {
+                    0.24
+                },
                 color: declared_color.unwrap_or_else(|| String::from("#e2e8f0")),
             }),
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.0)),
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
-        }));
+        };
+        apply_scene_path_style(&mut path, &style);
+        layer.children.push(RenderItem::Path(path));
     }
 
     for divider in &layout.extensions.cluster_dividers {
         let mut stroke = StrokeStyle::solid("#64748b", 1.0);
         stroke.dash_array = vec![6.0, 4.0];
-        layer.children.push(RenderItem::Path(RenderPath {
+        let mut path = RenderPath {
             source: RenderSource::Cluster(divider.cluster_index),
             commands: vec![
                 PathCmd::MoveTo {
@@ -5362,7 +5562,9 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
             stroke: Some(stroke),
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
-        }));
+        };
+        apply_scene_path_style(&mut path, &scene_cluster_style(ir, divider.cluster_index));
+        layer.children.push(RenderItem::Path(path));
     }
 
     if !layout.clusters.is_empty() {
@@ -5373,8 +5575,9 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
 }
 
 fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer =
-        RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
+    let mut layer = RenderGroup::new(Some(String::from("edges")))
+        .with_source(RenderSource::Diagram)
+        .with_resolved_paints();
     let sankey_widest = sankey_widest_flow(ir);
 
     for edge in &layout.edges {
@@ -5451,22 +5654,28 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             stroke.width = width;
         }
 
-        layer.children.push(RenderItem::Path(RenderPath {
+        let mut path = RenderPath {
             source: RenderSource::Edge(edge.edge_index),
             commands,
             fill: None,
             stroke: Some(stroke),
             marker_start,
             marker_end,
-        }));
+        };
+        apply_scene_path_style(
+            &mut path,
+            &edge_labels::edge_label_style(ir, edge.edge_index),
+        );
+        layer.children.push(RenderItem::Path(path));
     }
 
     layer
 }
 
 fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer =
-        RenderGroup::new(Some(String::from("nodes"))).with_source(RenderSource::Diagram);
+    let mut layer = RenderGroup::new(Some(String::from("nodes")))
+        .with_source(RenderSource::Diagram)
+        .with_resolved_paints();
 
     for node_box in &layout.nodes {
         // The cluster already paints the composite boundary. Its routing node shares that
@@ -5482,37 +5691,14 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             .nodes
             .get(node_box.node_index)
             .and_then(|node| node.requirement_meta.as_deref());
-        let declared = requirement.map(|_| ir.resolved_node_style(node_box.node_index));
-        let opacity = declared
-            .as_ref()
-            .and_then(|style| style.get("opacity"))
-            .and_then(|raw| raw.parse::<f32>().ok())
-            .filter(|value| value.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        let mut stroke = StrokeStyle::solid(
-            declared
-                .as_ref()
-                .and_then(|style| style.get("stroke"))
-                .and_then(|paint| scene_paint(paint))
-                .unwrap_or_else(|| "#94a3b8".to_owned()),
-            1.5,
-        );
-        stroke.opacity = opacity;
-
-        layer.children.push(RenderItem::Path(RenderPath {
+        let declared = ir.resolved_node_style(node_box.node_index);
+        let mut path = RenderPath {
             source: RenderSource::Node(node_box.node_index),
             commands: node_path(node_box.bounds, shape),
             fill: Some(FillStyle::Solid {
-                color: declared
-                    .as_ref()
-                    .and_then(|style| style.get("fill"))
-                    .and_then(|paint| scene_paint(paint))
-                    .or_else(|| {
-                        requirement
-                            .and_then(fm_core::requirement_risk_fill)
-                            .map(str::to_owned)
-                    })
+                color: requirement
+                    .and_then(fm_core::requirement_risk_fill)
+                    .map(str::to_owned)
                     .or_else(|| journey_score_fill(ir, node_box.node_index).map(str::to_owned))
                     .or_else(|| {
                         (ir.diagram_type == DiagramType::State
@@ -5524,21 +5710,23 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         .then(|| String::from("#475569"))
                     })
                     .unwrap_or_else(|| "#ffffff".to_owned()),
-                opacity,
+                opacity: 1.0,
             }),
-            stroke: Some(stroke),
+            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
-        }));
+        };
+        apply_scene_path_style(&mut path, &declared);
+        layer.children.push(RenderItem::Path(path));
         if ir.diagram_type == DiagramType::State && shape == fm_core::NodeShape::DoubleCircle {
             // A final state is a ring around a solid disc. The generic shape path describes only
             // its outer boundary, so the disc must be a separate primitive inside that boundary.
             let center = node_box.bounds.center();
             let radius = node_box.bounds.width.min(node_box.bounds.height) / 2.0;
             let inner_radius = (radius - 4.0).max(radius * 0.5);
-            layer.children.push(scene_path(
-                RenderSource::Node(node_box.node_index),
-                node_path(
+            let mut path = RenderPath {
+                source: RenderSource::Node(node_box.node_index),
+                commands: node_path(
                     LayoutRect {
                         x: center.x - inner_radius,
                         y: center.y - inner_radius,
@@ -5547,12 +5735,16 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     },
                     fm_core::NodeShape::Circle,
                 ),
-                Some(FillStyle::Solid {
+                fill: Some(FillStyle::Solid {
                     color: String::from("#475569"),
                     opacity: 1.0,
                 }),
-                Some(StrokeStyle::solid("#94a3b8", 1.5)),
-            ));
+                stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+                marker_start: MarkerKind::None,
+                marker_end: MarkerKind::None,
+            };
+            apply_scene_path_style(&mut path, &declared);
+            layer.children.push(RenderItem::Path(path));
         }
     }
 
@@ -5562,7 +5754,7 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             .get(node_box.node_index)
             .map_or(fm_core::NodeShape::Rect, |node| node.shape);
 
-        layer.children.push(RenderItem::Path(RenderPath {
+        let mut path = RenderPath {
             source: RenderSource::Node(node_box.node_index),
             commands: node_path(node_box.bounds, shape),
             fill: Some(FillStyle::Solid {
@@ -5572,7 +5764,9 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
-        }));
+        };
+        apply_scene_path_style(&mut path, &ir.resolved_node_style(node_box.node_index));
+        layer.children.push(RenderItem::Path(path));
     }
 
     layer
@@ -5583,8 +5777,9 @@ fn build_label_layer(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> (RenderGroup, LayoutRect) {
-    let mut layer =
-        RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
+    let mut layer = RenderGroup::new(Some(String::from("labels")))
+        .with_source(RenderSource::Diagram)
+        .with_resolved_paints();
     let mut edge_labels = edge_labels::uses_graph_edge_labels(ir.diagram_type)
         .then(|| edge_labels::EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, metrics));
 
@@ -5600,16 +5795,25 @@ fn build_label_layer(
         if is_composite_state_node(ir, node_box) {
             continue;
         }
+        let declared = ir.resolved_node_style(node_box.node_index);
+        let opacity = scene_style_opacity(&declared, "opacity");
         if let Some(step) = layout
             .extensions
             .journey
             .as_ref()
             .and_then(|journey| journey.step(node_box.node_index))
         {
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| String::from("#0f172a"));
             layer.children.extend(step.rows.iter().map(|row| {
-                RenderItem::Text(
-                    row.to_render_text(RenderSource::Node(node_box.node_index), "#0f172a"),
-                )
+                let mut text = row.to_render_text(RenderSource::Node(node_box.node_index), &color);
+                text.fill = FillStyle::Solid {
+                    color: color.clone(),
+                    opacity,
+                };
+                RenderItem::Text(text)
             }));
             continue;
         }
@@ -5625,7 +5829,6 @@ fn build_label_layer(
                 .label
                 .and_then(|id| ir.labels.get(id.0))
                 .map_or(node.id.as_str(), |label| label.text.as_str());
-            let declared = ir.resolved_node_style(node_box.node_index);
             let card = fm_core::ClassCompartmentLayout::with_font_size_override(
                 meta,
                 name,
@@ -5643,7 +5846,8 @@ fn build_label_layer(
                 .unwrap_or_else(|| "#1e293b".to_owned());
             let source = RenderSource::Node(node_box.node_index);
             let bounds = node_box.bounds;
-            if !declared.contains_key("fill") && bounds.width > 2.0 && bounds.height > 2.0 {
+            if !scene_declares_paint(&declared, "fill") && bounds.width > 2.0 && bounds.height > 2.0
+            {
                 layer.children.push(RenderItem::Path(RenderPath {
                     source,
                     commands: rounded_rect_path(
@@ -5657,7 +5861,7 @@ fn build_label_layer(
                     ),
                     fill: Some(FillStyle::Solid {
                         color: fm_core::mindmap::branch_fill("#f8fafc", &border, false),
-                        opacity: 1.0,
+                        opacity: opacity * scene_style_opacity(&declared, "fill-opacity"),
                     }),
                     stroke: None,
                     marker_start: MarkerKind::None,
@@ -5667,7 +5871,7 @@ fn build_label_layer(
             for separator_y in card.separator_ys {
                 let mut stroke = StrokeStyle::solid(&border, 0.75);
                 stroke.opacity = 0.65;
-                layer.children.push(RenderItem::Path(RenderPath {
+                let mut path = RenderPath {
                     source,
                     commands: vec![
                         PathCmd::MoveTo {
@@ -5683,7 +5887,9 @@ fn build_label_layer(
                     stroke: Some(stroke),
                     marker_start: MarkerKind::None,
                     marker_end: MarkerKind::None,
-                }));
+                };
+                apply_scene_path_style(&mut path, &declared);
+                layer.children.push(RenderItem::Path(path));
             }
             for row in card.rows {
                 let centered = row.centered();
@@ -5696,6 +5902,8 @@ fn build_label_layer(
                 if row.underline {
                     let width =
                         metrics.estimate_width(&row.text) * row.font_size / metrics.font_size();
+                    let mut stroke = StrokeStyle::solid(&color, 0.75);
+                    stroke.opacity = opacity;
                     layer.children.push(RenderItem::Path(RenderPath {
                         source,
                         commands: vec![
@@ -5709,7 +5917,7 @@ fn build_label_layer(
                             },
                         ],
                         fill: None,
-                        stroke: Some(StrokeStyle::solid(&color, 0.75)),
+                        stroke: Some(stroke),
                         marker_start: MarkerKind::None,
                         marker_end: MarkerKind::None,
                     }));
@@ -5728,7 +5936,7 @@ fn build_label_layer(
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
                         color: color.clone(),
-                        opacity: 1.0,
+                        opacity,
                     },
                 }));
             }
@@ -5736,7 +5944,6 @@ fn build_label_layer(
         }
         if !node.members.is_empty() {
             let name = display_node_label_ref(ir, node);
-            let declared = ir.resolved_node_style(node_box.node_index);
             let card_metrics = declared.get("font-family").map(|family| {
                 fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
                     preset: fm_core::FontPreset::from_family(family),
@@ -5760,8 +5967,11 @@ fn build_label_layer(
                 .unwrap_or_else(|| "#7c8da5".to_owned());
             let source = RenderSource::Node(node_box.node_index);
             let bounds = node_box.bounds;
-            if !declared.contains_key("fill")
-                && !declared.contains_key("fill-opacity")
+            if !scene_declares_paint(&declared, "fill")
+                && declared
+                    .get("fill-opacity")
+                    .and_then(|value| scene_opacity(value))
+                    .is_none()
                 && ir
                     .meta
                     .theme_overrides
@@ -5773,12 +5983,6 @@ fn build_label_layer(
                 && bounds.height > 2.0
                 && let Some(palette) = fm_core::ErCardPalette::new("#f8fafc", &border, &color)
             {
-                let opacity = declared
-                    .get("opacity")
-                    .and_then(|value| value.trim().parse::<f32>().ok())
-                    .filter(|value| value.is_finite())
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 1.0);
                 let mut surfaces =
                     RenderGroup::new(Some(format!("fm-er-surfaces-{}", node_box.node_index)));
                 // The scene's rectangular node outline has a five-unit radius. Keep every
@@ -5825,7 +6029,7 @@ fn build_label_layer(
             }
             let mut divider_stroke = StrokeStyle::solid(&border, 0.75);
             divider_stroke.opacity = 0.65;
-            layer.children.push(RenderItem::Path(RenderPath {
+            let mut path = RenderPath {
                 source,
                 commands: vec![
                     PathCmd::MoveTo {
@@ -5841,7 +6045,9 @@ fn build_label_layer(
                 stroke: Some(divider_stroke),
                 marker_start: MarkerKind::None,
                 marker_end: MarkerKind::None,
-            }));
+            };
+            apply_scene_path_style(&mut path, &declared);
+            layer.children.push(RenderItem::Path(path));
             for run in card.text {
                 layer.children.push(RenderItem::Text(RenderText {
                     source,
@@ -5860,7 +6066,7 @@ fn build_label_layer(
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
                         color: color.clone(),
-                        opacity: 1.0,
+                        opacity,
                     },
                 }));
             }
@@ -5868,7 +6074,6 @@ fn build_label_layer(
         }
         if let Some(meta) = node.requirement_meta.as_deref() {
             let name = display_node_label_ref(ir, node);
-            let declared = ir.resolved_node_style(node_box.node_index);
             let card_metrics = declared.get("font-family").map(|family| {
                 fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
                     preset: fm_core::FontPreset::from_family(family),
@@ -5891,12 +6096,6 @@ fn build_label_layer(
                 .get("stroke")
                 .and_then(|paint| scene_paint(paint))
                 .unwrap_or_else(|| "#7c8da5".to_owned());
-            let opacity = declared
-                .get("opacity")
-                .and_then(|raw| raw.parse::<f32>().ok())
-                .filter(|value| value.is_finite())
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
             let source = RenderSource::Node(node_box.node_index);
             let bounds = node_box.bounds;
             let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
@@ -5907,9 +6106,7 @@ fn build_label_layer(
                         | fm_core::RequirementCardRowKind::Stereotype
                 )
             }) {
-                let mut stroke = StrokeStyle::solid(border, 0.8);
-                stroke.opacity = opacity;
-                layer.children.push(RenderItem::Path(RenderPath {
+                let mut path = RenderPath {
                     source,
                     commands: vec![
                         PathCmd::MoveTo {
@@ -5922,10 +6119,12 @@ fn build_label_layer(
                         },
                     ],
                     fill: None,
-                    stroke: Some(stroke),
+                    stroke: Some(StrokeStyle::solid(border, 0.8)),
                     marker_start: MarkerKind::None,
                     marker_end: MarkerKind::None,
-                }));
+                };
+                apply_scene_path_style(&mut path, &declared);
+                layer.children.push(RenderItem::Path(path));
             }
             for (index, row) in card.rows.into_iter().enumerate() {
                 let role = match row.kind {
@@ -5962,7 +6161,6 @@ fn build_label_layer(
         }
         if let Some(meta) = node.c4_meta.as_deref() {
             let name = display_node_label_ref(ir, node);
-            let declared = ir.resolved_node_style(node_box.node_index);
             let card_metrics = declared.get("font-family").map(|family| {
                 fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
                     preset: fm_core::FontPreset::from_family(family),
@@ -5993,13 +6191,12 @@ fn build_label_layer(
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
                         color: color.clone(),
-                        opacity: 1.0,
+                        opacity,
                     },
                 }));
             }
             continue;
         }
-        let declared = ir.resolved_node_style(node_box.node_index);
         let styled_metrics = ir.effective_node_font_metrics(node_box.node_index, metrics);
         let metrics = styled_metrics.as_ref();
         let label_text = if node.class_meta.is_some() {
@@ -6049,7 +6246,7 @@ fn build_label_layer(
                 baseline: TextBaseline::Middle,
                 fill: FillStyle::Solid {
                     color: color.clone(),
-                    opacity: 1.0,
+                    opacity,
                 },
             }));
         }
@@ -6081,19 +6278,15 @@ fn build_label_layer(
         let Some(caption) = ir.graph_edge_caption(edge.edge_index) else {
             continue;
         };
+        let style = edge_labels::edge_label_style(ir, edge.edge_index);
+        let color = style
+            .get("color")
+            .and_then(|value| scene_paint(value))
+            .unwrap_or_else(|| String::from("#334155"));
+        let opacity = scene_style_opacity(&style, "opacity");
 
         if let Some(message) = layout.extensions.sequence_message(edge.edge_index) {
             let source = RenderSource::Edge(edge.edge_index);
-            let style = edge_labels::edge_label_style(ir, edge.edge_index);
-            let color = style
-                .get("color")
-                .and_then(|value| scene_paint(value))
-                .unwrap_or_else(|| String::from("#334155"));
-            let opacity = style
-                .get("opacity")
-                .and_then(|value| value.parse::<f32>().ok())
-                .filter(|opacity| opacity.is_finite())
-                .map_or(1.0, |opacity| opacity.clamp(0.0, 1.0));
             layer.children.push(RenderItem::Path(RenderPath {
                 source,
                 commands: rounded_rect_path(message.bounds, 4.0),
@@ -6125,7 +6318,6 @@ fn build_label_layer(
         }
 
         if let Some(placer) = edge_labels.as_mut() {
-            let style = edge_labels::edge_label_style(ir, edge.edge_index);
             let font_size = style
                 .get("font-size")
                 .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
@@ -6159,16 +6351,12 @@ fn build_label_layer(
                 ),
                 fill: Some(FillStyle::Solid {
                     color: String::from("#ffffff"),
-                    opacity: 1.0,
+                    opacity,
                 }),
                 stroke: None,
                 marker_start: MarkerKind::None,
                 marker_end: MarkerKind::None,
             }));
-            let color = style
-                .get("color")
-                .cloned()
-                .unwrap_or_else(|| String::from("#334155"));
             for (row, text) in caption.lines().enumerate() {
                 layer.children.push(RenderItem::Text(RenderText {
                     source: RenderSource::Edge(edge.edge_index),
@@ -6180,7 +6368,7 @@ fn build_label_layer(
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
                         color: color.clone(),
-                        opacity: 1.0,
+                        opacity,
                     },
                 }));
             }
@@ -6194,10 +6382,7 @@ fn build_label_layer(
                 font_size: 12.0,
                 align: TextAlign::Middle,
                 baseline: TextBaseline::Middle,
-                fill: FillStyle::Solid {
-                    color: String::from("#334155"),
-                    opacity: 1.0,
-                },
+                fill: FillStyle::Solid { color, opacity },
             }));
         }
     }
@@ -6219,17 +6404,12 @@ fn build_label_layer(
             cluster.cluster_index
         )))
         .with_source(source);
-        let mut color = String::from("#1e293b");
-        for style in &ir.style_refs {
-            if style.target == fm_core::IrStyleTarget::Cluster(cluster.cluster_index)
-                && let Some(declared) = fm_core::parse_style_string(&style.style)
-                    .properties
-                    .get("color")
-                    .and_then(|value| scene_paint(value))
-            {
-                color = declared;
-            }
-        }
+        let style = scene_cluster_style(ir, cluster.cluster_index);
+        let color = style
+            .get("color")
+            .and_then(|value| scene_paint(value))
+            .unwrap_or_else(|| String::from("#1e293b"));
+        let opacity = scene_style_opacity(&style, "opacity");
         for row in caption.rows {
             let text = RenderItem::Text(RenderText {
                 source,
@@ -6241,7 +6421,7 @@ fn build_label_layer(
                 baseline: TextBaseline::Alphabetic,
                 fill: FillStyle::Solid {
                     color: color.clone(),
-                    opacity: 1.0,
+                    opacity,
                 },
             });
             if row.kind == ClusterCaptionRowKind::BoundaryType {
@@ -6295,7 +6475,7 @@ fn append_sequence_participant_text(
             baseline: TextBaseline::Middle,
             fill: FillStyle::Solid {
                 color: color.clone(),
-                opacity: 1.0,
+                opacity: scene_style_opacity(&style, "opacity"),
             },
         }));
     }
@@ -34758,6 +34938,302 @@ mod tests {
         let first = build_render_scene(&ir, &layout);
         let second = build_render_scene(&ir, &layout);
         assert_eq!(first, second);
+    }
+
+    fn scene_texts(group: &super::RenderGroup) -> Vec<&super::RenderText> {
+        let mut texts = Vec::new();
+        for item in &group.children {
+            match item {
+                RenderItem::Group(group) => texts.extend(scene_texts(group)),
+                RenderItem::Text(text) => texts.push(text),
+                RenderItem::Path(_) => {}
+            }
+        }
+        texts
+    }
+
+    #[test]
+    fn render_scene_preserves_author_paint_cascade_without_semantic_ir() {
+        use super::{FillStyle, LineCap, LineJoin};
+
+        let ir = parse(
+            "flowchart LR\nsubgraph Group[Container]\n\
+             A[Alpha]:::accent -->|first| B[Beta]\nB -.->|second| C[Gamma]\nend\n\
+             classDef default fill:#112233,stroke:#445566,stroke-width:2px,opacity:0.8,fill-opacity:0.5,stroke-opacity:0.25,color:#abcdef\n\
+             classDef accent fill:#aabbcc,stroke:#ddeeff\n\
+             style A fill:#123456,opacity:0.4,stroke-dasharray:7 3,stroke-linecap:square,stroke-linejoin:bevel\n\
+             style Group fill:#cadbcd,stroke:#443322,stroke-width:3px,opacity:0.6,fill-opacity:0.25,stroke-opacity:0.5,color:#332211\n\
+             linkStyle default stroke:#225588,stroke-width:4px,opacity:0.5,stroke-opacity:0.4,color:#114477\n\
+             linkStyle 1 stroke:#118833,stroke-width:2px,stroke-dasharray:none,opacity:0.25\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        for id in ["nodes", "edges", "clusters", "labels"] {
+            assert!(gantt_scene_group(&scene, id).paints_resolved);
+        }
+        let a = ir.nodes.iter().position(|node| node.id == "A").unwrap();
+        let b = ir.nodes.iter().position(|node| node.id == "B").unwrap();
+        let nodes = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+        let a_path = nodes
+            .iter()
+            .find(|path| path.source == RenderSource::Node(a))
+            .unwrap();
+        assert_eq!(
+            a_path.fill,
+            Some(FillStyle::Solid {
+                color: "#123456".into(),
+                opacity: 0.2
+            })
+        );
+        let stroke = a_path.stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#ddeeff");
+        assert_eq!(stroke.width, 2.0);
+        assert_eq!(stroke.opacity, 0.1);
+        assert_eq!(stroke.dash_array, [7.0, 3.0]);
+        assert_eq!(stroke.line_cap, LineCap::Square);
+        assert_eq!(stroke.line_join, LineJoin::Bevel);
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|path| path.source == RenderSource::Node(b))
+                .unwrap()
+                .fill,
+            Some(FillStyle::Solid {
+                color: "#112233".into(),
+                opacity: 0.4
+            })
+        );
+        let edges = gantt_scene_paths(gantt_scene_group(&scene, "edges"));
+        let first = edges
+            .iter()
+            .find(|path| path.source == RenderSource::Edge(0))
+            .unwrap();
+        assert!(
+            first.fill.is_none(),
+            "a linkStyle must never create a filled connector"
+        );
+        let stroke = first.stroke.as_ref().unwrap();
+        assert_eq!(
+            (stroke.color.as_str(), stroke.width, stroke.opacity),
+            ("#225588", 4.0, 0.2)
+        );
+        let second = edges
+            .iter()
+            .find(|path| path.source == RenderSource::Edge(1))
+            .unwrap();
+        let stroke = second.stroke.as_ref().unwrap();
+        assert_eq!(
+            (stroke.color.as_str(), stroke.width, stroke.opacity),
+            ("#118833", 2.0, 0.1)
+        );
+        assert!(
+            stroke.dash_array.is_empty(),
+            "authored solid overrides the dotted arrow"
+        );
+        let clusters = gantt_scene_paths(gantt_scene_group(&scene, "clusters"));
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(
+            clusters[0].fill,
+            Some(FillStyle::Solid {
+                color: "#cadbcd".into(),
+                opacity: 0.15
+            })
+        );
+        let stroke = clusters[0].stroke.as_ref().unwrap();
+        assert_eq!(
+            (stroke.color.as_str(), stroke.width, stroke.opacity),
+            ("#443322", 3.0, 0.3)
+        );
+        let texts = scene_texts(gantt_scene_group(&scene, "labels"));
+        for (label, color, opacity) in [
+            ("Alpha", "#abcdef", 0.4),
+            ("Beta", "#abcdef", 0.8),
+            ("first", "#114477", 0.5),
+            ("second", "#114477", 0.25),
+            ("Container", "#332211", 0.6),
+        ] {
+            let text = texts.iter().find(|text| text.text == label).unwrap();
+            assert_eq!(
+                text.fill,
+                FillStyle::Solid {
+                    color: color.into(),
+                    opacity
+                },
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_scene_repeated_node_geometry_keeps_the_same_paint() {
+        use super::FillStyle;
+
+        for source in [
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+             sequenceDiagram\nparticipant A as Alpha\nparticipant B as Beta\nA->>B: hello\n\
+             style A fill:#123456,stroke:#abcdef,stroke-width:4px,stroke-dasharray:5 2,opacity:0.4,fill-opacity:0.5,color:#321654\n",
+            "packet-beta\n0-47: \"Payload\"\n",
+        ] {
+            let mut ir = parse(source).ir;
+            if ir.diagram_type == DiagramType::PacketBeta {
+                // Packet fields have generated identities; structured IR callers can style the
+                // field without changing its bit count or manufacturing continuation nodes.
+                ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle {
+                    properties: fm_core::parse_style_string(
+                        "fill:#123456;stroke:#abcdef;stroke-width:4px;stroke-dasharray:5 2;opacity:0.4;fill-opacity:0.5;color:#321654",
+                    ).properties,
+                }));
+            }
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+            let repeated: Vec<_> = paths
+                .iter()
+                .filter(|path| path.source == RenderSource::Node(0))
+                .collect();
+            assert_eq!(repeated.len(), 2, "{source}");
+            for path in repeated {
+                assert_eq!(
+                    path.fill,
+                    Some(FillStyle::Solid {
+                        color: "#123456".into(),
+                        opacity: 0.2
+                    })
+                );
+                let stroke = path.stroke.as_ref().unwrap();
+                assert_eq!(
+                    (stroke.color.as_str(), stroke.width, stroke.opacity),
+                    ("#abcdef", 4.0, 0.4)
+                );
+                assert_eq!(stroke.dash_array, [5.0, 2.0]);
+            }
+            let texts = scene_texts(gantt_scene_group(&scene, "labels"));
+            let repeated: Vec<_> = texts
+                .iter()
+                .filter(|text| text.source == RenderSource::Node(0))
+                .collect();
+            assert_eq!(repeated.len(), 2, "{source}");
+            assert!(repeated.iter().all(|text| text.fill
+                == FillStyle::Solid {
+                    color: "#321654".into(),
+                    opacity: 0.4
+                }));
+        }
+    }
+
+    #[test]
+    fn render_scene_omits_disabled_paints_and_refuses_unsafe_or_nonfinite_values() {
+        use super::{FillStyle, MarkerKind};
+
+        let ir = parse(
+            "flowchart LR\nA[Visible text] --> B[Visible label]\n\
+             style A fill:none,stroke:none\nstyle B stroke-width:0\n\
+             linkStyle default stroke:none\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let nodes = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+        assert!(nodes[0].fill.is_none() && nodes[0].stroke.is_none());
+        assert!(nodes[1].fill.is_some() && nodes[1].stroke.is_none());
+        let edges = gantt_scene_paths(gantt_scene_group(&scene, "edges"));
+        assert!(edges[0].stroke.is_none());
+        assert_eq!(
+            (edges[0].marker_start, edges[0].marker_end),
+            (MarkerKind::None, MarkerKind::None)
+        );
+        assert_eq!(scene_texts(gantt_scene_group(&scene, "labels")).len(), 2);
+
+        let mut ir = parse("flowchart LR\nA -->|safe text| B\n").ir;
+        let invalid = fm_core::IrInlineStyle {
+            properties: BTreeMap::from([
+                ("fill".into(), "url(https://example.invalid/paint)".into()),
+                ("stroke".into(), "url(#external)".into()),
+                ("color".into(), "url(https://example.invalid/text)".into()),
+                ("opacity".into(), "NaN".into()),
+                ("fill-opacity".into(), "inf".into()),
+                ("stroke-opacity".into(), "-inf".into()),
+                ("stroke-width".into(), "NaN".into()),
+                ("stroke-dasharray".into(), "4 NaN".into()),
+            ]),
+        };
+        ir.nodes[0].inline_style = Some(Box::new(invalid.clone()));
+        ir.edges[0].inline_style = Some(Box::new(invalid.clone()));
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let nodes = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+        assert_eq!(
+            nodes[0].fill,
+            Some(FillStyle::Solid {
+                color: "#ffffff".into(),
+                opacity: 1.0
+            })
+        );
+        let stroke = nodes[0].stroke.as_ref().unwrap();
+        assert_eq!(
+            (stroke.color.as_str(), stroke.width, stroke.opacity),
+            ("#94a3b8", 1.5, 1.0)
+        );
+        let edges = gantt_scene_paths(gantt_scene_group(&scene, "edges"));
+        let stroke = edges[0].stroke.as_ref().unwrap();
+        assert_eq!(
+            (stroke.color.as_str(), stroke.width, stroke.opacity),
+            ("#475569", 1.5, 1.0)
+        );
+        assert!(stroke.dash_array.is_empty());
+        assert!(
+            scene_texts(gantt_scene_group(&scene, "labels"))
+                .iter()
+                .all(|text| {
+                    let FillStyle::Solid { color, opacity } = &text.fill;
+                    !color.contains("url") && *opacity == 1.0
+                })
+        );
+        for source in [
+            "classDiagram\nclass Account {\n+String owner\n+balance() int\n}\n",
+            "erDiagram\nACCOUNT {\nstring id PK\nstring name\nint count\n}\n",
+        ] {
+            let mut ir = parse(source).ir;
+            let layout = layout_diagram(&ir);
+            let baseline = build_render_scene(&ir, &layout);
+            ir.nodes[0].inline_style = Some(Box::new(invalid.clone()));
+            assert_eq!(
+                build_render_scene(&ir, &layout),
+                baseline,
+                "invalid paint must not erase card accents: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_scene_color_functions_require_complete_finite_channels() {
+        for color in [
+            "rgb(12, 34, 56)",
+            "rgb(10%, 20%, 30%)",
+            "rgba(12, 34, 56, 0.5)",
+            "rgb(12 34 56 / 50%)",
+            "hsl(120, 50%, 40%)",
+            "hsla(120, 50%, 40%, 0.5)",
+            "hsl(0.5turn 50% 40% / 0.25)",
+        ] {
+            assert_eq!(super::scene_paint(color).as_deref(), Some(color));
+        }
+        for color in [
+            "rgb(1)",
+            "rgb( )",
+            "rgb(1,,3)",
+            "rgba(+)",
+            "rgba(1,2,3,)",
+            "rgb(1,2,3 / 0.5)",
+            "rgb(1 2 3 / 0.5 / 0.5)",
+            "rgb(1 2 3 / NaN)",
+            "hsl(120, 50, 40)",
+            "hsl(inf 50% 40%)",
+        ] {
+            assert_eq!(super::scene_paint(color), None, "{color}");
+        }
     }
 
     #[test]

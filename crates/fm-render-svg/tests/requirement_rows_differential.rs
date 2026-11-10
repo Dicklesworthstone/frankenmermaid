@@ -425,20 +425,31 @@ fn requirement_rows_honor_author_color_font_and_opacity_in_both_backends() {
             assert_eq!(rows.len(), 6, "all short fields must remain visible");
             for (tag, _) in rows {
                 assert_eq!(numeric_attr(tag, "font-size"), 24.0);
-                assert_eq!(inline_property(tag, "fill"), Some("#fedcba"));
                 assert_eq!(inline_property(tag, "font-family"), Some("monospace"));
-                assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
                 assert_eq!(inline_property(tag, "font-size"), Some("24px!important"));
-                if tag.contains(" fill-opacity=\"") {
-                    assert_eq!(
-                        numeric_attr(tag, "fill-opacity"),
-                        1.0,
-                        "node opacity must be applied once"
+                if backend == fm_render_svg::SvgBackend::Scene {
+                    assert!(tag.contains(" fill=\"#fedcba\""), "{tag}");
+                    assert_eq!(inline_property(tag, "fill"), None);
+                    assert_eq!(inline_property(tag, "opacity"), None);
+                    assert!(!tag.contains(" opacity=\""));
+                    assert!(
+                        (numeric_attr(tag, "fill-opacity") - 0.4).abs() < 0.001,
+                        "resolved text paint applies node opacity exactly once: {tag}"
                     );
+                } else {
+                    assert_eq!(inline_property(tag, "fill"), Some("#fedcba"));
+                    assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
+                    if tag.contains(" fill-opacity=\"") {
+                        assert_eq!(
+                            numeric_attr(tag, "fill-opacity"),
+                            1.0,
+                            "node opacity must be applied once"
+                        );
+                    }
                 }
             }
-            assert!(svg.contains("fill: #102030") || svg.contains("fill:#102030"));
             if backend == fm_render_svg::SvgBackend::LegacyLayout {
+                assert!(svg.contains("fill: #102030") || svg.contains("fill:#102030"));
                 let marker = svg.find("data-id=\"Safety\"").unwrap();
                 let start = svg[..marker].rfind("<g ").unwrap();
                 let group = &svg[start..];
@@ -454,18 +465,44 @@ fn requirement_rows_honor_author_color_font_and_opacity_in_both_backends() {
                     .unwrap();
                 assert_eq!(inline_property(divider, "opacity"), Some("0.4"));
                 assert!(!divider.contains(" stroke-opacity=\""));
+            } else {
+                assert!(svg.contains(" fill=\"#102030\""));
             }
+            let mut scene_node_paths = 0;
             for fragment in svg.split("<path ").skip(1) {
                 let tag = fragment.split('>').next().unwrap();
                 if tag.contains("data-fm-source-kind=\"node\"") {
-                    assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
-                    if tag.contains(" fill-opacity=\"") {
-                        assert_eq!(numeric_attr(tag, "fill-opacity"), 1.0);
-                    }
-                    if tag.contains(" stroke-opacity=\"") {
-                        assert_eq!(numeric_attr(tag, "stroke-opacity"), 1.0);
+                    if backend == fm_render_svg::SvgBackend::Scene {
+                        scene_node_paths += 1;
+                        assert_eq!(inline_property(tag, "fill"), None);
+                        assert_eq!(inline_property(tag, "opacity"), None);
+                        assert!(!tag.contains(" opacity=\""));
+                        if tag.contains(" fill=\"none\"") {
+                            assert!(!tag.contains(" fill-opacity=\""));
+                        } else {
+                            assert!(tag.contains(" fill=\"#102030\""));
+                            assert!((numeric_attr(tag, "fill-opacity") - 0.4).abs() < 0.001);
+                        }
+                        assert!(
+                            (numeric_attr(tag, "stroke-opacity") - 0.4).abs() < 0.001,
+                            "the outline and divider apply node opacity exactly once: {tag}"
+                        );
+                    } else {
+                        assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
+                        if tag.contains(" fill-opacity=\"") {
+                            assert_eq!(numeric_attr(tag, "fill-opacity"), 1.0);
+                        }
+                        if tag.contains(" stroke-opacity=\"") {
+                            assert_eq!(numeric_attr(tag, "stroke-opacity"), 1.0);
+                        }
                     }
                 }
+            }
+            if backend == fm_render_svg::SvgBackend::Scene {
+                assert_eq!(
+                    scene_node_paths, 2,
+                    "both the card and divider must be checked"
+                );
             }
         }
     }
