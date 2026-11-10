@@ -67,7 +67,9 @@ impl From<NodeShape> for GpuNodeShape {
             NodeShape::StackedDocument | NodeShape::StackedRect => Self::Rect,
             NodeShape::LinedCylinder => Self::Cylinder,
             NodeShape::SmallCircle | NodeShape::FramedCircle => Self::Circle,
-            NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,
+            NodeShape::Rounded => Self::RoundedRect,
+            NodeShape::Stadium => Self::Capsule,
+            NodeShape::Subroutine => Self::Rect,
             NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => Self::Circle,
             NodeShape::Diamond => Self::Diamond,
             NodeShape::Cylinder => Self::Cylinder,
@@ -83,8 +85,8 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::Pentagon
             | NodeShape::Star
             | NodeShape::Cloud
-            | NodeShape::Tag
-            | NodeShape::CrossedCircle => Self::Polygon,
+            | NodeShape::Tag => Self::Polygon,
+            NodeShape::CrossedCircle => Self::Circle,
         }
     }
 }
@@ -567,6 +569,199 @@ fn border_polyline(bounds: fm_layout::LayoutRect, shape: GpuNodeShape) -> Vec<[f
         // Everything else is a rectangle's perimeter. A rounded rect's corner radius is a smaller
         // deviation than the stroke width, so it shares this path rather than earning its own.
         _ => vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]],
+    }
+}
+
+/// These shapes have an authored outline that is already shared by layout and the scene
+/// renderer. Preserve that outline instead of assigning every many-sided node one SDF.
+fn node_uses_shared_path(shape: NodeShape) -> bool {
+    matches!(
+        shape,
+        NodeShape::Hexagon
+            | NodeShape::Asymmetric
+            | NodeShape::Trapezoid
+            | NodeShape::InvTrapezoid
+            | NodeShape::Parallelogram
+            | NodeShape::InvParallelogram
+            | NodeShape::Triangle
+            | NodeShape::FlippedTriangle
+            | NodeShape::SlopedRect
+            | NodeShape::Pentagon
+            | NodeShape::Star
+            | NodeShape::Tag
+            | NodeShape::NotchedRect
+            | NodeShape::NotchedPentagon
+            | NodeShape::Hourglass
+            | NodeShape::LightningBolt
+            | NodeShape::Bang
+            | NodeShape::Document
+            | NodeShape::BlockArrowRight
+            | NodeShape::BlockArrowLeft
+            | NodeShape::BlockArrowUp
+            | NodeShape::BlockArrowDown
+            | NodeShape::BlockArrowX
+            | NodeShape::BlockArrowY
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_node_path(
+    fills: &mut Vec<GpuTriangleInstance>,
+    borders: &mut Vec<GpuEdgeSegment>,
+    commands: &[PathCmd],
+    fill: [f32; 4],
+    stroke: [f32; 4],
+    width: f32,
+    dash: [f32; 2],
+    node_index: usize,
+) {
+    let mut segments = Vec::new();
+    let mut current = None;
+    let mut first = None;
+    let mut phase = 0.0;
+    for command in commands {
+        let mut append = |from: LayoutPoint, to: LayoutPoint| {
+            let length = (to.x - from.x).hypot(to.y - from.y);
+            if !finite_point(&from) || !finite_point(&to) || !length.is_finite() || length <= 0.0 {
+                return;
+            }
+            segments.push((from, to));
+            borders.push(GpuEdgeSegment {
+                from: [from.x, from.y],
+                to: [to.x, to.y],
+                edge_index: u32::try_from(node_index).unwrap_or(u32::MAX),
+                color: stroke,
+                dash_phase: phase,
+                dash,
+                width,
+            });
+            phase += length;
+        };
+        match *command {
+            PathCmd::MoveTo { x, y } => {
+                first = Some(LayoutPoint { x, y });
+                current = first;
+                phase = 0.0;
+            }
+            PathCmd::Close => {
+                if let Some((from, to)) = current.zip(first) {
+                    append(from, to);
+                    current = first;
+                }
+            }
+            command => flatten_connector_command(command, &mut current, &mut append),
+        }
+    }
+    // The same nonzero rule covers concave and crossing outlines without alpha overdraw.
+    tessellate_nonzero_fill(&segments, fill, fills);
+}
+
+fn circular_node_bounds(bounds: LayoutRect, shape: NodeShape) -> LayoutRect {
+    let radius = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => bounds.width.min(bounds.height) * 0.5,
+        NodeShape::SmallCircle | NodeShape::FramedCircle => fm_core::SMALL_CIRCLE_RADIUS,
+        _ => return bounds,
+    };
+    let center = bounds.center();
+    LayoutRect {
+        x: center.x - radius,
+        y: center.y - radius,
+        width: radius * 2.0,
+        height: radius * 2.0,
+    }
+}
+
+/// Composite markers retain their semantic interior strokes. These dimensions follow
+/// Canvas2D's shape primitives; node fills remain in the node pass and details in its border pass.
+#[allow(clippy::too_many_arguments)]
+fn append_node_details(
+    nodes: &mut Vec<GpuNodeInstance>,
+    borders: &mut Vec<GpuEdgeSegment>,
+    shape: NodeShape,
+    bounds: LayoutRect,
+    node_index: usize,
+    fill: [f32; 4],
+    stroke: [f32; 4],
+    width: f32,
+    dash: [f32; 2],
+    state_terminal_fill: Option<[f32; 4]>,
+) {
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
+    let center = bounds.center();
+    let mut line = |from, to| {
+        borders.push(GpuEdgeSegment {
+            from,
+            to,
+            edge_index: u32::try_from(node_index).unwrap_or(u32::MAX),
+            color: stroke,
+            dash_phase: 0.0,
+            dash,
+            width,
+        });
+    };
+    match shape {
+        NodeShape::Subroutine => {
+            line([x + 8.0, y], [x + 8.0, y + h]);
+            line([x + w - 8.0, y], [x + w - 8.0, y + h]);
+        }
+        NodeShape::CrossedCircle => {
+            let offset = w.min(h) * 0.5 * 0.707;
+            line(
+                [center.x - offset, center.y - offset],
+                [center.x + offset, center.y + offset],
+            );
+            line(
+                [center.x + offset, center.y - offset],
+                [center.x - offset, center.y + offset],
+            );
+        }
+        NodeShape::DoubleCircle | NodeShape::FramedCircle => {
+            let radius = if shape == NodeShape::FramedCircle {
+                fm_core::FRAMED_CIRCLE_INNER_RADIUS
+            } else {
+                let outer = w.min(h) * 0.5;
+                (outer - 4.0).max(outer * 0.5)
+            };
+            let inner_bounds = LayoutRect {
+                x: center.x - radius,
+                y: center.y - radius,
+                width: radius * 2.0,
+                height: radius * 2.0,
+            };
+            nodes.push(GpuNodeInstance {
+                center: [center.x, center.y],
+                half_extent: [radius; 2],
+                fill: if shape == NodeShape::FramedCircle {
+                    fill
+                } else {
+                    state_terminal_fill.unwrap_or([0.0; 4])
+                },
+                stroke,
+                stroke_width: if dash == [0.0; 2] { width } else { 0.0 },
+                shape: GpuNodeShape::Circle as u32,
+                node_index: u32::try_from(node_index).unwrap_or(u32::MAX),
+            });
+            if dash != [0.0; 2] {
+                push_dashed_border(
+                    borders,
+                    inner_bounds,
+                    GpuNodeShape::Circle,
+                    stroke,
+                    width,
+                    dash,
+                    node_index,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1672,10 +1867,14 @@ pub struct GpuRenderPlan {
     /// Pinned by `the_plan_field_order_matches_the_raster_draw_order`, which reads the call order
     /// out of renderer.rs rather than trusting this comment to stay true.
     pub node_instances: Vec<GpuNodeInstance>,
-    /// Dashed node borders, as edge segments (bd-l3nsf).
+    /// Exact shared-path fills for node shapes that the SDF cannot represent. These are drawn
+    /// after graph edges and before node outlines; a bounding-box stand-in would change the
+    /// meaning of triangles, stars, block arrows, and other distinct Mermaid shapes.
+    pub node_fill_triangles: Vec<GpuTriangleInstance>,
+    /// Exact path outlines, composite-shape details, and dashed SDF node borders.
     ///
-    /// ⚠️ DECLARED AFTER `node_instances` BECAUSE THAT IS THE DRAW ORDER: a border sits on top of the
-    /// fill it outlines. A node with a dashed border is planned with `stroke_width: 0.0` so the SDF
+    /// Declared after both node fill buffers because an outline sits on top of its fill.
+    /// An SDF node with a dashed border is planned with `stroke_width: 0.0` so the SDF
     /// draws no border of its own — these segments ARE its border, and a solid one underneath would
     /// show the dashes lying on a continuous line.
     ///
@@ -1906,7 +2105,7 @@ impl GpuRenderPlan {
                 if let Some(fm_layout::FillStyle::Solid { color, opacity }) = &path.fill {
                     let mut color = parse_paint_rgba(color).unwrap_or(DEFAULT_NODE_FILL_RGBA);
                     color[3] *= opacity;
-                    tessellate_radar_fill(&segments, color, &mut radar_triangles);
+                    tessellate_nonzero_fill(&segments, color, &mut radar_triangles);
                 }
             }
         }
@@ -2365,35 +2564,29 @@ impl GpuRenderPlan {
         }
 
         let mut node_instances = Vec::with_capacity(graph_nodes.len());
-        let semantic_defaults = matches!(
-            ir.diagram_type,
-            fm_core::DiagramType::Flowchart
-                | fm_core::DiagramType::Mindmap
-                | fm_core::DiagramType::Journey
-                | fm_core::DiagramType::Sankey
-        )
-        .then_some(config);
-        // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
-        // them, so this costs an unused Vec and no allocation.
+        let mut node_fill_triangles = Vec::new();
+        // Plain SDF nodes need no separate outline allocation. Exact polygon outlines,
+        // composite details, and authored dashes populate this foreground buffer.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
         for node in graph_nodes {
             if fm_layout::is_composite_state_node(ir, node) {
                 continue;
             }
-            let shape = ir
+            let authored_shape = ir
                 .nodes
                 .get(node.node_index)
-                .map_or(GpuNodeShape::Rect, |ir_node| ir_node.shape.into());
+                .map_or(NodeShape::Rect, |ir_node| ir_node.shape);
+            // A text block has a label box for layout and picking, but paints no shape.
+            if authored_shape == NodeShape::TextBlock {
+                continue;
+            }
+            let shape = authored_shape.into();
             // Colour resolved through the raster pass's own helper, so a GPU render and a Canvas2D
             // render of the same document cannot disagree about what the author asked for. An
             // undeclared or unparsable colour falls back to the theme constant rather than to
             // whatever happens to be in the instance buffer.
-            let (declared_fill, declared_stroke) = semantic_defaults.as_ref().map_or_else(
-                || crate::renderer::resolve_node_colors(ir, node.node_index),
-                |config| {
-                    crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config)
-                },
-            );
+            let (declared_fill, declared_stroke) =
+                crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
             let fill = declared_fill
                 .as_deref()
                 .and_then(parse_paint_rgba)
@@ -2441,10 +2634,24 @@ impl GpuRenderPlan {
             // "some dash is present".
             let dash = crate::renderer::resolve_node_stroke_dasharray(ir, node.node_index)
                 .and_then(|pattern| dash_pair(&pattern));
+            if node_uses_shared_path(authored_shape) {
+                append_node_path(
+                    &mut node_fill_triangles,
+                    &mut node_border_segments,
+                    &fm_layout::shapes::node_path(node.bounds, authored_shape),
+                    fill,
+                    stroke,
+                    stroke_width,
+                    dash.unwrap_or([0.0; 2]),
+                    node.node_index,
+                );
+                continue;
+            }
+            let bounds = circular_node_bounds(node.bounds, authored_shape);
             if let Some(dash) = dash {
                 push_dashed_border(
                     &mut node_border_segments,
-                    node.bounds,
+                    bounds,
                     shape,
                     stroke,
                     stroke_width,
@@ -2454,10 +2661,10 @@ impl GpuRenderPlan {
             }
             node_instances.push(GpuNodeInstance {
                 center: [
-                    node.bounds.x + (node.bounds.width * 0.5),
-                    node.bounds.y + (node.bounds.height * 0.5),
+                    bounds.x + (bounds.width * 0.5),
+                    bounds.y + (bounds.height * 0.5),
                 ],
-                half_extent: [node.bounds.width * 0.5, node.bounds.height * 0.5],
+                half_extent: [bounds.width * 0.5, bounds.height * 0.5],
                 fill,
                 stroke,
                 // A dashed node draws NO SDF border: the segments above are its border, and leaving
@@ -2466,6 +2673,26 @@ impl GpuRenderPlan {
                 shape: shape as u32,
                 node_index: node.node_index.try_into().unwrap_or(u32::MAX),
             });
+            append_node_details(
+                &mut node_instances,
+                &mut node_border_segments,
+                authored_shape,
+                bounds,
+                node.node_index,
+                fill,
+                stroke,
+                stroke_width,
+                dash.unwrap_or([0.0; 2]),
+                (ir.diagram_type == fm_core::DiagramType::State).then(|| {
+                    let mut color = declared_fill
+                        .as_deref()
+                        .and_then(parse_paint_rgba)
+                        .or_else(|| parse_paint_rgba(&config.edge_stroke))
+                        .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+                    color[3] *= opacity;
+                    color
+                }),
+            );
         }
 
         let segment_count = layout
@@ -3971,6 +4198,7 @@ impl GpuRenderPlan {
             arrowheads,
             pie_wedges,
             node_instances,
+            node_fill_triangles,
             node_border_segments,
             text_quads,
             sequence_number_instances,
@@ -4313,6 +4541,7 @@ impl GpuRenderPlan {
             er_marker_segments: Vec::new(),
             pie_wedges: Vec::new(),
             node_instances,
+            node_fill_triangles: Vec::new(),
             node_border_segments: Vec::new(),
             sequence_number_instances: Vec::new(),
             sequence_number_quad_start: text_quads.len(),
@@ -4663,6 +4892,7 @@ impl GpuRenderPlan {
             er_marker_segments: Vec::new(),
             pie_wedges: Vec::new(),
             node_instances,
+            node_fill_triangles: Vec::new(),
             node_border_segments: Vec::new(),
             sequence_number_instances: Vec::new(),
             sequence_number_quad_start: text_quads.len(),
@@ -4688,11 +4918,11 @@ fn include_text_quad_bounds(bounds: &mut LayoutRect, quads: &[GpuTextQuad]) {
     }
 }
 
-/// Tessellate a closed, flattened radar path using the nonzero winding rule used by SVG
-/// and Canvas. A fan about the wheel center is incorrect for concave or self-crossing
-/// cardinal curves, especially when an authored value lies at the minimum of the scale.
+/// Tessellate a closed, flattened path using the nonzero winding rule used by SVG and Canvas.
+/// A triangle fan is incorrect for concave or self-crossing paths, including radar curves,
+/// stars, lightning bolts, and hourglass nodes.
 /// Horizontal slabs split at both vertices and crossings keep their interiors disjoint.
-fn tessellate_radar_fill(
+fn tessellate_nonzero_fill(
     segments: &[(LayoutPoint, LayoutPoint)],
     color: [f32; 4],
     out: &mut Vec<GpuTriangleInstance>,
@@ -5056,7 +5286,7 @@ fn path_marker_end(commands: &[PathCmd]) -> Option<([f32; 2], f32)> {
 
 /// WGSL for the instanced SDF node pass (bd-2u0.2 component 4).
 ///
-/// One draw call covers every node: the vertex stage expands a unit quad to each instance's
+/// One draw call covers every SDF node: the vertex stage expands a unit quad to each instance's
 /// half-extent, and the fragment stage evaluates a signed distance field for that instance's shape.
 /// SDF rather than tessellated geometry is what keeps edges crisp at any zoom — the distance is
 /// recomputed per pixel, so a diagram zoomed 50x has the same edge quality as one at 1x, which is
@@ -5714,7 +5944,7 @@ mod tests {
                 })
                 .collect();
             let mut triangles = Vec::new();
-            super::tessellate_radar_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
+            super::tessellate_nonzero_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
             let area: f32 = triangles
                 .iter()
                 .map(|triangle| {
@@ -5747,7 +5977,7 @@ mod tests {
             }
         }
         let mut triangles = Vec::new();
-        super::tessellate_radar_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
+        super::tessellate_nonzero_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
         assert_eq!(
             triangles.len(),
             4,
@@ -5764,6 +5994,226 @@ mod tests {
             area, 450.0,
             "merging must preserve the complete filled area"
         );
+    }
+
+    #[test]
+    fn gpu_polygon_nodes_match_canvas_outlines_and_preserve_paint_and_dash() {
+        use crate::{DrawOperation, MockCanvas2dContext};
+
+        for alias in [
+            "hex",
+            "odd",
+            "trap-b",
+            "trap-t",
+            "lean-r",
+            "lean-l",
+            "tri",
+            "flip-tri",
+            "sl-rect",
+            "pentagon",
+            "star",
+            "notch-rect",
+            "notch-pent",
+            "bolt",
+            "bang",
+            "hourglass",
+            "block-right",
+            "block-left",
+            "block-up",
+            "block-down",
+            "block-x",
+            "block-y",
+        ] {
+            for dashed in [false, true] {
+                let declaration = if let Some(direction) = alias.strip_prefix("block-") {
+                    format!("block-beta\nA<[\"Distinct silhouette\"]>({direction})")
+                } else {
+                    format!("flowchart LR\nA@{{ shape: {alias}, label: \"Distinct silhouette\" }}")
+                };
+                let source = format!(
+                    "{declaration}\n\
+                     style A fill:#204060,stroke:#c02040,stroke-width:3,opacity:0.5{}\n",
+                    if dashed { ",stroke-dasharray:6 4" } else { "" },
+                );
+                let ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.nodes.len(), 1, "{alias}");
+                let layout = fm_layout::layout_diagram(&ir);
+                let bounds = layout.nodes[0].bounds;
+                let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+                assert!(
+                    plan.node_instances.is_empty(),
+                    "{alias} retained an SDF substitute"
+                );
+                assert!(
+                    !plan.node_fill_triangles.is_empty(),
+                    "{alias} lost its fill"
+                );
+                assert!(!plan.text_quads.is_empty(), "{alias} lost its label");
+
+                // The independent Canvas2D shape implementation supplies the actual authored
+                // contour. Compare every segment, not merely a vertex count or bounding box.
+                let mut canvas = MockCanvas2dContext::new(1000.0, 1000.0);
+                crate::shapes::draw_shape(
+                    &mut canvas,
+                    ir.nodes[0].shape,
+                    f64::from(bounds.x),
+                    f64::from(bounds.y),
+                    f64::from(bounds.width),
+                    f64::from(bounds.height),
+                    "#204060",
+                    "#c02040",
+                    3.0,
+                    6.0,
+                );
+                let mut points = Vec::new();
+                for operation in canvas.operations() {
+                    match *operation {
+                        DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => {
+                            points.push([x as f32, y as f32]);
+                        }
+                        DrawOperation::ClosePath => points.push(points[0]),
+                        DrawOperation::Fill => break,
+                        _ => {}
+                    }
+                }
+                assert!(points.len() >= 4, "{alias} reference contour missing");
+                assert_eq!(plan.node_border_segments.len(), points.len() - 1, "{alias}");
+                let mut phase = 0.0;
+                for (border, reference) in plan.node_border_segments.iter().zip(points.windows(2)) {
+                    for (actual, expected) in border
+                        .from
+                        .into_iter()
+                        .zip(reference[0])
+                        .chain(border.to.into_iter().zip(reference[1]))
+                    {
+                        assert!(
+                            (actual - expected).abs() < 0.001,
+                            "{alias}: {actual} != {expected}"
+                        );
+                    }
+                    assert_eq!(
+                        border.color,
+                        [192.0 / 255.0, 32.0 / 255.0, 64.0 / 255.0, 0.5]
+                    );
+                    assert_eq!(border.width, 3.0);
+                    assert_eq!(border.dash, if dashed { [6.0, 4.0] } else { [0.0; 2] });
+                    assert!((border.dash_phase - phase).abs() < 0.001);
+                    phase += (border.to[0] - border.from[0]).hypot(border.to[1] - border.from[1]);
+                }
+                let area: f32 = plan
+                    .node_fill_triangles
+                    .iter()
+                    .map(|triangle| {
+                        assert_eq!(
+                            triangle.color,
+                            [32.0 / 255.0, 64.0 / 255.0, 96.0 / 255.0, 0.5]
+                        );
+                        let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+                        ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+                    })
+                    .sum();
+                let expected_area = if alias == "hourglass" {
+                    bounds.width * bounds.height * 0.5
+                } else {
+                    points
+                        .windows(2)
+                        .map(|pair| pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1])
+                        .sum::<f32>()
+                        .abs()
+                        * 0.5
+                };
+                assert!(
+                    (area - expected_area).abs() <= expected_area * 0.0001,
+                    "{alias}: filled {area}, expected {expected_area}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_composite_nodes_preserve_rings_crosses_subroutine_rules_and_text_only_nodes() {
+        use fm_core::NodeShape;
+        for (alias, shape, instances, borders) in [
+            ("subroutine", NodeShape::Subroutine, 1, 2),
+            ("cross-circ", NodeShape::CrossedCircle, 1, 2),
+            ("double-circle", NodeShape::DoubleCircle, 2, 0),
+            ("sm-circ", NodeShape::SmallCircle, 1, 0),
+            ("fr-circ", NodeShape::FramedCircle, 2, 0),
+            ("text", NodeShape::TextBlock, 0, 0),
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\nA@{{ shape: {alias}, label: \"Visible label\" }}\n"
+            ))
+            .ir;
+            assert_eq!(ir.nodes[0].shape, shape);
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert_eq!(plan.node_instances.len(), instances, "{alias}");
+            assert_eq!(plan.node_border_segments.len(), borders, "{alias}");
+            assert!(plan.node_fill_triangles.is_empty());
+            assert!(!plan.text_quads.is_empty(), "{alias} must retain its text");
+            if matches!(shape, NodeShape::SmallCircle | NodeShape::FramedCircle) {
+                assert_eq!(
+                    plan.node_instances[0].half_extent,
+                    [fm_core::SMALL_CIRCLE_RADIUS; 2]
+                );
+            }
+            if matches!(shape, NodeShape::CrossedCircle | NodeShape::DoubleCircle) {
+                let node = plan.node_instances[0];
+                assert_eq!(
+                    node.half_extent[0], node.half_extent[1],
+                    "a circle must not become an ellipse"
+                );
+            }
+            if shape == NodeShape::DoubleCircle {
+                assert_eq!(
+                    plan.node_instances[1].fill[3], 0.0,
+                    "an ordinary double ring is hollow"
+                );
+                assert!(
+                    plan.node_instances[1].half_extent[0] < plan.node_instances[0].half_extent[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_state_start_and_final_nodes_have_their_semantic_solid_discs() {
+        let ir = fm_parser::parse("stateDiagram-v2\n[*] --> Active\nActive --> [*]\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = crate::CanvasRenderConfig {
+            edge_stroke: "#123456".into(),
+            ..Default::default()
+        };
+        let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let color = [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0];
+        let mut ornaments = 0;
+        for (index, node) in ir.nodes.iter().enumerate() {
+            let instances: Vec<_> = plan
+                .node_instances
+                .iter()
+                .filter(|instance| instance.node_index as usize == index)
+                .collect();
+            match node.shape {
+                fm_core::NodeShape::FilledCircle => {
+                    assert_eq!(instances.len(), 1);
+                    assert_eq!(instances[0].fill, color);
+                    ornaments += 1;
+                }
+                fm_core::NodeShape::DoubleCircle => {
+                    assert_eq!(instances.len(), 2);
+                    assert_ne!(
+                        instances[0].fill, color,
+                        "the final ring must remain distinct"
+                    );
+                    assert_eq!(instances[1].fill, color);
+                    assert!(instances[1].half_extent[0] < instances[0].half_extent[0]);
+                    ornaments += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(ornaments, 2);
     }
 
     #[test]

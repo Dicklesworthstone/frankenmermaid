@@ -353,6 +353,7 @@ pub struct WebGpuPlanSummary {
     edge_segments: usize,
     arrowheads: usize,
     node_instances: usize,
+    node_fill_triangles: usize,
     text_quads: usize,
     text_runs: usize,
 }
@@ -370,6 +371,7 @@ impl From<&GpuRenderPlan> for WebGpuPlanSummary {
             edge_segments: plan.edge_segments.len(),
             arrowheads: plan.arrowheads.len(),
             node_instances: plan.node_instances.len(),
+            node_fill_triangles: plan.node_fill_triangles.len(),
             text_quads: plan.text_quads.len(),
             text_runs: plan.text_runs.len(),
         }
@@ -5345,6 +5347,22 @@ mod tests {
             planned.ir.nodes.len(),
             "WebGPU plan and SVG source disagree about the corpus node set"
         );
+    }
+
+    #[test]
+    fn webgpu_summary_preserves_polygon_only_diagrams() {
+        let _serial = config_guard();
+        let planned =
+            build_webgpu_plan("flowchart LR\nA@{ shape: tri, label: \"Extract\" }\n", None)
+                .expect("plan an authored triangle");
+        assert_eq!(planned.ir.nodes[0].shape, fm_core::NodeShape::Triangle);
+        let summary = WebGpuPlanSummary::from(&planned.plan);
+        assert_eq!(summary.node_instances, 0, "no substitute SDF node");
+        assert!(summary.node_fill_triangles > 0);
+        assert!(summary.text_quads > 0);
+        let json = serde_json::to_value(summary).unwrap();
+        assert!(json["nodeFillTriangles"].as_u64().unwrap() > 0);
+        assert!(json.get("node_fill_triangles").is_none());
     }
 
     /// SAME-IR COMPARISON: the regions the wasm surface publishes must describe the same

@@ -144,11 +144,13 @@ pub enum PrimitiveFamily {
     Pie,
     /// Node boxes, drawn as SDF quads.
     Node,
+    /// Exact non-SDF node fills, after graph edges and before node outlines.
+    NodeFill,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
     Edge,
     /// Path-end markers, drawn as instanced quads so the shader can represent UML endpoint forms.
     Arrowhead,
-    /// Dashed node borders, drawn with the EDGE pipeline but after the nodes (bd-l3nsf).
+    /// Node outlines and composite details, drawn with the EDGE pipeline after node fills.
     ///
     /// A separate family rather than more `Edge` instances because the two occupy different slots in
     /// the draw order: edges go under the boxes they connect, a border goes on top of the box it
@@ -227,6 +229,7 @@ impl PrimitiveFamily {
             Self::ErMarker => PrimitiveInstances::Edges(&plan.er_marker_segments),
             Self::Pie => PrimitiveInstances::Pies(&plan.pie_wedges),
             Self::Node => PrimitiveInstances::Nodes(&plan.node_instances),
+            Self::NodeFill => PrimitiveInstances::Triangles(&plan.node_fill_triangles),
             Self::NodeBorder => PrimitiveInstances::Edges(&plan.node_border_segments),
             Self::Text => PrimitiveInstances::Text(
                 &plan.text_quads[..plan.sequence_number_quad_start.min(plan.text_quads.len())],
@@ -539,7 +542,7 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 31] {
+pub const fn pipelines() -> [PipelineDescriptor; 32] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
@@ -573,6 +576,7 @@ pub const fn pipelines() -> [PipelineDescriptor; 31] {
         edge_family(PrimitiveFamily::ErMarker, "fm-er-marker"),
         pie_pipeline(),
         node_pipeline(),
+        node_fill_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
         node_family(PrimitiveFamily::SequenceNumber, "fm-sequence-number"),
@@ -671,6 +675,16 @@ pub const fn xy_area_pipeline() -> PipelineDescriptor {
         },
         vertices_per_instance: 3,
         samples_atlas: false,
+    }
+}
+
+/// Shared node paths use the existing filled-triangle shader, in the node submission layer.
+#[must_use]
+pub const fn node_fill_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-node-fill",
+        family: PrimitiveFamily::NodeFill,
+        ..xy_area_pipeline()
     }
 }
 

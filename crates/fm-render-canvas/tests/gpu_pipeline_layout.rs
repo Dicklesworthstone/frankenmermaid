@@ -460,6 +460,7 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::ErMarker,
             PrimitiveFamily::Pie,
             PrimitiveFamily::Node,
+            PrimitiveFamily::NodeFill,
             PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text,
             PrimitiveFamily::SequenceNumber,
@@ -468,6 +469,37 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
         ],
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
          edges, boxes over both, dashed borders over boxes, and destruction crosses above labels"
+    );
+}
+
+#[test]
+fn exact_polygon_fills_reach_the_device_between_edges_and_outlines() {
+    let ir = fm_parser::parse(
+        "flowchart LR\nA@{ shape: tri, label: \"Extract\" } --> B@{ shape: star, label: \"Review\" }\n",
+    ).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert_eq!(plan.node_instances.len(), 0, "no SDF substitutes");
+    assert!(!plan.node_fill_triangles.is_empty());
+    let batches = draw_batches(&plan);
+    let at = |family| {
+        batches
+            .iter()
+            .position(|batch| batch.family == family)
+            .unwrap()
+    };
+    assert!(at(PrimitiveFamily::Edge) < at(PrimitiveFamily::NodeFill));
+    assert!(at(PrimitiveFamily::Arrowhead) < at(PrimitiveFamily::NodeFill));
+    assert!(at(PrimitiveFamily::NodeFill) < at(PrimitiveFamily::NodeBorder));
+    assert!(at(PrimitiveFamily::NodeBorder) < at(PrimitiveFamily::Text));
+    let fill = &batches[at(PrimitiveFamily::NodeFill)];
+    assert_eq!(fill.instance_count as usize, plan.node_fill_triangles.len());
+    assert_eq!(fill.vertices_per_instance, 3);
+    let pipeline = fm_render_canvas::gpu_pipeline::node_fill_pipeline();
+    assert_eq!(pipeline.wgsl, fm_render_canvas::TRIANGLE_WGSL);
+    assert_eq!(
+        pipeline.instance.array_stride as usize,
+        size_of::<fm_render_canvas::GpuTriangleInstance>()
     );
 }
 
@@ -611,6 +643,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
             plan.er_marker_segments.len(),
             plan.pie_wedges.len(),
             plan.node_instances.len(),
+            plan.node_fill_triangles.len(),
             plan.node_border_segments.len(),
             plan.text_quads.len(),
             plan.sequence_number_instances.len(),
@@ -812,10 +845,18 @@ fn referenced_composite_states_draw_their_containers_once_and_keep_child_geometr
         "fixture must reference both nested containers"
     );
     let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
-    assert_eq!(
-        plan.node_instances.len(),
-        layout.nodes.len() - composites.len()
-    );
+    let painted_nodes: std::collections::BTreeSet<_> = plan
+        .node_instances
+        .iter()
+        .map(|node| node.node_index as usize)
+        .collect();
+    let expected_nodes: std::collections::BTreeSet<_> = layout
+        .nodes
+        .iter()
+        .filter(|node| !fm_layout::is_composite_state_node(&ir, node))
+        .map(|node| node.node_index)
+        .collect();
+    assert_eq!(painted_nodes, expected_nodes);
     assert_eq!(plan.cluster_instances.len(), layout.clusters.len());
     for composite in composites {
         assert!(
