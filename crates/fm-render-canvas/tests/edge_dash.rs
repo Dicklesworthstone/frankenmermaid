@@ -57,6 +57,24 @@ fn a_declared_dash_overrides_the_arrow_derived_one() {
     );
 }
 
+#[test]
+fn an_explicit_solid_dash_removes_the_arrow_default() {
+    for declaration in ["none", "0", "0 0"] {
+        let ops = canvas_ops(&format!(
+            "flowchart TD\n a -.-> b\n linkStyle 0 stroke-dasharray:{declaration}\n"
+        ));
+        assert!(ops.contains("Stroke"), "the edge must still be drawn");
+        assert!(
+            ops.contains("SetLineDash([])"),
+            "the explicit solid dash was lost: {ops}"
+        );
+        assert!(
+            !ops.contains("SetLineDash([5.0, 5.0])"),
+            "{declaration}: an explicitly solid edge kept its arrow-derived dash: {ops}"
+        );
+    }
+}
+
 /// CONTROL: an undeclared edge keeps its arrow-derived pattern.
 ///
 /// Guards the `None` arm from the other side. A resolver that returned an empty pattern when
@@ -83,7 +101,6 @@ fn a_malformed_edge_dash_falls_back_to_the_arrow_pattern() {
     for source in [
         "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-dasharray:wide\n",
         "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-dasharray:-7 3\n",
-        "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-dasharray:0 0\n",
     ] {
         let ops = canvas_ops(source);
         assert!(

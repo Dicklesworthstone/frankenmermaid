@@ -346,7 +346,8 @@ pub struct GpuEdgeSegment {
     pub edge_index: u32,
     /// Linear RGBA stroke, resolved from `linkStyle` through the same helper the raster pass uses.
     pub color: [f32; 4],
-    /// Distance along the whole edge at which this segment STARTS, in layout units (bd-f7ctn).
+    /// Distance along the whole edge at which this segment STARTS, in layout units (bd-f7ctn),
+    /// minus the start offset of this segment's authored dash interval.
     ///
     /// A routed edge becomes one segment per `points.windows(2)` pair, and each fragment computes
     /// its dash phase from its distance along ITS OWN segment. Without this offset every segment
@@ -503,6 +504,66 @@ fn dash_pair(pattern: &[f64]) -> Option<[f32; 2]> {
         return None;
     }
     Some([on, off])
+}
+
+/// Encode a complete SVG dash array as disjoint repeating masks for the existing line shader.
+///
+/// Each even entry owns one on-interval in the full period. Rendering one ribbon per interval
+/// preserves arbitrary and odd-length arrays without tessellating every individual dash: even a
+/// tiny pattern on a long connector produces at most one mask per authored on-interval. Odd lists
+/// repeat twice, as on Canvas2D, and zero-length entries consume no geometry or iteration budget.
+fn edge_dash_masks(pattern: &[f64]) -> Vec<([f32; 2], f32)> {
+    if pattern.is_empty() {
+        return vec![([0.0, 0.0], 0.0)];
+    }
+    let count = pattern.len() * if pattern.len() % 2 == 0 { 1 } else { 2 };
+    let period: f64 = pattern.iter().cycle().take(count).sum();
+    if period <= 0.0 || !(period as f32).is_finite() {
+        return vec![([0.0, 0.0], 0.0)];
+    }
+    let mut offset = 0.0;
+    let mut masks = Vec::with_capacity(count / 2);
+    for (index, &length) in pattern.iter().cycle().take(count).enumerate() {
+        if index % 2 == 0 && length as f32 > 0.0 {
+            masks.push(([length as f32, (period - length) as f32], offset as f32));
+        }
+        offset += length;
+    }
+    masks
+}
+
+fn resolved_edge_color(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    config: &crate::CanvasRenderConfig,
+) -> [f32; 4] {
+    let (stroke, _) = crate::renderer::resolve_edge_style_with_defaults(ir, edge_index, config);
+    let mut color = stroke
+        .as_deref()
+        .and_then(parse_paint_rgba)
+        .or_else(|| parse_paint_rgba(&config.edge_stroke))
+        .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+    color[3] *= crate::renderer::resolve_edge_opacity(ir, edge_index).unwrap_or(1.0) as f32;
+    color
+}
+
+fn apply_edge_marker_paint(
+    marker: &mut GpuArrowheadInstance,
+    ir: &MermaidDiagramIr,
+    config: &crate::CanvasRenderConfig,
+) {
+    let edge_index = marker.edge_index as usize;
+    marker.color = resolved_edge_color(ir, edge_index, config);
+    marker.fill = if marker.kind == GpuMarkerKind::Circle as u32
+        || marker.kind == GpuMarkerKind::DiamondOpen as u32
+        || marker.kind == GpuMarkerKind::TriangleOpen as u32
+    {
+        let mut fill = parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+        fill[3] *= crate::renderer::resolve_edge_opacity(ir, edge_index).unwrap_or(1.0) as f32;
+        fill
+    } else {
+        marker.color
+    };
 }
 
 /// Emit a node's border as dashed segments, carrying arc length across the joins (bd-l3nsf).
@@ -2728,22 +2789,13 @@ impl GpuRenderPlan {
             // `linkStyle` resolved through the raster pass's own helper, so a GPU render and a
             // Canvas2D render cannot disagree about what the author declared. A declared width
             // overrides the arrow-derived one exactly as it does in `draw_edges`.
-            let (declared_stroke, declared_width) =
+            let (_, declared_width) =
                 crate::renderer::resolve_edge_style_with_defaults(ir, edge.edge_index, config);
-            let color = declared_stroke
-                .as_deref()
-                .and_then(parse_paint_rgba)
-                .or_else(|| parse_paint_rgba(&config.edge_stroke))
-                .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+            let color = resolved_edge_color(ir, edge.edge_index, config);
             let width = declared_width.map_or(width, |declared| declared as f32);
 
-            // The dash the arrow type carries. Only `[on, off]` patterns exist today; a longer
-            // pattern would need a different encoding, so it is truncated deliberately rather than
-            // silently taking its first two entries as if they were the whole thing.
-            let dash = match dash_pattern {
-                [on, off] => [*on as f32, *off as f32],
-                _ => [0.0, 0.0],
-            };
+            let declared_dash = crate::renderer::resolve_edge_dash_array(ir, edge.edge_index);
+            let dash_masks = edge_dash_masks(declared_dash.as_deref().unwrap_or(dash_pattern));
 
             // Sample the same bounded curves Canvas and Scene draw. Dash phase follows the sampled
             // arc length, so a dotted connector keeps its rhythm through both lines and elbows.
@@ -2761,15 +2813,17 @@ impl GpuRenderPlan {
                         if !length.is_finite() || length <= 0.0 {
                             return;
                         }
-                        edge_segments.push(GpuEdgeSegment {
-                            from: [from.x, from.y],
-                            to: [to.x, to.y],
-                            edge_index,
-                            color,
-                            dash_phase,
-                            dash,
-                            width,
-                        });
+                        for &(dash, offset) in &dash_masks {
+                            edge_segments.push(GpuEdgeSegment {
+                                from: [from.x, from.y],
+                                to: [to.x, to.y],
+                                edge_index,
+                                color,
+                                dash_phase: dash_phase - offset,
+                                dash,
+                                width,
+                            });
+                        }
                         dash_phase += length;
                     })
                 },
@@ -2796,6 +2850,8 @@ impl GpuRenderPlan {
                             &glyph,
                             [endpoint.point.x, endpoint.point.y],
                             endpoint.tangent.y.atan2(endpoint.tangent.x),
+                            color,
+                            edge_index,
                             &mut er_marker_segments,
                         );
                     }
@@ -2831,10 +2887,7 @@ impl GpuRenderPlan {
                         color,
                     );
                     instance.edge_index = edge_index;
-                    if marker == MarkerKind::Circle {
-                        instance.fill =
-                            parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
-                    }
+                    apply_edge_marker_paint(&mut instance, ir, config);
                     arrowheads.push(instance);
                 }
             }
@@ -3568,7 +3621,7 @@ impl GpuRenderPlan {
         };
 
         for ((node_index, center, text), node_metrics) in labelled.iter().zip(&run_metrics) {
-            let label_rgba = crate::renderer::resolve_node_text_color(
+            let mut label_rgba = crate::renderer::resolve_node_text_color(
                 ir,
                 usize::try_from(*node_index).unwrap_or(usize::MAX),
             )
@@ -3576,6 +3629,8 @@ impl GpuRenderPlan {
             .and_then(parse_paint_rgba)
             .or_else(|| parse_paint_rgba(&config.label_color))
             .unwrap_or(DEFAULT_LABEL_RGBA);
+            label_rgba[3] *= crate::renderer::resolve_node_opacity(ir, *node_index as usize)
+                .unwrap_or(1.0) as f32;
             let node_metrics = node_metrics.as_ref();
             let face =
                 GlyphFace::for_node(&node_fonts, *node_index as usize, &default_face, None, None);
@@ -3708,7 +3763,7 @@ impl GpuRenderPlan {
 
         // Preserve every measured caption row, including its typography and C4 type subtitles.
         for (cluster, caption) in layout.clusters.iter().zip(&cluster_captions) {
-            let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
+            let mut colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .or_else(|| {
@@ -3720,6 +3775,8 @@ impl GpuRenderPlan {
                 })
                 .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
+            colour[3] *= crate::renderer::resolve_cluster_opacity(ir, cluster.cluster_index)
+                .unwrap_or(1.0) as f32;
             for row in &caption.rows {
                 let face = GlyphFace::for_cluster_row(&default_face, caption, row);
                 let mut sink = sink.with_face(&face, &metrics);
@@ -3756,17 +3813,27 @@ impl GpuRenderPlan {
             });
         let mut graph_label_plates = Vec::new();
         for (edge, caption) in layout.edges.iter().zip(&edge_captions) {
-            if edge.bundled {
+            if edge.bundled
+                || ir
+                    .edges
+                    .get(edge.edge_index)
+                    .is_some_and(|edge| edge.arrow == fm_core::ArrowType::Invisible)
+            {
                 continue;
             }
-            let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
+            let mut colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
+            let opacity =
+                crate::renderer::resolve_edge_opacity(ir, edge.edge_index).unwrap_or(1.0) as f32;
+            colour[3] *= opacity;
 
             if let Some(message) = layout.extensions.sequence_message(edge.edge_index) {
-                graph_label_plates.push(message.bounds);
+                if opacity > 0.0 {
+                    graph_label_plates.push(message.bounds);
+                }
                 for (row, text) in message.text.split('\n').enumerate() {
                     let center = message.line_center(row);
                     sink.push_centred_with_font(
@@ -3805,12 +3872,14 @@ impl GpuRenderPlan {
                         + 8.0;
                     let height = lines as f32 * line_height + 4.0;
                     let center = placer.place(edge, width, height);
-                    graph_label_plates.push(LayoutRect {
-                        x: center.x - width / 2.0,
-                        y: center.y - height / 2.0,
-                        width,
-                        height,
-                    });
+                    if opacity > 0.0 {
+                        graph_label_plates.push(LayoutRect {
+                            x: center.x - width / 2.0,
+                            y: center.y - height / 2.0,
+                            width,
+                            height,
+                        });
+                    }
                     sink.push_edge_caption(
                         caption,
                         (center.x, center.y),
@@ -4248,29 +4317,14 @@ impl GpuRenderPlan {
             fm_core::DiagramType::XyChart | fm_core::DiagramType::QuadrantChart
         ) {
             plan.arrowheads = scene_marker_instances(&scene.root);
-            if ir.diagram_type == fm_core::DiagramType::Sankey {
-                // The shared scene supplies endpoint geometry; source-category paint belongs
-                // to the resolved renderer palette, just as it does on the ribbon itself.
-                let mut edge_colors = vec![None; ir.edges.len()];
-                for segment in &plan.edge_segments {
-                    if let Some(color) = edge_colors.get_mut(segment.edge_index as usize) {
-                        *color = Some(segment.color);
-                    }
-                }
-                for marker in &mut plan.arrowheads {
-                    if let Some(color) = edge_colors
-                        .get(marker.edge_index as usize)
-                        .copied()
-                        .flatten()
-                    {
-                        marker.color = color;
-                        if marker.kind != GpuMarkerKind::Circle as u32
-                            && marker.kind != GpuMarkerKind::DiamondOpen as u32
-                            && marker.kind != GpuMarkerKind::TriangleOpen as u32
-                        {
-                            marker.fill = color;
-                        }
-                    }
+            // Scene paths supply marker geometry; the same effective paints as their connectors
+            // supply color and opacity. Replacing the direct markers must not discard linkStyle,
+            // theme variables, configured alpha, or a circle terminator's separate fill.
+            let mut effective_config = config.clone();
+            effective_config.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
+            for marker in &mut plan.arrowheads {
+                if ir.edges.get(marker.edge_index as usize).is_some() {
+                    apply_edge_marker_paint(marker, ir, &effective_config);
                 }
             }
         }
@@ -5133,6 +5187,8 @@ fn push_er_glyph_segments(
     glyph: &fm_layout::ErMarkerGlyph,
     position: [f32; 2],
     angle: f32,
+    color: [f32; 4],
+    edge_index: u32,
     out: &mut Vec<GpuEdgeSegment>,
 ) {
     let (sin, cos) = angle.sin_cos();
@@ -5146,8 +5202,8 @@ fn push_er_glyph_segments(
         out.push(GpuEdgeSegment {
             from,
             to,
-            edge_index: NO_EDGE_INDEX,
-            color: DEFAULT_EDGE_STROKE_RGBA,
+            edge_index,
+            color,
             dash_phase: 0.0,
             dash: [0.0, 0.0],
             width: 1.0,
@@ -5722,7 +5778,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // restart the pattern.
         let along = in.arc_length + in.dash_phase;
         let phase = along - period * floor(along / period);
-        if (phase > in.dash.x) {
+        if (phase >= in.dash.x) {
             discard;
         }
     }
@@ -6049,6 +6105,7 @@ mod tests {
                     "{alias} lost its fill"
                 );
                 assert!(!plan.text_quads.is_empty(), "{alias} lost its label");
+                assert_text_alpha(&plan, GpuTextSource::Node, 0, 0.5);
 
                 // The independent Canvas2D shape implementation supplies the actual authored
                 // contour. Compare every segment, not merely a vertex count or bounding box.
@@ -7661,6 +7718,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gpu_declared_dashes_override_arrow_defaults_without_leaking() {
+        for (declaration, expected) in [
+            ("7 3", [7.0, 3.0]),
+            ("3", [3.0, 3.0]),
+            ("none", [0.0, 0.0]),
+            ("0 0", [0.0, 0.0]),
+            ("", [5.0, 5.0]),
+            ("bad", [5.0, 5.0]),
+            ("-3 2", [5.0, 5.0]),
+            ("NaN 2", [5.0, 5.0]),
+            ("Infinity 2", [5.0, 5.0]),
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n a -.-> b\n b -.-> c\n\
+                 linkStyle 0 stroke-dasharray:{declaration}\n"
+            ))
+            .ir;
+            assert_eq!(ir.edges.len(), 2);
+            let plan = GpuRenderPlan::from_layout(&ir, &fm_layout::layout_diagram(&ir), 1.0);
+            for (index, expected) in [(0, expected), (1, [5.0, 5.0])] {
+                let segments: Vec<_> = plan
+                    .edge_segments
+                    .iter()
+                    .filter(|segment| segment.edge_index == index)
+                    .collect();
+                assert!(!segments.is_empty());
+                assert!(
+                    segments.iter().all(|segment| segment.dash == expected),
+                    "{declaration:?}: edge {index} lost its resolved dash {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_dash_masks_preserve_complete_patterns_through_curves_and_zero_intervals() {
+        for pattern in [
+            vec![4.0, 2.0, 1.0, 3.0],
+            vec![4.0, 2.0, 1.0],
+            vec![4.0, 0.0, 2.0, 3.0],
+            vec![0.0, 2.0, 3.0, 1.0],
+        ] {
+            let declaration = pattern
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n a --> b\n linkStyle default stroke-dasharray:{declaration}\n"
+            ))
+            .ir;
+            let mut layout = fm_layout::layout_diagram(&ir);
+            layout.edges[0].points = [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (100.0, 40.0)]
+                .into_iter()
+                .map(|(x, y)| LayoutPoint { x, y })
+                .collect();
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            let mut repeated = pattern.clone();
+            if pattern.len() % 2 == 1 {
+                repeated.extend_from_slice(&pattern);
+            }
+            let mask_count = repeated
+                .iter()
+                .step_by(2)
+                .filter(|&&length| length > 0.0)
+                .count();
+            let period: f64 = repeated.iter().sum();
+            assert!(
+                plan.edge_segments.len() > mask_count,
+                "fixture must cross a bend"
+            );
+            assert_eq!(plan.edge_segments.len() % mask_count, 0);
+            let mut distance = 0.0_f64;
+            for masks in plan.edge_segments.chunks_exact(mask_count) {
+                let first = masks[0];
+                assert!(
+                    masks
+                        .iter()
+                        .all(|mask| mask.from == first.from && mask.to == first.to)
+                );
+                let length =
+                    f64::from((first.to[0] - first.from[0]).hypot(first.to[1] - first.from[1]));
+                for fraction in [0.13, 0.37, 0.61, 0.89] {
+                    let local = length * fraction;
+                    let mut phase = (distance + local).rem_euclid(period);
+                    let mut expected = false;
+                    for (index, &interval) in repeated.iter().enumerate() {
+                        if phase < interval {
+                            expected = index % 2 == 0;
+                            break;
+                        }
+                        phase -= interval;
+                    }
+                    let visible_masks = masks
+                        .iter()
+                        .filter(|mask| {
+                            let period = mask.dash[0] + mask.dash[1];
+                            let phase = (local as f32 + mask.dash_phase).rem_euclid(period);
+                            phase < mask.dash[0]
+                        })
+                        .count();
+                    assert_eq!(
+                        visible_masks,
+                        usize::from(expected),
+                        "{declaration}: phase {} painted {visible_masks} masks",
+                        distance + local
+                    );
+                }
+                distance += length;
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_zero_on_intervals_hide_only_the_line_and_tiny_dashes_have_bounded_geometry() {
+        for declaration in ["0 4", "0 4 0 2"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n a --> b\n linkStyle 0 stroke-dasharray:{declaration}\n"
+            ))
+            .ir;
+            let plan = GpuRenderPlan::from_layout(&ir, &fm_layout::layout_diagram(&ir), 1.0);
+            assert!(plan.edge_segments.is_empty());
+            assert_eq!(
+                plan.arrowheads.len(),
+                1,
+                "markers stay solid even on dashed lines"
+            );
+        }
+        let ir = fm_parser::parse(
+            "flowchart LR\n a --> b\n\
+             linkStyle 0 stroke-dasharray:0.000001 0 0.000002 0.000003\n",
+        )
+        .ir;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        layout.edges[0].points = [
+            LayoutPoint { x: 0.0, y: 0.0 },
+            LayoutPoint { x: 1e6, y: 0.0 },
+        ]
+        .into_iter()
+        .collect();
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(
+            plan.edge_segments.len(),
+            2,
+            "geometry depends on intervals, not dash cycles"
+        );
+        assert!(plan.edge_segments.iter().all(|segment| {
+            segment.dash.iter().all(|value| value.is_finite()) && segment.dash_phase.is_finite()
+        }));
+    }
+
     /// A declared `linkStyle` colour reaches both the segment AND its arrowhead.
     #[test]
     fn a_declared_link_colour_reaches_the_segment_and_its_head() {
@@ -7872,6 +8081,153 @@ mod tests {
                 .map(|i| i.fill[3])
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn assert_text_alpha(plan: &GpuRenderPlan, source: GpuTextSource, index: usize, expected: f32) {
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == source && run.node_index as usize == index)
+            .collect();
+        assert!(!runs.is_empty(), "missing {source:?} text for {index}");
+        for run in runs {
+            let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            assert!(!quads.is_empty());
+            assert!(
+                quads
+                    .iter()
+                    .all(|quad| (quad.color[3] - expected).abs() < 1e-6),
+                "{source:?} {index}: expected alpha {expected}, got {:?}",
+                quads.iter().map(|quad| quad.color[3]).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_authored_opacity_multiplies_paint_alpha_across_shapes_text_and_markers() {
+        let ir = fm_parser::parse(
+            "flowchart LR\n\
+             subgraph faded[Faded group]\n a[Alpha]\n end\n\
+             subgraph plain[Plain group]\n b[Beta]\n end\n\
+             a -->|Faded edge| b\n\
+             b --o|Circle edge| c[Gamma]\n\
+             c -->|Hidden edge| d[Delta]\n\
+             d -->|Plain edge| e[Epsilon]\n\
+             classDef muted color:#ff000080,opacity:0.5\n class a muted\n\
+             style faded color:#00ff0080,opacity:0.25\n\
+             linkStyle default stroke:#11223380,color:#44556680\n\
+             linkStyle 0 opacity:0.5\n\
+             linkStyle 1 opacity:0.25\n\
+             linkStyle 2 opacity:0\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 4);
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let config = crate::CanvasRenderConfig {
+            node_fill: "#77889980".to_owned(),
+            label_color: "#55667780".to_owned(),
+            ..Default::default()
+        };
+        let paint_alpha = 128.0 / 255.0;
+        let node = |id: &str| ir.nodes.iter().position(|node| node.id == id).unwrap();
+        let cluster = |id: &str| {
+            ir.graph
+                .subgraphs
+                .iter()
+                .find(|subgraph| subgraph.key == id)
+                .unwrap()
+                .cluster
+                .unwrap()
+                .0
+        };
+        for plan in [
+            GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+            GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config),
+        ] {
+            assert_text_alpha(&plan, GpuTextSource::Node, node("a"), paint_alpha * 0.5);
+            assert_text_alpha(&plan, GpuTextSource::Node, node("b"), paint_alpha);
+            assert_text_alpha(
+                &plan,
+                GpuTextSource::Cluster,
+                cluster("faded"),
+                paint_alpha * 0.25,
+            );
+            assert_text_alpha(&plan, GpuTextSource::Cluster, cluster("plain"), paint_alpha);
+            for (index, opacity) in [0.5, 0.25, 0.0, 1.0].into_iter().enumerate() {
+                let expected = paint_alpha * opacity;
+                assert_text_alpha(&plan, GpuTextSource::Edge, index, expected);
+                let segments: Vec<_> = plan
+                    .edge_segments
+                    .iter()
+                    .filter(|segment| segment.edge_index as usize == index)
+                    .collect();
+                assert!(!segments.is_empty(), "missing edge {index}");
+                assert!(segments.iter().all(|segment| {
+                    (segment.color[3] - expected).abs() < 1e-6
+                        && (segment.color[0] - 17.0 / 255.0).abs() < 1e-6
+                }));
+                let markers: Vec<_> = plan
+                    .arrowheads
+                    .iter()
+                    .filter(|marker| marker.edge_index as usize == index)
+                    .collect();
+                assert!(!markers.is_empty(), "missing marker {index}");
+                for marker in markers {
+                    assert!((marker.color[3] - expected).abs() < 1e-6);
+                    assert!((marker.color[0] - 17.0 / 255.0).abs() < 1e-6);
+                    assert!((marker.fill[3] - expected).abs() < 1e-6);
+                    if index == 1 {
+                        assert_eq!(marker.kind, super::GpuMarkerKind::Circle as u32);
+                        assert!((marker.fill[0] - 119.0 / 255.0).abs() < 1e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_zero_and_invalid_opacity_keep_node_and_cluster_text_in_sync() {
+        for (declared, expected) in [("0", 0.0), ("bad", 1.0), ("-0.5", 1.0), ("2", 1.0)] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart TD\n subgraph group[Group]\n a[Alpha]\n end\n\
+                 style a opacity:{declared}\n style group opacity:{declared}\n"
+            ))
+            .ir;
+            let plan = GpuRenderPlan::from_layout(&ir, &fm_layout::layout_diagram(&ir), 1.0);
+            assert_text_alpha(&plan, GpuTextSource::Node, 0, expected);
+            assert_text_alpha(&plan, GpuTextSource::Cluster, 0, expected);
+            assert!((plan.node_instances[0].fill[3] - expected).abs() < 1e-6);
+            assert!((plan.cluster_instances[0].fill[3] - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gpu_cardinality_labels_and_er_glyphs_inherit_their_edge_paint_and_opacity() {
+        for source in [
+            "classDiagram\n A \"1\" --> \"many\" B : owns\n",
+            "erDiagram\n CUSTOMER ||--o{ ORDER : places\n",
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "{source}linkStyle 0 stroke:#ff000080,color:#0000ff80,opacity:0.25\n"
+            ))
+            .ir;
+            assert_eq!(ir.edges.len(), 1);
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            let alpha = (128.0 / 255.0) * 0.25;
+            assert_text_alpha(&plan, GpuTextSource::Edge, 0, alpha);
+            assert_text_alpha(&plan, GpuTextSource::EdgeSourceCardinality, 0, alpha);
+            assert_text_alpha(&plan, GpuTextSource::EdgeTargetCardinality, 0, alpha);
+            if ir.diagram_type == fm_core::DiagramType::Er {
+                assert!(!plan.er_marker_segments.is_empty());
+                assert!(plan.er_marker_segments.iter().all(|segment| {
+                    segment.edge_index == 0
+                        && segment.color == [1.0, 0.0, 0.0, alpha]
+                        && segment.dash == [0.0, 0.0]
+                }));
+            }
+        }
     }
 
     /// A declared font size sizes the GPU quads AND the glyph atlas (bd-eudpo).

@@ -4776,22 +4776,27 @@ pub(crate) fn resolve_node_text_color(ir: &MermaidDiagramIr, node_index: usize) 
 /// Parse an SVG `stroke-dasharray` into a canvas dash pattern.
 ///
 /// SVG accepts commas, whitespace, or both as separators (`5 5`, `5,5`, `5, 5`), so both are
-/// treated as separators rather than guessing one. `none` is SVG's explicit "solid" and returns
-/// `None`, which is the same answer as "nothing declared" and correctly means "keep the default".
+/// treated as separators rather than guessing one. `none` and all-zero arrays explicitly select a
+/// solid stroke, represented by an empty vector. They must remain distinct from an absent or
+/// invalid declaration (`None`), which preserves an arrow's default dash pattern.
 ///
 /// Rejected rather than forwarded: any component that does not parse, is negative, or is
-/// non-finite, and an ALL-ZERO pattern. The last one matters because `[0, 0]` is not a no-op on a
-/// canvas — the specification makes a zero-length dash pattern render as though no dash were set
-/// on some paths and can stall rasterisation on others, so a junk declaration would be strictly
-/// worse than ignoring it. This mirrors `parse_stroke_width`, which refuses for the same reason.
+/// non-finite. Normalize all-zero arrays to an empty pattern instead of passing zero-length
+/// intervals to the rendering backends.
 fn parse_dash_array(raw: Option<&str>) -> Option<Vec<f64>> {
     let raw = raw?.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
+    if raw.is_empty() {
         return None;
+    }
+    if raw.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
     }
 
     let mut pattern = Vec::new();
-    for part in raw.split([',', ' ', '\t']).filter(|part| !part.is_empty()) {
+    for part in raw
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+    {
         let value = part
             .trim()
             .trim_end_matches("px")
@@ -4802,8 +4807,11 @@ fn parse_dash_array(raw: Option<&str>) -> Option<Vec<f64>> {
         pattern.push(value);
     }
 
-    if pattern.is_empty() || pattern.iter().all(|value| *value == 0.0) {
+    if pattern.is_empty() {
         return None;
+    }
+    if pattern.iter().all(|value| *value == 0.0) {
+        pattern.clear();
     }
     Some(pattern)
 }
