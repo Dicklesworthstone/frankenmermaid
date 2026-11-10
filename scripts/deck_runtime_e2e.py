@@ -7,7 +7,9 @@ focus classes, staggered step reveals, slide navigation, overview tour rect (pre
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
 layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
-drag spring-back, self-loop edges gluing to their node, and variant followers. 37 checks; exit 0 = all pass.
+drag spring-back, self-loop edges gluing to their node, and variant followers. Also drives the
+standalone talk.html golden in fullscreen, with pointer/keyboard navigation and phone layouts.
+Exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
 chromium (any venv works: /path/to/venv/bin/python scripts/deck_runtime_e2e.py). The
@@ -23,9 +25,10 @@ except ImportError:
 
 import threading, functools, sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-ROOT = "/data/projects/frankenmermaid"
+ROOT = str(Path(__file__).resolve().parents[1])
 Handler = functools.partial(SimpleHTTPRequestHandler, directory=ROOT)
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
@@ -176,6 +179,76 @@ with sync_playwright() as p:
     check("destroy removes tooltip el", page.locator(".fm-deck-tip").count() == 0)
     check("destroy clears nav dots (no zombie handlers)", page.locator("#deck-dots i").count() == 0)
     check("no page errors at teardown", not errors, errors)
+
+    # Exported talks must keep their narration and native controls in the fullscreen
+    # subtree. Drive actual pointer/key defaults: synthetic click() would miss the stage's
+    # pointer capture stealing button clicks, or Space activating Next instead of Previous.
+    talk_url = f"http://127.0.0.1:{port}/crates/fm-cli/tests/golden/deck/flowchart_subgraphs.talk.html"
+    page.goto(talk_url)
+    page.emulate_media(reduced_motion="reduce")
+    page.focus("#deck-stage")
+    page.keyboard.press("f")
+    page.wait_for_function("document.fullscreenElement && document.fullscreenElement.id === 'deck-stage'")
+    chrome_visible = page.evaluate("""() => {
+      const stage = document.fullscreenElement;
+      return ['#deck-num', '#deck-title', '#deck-caption', '#deck-controls', '#deck-dots']
+        .every(selector => {
+          const el = document.querySelector(selector), r = el.getBoundingClientRect();
+          return stage.contains(el) && r.width > 0 && r.height > 0 &&
+            r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+        });
+    }""")
+    check("talk fullscreen: narration and navigation stay visible", chrome_visible)
+    check("talk fullscreen: title and caption retained",
+          page.inner_text("#deck-title") == "Entry" and
+          page.inner_text("#deck-caption") == "where it starts")
+    check("talk fullscreen: theme background retained", page.evaluate("""() =>
+      getComputedStyle(document.querySelector('#deck-stage')).backgroundColor ===
+      getComputedStyle(document.body).backgroundColor"""))
+
+    page.locator("#deck-next").click()
+    check("talk fullscreen: pointer Next changes slide",
+          page.inner_text("#deck-num") == "02 / 04 · 0/2", page.inner_text("#deck-num"))
+    page.locator("#deck-next").click()
+    check("talk fullscreen: pointer Next reveals once",
+          page.inner_text("#deck-num") == "02 / 04 · 1/2", page.inner_text("#deck-num"))
+    page.locator("#deck-prev").press("Space")
+    check("talk fullscreen: Space activates Previous, not stage Next",
+          page.inner_text("#deck-num") == "02 / 04 · 0/2", page.inner_text("#deck-num"))
+    page.locator("#deck-next").press("Enter")
+    check("talk fullscreen: Enter activates Next exactly once",
+          page.inner_text("#deck-num") == "02 / 04 · 1/2", page.inner_text("#deck-num"))
+    page.locator("#deck-dots i").nth(2).press("Enter")
+    check("talk fullscreen: Enter activates selected navigation dot",
+          page.inner_text("#deck-num") == "03 / 04", page.inner_text("#deck-num"))
+    page.locator("#deck-dots i").nth(0).press("Space")
+    check("talk fullscreen: Space activates selected navigation dot",
+          page.inner_text("#deck-num") == "01 / 04", page.inner_text("#deck-num"))
+    page.locator("#deck-dots i").nth(1).click()
+    page.keyboard.press("ArrowRight")
+    check("talk fullscreen: stage shortcuts survive control focus",
+          page.inner_text("#deck-num") == "02 / 04 · 1/2", page.inner_text("#deck-num"))
+    page.evaluate("document.exitFullscreen()")
+    page.wait_for_function("!document.fullscreenElement")
+    page.locator("#deck-prev").click()
+    check("talk fullscreen: exit preserves working controls and reveal state",
+          page.inner_text("#deck-num") == "02 / 04 · 0/2", page.inner_text("#deck-num"))
+    check("talk fullscreen: no page errors", not errors, errors)
+    page.close()
+
+    page = browser.new_page(viewport={"width": 390, "height": 844},
+                            is_mobile=True, has_touch=True, reduced_motion="reduce")
+    page.goto(talk_url)
+    check("talk phone: narration does not overlap navigation", page.evaluate("""() => {
+      const card = document.querySelector('#deck-card').getBoundingClientRect();
+      const controls = document.querySelector('#deck-controls').getBoundingClientRect();
+      return card.width > 0 && card.left >= 0 && card.right <= innerWidth &&
+        card.top >= 0 && card.bottom < controls.top;
+    }"""))
+    page.locator("#deck-next").tap()
+    check("talk phone: touch Next remains interactive",
+          page.inner_text("#deck-num") == "02 / 04 · 0/2", page.inner_text("#deck-num"))
+    page.close()
 
     browser.close()
 server.shutdown()

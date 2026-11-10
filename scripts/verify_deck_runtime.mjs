@@ -17,6 +17,10 @@
 //   4. the canonical runtime still carries its two load-bearing code paths, string-asserted:
 //      the SVG pin (the coordinate contract) and the stage-scoped stopPropagation (the
 //      spotlight arrow-key conflict tripwire).
+//   5. the actual standalone template bootstrap keeps nested control gestures out of the
+//      stage camera and preserves native button and navigation-dot keyboard activation.
+//      This DOM/event harness does not substitute for fullscreen geometry checks in
+//      deck_runtime_e2e.py, which require a real browser.
 // The CLI talk.html surface is guarded elsewhere at BYTE level by the
 // `deck_talk_html_matches_checked_in_golden` test — no weaker smoke is duplicated here.
 //
@@ -27,6 +31,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -84,6 +89,93 @@ check(
   canonical.includes("event.stopPropagation()"),
   "the showcase's window keydown claims bare arrows for the spotlight",
 );
+
+// Execute the shipping template's event wiring with the canonical keyboard handler.
+// DOM defaults (native button click after Space/Enter) are deliberately separate from
+// keydown dispatch so swallowing a default, or the stage's Next shortcut stealing Space
+// from Previous, fails independently of pointer navigation.
+const template = readFileSync(join(repo, "crates/fm-cli/src/deck_template.html"), "utf8");
+const elements = new Map();
+function element(id, tagName = "DIV", parent = null) {
+  const el = {
+    id, tagName, parent, role: "", textContent: "", listeners: {},
+    addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); },
+    contains(other) {
+      for (; other; other = other.parent) if (other === this) return true;
+      return false;
+    },
+    closest() {
+      for (let node = this; node; node = node.parent) {
+        if (node.tagName === "BUTTON" || node.role === "button") return node;
+      }
+      return null;
+    },
+    focus() {},
+    click() { dispatch(this, "click"); },
+  };
+  elements.set(id, el);
+  return el;
+}
+function dispatch(target, type, key) {
+  const event = {
+    target, type, key, stopped: false, defaultPrevented: false,
+    stopPropagation() { this.stopped = true; },
+    preventDefault() { this.defaultPrevented = true; },
+  };
+  for (let node = target; node; node = node.parent) {
+    for (const listener of node.listeners[type] ?? []) listener(event);
+    if (event.stopped) break;
+  }
+  return event;
+}
+const stage = element("deck-stage");
+const chrome = element("deck-chrome", "DIV", stage);
+const controls = element("deck-controls", "DIV", chrome);
+const dots = element("deck-dots", "DIV", chrome);
+for (const id of ["deck-num", "deck-title", "deck-caption"]) element(id, "DIV", chrome);
+for (const id of ["deck-prev", "deck-next", "deck-overview-btn"]) element(id, "BUTTON", controls);
+element("deck-manifest").textContent = JSON.stringify({ slides: [{ id: "a" }, { id: "b" }] });
+const calls = { next: 0, prev: 0, go: 0, gestures: 0 };
+const api = {
+  next() { calls.next++; }, prev() { calls.prev++; }, go() { calls.go++; },
+  overview() {}, exitFreeCam() {},
+};
+const keyboard = canonical.match(/function onKeyDown\(event\) \{[\s\S]*?\n    \}/)?.[0];
+if (!keyboard) throw new Error("Canonical deck keyboard handler missing");
+stage.addEventListener("keydown", runInNewContext(`(${keyboard})`, { api, stage, sceneCount: 3 }));
+for (const type of ["pointerdown", "wheel", "dblclick"]) {
+  stage.addEventListener(type, () => { calls.gestures++; });
+}
+const window = {
+  FmDeckRuntime: { mount(options) {
+    options.ui.nextBtn.addEventListener("click", api.next);
+    options.ui.prevBtn.addEventListener("click", api.prev);
+    return api;
+  } },
+};
+window.parent = window;
+const bootstrap = [...template.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)?.[1];
+if (!bootstrap) throw new Error("Standalone deck bootstrap missing");
+runInNewContext(bootstrap.replace("{{SVG_JS_STRING}}", '"<svg/>"'), {
+  window, document: { getElementById: (id) => elements.get(id) }, location: { hash: "" }, history: {},
+});
+for (const type of ["pointerdown", "wheel", "dblclick"]) dispatch(elements.get("deck-next"), type);
+check("standalone controls do not start camera gestures", calls.gestures === 0);
+const previousSpace = dispatch(elements.get("deck-prev"), "keydown", " ");
+check("Space on Previous preserves its native default without advancing", !previousSpace.defaultPrevented && calls.next === 0);
+elements.get("deck-prev").click();
+check("native Previous activation goes back once", calls.prev === 1);
+const nextEnter = dispatch(elements.get("deck-next"), "keydown", "Enter");
+check("Enter on Next preserves native activation", !nextEnter.defaultPrevented);
+elements.get("deck-next").click();
+check("native Next activation advances once", calls.next === 1);
+const dot = element("dot", "I", dots);
+dot.role = "button";
+dot.addEventListener("click", api.go);
+check("Enter activates a navigation dot once", dispatch(dot, "keydown", "Enter").defaultPrevented && calls.go === 1);
+check("Space activates a navigation dot once", dispatch(dot, "keydown", " ").defaultPrevented && calls.go === 2);
+dispatch(elements.get("deck-next"), "keydown", "ArrowRight");
+check("stage arrow shortcuts still work from focused controls", calls.next === 2);
 
 // Render the demo deck through the SHIPPED WASM.
 const demoMatch = demoSources[0].match(/const DECK_DEMO_SOURCE = `([\s\S]*?)`;/);

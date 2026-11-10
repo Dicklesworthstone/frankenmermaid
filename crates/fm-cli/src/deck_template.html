@@ -12,7 +12,7 @@
   html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
     background: {{BG}}; color: {{FG}}; }
   #deck-stage { position: relative; overflow: hidden; width: 100vw; height: 100vh;
-    touch-action: none; cursor: grab; outline: none; }
+    touch-action: none; cursor: grab; outline: none; background: inherit; }
   #deck-card { position: fixed; left: 22px; bottom: 20px; z-index: 10;
     max-width: min(580px, 68vw); pointer-events: none; }
   #deck-num { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
@@ -33,11 +33,17 @@
   #deck-hints { position: fixed; top: 16px; right: 22px; z-index: 10; text-align: right;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; opacity: .5;
     line-height: 1.6; pointer-events: none; }
-  @media (max-width: 700px) { #deck-hints, #deck-dots { display: none; } }
+  @media (max-width: 700px) {
+    #deck-hints, #deck-dots { display: none; }
+    #deck-card { left: 16px; right: 16px; top: 16px; bottom: auto; max-width: none; }
+  }
 </style>
 </head>
 <body>
-<div id="deck-stage" tabindex="0"></div>
+<div id="deck-stage" tabindex="0">
+<!-- Fullscreen promotes the stage and its descendants only. Keep the narration and
+     controls inside it so presenting never hides the slide title or navigation. -->
+<div id="deck-chrome">
 <div id="deck-card">
   <div id="deck-num"></div>
   <div id="deck-title"></div>
@@ -51,6 +57,8 @@
 </div>
 <div id="deck-hints">←/→ steps &amp; slides · o whole graph · f fullscreen<br>
 esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</div>
+</div>
+</div>
 
 <script type="application/json" id="deck-manifest">{{MANIFEST_JSON}}</script>
 <script>RUNTIME_JS</script>
@@ -58,7 +66,25 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
 "use strict";
 (() => {
   var stage = document.getElementById("deck-stage");
+  var chrome = document.getElementById("deck-chrome");
   var manifest = JSON.parse(document.getElementById("deck-manifest").textContent);
+  // The runtime owns camera gestures on the stage. Native controls must keep their
+  // pointer targets rather than being captured as a diagram drag, including on touch.
+  ["pointerdown", "wheel", "dblclick"].forEach(function (type) {
+    chrome.addEventListener(type, function (event) { event.stopPropagation(); });
+  });
+  chrome.addEventListener("keydown", function (event) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    var control = event.target.closest("button, [role='button']");
+    if (!control || !chrome.contains(control)) return;
+    // Space activates the focused control, not the stage's Next shortcut. The dots
+    // are role-buttons, so supply their activation; real buttons keep native behavior.
+    event.stopPropagation();
+    if (control.tagName !== "BUTTON") {
+      event.preventDefault();
+      control.click();
+    }
+  });
   // mount announces its initial slide synchronously and rewrites the hash below. Capture
   // the requested deep link first; malformed percent escapes should not break a talk.
   var requested = "";

@@ -12,7 +12,7 @@
   html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
     background: #ffffff; color: #1e293b; }
   #deck-stage { position: relative; overflow: hidden; width: 100vw; height: 100vh;
-    touch-action: none; cursor: grab; outline: none; }
+    touch-action: none; cursor: grab; outline: none; background: inherit; }
   #deck-card { position: fixed; left: 22px; bottom: 20px; z-index: 10;
     max-width: min(580px, 68vw); pointer-events: none; }
   #deck-num { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
@@ -33,11 +33,17 @@
   #deck-hints { position: fixed; top: 16px; right: 22px; z-index: 10; text-align: right;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; opacity: .5;
     line-height: 1.6; pointer-events: none; }
-  @media (max-width: 700px) { #deck-hints, #deck-dots { display: none; } }
+  @media (max-width: 700px) {
+    #deck-hints, #deck-dots { display: none; }
+    #deck-card { left: 16px; right: 16px; top: 16px; bottom: auto; max-width: none; }
+  }
 </style>
 </head>
 <body>
-<div id="deck-stage" tabindex="0"></div>
+<div id="deck-stage" tabindex="0">
+<!-- Fullscreen promotes the stage and its descendants only. Keep the narration and
+     controls inside it so presenting never hides the slide title or navigation. -->
+<div id="deck-chrome">
 <div id="deck-card">
   <div id="deck-num"></div>
   <div id="deck-title"></div>
@@ -51,6 +57,8 @@
 </div>
 <div id="deck-hints">←/→ steps &amp; slides · o whole graph · f fullscreen<br>
 esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</div>
+</div>
+</div>
 
 <script type="application/json" id="deck-manifest">{"schemaVersion":"1.1.0","generator":"frankenmermaid","diagramType":"Flowchart","title":"Subgraph tour","viewBox":{"x":0.0,"y":0.0,"width":1133.76,"height":226.55},"options":{"fitMargin":150.0,"zoomMax":1.4,"dimOpacity":0.07,"autoAdvanceMs":0},"slides":[{"id":"intro","title":"Entry","caption":"where it starts","bounds":{"x":52.0,"y":82.49,"width":292.16,"height":81.61},"fitMargin":150.0,"zoomMax":1.4,"nodes":[{"index":0,"sourceId":"start","elementId":"fm-node-start-0","step":0},{"index":1,"sourceId":"gate","elementId":"fm-node-gate-1","step":0}],"edges":[{"index":0,"elementId":"fm-edge-0","step":0,"touching":false}],"maxStep":0},{"id":"core","title":"The core","bounds":{"x":418.81,"y":52.0,"width":493.95,"height":122.55},"fitMargin":150.0,"zoomMax":1.4,"nodes":[{"index":2,"sourceId":"core1","elementId":"fm-node-core1-2","step":0,"tooltip":"the heart of it"},{"index":3,"sourceId":"core2","elementId":"fm-node-core2-3","step":1},{"index":4,"sourceId":"core3","elementId":"fm-node-core3-4","step":2}],"edges":[{"index":2,"elementId":"fm-edge-2","step":1,"touching":false},{"index":3,"elementId":"fm-edge-3","step":2,"touching":false}],"clusters":[{"index":0,"elementId":"fm-cluster-0","step":0,"cameraContained":true}],"maxStep":2,"steps":[{"step":1,"elementIds":["fm-node-core2-3","fm-edge-2"]},{"step":2,"elementIds":["fm-node-core3-4","fm-edge-3"]}]},{"id":"all","title":"all","bounds":{"x":52.0,"y":52.0,"width":1029.76,"height":122.55},"fitMargin":150.0,"zoomMax":1.4,"nodes":[{"index":0,"sourceId":"start","elementId":"fm-node-start-0","step":0},{"index":1,"sourceId":"gate","elementId":"fm-node-gate-1","step":0},{"index":2,"sourceId":"core1","elementId":"fm-node-core1-2","step":0,"tooltip":"the heart of it"},{"index":3,"sourceId":"core2","elementId":"fm-node-core2-3","step":0},{"index":4,"sourceId":"core3","elementId":"fm-node-core3-4","step":0},{"index":5,"sourceId":"done","elementId":"fm-node-done-5","step":0}],"clusters":[{"index":0,"elementId":"fm-cluster-0","step":0,"cameraContained":true}],"maxStep":0}],"overview":{"enabled":true,"title":"Overview","tour":true},"nodeSlideIndex":{"fm-node-core1-2":["core","all"],"fm-node-core2-3":["core","all"],"fm-node-core3-4":["core","all"],"fm-node-done-5":["all"],"fm-node-gate-1":["intro","all"],"fm-node-start-0":["intro","all"]},"nodeGeometry":{"fm-node-core1-2":{"x":446.81,"y":100.05,"width":100.0,"height":46.5},"fm-node-core2-3":{"x":610.81,"y":100.05,"width":100.0,"height":46.5},"fm-node-core3-4":{"x":774.81,"y":100.05,"width":109.95,"height":46.5},"fm-node-done-5":{"x":976.76,"y":90.05,"width":105.0,"height":66.5},"fm-node-gate-1":{"x":219.35,"y":82.49,"width":124.81,"height":81.61},"fm-node-start-0":{"x":52.0,"y":100.05,"width":103.35,"height":46.5}},"edgeEndpoints":{"fm-edge-0":{"fromElementId":"fm-node-start-0","toElementId":"fm-node-gate-1"},"fm-edge-1":{"fromElementId":"fm-node-gate-1","toElementId":"fm-node-core1-2"},"fm-edge-2":{"fromElementId":"fm-node-core1-2","toElementId":"fm-node-core2-3"},"fm-edge-3":{"fromElementId":"fm-node-core2-3","toElementId":"fm-node-core3-4"},"fm-edge-4":{"fromElementId":"fm-node-core3-4","toElementId":"fm-node-done-5"}}}</script>
 <script>/* frankenmermaid deck runtime (epic bd-z7g6k, bd-lnca7, morph bd-tm1q7).
@@ -1291,7 +1299,25 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
 "use strict";
 (() => {
   var stage = document.getElementById("deck-stage");
+  var chrome = document.getElementById("deck-chrome");
   var manifest = JSON.parse(document.getElementById("deck-manifest").textContent);
+  // The runtime owns camera gestures on the stage. Native controls must keep their
+  // pointer targets rather than being captured as a diagram drag, including on touch.
+  ["pointerdown", "wheel", "dblclick"].forEach(function (type) {
+    chrome.addEventListener(type, function (event) { event.stopPropagation(); });
+  });
+  chrome.addEventListener("keydown", function (event) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    var control = event.target.closest("button, [role='button']");
+    if (!control || !chrome.contains(control)) return;
+    // Space activates the focused control, not the stage's Next shortcut. The dots
+    // are role-buttons, so supply their activation; real buttons keep native behavior.
+    event.stopPropagation();
+    if (control.tagName !== "BUTTON") {
+      event.preventDefault();
+      control.click();
+    }
+  });
   // mount announces its initial slide synchronously and rewrites the hash below. Capture
   // the requested deep link first; malformed percent escapes should not break a talk.
   var requested = "";
