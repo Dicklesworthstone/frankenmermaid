@@ -21635,7 +21635,7 @@ fn coordinate_assignment(
     }
 
     // Compute secondary coordinates using Brandes-Köpf 4-way alignment.
-    let secondary_coords = brandes_kopf_secondary_coords(
+    let mut secondary_coords = brandes_kopf_secondary_coords(
         ir,
         node_sizes,
         ranks,
@@ -21644,22 +21644,32 @@ fn coordinate_assignment(
         horizontal_ranks,
     );
 
-    // Build output using primary offsets and Brandes-Köpf secondary coordinates.
+    // The alignment coordinate is the members' centre for a collapsed cluster. Convert it to
+    // the actual frame centre before checking rank clearance: unequal nested caption bands
+    // can otherwise shift a tall frame into its neighbour after the separation projection.
+    // Captions occupy the primary axis in TB/BT, where the measured frame height reserves them.
+    if horizontal_ranks && !cross_anchors.is_empty() {
+        for (node, coordinate) in secondary_coords.iter_mut().enumerate() {
+            *coordinate -= cross_anchors.get(node).copied().unwrap_or(0.0);
+        }
+        project_rank_separation(
+            &mut secondary_coords,
+            node_sizes,
+            ordering_by_rank,
+            spacing.node_spacing,
+            horizontal_ranks,
+        );
+    }
+
+    // Build output using primary offsets and the final frame-centre coordinates.
     // The coordinates are centres (see below); the smallest leading edge is kept at 0, as it was
     // when they were used as edges.
     let secondary_floor = (0..ir.nodes.len())
         .filter_map(|node| {
             let centre = *secondary_coords.get(node)?;
             let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
-            // Fold the caption half-band into the floor so a captioned cluster that is the
-            // top-most element re-anchors its own box without shifting the whole diagram.
-            let anchor = if horizontal_ranks {
-                cross_anchors.get(node).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            };
             let half_extent = (if horizontal_ranks { height } else { width }) / 2.0;
-            Some(centre - half_extent - anchor)
+            Some(centre - half_extent)
         })
         .fold(f32::INFINITY, f32::min);
     let secondary_floor = if secondary_floor.is_finite() {
@@ -21688,13 +21698,9 @@ fn coordinate_assignment(
             // between a narrow and a wide node jogged) and could overlap them. Along the rank axis
             // a node stays on its band's leading edge, which gives every edge into the rank one
             // shared channel for the orthogonal router.
-            // Captioned clusters: pull the stand-in up by half its caption band so the
-            // cluster's CONTENTS -- not its taller caption frame -- sit on the chain line.
-            // Cross axis only (the caption band is vertical); for TB/BT the band lies on the
-            // primary axis and the box height already reserves it, so anchor stays 0 there.
-            let anchor = cross_anchors.get(node_index).copied().unwrap_or(0.0);
+            // Cluster coordinates already include their measured member-to-frame offset.
             let (x, y) = if horizontal_ranks {
-                (primary, secondary - height / 2.0 - secondary_floor - anchor)
+                (primary, secondary - height / 2.0 - secondary_floor)
             } else {
                 (secondary - width / 2.0 - secondary_floor, primary)
             };
@@ -43942,19 +43948,9 @@ mod tests {
         }
     }
 
-    /// Nodes of different sizes connected in a chain share a centre line, so the edge between
-    /// them is straight. Brandes-Köpf's coordinate is a centre, and using it as the left edge
-    /// aligned the chain's LEFT edges instead, which bent every edge between a narrow and a wide
-    /// node. In a left-to-right chain through a subgraph, the outside nodes line up with the
-    /// subgraph's middle.
-    /// Members-on-rank invariant for the chains slot-reservation fix: a chain through a captioned
-    /// subgraph keeps the subgraph's members on the same centre line as the outside nodes (Y for
-    /// LR/RL, X for TB/BT). Asserted for single-level clusters in all four rank directions and both
-    /// font sizes -- the caption band, and so the cross-axis re-anchor, scales with the font -- and
-    /// for nested subgraphs in TB/BT (where the band lies on the primary axis and the box height
-    /// reserves it). Nested LR/RL is exercised but NOT asserted: a second, inner caption band stays
-    /// uncorrected (one level of correction, matching the pre-regression baseline); that residual
-    /// is tracked in a separate issue and must not be frozen here as an expected value.
+    /// A chain's member centres remain aligned through every captioned subgraph level.
+    /// Nested frames reserve their own caption bands and additional inter-frame clearance;
+    /// the correction must use that complete geometry, including authored caption fonts.
     #[test]
     fn chains_through_clusters_stay_on_the_centre_line() {
         let default_font = fm_core::FontMetrics::default_metrics();
@@ -43962,7 +43958,7 @@ mod tests {
             font_size: default_font.config().font_size * 1.8,
             ..default_font.config().clone()
         });
-        for font in [default_font.clone(), large_font.clone()] {
+        for font in [default_font, large_font] {
             for direction in ["LR", "RL", "TB", "BT"] {
                 let horizontal = matches!(direction, "LR" | "RL");
                 let single = fm_parser::parse(&format!(
@@ -43973,12 +43969,20 @@ mod tests {
                     "flowchart {direction}\n  start --> gate\n  gate --> core1\n  subgraph outer\n    subgraph inner\n      core1 --> core2\n    end\n  end\n  core2 --> done\n"
                 ))
                 .ir;
-                for (shape, ir) in [("single", &single), ("nested", &nested)] {
-                    // Nested LR/RL leaves one inner band uncorrected (tracked separately); do not
-                    // assert a residual there. Every other case must be exactly on the line.
-                    if shape == "nested" && horizontal {
-                        continue;
-                    }
+                let deep = fm_parser::parse(&format!(
+                    "flowchart {direction}\n  start --> gate{{Gate}}\n  gate --> core1\n  subgraph outer[\"Outer caption<br/>with another row\"]\n    subgraph middle\n      subgraph inner\n        core1[\"Core<br/>first member\"] --> core2[\"Larger member<br/>with another line<br/>and a third row\"]\n      end\n    end\n  end\n  core2 --> done\n  style outer font-size:31px\n  style inner font-size:23px\n"
+                ))
+                .ir;
+                let mixed = fm_parser::parse(&format!(
+                    "flowchart {direction}\n  start --> gate\n  subgraph outer\n    gate --> core1\n    subgraph middle\n      subgraph inner\n        core1 --> core2\n      end\n    end\n  end\n  core2 --> done\n"
+                ))
+                .ir;
+                for (shape, ir) in [
+                    ("single", &single),
+                    ("nested", &nested),
+                    ("deep", &deep),
+                    ("mixed", &mixed),
+                ] {
                     let config = LayoutConfig {
                         font_metrics: Some(font.clone()),
                         ..LayoutConfig::default()
@@ -44002,6 +44006,53 @@ mod tests {
                             (cross(id) - line).abs()
                         );
                     }
+                    for cluster in &layout.clusters {
+                        for member in &ir.clusters[cluster.cluster_index].members {
+                            let node = layout.nodes[member.0].bounds;
+                            let frame = cluster.bounds;
+                            assert!(
+                                node.x + 0.01 >= frame.x
+                                    && node.y + 0.01 >= frame.y
+                                    && node.x + node.width <= frame.x + frame.width + 0.01
+                                    && node.y + node.height <= frame.y + frame.height + 0.01,
+                                "{direction}/{shape}: member {} escapes cluster {}",
+                                member.0,
+                                cluster.cluster_index
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applying unequal caption offsets must not invalidate a rank's reserved frame gaps.
+    #[test]
+    fn caption_anchors_preserve_same_rank_clearance() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let spacing = LayoutSpacing {
+            node_spacing: 28.0,
+            ..LayoutSpacing::default()
+        };
+        let sizes = [(100.0, 80.0), (120.0, 360.0), (80.0, 180.0)];
+        let anchors = [0.0, 160.0, 50.0];
+        let ranks = BTreeMap::from([(0, 0), (1, 0), (2, 0)]);
+        for direction in ["LR", "RL"] {
+            let ir = fm_parser::parse(&format!("flowchart {direction}\nA\nB\nC")).ir;
+            assert_eq!(ir.nodes.len(), sizes.len());
+            for order in [[0, 1, 2], [2, 1, 0]] {
+                let ordering = BTreeMap::from([(0, order.to_vec())]);
+                let nodes = coordinate_assignment(
+                    &ir, &sizes, &ranks, &ordering, spacing, &metrics, &anchors,
+                );
+                for pair in order.windows(2) {
+                    let above = nodes[pair[0]].bounds;
+                    let below = nodes[pair[1]].bounds;
+                    let gap = below.y - (above.y + above.height);
+                    assert!(
+                        gap + 0.01 >= spacing.node_spacing,
+                        "{direction}/{order:?}: caption offsets reduced the frame gap to {gap}"
+                    );
                 }
             }
         }

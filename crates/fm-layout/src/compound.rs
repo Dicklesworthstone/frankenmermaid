@@ -148,6 +148,9 @@ struct PlacedCluster {
     boxes: Vec<LayoutNodeBox>,
     /// The exact frame drawn around these contents, including the title and nested clearances.
     bounds: LayoutRect,
+    /// Vertical offset from the full frame's centre to its member-node centre.
+    /// Includes every nested caption band and the clearance between nested frames.
+    cross_anchor: f32,
 }
 
 fn place(
@@ -214,6 +217,7 @@ fn place(
                 members,
                 boxes,
                 bounds,
+                cross_anchor: content.center().y - bounds.center().y,
             }
         })
         .collect();
@@ -225,7 +229,7 @@ fn place(
         .map(|subgraph| composite_state_node(ir, subgraph, &owner))
         .collect();
 
-    let parent = parent_ir(ir, &owner, &tops, &composite, spacing, metrics);
+    let mut parent = parent_ir(ir, &owner, &tops, &composite);
     let mut parent_sizes: Vec<(f32, f32)> = parent
         .source
         .iter()
@@ -235,7 +239,13 @@ fn place(
         })
         .collect();
     for (top, stand_in) in parent.stand_in.iter().enumerate() {
-        parent_sizes[*stand_in] = (placed[top].bounds.width, placed[top].bounds.height);
+        let cluster = &placed[top];
+        parent_sizes[*stand_in] = (cluster.bounds.width, cluster.bounds.height);
+        // Align the actual members, including all nested caption bands and frame clearances.
+        // Composite states use a real node as their stand-in, so its own centre stays the anchor.
+        if composite[top].is_none() {
+            parent.cross_anchors[*stand_in] = cluster.cross_anchor;
+        }
     }
     let parent_boxes = flat_boxes(
         &parent.ir,
@@ -511,9 +521,8 @@ struct ParentGraph {
     source: Vec<Source>,
     /// For each top-level cluster, the parent node standing in for it.
     stand_in: Vec<usize>,
-    /// Half the asymmetric top caption band of each collapsed cluster, per parent node (0
-    /// for non-cluster stand-ins). `coordinate_assignment` subtracts it on the cross axis so
-    /// a cluster's CONTENTS -- not its taller caption frame -- land on the chain line.
+    /// Vertical offset from each cluster frame's centre to its laid-out member centre.
+    /// Filled from the measured `PlacedCluster`; real nodes retain a zero offset.
     cross_anchors: Vec<f32>,
 }
 
@@ -525,8 +534,6 @@ fn parent_ir(
     owner: &[Option<usize>],
     tops: &[&IrSubgraph],
     composite: &[Option<usize>],
-    spacing: LayoutSpacing,
-    metrics: &fm_core::FontMetrics,
 ) -> ParentGraph {
     let mut parent = MermaidDiagramIr::empty(ir.diagram_type);
     parent.direction = ir.direction;
@@ -585,29 +592,8 @@ fn parent_ir(
             })
         })
         .collect();
-    // A collapsed cluster's frame reserves an asymmetric caption band on top, so the frame
-    // centre sits half a band above the contents. Carry that half-band per stand-in (from
-    // the SAME caption `extra_header` the frame uses) so the cross-axis kernel lands the
-    // contents, not the frame, on the chain line. Composite-state stand-ins are real nodes,
-    // so they keep 0.
-    let mut cross_anchors = vec![0.0_f32; parent.nodes.len()];
-    for (top, subgraph) in tops.iter().enumerate() {
-        if composite[top].is_some() {
-            continue;
-        }
-        let cluster = subgraph.cluster.and_then(|id| ir.clusters.get(id.0));
-        let title = cluster
-            .map_or(subgraph.title, |cluster| cluster.title)
-            .and_then(|label| ir.labels.get(label.0))
-            .map(|label| label.text.as_str());
-        let caption = ClusterCaptionLayout::new(
-            ir,
-            subgraph.cluster.map_or(usize::MAX, |id| id.0),
-            title,
-            metrics,
-        );
-        cross_anchors[stand_in[top]] = caption.extra_header(spacing.cluster_padding) / 2.0;
-    }
+    // The caller fills cluster offsets from their recursively measured geometry.
+    let cross_anchors = vec![0.0_f32; parent.nodes.len()];
     ParentGraph {
         ir: parent,
         source,
@@ -951,14 +937,7 @@ mod tests {
                     // Re-layout the top-level graph using the actual reconstructed frame sizes.
                     // If allocation and reconstruction disagree, the original boxes escape these
                     // slots even though their contents may still be inside their own rectangles.
-                    let parent = parent_ir(
-                        &ir,
-                        &owner,
-                        &tops,
-                        &vec![None; tops.len()],
-                        spacing,
-                        &metrics,
-                    );
+                    let mut parent = parent_ir(&ir, &owner, &tops, &vec![None; tops.len()]);
                     let cluster_bounds = |top: usize| {
                         let index = tops[top].cluster.expect("cluster id").0;
                         clusters
@@ -967,6 +946,16 @@ mod tests {
                             .unwrap()
                             .bounds
                     };
+                    for (top, &stand_in) in parent.stand_in.iter().enumerate() {
+                        let content = bounding_box(
+                            nodes
+                                .iter()
+                                .filter(|node| owner[node.node_index] == Some(top))
+                                .map(|node| node.bounds),
+                        );
+                        parent.cross_anchors[stand_in] =
+                            content.center().y - cluster_bounds(top).center().y;
+                    }
                     let sizes: Vec<_> = parent
                         .source
                         .iter()
