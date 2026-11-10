@@ -1445,13 +1445,28 @@ XY charts have a dedicated Canvas2D path with numeric ticks and gridlines, categ
 labels, chart titles, grouped bars, connected line points, and area fills. Vertical and
 horizontal charts share their domains, tick values, and category labels with SVG; data marks
 use the layout's exact rectangles and point centers, including negative values and zero
-baselines. The GPU scene does not yet carry these dedicated XY draws.
+baselines. The GPU plan uses the same chart domains, labels, and quantitative geometry.
 
 ### Trait-based abstraction
 
 `Canvas2dContext` is a trait with 40 methods covering path operations (`begin_path`, `move_to`, `line_to`, `quadratic_curve_to`, `bezier_curve_to`, `arc`, `arc_to`, `rect`, …), drawing (`fill`, `stroke`, `fill_rect`, `stroke_rect`, `clear_rect`), text (`fill_text`, `stroke_text`, `measure_text`, plus alignment / baseline setters), style (fill / stroke / line-width / line-cap / line-join / line-dash / global-alpha / font), transform (`save`, `restore`, `translate`, `scale`, `rotate`, `set_transform`, `reset_transform`, `clip`), and shadows.
 
 In WASM builds, the trait is implemented against `web_sys::CanvasRenderingContext2d` with font-size-aware text metrics. For testing, a `MockCanvas2dContext` records all draw operations into a `Vec<DrawOperation>` so the full render pipeline can be tested in CI without a browser.
+
+### WebGPU text and authored fonts
+
+The optional `webgpu` feature provides a device renderer, including the asynchronous WASM
+`renderWebGpuToRgba` export. Its text atlas distinguishes **family, weight, style, and character**.
+Authored node fonts, compartment heading styles, cluster captions, and mirrored sequence
+participant headers retain their resolved faces. Text size remains per run, so different sizes
+can share a face without multiplying the atlas's glyph cells.
+
+Browser rasterization loads each requested face with its actual character sample, preserving
+web-font subsets and the browser's character fallback. Native callers bind supplied font bytes
+to the atlas's `GlyphFace` descriptors through `glyph_raster::rasterize_atlas_with_faces` and
+ordered `GlyphFaceFonts` stacks. Missing bindings, missing characters, and clipped glyphs are
+reported by face and character. The single-font convenience entry points accept a single
+unstyled face; styled or mixed-face plans require explicit bindings.
 
 ### Viewport transform
 
@@ -2320,7 +2335,7 @@ A --> B
 - **`classDef` / `style` directives** apply to SVG and Canvas nodes, including the implicit default class, named-class overrides, and direct styles. GPU node plans use the same resolved node styles. Terminal output does not provide a CSS color channel.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
-- **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
+- **WebGPU backend** has an opt-in device renderer and asynchronous `renderWebGpuToRgba` export. The synchronous `Diagram` canvas API continues to use its Canvas2D fallback; the default WASM bundle does not include the optional device backend.
 - **FNX directed analysis** (Phase 2) is in canary rollout via the `RolloutPhase` state machine in `fm-core/src/canary.rs` (`Disabled → Canary → Partial → Full`, with `RolledBack` for health-criteria violations). Enable explicitly with `--features fnx-experimental-directed` if you want to drive it.
 - **`@frankenmermaid/core` npm package** is not on npm yet. The supported release path is `/dsr`, and no npm publication from that path has been verified. Until then, use the WASM bundle from the live demo or build locally with `./build-wasm.sh`.
 - Some niche Mermaid syntax may parse with warnings and produce different visual output from mermaid-js; the `Compatibility` diagnostic category surfaces these explicitly.
@@ -2924,7 +2939,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **CEGIS layout constraint synthesis** (`bd-1iwz`) | Speculative | Counterexample-guided synthesis to auto-generate layout constraints from user-provided examples |
 | **Geometric/Conformal Algebra extensions** (`bd-3cd8`) | In progress | The CGA pipeline currently covers transforms + intersection queries; the broader epic includes coordinate-free PGA/CGA for layout primitives |
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |
-| **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | The WebRenderer selector exists; Canvas2D is the current fallback; full WebGPU implementation is queued |
+| **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | Opt-in device rendering includes multi-face text; the synchronous `Diagram` API retains its Canvas2D fallback |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
 | **`@frankenmermaid/core` npm publish** | Awaiting `/dsr` release | Build and verify the package through `/dsr`, then confirm the public registry from a clean consumer before documenting npm installation |

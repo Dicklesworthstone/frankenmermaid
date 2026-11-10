@@ -16,7 +16,9 @@
 //! caller. The consequence is that a caller with no font gets a blank atlas, which is why
 //! [`rasterize_atlas`] reports what it could not place instead of silently producing empty cells.
 
-use crate::gpu_plan::GlyphAtlasPlan;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::gpu_plan::{GlyphAtlasPlan, GlyphFace};
 
 /// The baseline row within a cell, in cell-local pixels.
 ///
@@ -161,6 +163,27 @@ pub struct RasterizedGlyph {
     pub coverage: Vec<u8>,
 }
 
+/// An exact face-and-character cell in the planned atlas.
+///
+/// A character can appear in several faces, so a character-only diagnostic cannot identify which
+/// label lost its glyph or was clipped. The index addresses [`GlyphAtlasPlan::faces`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtlasGlyph {
+    pub face_index: u32,
+    pub glyph: char,
+}
+
+/// A caller-supplied font stack for one exact planned face.
+///
+/// Binding a descriptor is the caller's assertion that these fonts implement its family, weight
+/// and style. The rasterizer does not select system fonts or synthesize bold/italic outlines.
+/// Fallbacks are searched in order for each character, within this face alone. A font for another
+/// face is never borrowed just because it happens to contain the character.
+pub struct GlyphFaceFonts<'a> {
+    pub face: &'a GlyphFace,
+    pub fonts: &'a [&'a GlyphFont],
+}
+
 /// What [`rasterize_atlas`] managed to do, so a caller is never left guessing at a blank texture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtlasCoverage {
@@ -168,11 +191,19 @@ pub struct AtlasCoverage {
     pub bitmap: Vec<u8>,
     /// Cells that received a glyph raster.
     pub rendered: usize,
-    /// Characters not mapped by any supplied font, in plan order (whitespace excluded).
+    /// Characters not mapped by a font bound to their face, in plan order (whitespace excluded).
     /// Supported empty glyphs are not missing: a zero-width character can legitimately have no ink.
+    /// Repeated characters in different faces are repeated here; `missing_cells` identifies them.
     pub missing: Vec<char>,
     /// Glyphs whose raster was larger than a cell and was clipped to fit.
     pub clipped: Vec<char>,
+    /// Exact cells missing character coverage or a face binding, in plan order.
+    pub missing_cells: Vec<AtlasGlyph>,
+    /// Exact cells whose raster was clipped, in plan order.
+    pub clipped_cells: Vec<AtlasGlyph>,
+    /// Face indices used by cells but not bound to a caller-supplied stack, sorted and deduplicated.
+    /// An explicitly bound empty stack has missing character coverage, not a missing binding.
+    pub unbound_faces: Vec<u32>,
 }
 
 /// Rasterise every glyph the plan placed into its own cell.
@@ -195,13 +226,16 @@ pub struct AtlasCoverage {
 /// [`AtlasCoverage::clipped`]: silently scaling one glyph would make it a different size from every
 /// other glyph on the same line, which looks like a font bug and is harder to trace than a clip.
 ///
-/// For multilingual labels, use [`rasterize_atlas_with_fallbacks`] with an ordered font stack.
+/// This convenience entry point accepts only a single unstyled face. A styled or multi-face plan
+/// requires [`rasterize_atlas_with_faces`] to bind the declared faces explicitly. Otherwise its
+/// cells remain transparent and [`AtlasCoverage::unbound_faces`] reports the unresolved bindings.
+/// For multilingual labels in one unstyled face, use [`rasterize_atlas_with_fallbacks`].
 #[must_use]
 pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage {
     rasterize_atlas_with_fallbacks(plan, &[font])
 }
 
-/// Rasterise an atlas using the first font in `fonts` that covers each character.
+/// Rasterise a single unstyled face using the first font in `fonts` that covers each character.
 ///
 /// Fonts are in caller-defined priority order; no system-font lookup or platform-dependent fallback
 /// is performed. Each face is fitted once to the same atlas baseline. The atlas plan, cell order,
@@ -212,10 +246,34 @@ pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage
 /// An empty stack produces a transparent atlas and reports every non-whitespace planned character
 /// as missing. Unsupported characters never paint `.notdef` boxes. This is character fallback,
 /// not script shaping, bidi reordering, ligature substitution or color-emoji rendering.
+/// Styled or multi-face plans require explicit [`GlyphFaceFonts`] bindings and remain unpainted
+/// here; applying one regular font to every face would silently discard authored typography.
 #[must_use]
 pub fn rasterize_atlas_with_fallbacks(
     plan: &GlyphAtlasPlan,
     fonts: &[&GlyphFont],
+) -> AtlasCoverage {
+    if let [face] = plan.faces.as_slice()
+        && matches!(face.weight.as_str(), "normal" | "400")
+        && face.style == "normal"
+    {
+        rasterize_atlas_with_faces(plan, &[GlyphFaceFonts { face, fonts }])
+    } else {
+        rasterize_atlas_with_faces(plan, &[])
+    }
+}
+
+/// Rasterise each atlas cell with the ordered font stack bound to its exact face descriptor.
+///
+/// Bindings may be supplied in any order. If a descriptor is repeated, its first binding wins;
+/// combine its fallback fonts in that binding's stack to make fallback order explicit. Each font
+/// in each stack is fitted once to the shared baseline, preserving distinct ascent/descent ratios.
+/// Cell rectangles, UVs and text quads are unchanged. Missing bindings are reported separately from
+/// missing characters, and the selected font's supported empty glyphs remain empty.
+#[must_use]
+pub fn rasterize_atlas_with_faces(
+    plan: &GlyphAtlasPlan,
+    faces: &[GlyphFaceFonts<'_>],
 ) -> AtlasCoverage {
     let width = plan.texture_px[0].max(1) as usize;
     let height = plan.texture_px[1].max(1) as usize;
@@ -223,18 +281,44 @@ pub fn rasterize_atlas_with_fallbacks(
     let mut rendered = 0_usize;
     let mut missing = Vec::new();
     let mut clipped = Vec::new();
+    let mut missing_cells = Vec::new();
+    let mut clipped_cells = Vec::new();
+    let mut unbound_faces = BTreeSet::new();
 
-    // Fit each face once, not once per glyph. A fallback face can have very different line metrics
-    // from the primary face; sharing its pixel size would destroy the common baseline convention.
-    let fitted: Vec<(&GlyphFont, f32)> = fonts
+    let mut bindings = BTreeMap::new();
+    for binding in faces {
+        bindings.entry(binding.face).or_insert(binding.fonts);
+    }
+    // The same character can use a different stack in each face. Fit each binding's fonts once,
+    // not once per glyph; a fallback can have very different metrics from the primary font.
+    let fitted: Vec<_> = plan
+        .faces
         .iter()
-        .map(|&font| {
-            let px = fitted_pixel_size(plan, font).unwrap_or_else(|| plan.cell_px.max(1) as f32);
-            (font, px)
+        .map(|face| {
+            bindings.get(face).map(|fonts| {
+                fonts
+                    .iter()
+                    .map(|&font| {
+                        let px = fitted_pixel_size(plan, font)
+                            .unwrap_or_else(|| plan.cell_px.max(1) as f32);
+                        (font, px)
+                    })
+                    .collect::<Vec<_>>()
+            })
         })
         .collect();
 
     for cell in &plan.cells {
+        let identity = AtlasGlyph {
+            face_index: cell.face_index,
+            glyph: cell.glyph,
+        };
+        let stack = fitted
+            .get(cell.face_index as usize)
+            .and_then(Option::as_deref);
+        if stack.is_none() {
+            unbound_faces.insert(cell.face_index);
+        }
         // The cell's pixel rectangle, derived from the SAME UVs the shader samples with. Deriving it
         // from `columns`/`rows` arithmetic instead would be a second source of truth, and the two
         // could disagree without anything noticing.
@@ -248,9 +332,14 @@ pub fn rasterize_atlas_with_fallbacks(
         let cell_w = x1 - x0;
         let cell_h = y1 - y0;
 
-        let Some(&(font, px)) = fitted.iter().find(|(font, _)| font.has_glyph(cell.glyph)) else {
+        let Some(&(font, px)) = stack
+            .unwrap_or_default()
+            .iter()
+            .find(|(font, _)| font.has_glyph(cell.glyph))
+        else {
             if !cell.glyph.is_whitespace() {
                 missing.push(cell.glyph);
+                missing_cells.push(identity);
             }
             continue;
         };
@@ -290,6 +379,7 @@ pub fn rasterize_atlas_with_fallbacks(
         }
         if clipped_this {
             clipped.push(cell.glyph);
+            clipped_cells.push(identity);
         }
         rendered += 1;
     }
@@ -299,5 +389,8 @@ pub fn rasterize_atlas_with_fallbacks(
         rendered,
         missing,
         clipped,
+        missing_cells,
+        clipped_cells,
+        unbound_faces: unbound_faces.into_iter().collect(),
     }
 }

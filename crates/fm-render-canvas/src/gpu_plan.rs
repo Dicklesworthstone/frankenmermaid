@@ -592,12 +592,143 @@ pub fn run_advance(text: &str, font_px: f32) -> f32 {
         .sum()
 }
 
+/// A raster face shared by text runs, independently of their layout font size.
+///
+/// Family, weight and style all participate in the atlas key: an italic `a` cannot sample the
+/// upright `a`'s cell. Font size stays on the quad, so differently sized runs can share one face.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GlyphFace {
+    pub family: String,
+    pub weight: String,
+    pub style: String,
+}
+
+impl Default for GlyphFace {
+    fn default() -> Self {
+        Self::new("sans-serif")
+    }
+}
+
+impl GlyphFace {
+    /// The normal, upright face from a CSS family stack.
+    #[must_use]
+    pub fn new(family: &str) -> Self {
+        Self {
+            family: if family.trim().is_empty() {
+                "sans-serif".to_string()
+            } else {
+                family.to_string()
+            },
+            weight: "normal".to_string(),
+            style: "normal".to_string(),
+        }
+    }
+
+    /// Resolve the same declared components and semantic defaults as Canvas2D's node text.
+    fn for_node(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        weight: Option<&str>,
+        style: Option<&str>,
+    ) -> Self {
+        let fallback = crate::renderer::DeclaredNodeFont::default();
+        let declared = node_fonts.get(index).unwrap_or(&fallback);
+        Self {
+            family: declared.family.as_ref().unwrap_or(&base.family).clone(),
+            weight: declared
+                .weight
+                .or(weight)
+                .unwrap_or(&base.weight)
+                .to_string(),
+            style: declared.style.or(style).unwrap_or(&base.style).to_string(),
+        }
+    }
+
+    fn for_class_row(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        row: &fm_core::ClassCompartmentRow,
+    ) -> Self {
+        Self::for_node(
+            node_fonts,
+            index,
+            base,
+            (row.kind == fm_core::ClassCompartmentRowKind::Name).then_some("600"),
+            row.italic.then_some("italic"),
+        )
+    }
+
+    fn for_er_row(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        row: &fm_core::ErCardText,
+    ) -> Self {
+        Self::for_node(
+            node_fonts,
+            index,
+            base,
+            row.emphasized.then_some("bold"),
+            None,
+        )
+    }
+
+    fn for_c4_row(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        row: &fm_core::C4CardRow,
+    ) -> Self {
+        Self::for_node(
+            node_fonts,
+            index,
+            base,
+            (row.kind == fm_core::C4CardRowKind::Name).then_some("600"),
+            None,
+        )
+    }
+
+    fn for_requirement_row(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        row: &fm_core::RequirementCardRow,
+    ) -> Self {
+        Self::for_node(
+            node_fonts,
+            index,
+            base,
+            (row.kind == fm_core::RequirementCardRowKind::Name).then_some("bold"),
+            (row.kind == fm_core::RequirementCardRowKind::Stereotype).then_some("italic"),
+        )
+    }
+
+    fn for_cluster_row(
+        base: &Self,
+        caption: &fm_layout::cluster_caption::ClusterCaptionLayout,
+        row: &fm_layout::cluster_caption::ClusterCaptionRow,
+    ) -> Self {
+        Self {
+            family: caption
+                .font_family
+                .clone()
+                .unwrap_or_else(|| base.family.clone()),
+            weight: caption.row_weight(row).to_string(),
+            style: caption.font_style.unwrap_or(&base.style).to_string(),
+        }
+    }
+}
+
 /// One glyph's cell in the atlas texture.
 ///
 /// UVs are normalised, so the shader samples without knowing the texture size, and the browser side
 /// is free to rasterise at whatever device pixel ratio it likes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlyphCell {
+    /// Index into [`GlyphAtlasPlan::faces`].
+    pub face_index: u32,
     pub glyph: char,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -610,11 +741,13 @@ pub struct GlyphCell {
 /// decided HERE is which glyphs the diagram needs and where each one lives, because the quads in
 /// [`GpuRenderPlan::text_quads`] carry UVs into this layout and both have to agree.
 ///
-/// Deterministic by construction: glyphs are collected into a `BTreeSet`, so the atlas for a given
-/// diagram is byte-identical across runs. A hash-ordered atlas would reshuffle UVs between two
-/// renders of the same document and make any golden comparison useless.
+/// Deterministic by construction: faces use a `BTreeMap` and their glyphs use `BTreeSet`s, so the
+/// atlas for a given diagram is byte-identical across runs. A hash-ordered atlas would reshuffle
+/// UVs between two renders of the same document and make any golden comparison useless.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphAtlasPlan {
+    /// Requested raster faces in deterministic lexical order.
+    pub faces: Vec<GlyphFace>,
     /// Side of one square cell, in texture pixels.
     pub cell_px: u32,
     /// Cells per row.
@@ -625,9 +758,9 @@ pub struct GlyphAtlasPlan {
     pub texture_px: [u32; 2],
     /// Distance from the TOP of a cell to the shared glyph baseline, in texture pixels.
     ///
-    /// One value for the whole atlas: every cell is the same square and every glyph is rasterised at
-    /// the same size, and a per-glyph baseline would be a contradiction in terms — a baseline is
-    /// precisely the line glyphs share.
+    /// One value for the whole atlas: every cell is the same square and every face fits its own
+    /// ascent/descent around this shared baseline. A per-glyph baseline would be a contradiction
+    /// in terms — a baseline is precisely the line glyphs share.
     ///
     /// This is what makes a rasterised atlas typographic rather than merely populated. Centring each
     /// glyph in its cell — the obvious placement, and what this crate did first — aligns the MIDDLE
@@ -639,7 +772,7 @@ pub struct GlyphAtlasPlan {
     /// real ascent metrics. [`GLYPH_BASELINE_RATIO`] carries the reasoning, and
     /// `glyph_raster::fitted_pixel_size` scales a supplied face so its ascent lands exactly here.
     pub baseline_px: f32,
-    /// Cells, sorted by `glyph` — binary-searchable and stable.
+    /// Cells, sorted by `(face_index, glyph)` — binary-searchable and stable.
     pub cells: Vec<GlyphCell>,
 }
 
@@ -659,16 +792,33 @@ pub const GLYPH_BASELINE_RATIO: f32 = 0.8;
 impl GlyphAtlasPlan {
     /// Plan an atlas covering every glyph in `texts`.
     ///
-    /// A square-ish grid rather than a tight shelf pack: every cell is the same size because every
-    /// glyph is rasterised at the same font size, so the packing problem a shelf packer solves does
-    /// not exist here, and a grid is exactly reproducible.
+    /// A square-ish grid rather than a tight shelf pack: every cell is the same size, so the
+    /// packing problem a shelf packer solves does not exist here, and a grid is reproducible.
     #[must_use]
     pub fn for_texts<'a, I>(texts: I, cell_px: u32) -> Self
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let mut glyphs: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
-        for text in texts {
+        Self::for_styled_texts(
+            texts.into_iter().map(|text| (GlyphFace::default(), text)),
+            cell_px,
+        )
+    }
+
+    /// Plan only the face/glyph combinations that the text actually requests.
+    ///
+    /// Deduplication is per face. This avoids allocating every character in every family when a
+    /// diagram contains many separately styled nodes, while keeping UVs independent of traversal
+    /// order. Repeating a face or a label does not add cells.
+    #[must_use]
+    pub fn for_styled_texts<'a, I>(texts: I, cell_px: u32) -> Self
+    where
+        I: IntoIterator<Item = (GlyphFace, &'a str)>,
+    {
+        let mut faces: std::collections::BTreeMap<GlyphFace, std::collections::BTreeSet<char>> =
+            std::collections::BTreeMap::new();
+        for (face, text) in texts {
+            let glyphs = faces.entry(face).or_default();
             for glyph in text.chars() {
                 // Control characters have no raster; a newline is a layout instruction, not ink.
                 if !glyph.is_control() {
@@ -677,9 +827,16 @@ impl GlyphAtlasPlan {
             }
         }
 
-        let count = u32::try_from(glyphs.len()).unwrap_or(u32::MAX);
+        let count = u32::try_from(
+            faces
+                .values()
+                .map(std::collections::BTreeSet::len)
+                .sum::<usize>(),
+        )
+        .unwrap_or(u32::MAX);
         if count == 0 || cell_px == 0 {
             return Self {
+                faces: faces.into_keys().collect(),
                 cell_px,
                 columns: 0,
                 rows: 0,
@@ -701,8 +858,11 @@ impl GlyphAtlasPlan {
         let height = f32::from(u16::try_from(texture_px[1]).unwrap_or(u16::MAX));
         let cell = f32::from(u16::try_from(cell_px).unwrap_or(u16::MAX));
 
-        let mut cells = Vec::with_capacity(glyphs.len());
-        for (index, glyph) in glyphs.into_iter().enumerate() {
+        let mut cells = Vec::with_capacity(count as usize);
+        let glyphs = faces.values().enumerate().flat_map(|(face_index, glyphs)| {
+            glyphs.iter().map(move |&glyph| (face_index as u32, glyph))
+        });
+        for (index, (face_index, glyph)) in glyphs.enumerate() {
             let i = u32::try_from(index).unwrap_or(u32::MAX);
             let col = f32::from(u16::try_from(i % columns).unwrap_or(u16::MAX));
             let row = f32::from(u16::try_from(i / columns).unwrap_or(u16::MAX));
@@ -711,6 +871,7 @@ impl GlyphAtlasPlan {
             let x1 = ((col + 1.0) * cell) / width;
             let y1 = ((row + 1.0) * cell) / height;
             cells.push(GlyphCell {
+                face_index,
                 glyph,
                 uv_min: [x0, y0],
                 uv_max: [x1, y1],
@@ -718,6 +879,7 @@ impl GlyphAtlasPlan {
         }
 
         Self {
+            faces: faces.into_keys().collect(),
             cell_px,
             columns,
             rows,
@@ -727,11 +889,29 @@ impl GlyphAtlasPlan {
         }
     }
 
-    /// The cell for `glyph`, or `None` if the atlas does not carry it.
+    /// The cell in the first face for a uniform-font caller. Multi-face callers use
+    /// [`Self::cell_for_face`] with the face recorded by their text run.
     #[must_use]
     pub fn cell(&self, glyph: char) -> Option<&GlyphCell> {
+        self.cell_for_face(0, glyph)
+    }
+
+    /// Resolve a raster face without depending on the order in which labels were collected.
+    #[must_use]
+    pub fn face_index(&self, face: &GlyphFace) -> Option<u32> {
+        self.faces
+            .binary_search(face)
+            .ok()
+            .and_then(|index| index.try_into().ok())
+    }
+
+    /// The cell for one exact face/glyph pair.
+    #[must_use]
+    pub fn cell_for_face(&self, face_index: u32, glyph: char) -> Option<&GlyphCell> {
         self.cells
-            .binary_search_by(|candidate| candidate.glyph.cmp(&glyph))
+            .binary_search_by_key(&(face_index, glyph), |candidate| {
+                (candidate.face_index, candidate.glyph)
+            })
             .ok()
             .and_then(|index| self.cells.get(index))
     }
@@ -805,12 +985,31 @@ fn cardinality_anchor(from: LayoutPoint, toward: LayoutPoint, inset: f32) -> (f3
 /// label plate) and cardinalities (`TextAlign::Center` with a `Middle` baseline).
 struct TextSink<'a> {
     atlas: &'a GlyphAtlasPlan,
+    face_index: u32,
     quads: &'a mut Vec<GpuTextQuad>,
     runs: &'a mut Vec<GpuTextRun>,
     metrics: &'a fm_core::FontMetrics,
 }
 
 impl TextSink<'_> {
+    /// Reborrow the sink for one resolved face; the caller's default face is unchanged.
+    fn with_face<'a>(
+        &'a mut self,
+        face: &GlyphFace,
+        metrics: &'a fm_core::FontMetrics,
+    ) -> TextSink<'a> {
+        TextSink {
+            atlas: self.atlas,
+            face_index: self
+                .atlas
+                .face_index(face)
+                .expect("text face was collected into the atlas"),
+            quads: &mut *self.quads,
+            runs: &mut *self.runs,
+            metrics,
+        }
+    }
+
     fn push_centred(
         &mut self,
         text: &str,
@@ -953,6 +1152,9 @@ impl TextSink<'_> {
     ) {
         let mut config = self.metrics.config().clone();
         config.font_size = font_px;
+        if let Some(face) = self.atlas.faces.get(self.face_index as usize) {
+            config.preset = fm_core::FontPreset::from_family(&face.family);
+        }
         let metrics = fm_core::FontMetrics::new(config);
         let glyphs: Vec<_> = text
             .chars()
@@ -978,7 +1180,7 @@ impl TextSink<'_> {
                 };
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
         for (glyph, advance) in glyphs {
-            let Some(cell) = self.atlas.cell(glyph) else {
+            let Some(cell) = self.atlas.cell_for_face(self.face_index, glyph) else {
                 pen_x += advance;
                 continue;
             };
@@ -996,6 +1198,7 @@ impl TextSink<'_> {
         if quad_count > 0 {
             self.runs.push(GpuTextRun {
                 source,
+                face_index: self.face_index,
                 node_index: u32::try_from(index).unwrap_or(u32::MAX),
                 first_quad,
                 quad_count,
@@ -1317,6 +1520,8 @@ pub struct GpuTextRun {
     /// claims to be: a cluster title's run carries a CLUSTER index, and a consumer resolving it
     /// against `ir.nodes` would silently read an unrelated node or none at all.
     pub source: GpuTextSource,
+    /// The exact raster face sampled by this run's quads.
+    pub face_index: u32,
     /// Index back into `MermaidDiagramIr::nodes`, or `::clusters` / `::edges` when `source` says so.
     pub node_index: u32,
     /// Index of this run's first quad in [`GpuRenderPlan::text_quads`].
@@ -1517,7 +1722,7 @@ impl GpuRenderPlan {
     }
 
     /// Build primitives using the same resolved typography as Canvas2D and layout measurement.
-    /// The atlas's raster font family must match `config.font_family`.
+    /// Every text run carries its resolved face, including authored node font overrides.
     #[must_use]
     pub fn from_layout_with_config(
         ir: &MermaidDiagramIr,
@@ -1544,7 +1749,7 @@ impl GpuRenderPlan {
         if ir.diagram_type == fm_core::DiagramType::XyChart
             && let Some(meta) = ir.xy_chart_meta.as_ref()
         {
-            return Self::from_xychart(ir, meta, layout, &metrics);
+            return Self::from_xychart(ir, meta, layout, config, &metrics);
         }
         // Pie parser nodes carry slice names for layout. They are not graph circles: drawing
         // them after the sectors would cover the chart and duplicate its percentage labels.
@@ -2797,9 +3002,7 @@ impl GpuRenderPlan {
             }
         }
 
-        // Paragraph breaks and glyph advances must use the same authored font metrics. The atlas
-        // still carries the configured raster face, but a size or family override must not make
-        // the label occupy a different rectangle from the one layout reserved for it.
+        // Paragraph breaks and glyph advances use the same authored font metrics as layout.
         let run_metrics: Vec<Cow<'_, fm_core::FontMetrics>> = labelled
             .iter()
             .map(|(node_index, _, _)| {
@@ -2948,109 +3151,190 @@ impl GpuRenderPlan {
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
-        let glyph_atlas =
-            // ⚠️ CLUSTER TITLES AND EDGE LABELS MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
-            // does `let Some(cell) = glyph_atlas.cell(glyph) else { continue }`, so a glyph the
-            // atlas never saw is skipped silently — the title would emit zero quads and the plan
-            // would look correct. Feeding both sets in is what makes the titles renderable at all.
-            GlyphAtlasPlan::for_texts(
-                labelled
+        let default_face = GlyphFace::new(&config.font_family);
+        // Merge the cascade once per node, not once per attribute row in each atlas/text pass.
+        let node_fonts: Vec<_> = (0..ir.nodes.len())
+            .map(|index| crate::renderer::resolve_declared_node_font(ir, index))
+            .collect();
+        let mut styled_texts = Vec::new();
+        for (index, _, text) in &labelled {
+            styled_texts.push((
+                GlyphFace::for_node(&node_fonts, *index as usize, &default_face, None, None),
+                text.as_ref(),
+            ));
+        }
+        for (index, _, card, _) in &class_cards {
+            for row in &card.rows {
+                styled_texts.push((
+                    GlyphFace::for_class_row(&node_fonts, *index, &default_face, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for (index, _, card, _) in &er_cards {
+            for row in &card.text {
+                styled_texts.push((
+                    GlyphFace::for_er_row(&node_fonts, *index, &default_face, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for (index, _, card, _) in &c4_cards {
+            for row in &card.rows {
+                styled_texts.push((
+                    GlyphFace::for_c4_row(&node_fonts, *index, &default_face, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for (index, _, card, _) in &requirement_cards {
+            for row in &card.rows {
+                styled_texts.push((
+                    GlyphFace::for_requirement_row(&node_fonts, *index, &default_face, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for (row, source, index, _) in &journey_rows {
+            let face = if *source == GpuTextSource::Node {
+                GlyphFace::for_node(&node_fonts, *index as usize, &default_face, None, None)
+            } else {
+                default_face.clone()
+            };
+            styled_texts.push((face, row.text.as_str()));
+        }
+        for caption in &cluster_captions {
+            for row in &caption.rows {
+                styled_texts.push((
+                    GlyphFace::for_cluster_row(&default_face, caption, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for node_box in &layout.extensions.sequence_mirror_headers {
+            styled_texts.push((
+                GlyphFace::for_node(&node_fonts, node_box.node_index, &default_face, None, None),
+                mirror_header_label(ir, node_box),
+            ));
+        }
+
+        // Annotation text uses the configured default face. Node and compartment rows above feed
+        // only their requested face/glyph pairs, rather than an atlas-wide fonts × glyphs product.
+        let default_texts = layout
+            .extensions
+            .sequence_messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .chain(
+                edge_captions
                     .iter()
-                    .map(|(_, _, text)| text.as_ref())
-                    .chain(class_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
-                    .chain(er_cards.iter().flat_map(|(_, _, card, _)| card.text.iter().map(|run| run.text.as_str())))
-                    .chain(c4_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
-                    .chain(requirement_cards.iter().flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.text.as_str())))
-                    .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
-                    .chain(layout.extensions.sequence_messages.iter().map(|message| message.text.as_str()))
-                    .chain(cluster_captions.iter().flat_map(|caption| caption.rows.iter().map(|row| row.text.as_str())))
-                    .chain(edge_captions.iter().flatten().flat_map(fm_core::GraphEdgeCaption::lines))
-                    // CARDINALITIES GO IN THE ATLAS TOO. Same trap: a `1` that never reached the
-                    // atlas emits no quad and the run vanishes without an error anywhere.
-                    .chain(
-                        layout
-                            .edges
-                            .iter()
-                            .filter(|edge| !edge.bundled)
-                            .flat_map(|edge| {
-                                let (source, target) = edge_cardinality_texts(ir, edge);
-                                [source, target]
+                    .flatten()
+                    .flat_map(fm_core::GraphEdgeCaption::lines),
+            )
+            // CARDINALITIES GO IN THE ATLAS TOO. Same trap: a `1` that never reached the
+            // atlas emits no quad and the run vanishes without an error anywhere.
+            .chain(
+                layout
+                    .edges
+                    .iter()
+                    .filter(|edge| !edge.bundled)
+                    .flat_map(|edge| {
+                        let (source, target) = edge_cardinality_texts(ir, edge);
+                        [source, target]
+                    })
+                    .flatten(),
+            )
+            // NOTE BODIES GO IN THE ATLAS TOO -- same silent-vanish trap.
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| note.text.as_str()),
+            )
+            .chain(
+                sequence_fragment_text
+                    .iter()
+                    .map(|caption| caption.text.as_str()),
+            )
+            .chain(sequence_numbers.iter().map(|number| number.text.as_str()))
+            // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
+            // feeding that same iterator prevents a future line filter from starving a
+            // run that still looks structurally present.
+            .chain(
+                layout
+                    .extensions
+                    .state_notes
+                    .iter()
+                    .flat_map(|note| note.text.lines()),
+            )
+            // AXIS LABELS GO IN THE ATLAS TOO. Tick segments without their dates or
+            // categories are geometry with no scale, which is the same missing-source
+            // failure as an entirely absent axis.
+            .chain(
+                layout
+                    .extensions
+                    .axis_ticks
+                    .iter()
+                    .filter(|tick| !tick.label.is_empty())
+                    .map(|tick| tick.label.as_str()),
+            )
+            // Band captions exclude timeline sections, already named by their cluster
+            // titles, and sequence/journey lanes, already named by their headers.
+            .chain(layout.extensions.bands.iter().filter_map(|band| {
+                let draw_label = (matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                    && ir.diagram_type != fm_core::DiagramType::Timeline)
+                    || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
+                        && !matches!(
+                            ir.diagram_type,
+                            fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey
+                        ));
+                draw_label
+                    .then_some(band.label.as_str())
+                    .filter(|label| !label.is_empty())
+            }))
+            .chain(
+                layout
+                    .extensions
+                    .packet_field_continuations
+                    .iter()
+                    .filter_map(|continuation| ir.nodes.get(continuation.node_index))
+                    .filter_map(|node| {
+                        node.label
+                            .and_then(|label| ir.labels.get(label.0))
+                            .map_or(Some(node.id.as_str()), |label| {
+                                label.text.split('\n').next()
                             })
-                            .flatten(),
-                    )
-                    // FOOT-ROW NAMES GO IN THE ATLAS TOO -- same silent-vanish trap.
-                    .chain(
-                        layout
-                            .extensions
-                            .sequence_mirror_headers
-                            .iter()
-                            .map(|node_box| mirror_header_label(ir, node_box)),
-                    )
-                    // NOTE BODIES GO IN THE ATLAS TOO -- same silent-vanish trap.
-                    .chain(
-                        layout
-                            .extensions
-                            .sequence_notes
-                            .iter()
-                            .map(|note| note.text.as_str()),
-                    )
-                    .chain(sequence_fragment_text.iter().map(|caption| caption.text.as_str()))
-                    .chain(sequence_numbers.iter().map(|number| number.text.as_str()))
-                    // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
-                    // feeding that same iterator prevents a future line filter from starving a
-                    // run that still looks structurally present.
-                    .chain(
-                        layout
-                            .extensions
-                            .state_notes
-                            .iter()
-                            .flat_map(|note| note.text.lines()),
-                    )
-                    // AXIS LABELS GO IN THE ATLAS TOO. Tick segments without their dates or
-                    // categories are geometry with no scale, which is the same missing-source
-                    // failure as an entirely absent axis.
-                    .chain(
-                        layout
-                            .extensions
-                            .axis_ticks
-                            .iter()
-                            .filter(|tick| !tick.label.is_empty())
-                            .map(|tick| tick.label.as_str()),
-                    )
-                    // Band captions exclude timeline sections, already named by their cluster
-                    // titles, and sequence/journey lanes, already named by their headers.
-                    .chain(layout.extensions.bands.iter().filter_map(|band| {
-                        let draw_label = (matches!(band.kind, fm_layout::LayoutBandKind::Section)
-                            && ir.diagram_type != fm_core::DiagramType::Timeline)
-                            || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
-                                && !matches!(ir.diagram_type, fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey));
-                        draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
-                    }))
-                    .chain(
-                        layout
-                            .extensions
-                            .packet_field_continuations
-                            .iter()
-                            .filter_map(|continuation| ir.nodes.get(continuation.node_index))
-                            .filter_map(|node| {
-                                node.label
-                                    .and_then(|label| ir.labels.get(label.0))
-                                    .map_or(Some(node.id.as_str()), |label| {
-                                        label.text.split('\n').next()
-                                    })
-                            }),
-                    )
-                    .chain(pie_text_blocks.iter().flat_map(|(block, _, _)| {
-                        block.lines.iter().map(String::as_str)
-                    }))
-                    .chain(radar_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str))))
-                    .chain(treemap_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str)))),
-                cell_px,
-            );
+                    }),
+            )
+            .chain(
+                pie_text_blocks
+                    .iter()
+                    .flat_map(|(block, _, _)| block.lines.iter().map(String::as_str)),
+            )
+            .chain(radar_chart.iter().flat_map(|chart| {
+                chart
+                    .text
+                    .iter()
+                    .flat_map(|block| block.lines.iter().map(String::as_str))
+            }))
+            .chain(treemap_chart.iter().flat_map(|chart| {
+                chart
+                    .text
+                    .iter()
+                    .flat_map(|block| block.lines.iter().map(String::as_str))
+            }));
+        let glyph_atlas = GlyphAtlasPlan::for_styled_texts(
+            styled_texts
+                .into_iter()
+                .chain(default_texts.map(|text| (default_face.clone(), text))),
+            cell_px,
+        );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
         let mut text_runs: Vec<GpuTextRun> = Vec::with_capacity(labelled.len());
         let mut sink = TextSink {
             atlas: &glyph_atlas,
+            face_index: glyph_atlas.face_index(&default_face).unwrap_or(0),
             quads: &mut text_quads,
             runs: &mut text_runs,
             metrics: &metrics,
@@ -3066,12 +3350,9 @@ impl GpuRenderPlan {
             .or_else(|| parse_paint_rgba(&config.label_color))
             .unwrap_or(DEFAULT_LABEL_RGBA);
             let node_metrics = node_metrics.as_ref();
-            let mut node_sink = TextSink {
-                atlas: sink.atlas,
-                quads: &mut *sink.quads,
-                runs: &mut *sink.runs,
-                metrics: node_metrics,
-            };
+            let face =
+                GlyphFace::for_node(&node_fonts, *node_index as usize, &default_face, None, None);
+            let mut node_sink = sink.with_face(&face, node_metrics);
             node_sink.push_centred_with_font(
                 text,
                 (center[0], center[1]),
@@ -3084,6 +3365,8 @@ impl GpuRenderPlan {
 
         for (node_index, bounds, card, color) in class_cards {
             for row in card.rows {
+                let face = GlyphFace::for_class_row(&node_fonts, node_index, &default_face, &row);
+                let mut sink = sink.with_face(&face, &metrics);
                 let anchor = (
                     if row.centered() {
                         bounds.x + bounds.width * 0.5
@@ -3116,6 +3399,8 @@ impl GpuRenderPlan {
 
         for (node_index, bounds, card, color) in er_cards {
             for run in card.text {
+                let face = GlyphFace::for_er_row(&node_fonts, node_index, &default_face, &run);
+                let mut sink = sink.with_face(&face, &metrics);
                 if let Some(column) = run.column {
                     sink.push_left(
                         &run.text,
@@ -3146,6 +3431,9 @@ impl GpuRenderPlan {
         for (node_index, bounds, card, color) in requirement_cards {
             let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
             for row in card.rows {
+                let face =
+                    GlyphFace::for_requirement_row(&node_fonts, node_index, &default_face, &row);
+                let mut sink = sink.with_face(&face, &metrics);
                 sink.push_centred_with_font(
                     &row.text,
                     (bounds.x + bounds.width * 0.5, top + row.center_y),
@@ -3160,6 +3448,8 @@ impl GpuRenderPlan {
         for (node_index, bounds, card, color) in c4_cards {
             let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
             for row in card.rows {
+                let face = GlyphFace::for_c4_row(&node_fonts, node_index, &default_face, &row);
+                let mut sink = sink.with_face(&face, &metrics);
                 sink.push_centred_with_font(
                     &row.text,
                     (bounds.x + bounds.width * 0.5, top + row.center_y),
@@ -3172,6 +3462,12 @@ impl GpuRenderPlan {
         }
 
         for (row, source, node_index, color) in journey_rows {
+            let face = if source == GpuTextSource::Node {
+                GlyphFace::for_node(&node_fonts, node_index as usize, &default_face, None, None)
+            } else {
+                default_face.clone()
+            };
+            let mut sink = sink.with_face(&face, &metrics);
             let center = row.bounds.center();
             sink.push_centred_with_font(
                 &row.text,
@@ -3183,9 +3479,7 @@ impl GpuRenderPlan {
             );
         }
 
-        // Preserve every measured caption row, including C4 type subtitles. The single-face
-        // atlas still uses the configured family/weight; size and alphabetic baselines match
-        // Canvas2D/SVG, and authored larger faces receive appropriately sized atlas cells.
+        // Preserve every measured caption row, including its typography and C4 type subtitles.
         for (cluster, caption) in layout.clusters.iter().zip(&cluster_captions) {
             let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
@@ -3200,6 +3494,8 @@ impl GpuRenderPlan {
                 .or_else(|| parse_paint_rgba(&config.label_color))
                 .unwrap_or(DEFAULT_LABEL_RGBA);
             for row in &caption.rows {
+                let face = GlyphFace::for_cluster_row(&default_face, caption, row);
+                let mut sink = sink.with_face(&face, &metrics);
                 sink.push_left(
                     &row.text,
                     (
@@ -3345,6 +3641,10 @@ impl GpuRenderPlan {
             if node_box.bounds.width <= 0.0 || node_box.bounds.height <= 0.0 {
                 continue;
             }
+            let face =
+                GlyphFace::for_node(&node_fonts, node_box.node_index, &default_face, None, None);
+            let node_metrics = ir.effective_node_font_metrics(node_box.node_index, &metrics);
+            let mut sink = sink.with_face(&face, node_metrics.as_ref());
             sink.push_centred(
                 mirror_header_label(ir, node_box),
                 (
@@ -3894,7 +4194,8 @@ impl GpuRenderPlan {
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
-        let glyph_atlas = GlyphAtlasPlan::for_texts(
+        let default_face = GlyphFace::new(&config.font_family);
+        let glyph_atlas = GlyphAtlasPlan::for_styled_texts(
             chart
                 .headings
                 .iter()
@@ -3910,13 +4211,15 @@ impl GpuRenderPlan {
                         .annotations
                         .iter()
                         .flat_map(|text| text.lines.iter().map(String::as_str)),
-                ),
+                )
+                .map(|text| (default_face.clone(), text)),
             cell_px,
         );
         let mut text_quads = Vec::new();
         let mut text_runs = Vec::new();
         let mut sink = TextSink {
             atlas: &glyph_atlas,
+            face_index: glyph_atlas.face_index(&default_face).unwrap_or(0),
             quads: &mut text_quads,
             runs: &mut text_runs,
             metrics,
@@ -4025,6 +4328,7 @@ impl GpuRenderPlan {
         ir: &MermaidDiagramIr,
         meta: &fm_core::IrXyChartMeta,
         layout: &DiagramLayout,
+        config: &crate::CanvasRenderConfig,
         metrics: &fm_core::FontMetrics,
     ) -> Self {
         use crate::TextAlign;
@@ -4196,12 +4500,18 @@ impl GpuRenderPlan {
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
-        let glyph_atlas =
-            GlyphAtlasPlan::for_texts(labels.iter().map(|label| label.text.as_str()), cell_px);
+        let default_face = GlyphFace::new(&config.font_family);
+        let glyph_atlas = GlyphAtlasPlan::for_styled_texts(
+            labels
+                .iter()
+                .map(|label| (default_face.clone(), label.text.as_str())),
+            cell_px,
+        );
         let mut text_quads = Vec::new();
         let mut text_runs = Vec::new();
         let mut sink = TextSink {
             atlas: &glyph_atlas,
+            face_index: glyph_atlas.face_index(&default_face).unwrap_or(0),
             quads: &mut text_quads,
             runs: &mut text_runs,
             metrics,
@@ -6734,6 +7044,44 @@ mod tests {
         assert_eq!(first.cells, sorted, "cells are not sorted by glyph");
     }
 
+    #[test]
+    fn glyph_atlas_deduplicates_face_glyph_pairs_without_cross_product_cells() {
+        let normal = super::GlyphFace::new("serif");
+        let italic = super::GlyphFace {
+            family: "monospace".into(),
+            weight: "700".into(),
+            style: "italic".into(),
+        };
+        let atlas = super::GlyphAtlasPlan::for_styled_texts(
+            [
+                (normal.clone(), "aa\n"),
+                (italic.clone(), "a界"),
+                (italic.clone(), "界"),
+            ],
+            32,
+        );
+        let reordered = super::GlyphAtlasPlan::for_styled_texts(
+            [(italic.clone(), "界a"), (normal.clone(), "a")],
+            32,
+        );
+        assert_eq!(atlas, reordered);
+        assert_eq!(atlas.faces.len(), 2);
+        assert_eq!(
+            atlas.cells.len(),
+            3,
+            "only requested pairs consume atlas space"
+        );
+        let normal_id = atlas.face_index(&normal).unwrap();
+        let italic_id = atlas.face_index(&italic).unwrap();
+        assert_ne!(normal_id, italic_id);
+        let normal_a = atlas.cell_for_face(normal_id, 'a').unwrap();
+        let italic_a = atlas.cell_for_face(italic_id, 'a').unwrap();
+        assert_ne!(normal_a.uv_min, italic_a.uv_min);
+        assert!(atlas.cell_for_face(normal_id, '界').is_none());
+        assert!(atlas.cell_for_face(italic_id, '界').is_some());
+        assert!(atlas.cell_for_face(u32::MAX, 'a').is_none());
+    }
+
     /// Every cell must be inside the texture and non-degenerate.
     #[test]
     fn glyph_cells_stay_inside_the_texture() {
@@ -9076,24 +9424,12 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map_or(GPU_FULL_SRC, |(production, _tests)| production);
         // (resolver, why it is exempt) — an entry here must cite a bead.
-        const EXEMPT: &[(&str, &str)] = &[
-            (
-                "resolve_cluster_dash_array",
-                "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
+        const EXEMPT: &[(&str, &str)] = &[(
+            "resolve_cluster_dash_array",
+            "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
                  length the SDF lacks. A cluster border is the same rect and can follow the same route; \
                  it is not done here only because that bead scoped itself to nodes",
-            ),
-            (
-                "resolve_declared_node_font",
-                "bd-gpu-single-face-atlas-declared-node-font-9afxb: the GPU text pass is a single-face \
-                 glyph atlas (bd-2u0.2 component 3) keyed by char (GlyphAtlasPlan/GlyphCell), rasterised \
-                 browser-side with one configured family/weight (glyph_raster::rasterize_atlas). Declared \
-                 font-SIZE is honoured via per-run font_px and cell sizing, but per-node \
-                 font-WEIGHT/STYLE/FAMILY is an atlas-wide property the plan cannot vary until a \
-                 multi-face atlas lands; until then the raster pass (resolve_node_font) is the only \
-                 renderer that applies it",
-            ),
-        ];
+        )];
 
         let mut resolvers = Vec::new();
         let mut rest = RENDERER_SRC;

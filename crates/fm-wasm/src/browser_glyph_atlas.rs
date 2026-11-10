@@ -2,10 +2,38 @@
 //!
 //! Each quad samples a square cell, independently of the glyph's advance. Ink is centered
 //! horizontally in that cell and placed on one shared alphabetic baseline. Canvas supplies
-//! the configured font stack, including browser font fallback; no font file is bundled here.
+//! each run's family, weight and style, including browser font fallback; no font file is
+//! bundled here. Different faces occupy different cells even when they draw the same character.
 
-#[cfg(target_arch = "wasm32")]
-use fm_render_canvas::GlyphAtlasPlan;
+use fm_render_canvas::{GlyphAtlasPlan, GlyphCell, GlyphFace};
+
+/// Keep the font declaration attached to the atlas instead of accepting a second, potentially
+/// stale family from the caller. The planner resolves authored components through the same
+/// validated node-font cascade as Canvas2D.
+fn css_font(face: &GlyphFace, size: f64) -> String {
+    let family = if face.family.trim().is_empty() {
+        "sans-serif"
+    } else {
+        face.family.trim()
+    };
+    format!("{} {} {size}px {family}", face.style, face.weight)
+}
+
+/// Group in one pass, so a document with many authored faces does not rescan every glyph for
+/// every face. Invalid face IDs fail explicitly rather than rasterizing in the previous font.
+fn cells_by_face(plan: &GlyphAtlasPlan) -> Result<Vec<Vec<&GlyphCell>>, String> {
+    let mut batches = vec![Vec::new(); plan.faces.len()];
+    for cell in &plan.cells {
+        let batch = batches.get_mut(cell.face_index as usize).ok_or_else(|| {
+            format!(
+                "WebGPU glyph atlas references unknown face {}",
+                cell.face_index
+            )
+        })?;
+        batch.push(cell);
+    }
+    Ok(batches)
+}
 
 pub(crate) fn coverage_len([width, height]: [u32; 2]) -> Result<usize, String> {
     if width == 0 || height == 0 {
@@ -39,7 +67,7 @@ impl InkMetrics {
     }
 }
 
-/// Choose ONE size for the entire atlas, including fallback glyphs and deep descenders.
+/// Choose ONE size for a face, including its fallback glyphs and deep descenders.
 /// Resizing individual glyphs would enlarge punctuation and destroy relative letter heights.
 fn fitted_font_size(cell: f64, baseline: f64, metrics: &[InkMetrics]) -> Result<f64, String> {
     if !cell.is_finite()
@@ -92,7 +120,10 @@ fn alpha_coverage(rgba: &[u8], dimensions: [u32; 2]) -> Result<Vec<u8>, String> 
 
 #[cfg(target_arch = "wasm32")]
 mod browser {
-    use super::{GlyphAtlasPlan, InkMetrics, alpha_coverage, coverage_len, fitted_font_size};
+    use super::{
+        GlyphAtlasPlan, InkMetrics, alpha_coverage, cells_by_face, coverage_len, css_font,
+        fitted_font_size,
+    };
     use js_sys::{Function, Promise, Reflect};
     use wasm_bindgen::{JsCast, JsValue};
     use web_sys::CanvasRenderingContext2d;
@@ -181,57 +212,79 @@ mod browser {
         })
     }
 
-    pub(crate) async fn rasterize(
-        plan: &GlyphAtlasPlan,
-        font_family: &str,
-    ) -> Result<Vec<u8>, String> {
+    /// Canvas ignores invalid font assignments instead of returning an error. Never let a bad
+    /// family inherit the previous face's glyphs, including on hosts without FontFaceSet.load.
+    /// Two valid sentinels distinguish rejection from a valid request equal to either sentinel.
+    fn set_font_checked(context: &CanvasRenderingContext2d, font: &str) -> Result<(), String> {
+        context.set_font("1px serif");
+        let first = context.font();
+        context.set_font(font);
+        if context.font() != first {
+            return Ok(());
+        }
+        context.set_font("2px serif");
+        let second = context.font();
+        context.set_font(font);
+        if context.font() == second {
+            return Err(format!(
+                "WebGPU glyph atlas has an invalid browser font: {font:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn rasterize(plan: &GlyphAtlasPlan) -> Result<Vec<u8>, String> {
         coverage_len(plan.texture_px)?;
-        let font_family = if font_family.trim().is_empty() {
-            "sans-serif"
-        } else {
-            font_family
-        };
-        let initial_font = format!("{}px {font_family}", plan.cell_px);
-        let sample: String = plan.cells.iter().map(|cell| cell.glyph).collect();
-        load_fonts(&initial_font, &sample).await?;
+        let batches = cells_by_face(plan)?;
 
         let [width, height] = plan.texture_px;
         let context = create_context(width, height)?;
         context.set_text_align("left");
         context.set_text_baseline("alphabetic");
-        context.set_font(&initial_font);
-        let metrics: Vec<_> = plan
-            .cells
-            .iter()
-            .map(|cell| measure(&context, cell.glyph))
-            .collect::<Result<_, _>>()?;
-        let font_px = fitted_font_size(
-            f64::from(plan.cell_px),
-            f64::from(plan.baseline_px),
-            &metrics,
-        )?;
-        context.set_font(&format!("{font_px}px {font_family}"));
         context.set_fill_style_str("#ffffff");
 
-        for cell in &plan.cells {
-            if cell.glyph.is_whitespace() {
+        for (face, cells) in plan.faces.iter().zip(batches) {
+            if cells.is_empty() {
                 continue;
             }
-            let x0 = (f64::from(cell.uv_min[0]) * f64::from(width)).round();
-            let y0 = (f64::from(cell.uv_min[1]) * f64::from(height)).round();
-            let x1 = (f64::from(cell.uv_max[0]) * f64::from(width)).round();
-            let y1 = (f64::from(cell.uv_max[1]) * f64::from(height)).round();
-            let metrics = measure(&context, cell.glyph)?;
-            let x = metrics.centered_origin(x0, x1 - x0);
-            let y = y0 + f64::from(plan.baseline_px);
-            context.save();
-            context.begin_path();
-            context.rect(x0, y0, x1 - x0, y1 - y0);
-            context.clip();
-            let painted = context.fill_text(&cell.glyph.to_string(), x, y);
-            context.restore();
-            painted
-                .map_err(|error| js_failure("failed to rasterize a WebGPU label glyph", error))?;
+            let initial_font = css_font(face, f64::from(plan.cell_px));
+            let sample: String = cells.iter().map(|cell| cell.glyph).collect();
+            // Load each actual face and its characters: loading only the family misses bold or
+            // italic web-font resources, and a generic sample misses unicode-range subsets.
+            load_fonts(&initial_font, &sample).await?;
+            set_font_checked(&context, &initial_font)?;
+            let metrics: Vec<_> = cells
+                .iter()
+                .map(|cell| measure(&context, cell.glyph))
+                .collect::<Result<_, _>>()?;
+            let font_px = fitted_font_size(
+                f64::from(plan.cell_px),
+                f64::from(plan.baseline_px),
+                &metrics,
+            )?;
+            set_font_checked(&context, &css_font(face, font_px))?;
+
+            for cell in cells {
+                if cell.glyph.is_whitespace() {
+                    continue;
+                }
+                let x0 = (f64::from(cell.uv_min[0]) * f64::from(width)).round();
+                let y0 = (f64::from(cell.uv_min[1]) * f64::from(height)).round();
+                let x1 = (f64::from(cell.uv_max[0]) * f64::from(width)).round();
+                let y1 = (f64::from(cell.uv_max[1]) * f64::from(height)).round();
+                let metrics = measure(&context, cell.glyph)?;
+                let x = metrics.centered_origin(x0, x1 - x0);
+                let y = y0 + f64::from(plan.baseline_px);
+                context.save();
+                context.begin_path();
+                context.rect(x0, y0, x1 - x0, y1 - y0);
+                context.clip();
+                let painted = context.fill_text(&cell.glyph.to_string(), x, y);
+                context.restore();
+                painted.map_err(|error| {
+                    js_failure("failed to rasterize a WebGPU label glyph", error)
+                })?;
+            }
         }
         let rgba = context
             // web-sys uses f64 here in its stable API and i32 with unstable APIs enabled.
@@ -248,6 +301,63 @@ pub(crate) use browser::rasterize;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_faces_keep_distinct_loading_samples_and_css_fonts() {
+        let regular = GlyphFace::new("'Atlas Test', sans-serif");
+        let bold_italic = GlyphFace {
+            family: "'Atlas Test', sans-serif".to_string(),
+            weight: "700".to_string(),
+            style: "italic".to_string(),
+        };
+        let monospace = GlyphFace::new("monospace");
+        let plan = GlyphAtlasPlan::for_styled_texts(
+            [
+                (regular.clone(), "Ag"),
+                (bold_italic.clone(), "Aé"),
+                (monospace.clone(), "漢"),
+            ],
+            32,
+        );
+        let batches = cells_by_face(&plan).unwrap();
+        for (face, expected) in [(&regular, "Ag"), (&bold_italic, "Aé"), (&monospace, "漢")] {
+            let index = plan.face_index(face).unwrap() as usize;
+            let sample: String = batches[index].iter().map(|cell| cell.glyph).collect();
+            assert_eq!(
+                sample, expected,
+                "each face loads only its actual characters"
+            );
+            assert!(
+                batches[index]
+                    .iter()
+                    .all(|cell| cell.face_index as usize == index)
+            );
+        }
+        assert_eq!(
+            css_font(&regular, 32.0),
+            "normal normal 32px 'Atlas Test', sans-serif"
+        );
+        assert_eq!(
+            css_font(&bold_italic, 24.5),
+            "italic 700 24.5px 'Atlas Test', sans-serif"
+        );
+        assert_eq!(css_font(&monospace, 16.0), "normal normal 16px monospace");
+        let regular_a = plan
+            .cell_for_face(plan.face_index(&regular).unwrap(), 'A')
+            .unwrap();
+        let bold_a = plan
+            .cell_for_face(plan.face_index(&bold_italic).unwrap(), 'A')
+            .unwrap();
+        assert_ne!(regular_a.uv_min, bold_a.uv_min);
+    }
+
+    #[test]
+    fn atlas_with_unknown_face_fails_before_rasterization() {
+        let mut plan = GlyphAtlasPlan::for_texts(["A"], 32);
+        plan.cells[0].face_index = 99;
+        let error = cells_by_face(&plan).unwrap_err();
+        assert!(error.contains("unknown face 99"), "{error}");
+    }
 
     #[test]
     fn a_shared_size_fits_accents_descenders_and_wide_fallback_glyphs() {

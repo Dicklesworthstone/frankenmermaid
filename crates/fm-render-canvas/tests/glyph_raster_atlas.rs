@@ -10,15 +10,16 @@
 #![cfg(feature = "webgpu")]
 
 use fm_render_canvas::CanvasRenderConfig;
-use fm_render_canvas::GpuRenderPlan;
 use fm_render_canvas::glyph_raster::{
-    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
+    GlyphFaceFonts, GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
+    rasterize_atlas_with_faces,
 };
 use fm_render_canvas::gpu_device::{
     GlyphAtlasTexture, GpuDevice, GpuDeviceError, InstanceDraw, InstancePass, render_instances,
     solid_coverage, text_instance_bytes,
 };
 use fm_render_canvas::gpu_pipeline::text_pipeline;
+use fm_render_canvas::{GlyphAtlasPlan, GlyphFace, GpuRenderPlan, GpuTextSource};
 
 /// A font this box actually has. Chosen by path rather than through fontconfig so the test is
 /// deterministic: fontconfig's "sans-serif" resolves differently per machine, and an atlas rendered
@@ -26,10 +27,14 @@ use fm_render_canvas::gpu_pipeline::text_pipeline;
 const FONT_PATH: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
 fn font_or_skip() -> Option<GlyphFont> {
-    let Ok(bytes) = std::fs::read(FONT_PATH) else {
+    font_at_or_skip(FONT_PATH)
+}
+
+fn font_at_or_skip(path: &str) -> Option<GlyphFont> {
+    let Ok(bytes) = std::fs::read(path) else {
         // Reported, never silent: a test that returns quietly on a fontless box is
         // indistinguishable from one that passed.
-        eprintln!("[glyph] SKIPPED: no font at {FONT_PATH}");
+        eprintln!("[glyph] SKIPPED: no font at {path}");
         return None;
     };
     Some(GlyphFont::from_bytes(&bytes).expect("DejaVuSans should parse"))
@@ -357,6 +362,112 @@ fn rasterising_the_same_atlas_twice_is_byte_identical() {
         "atlas rasterisation is not deterministic"
     );
     assert_eq!(first.rendered, second.rendered);
+}
+
+/// Same authored text in four declared faces must address four actual sets of letterforms. This
+/// exercises source parsing, the declared style cascade, plan UVs and real native font rasterizers.
+#[test]
+fn declared_weight_style_and_family_sample_their_real_font_outlines() {
+    let (Some(regular), Some(bold), Some(oblique), Some(serif)) = (
+        font_or_skip(),
+        font_at_or_skip("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        font_at_or_skip("/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"),
+        font_at_or_skip("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+    ) else {
+        return;
+    };
+    let plan = plan_for(
+        "flowchart LR\n\
+         A[Ag] --> B[Ag] --> C[Ag] --> D[Ag]\n\
+         classDef plain font-family:sans-serif,font-weight:normal,font-style:normal\n\
+         classDef strong font-family:sans-serif,font-weight:bold,font-style:normal\n\
+         classDef slanted font-family:sans-serif,font-weight:normal,font-style:oblique\n\
+         classDef serif font-family:serif,font-weight:normal,font-style:normal\n\
+         class A plain\nclass B strong\nclass C slanted\nclass D serif\n",
+    );
+    let faces = [
+        GlyphFace::new("sans-serif"),
+        GlyphFace {
+            weight: "bold".into(),
+            ..GlyphFace::new("sans-serif")
+        },
+        GlyphFace {
+            style: "oblique".into(),
+            ..GlyphFace::new("sans-serif")
+        },
+        GlyphFace::new("serif"),
+    ];
+    let fonts = [&regular, &bold, &oblique, &serif];
+    let stacks: Vec<_> = fonts.iter().map(|&font| [font]).collect();
+    let bindings: Vec<_> = faces
+        .iter()
+        .zip(&stacks)
+        .map(|(face, fonts)| GlyphFaceFonts { face, fonts })
+        .collect();
+    let coverage = rasterize_atlas_with_faces(&plan.glyph_atlas, &bindings);
+    assert_eq!(coverage.rendered, 8);
+    assert!(
+        coverage.unbound_faces.is_empty(),
+        "{:?}",
+        coverage.unbound_faces
+    );
+    assert!(
+        coverage.missing_cells.is_empty(),
+        "{:?}",
+        coverage.missing_cells
+    );
+    assert!(
+        coverage.clipped_cells.is_empty(),
+        "{:?}",
+        coverage.clipped_cells
+    );
+
+    let atlas = &plan.glyph_atlas;
+    let width = atlas.texture_px[0] as usize;
+    let height = atlas.texture_px[1] as usize;
+    let mut glyph_a_bitmaps = Vec::new();
+    for (node_index, (face, font)) in faces.iter().zip(fonts).enumerate() {
+        let face_index = atlas.face_index(face).expect("declared face is planned");
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == GpuTextSource::Node && run.node_index as usize == node_index)
+            .expect("node has a text run");
+        assert_eq!(run.face_index, face_index);
+        let start = run.first_quad as usize;
+        let end = start + run.quad_count as usize;
+        assert_eq!(run.quad_count, 2);
+        for (glyph, quad) in "Ag".chars().zip(&plan.text_quads[start..end]) {
+            let cell = atlas.cell_for_face(face_index, glyph).expect("glyph cell");
+            assert_eq!(quad.uv_min, cell.uv_min);
+            assert_eq!(quad.uv_max, cell.uv_max);
+            let x0 = (cell.uv_min[0] * width as f32).round() as usize;
+            let y0 = (cell.uv_min[1] * height as f32).round() as usize;
+            let x1 = (cell.uv_max[0] * width as f32).round() as usize;
+            let y1 = (cell.uv_max[1] * height as f32).round() as usize;
+            let pixels: Vec<_> = (y0..y1)
+                .flat_map(|y| {
+                    coverage.bitmap[y * width + x0..y * width + x1]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let single = GlyphAtlasPlan::for_texts([glyph.to_string().as_str()], atlas.cell_px);
+            assert_eq!(pixels, rasterize_atlas(&single, font).bitmap);
+            if glyph == 'A' {
+                glyph_a_bitmaps.push(pixels);
+            }
+        }
+    }
+    // Independent font evidence: four face descriptors must not simply disguise one bitmap.
+    for (index, pixels) in glyph_a_bitmaps.iter().enumerate() {
+        for other in &glyph_a_bitmaps[index + 1..] {
+            assert_ne!(pixels, other, "two declared faces painted the same outline");
+        }
+    }
+    let ink = |pixels: &[u8]| pixels.iter().map(|&value| u64::from(value)).sum::<u64>();
+    assert!(ink(&glyph_a_bitmaps[1]) > ink(&glyph_a_bitmaps[0]));
+    assert_eq!(coverage, rasterize_atlas_with_faces(atlas, &bindings));
 }
 
 /// END TO END ON A DEVICE: the text pipeline sampling a REAL atlas still paints, and paints less

@@ -47,10 +47,10 @@ pub use gpu_layout::{
     edge_buffer_layout, node_buffer_layout, text_buffer_layout,
 };
 pub use gpu_plan::{
-    ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment,
-    GpuMarkerKind, GpuNodeInstance, GpuNodeShape, GpuPieWedge, GpuRenderPlan, GpuTextQuad,
-    GpuTextRun, GpuTextSource, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL, TEXT_ATLAS_WGSL,
-    TRIANGLE_WGSL, parse_paint_rgba,
+    ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GlyphFace, GpuArrowheadInstance,
+    GpuEdgeSegment, GpuMarkerKind, GpuNodeInstance, GpuNodeShape, GpuPieWedge, GpuRenderPlan,
+    GpuTextQuad, GpuTextRun, GpuTextSource, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL,
+    TEXT_ATLAS_WGSL, TRIANGLE_WGSL, parse_paint_rgba,
 };
 pub use interaction::{
     CanvasSession, HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test,

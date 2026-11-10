@@ -1315,7 +1315,8 @@ fn whole_diagram_submission_paints_the_planned_furniture() {
 /// exact counter. Filled synthetic cells alone cannot establish that the digits are legible.
 #[test]
 fn sequence_number_digits_paint_real_glyph_ink_above_their_capsules() {
-    use fm_render_canvas::glyph_raster::{GlyphFont, rasterize_atlas};
+    use fm_render_canvas::GlyphFace;
+    use fm_render_canvas::glyph_raster::{GlyphFaceFonts, GlyphFont, rasterize_atlas_with_faces};
 
     let Some(gpu) = device_or_skip() else {
         return;
@@ -1351,7 +1352,19 @@ fn sequence_number_digits_paint_real_glyph_ink_above_their_capsules() {
         .collect();
     assert_eq!(runs.len(), 2);
     assert_eq!(plan.sequence_number_instances.len(), 2);
-    let coverage = rasterize_atlas(&plan.glyph_atlas, &font);
+    let face = GlyphFace::new(&config.font_family);
+    let coverage = rasterize_atlas_with_faces(
+        &plan.glyph_atlas,
+        &[GlyphFaceFonts {
+            face: &face,
+            fonts: &[&font],
+        }],
+    );
+    assert!(
+        coverage.unbound_faces.is_empty(),
+        "unbound faces: {:?}",
+        coverage.unbound_faces
+    );
     assert!(
         coverage.missing.is_empty(),
         "missing glyphs: {:?}",
@@ -1379,7 +1392,7 @@ fn sequence_number_digits_paint_real_glyph_ink_above_their_capsules() {
         for (quad, glyph) in quads.iter().zip(expected.chars()) {
             let cell = plan
                 .glyph_atlas
-                .cell(glyph)
+                .cell_for_face(run.face_index, glyph)
                 .expect("counter digit is in the atlas");
             assert_eq!(quad.uv_min, cell.uv_min);
             assert_eq!(quad.uv_max, cell.uv_max);

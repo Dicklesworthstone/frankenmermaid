@@ -2122,6 +2122,7 @@ impl Canvas2dRenderer {
         if layout.extensions.sequence_mirror_headers.is_empty() {
             return;
         }
+        let base_metrics = self.config.font_metrics();
         let mut header_font: Option<String> = None;
         for node_box in &layout.extensions.sequence_mirror_headers {
             let x = f64::from(node_box.bounds.x) + offset_x;
@@ -2154,11 +2155,20 @@ impl Canvas2dRenderer {
                 continue;
             }
             ctx.set_fill_style(&self.config.label_color);
-            ctx.set_font(header_font.get_or_insert_with(|| standard_node_font(&self.config)));
+            let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
+            ctx.set_font(declared_font.as_deref().unwrap_or_else(|| {
+                header_font.get_or_insert_with(|| standard_node_font(&self.config))
+            }));
             ctx.set_text_align(TextAlign::Center);
             ctx.set_text_baseline(TextBaseline::Middle);
-            ctx.fill_text(label, x + w / 2.0, y + h / 2.0);
-            self.draw_calls += 1;
+            let metrics = ir.effective_node_font_metrics(node_box.node_index, &base_metrics);
+            let line_height = f64::from(metrics.line_height_px());
+            let first_y =
+                y + h / 2.0 - (label.lines().count().saturating_sub(1) as f64) * line_height / 2.0;
+            for (row, text) in label.lines().enumerate() {
+                ctx.fill_text(text, x + w / 2.0, first_y + row as f64 * line_height);
+                self.draw_calls += 1;
+            }
         }
     }
 
@@ -4987,9 +4997,9 @@ fn sanitize_font_family(value: &str) -> Option<String> {
 #[derive(Default)]
 pub(crate) struct DeclaredNodeFont {
     pub(crate) size: Option<f64>,
-    weight: Option<&'static str>,
-    style: Option<&'static str>,
-    family: Option<String>,
+    pub(crate) weight: Option<&'static str>,
+    pub(crate) style: Option<&'static str>,
+    pub(crate) family: Option<String>,
 }
 
 impl DeclaredNodeFont {
@@ -6470,8 +6480,23 @@ mod tests {
                     + f64::from(crate::gpu_plan::GLYPH_BASELINE_RATIO - 0.5) * font_size;
                 assert!((baseline - row.y).abs() < 0.001);
                 for glyph in row.text.chars() {
-                    assert!(plan.glyph_atlas.cell(glyph).is_some());
+                    assert!(
+                        plan.glyph_atlas
+                            .cell_for_face(run.face_index, glyph)
+                            .is_some()
+                    );
                 }
+                let face = &plan.glyph_atlas.faces[run.face_index as usize];
+                assert_eq!(
+                    face.family,
+                    if authored_font {
+                        "monospace"
+                    } else {
+                        &config.font_family
+                    }
+                );
+                assert_eq!(face.weight, if authored_font { "700" } else { "600" });
+                assert_eq!(face.style, if authored_font { "italic" } else { "normal" });
             }
             if authored_font {
                 assert!(

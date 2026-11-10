@@ -2,10 +2,10 @@
 #![cfg(feature = "webgpu")]
 
 use fm_render_canvas::glyph_raster::{
-    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
-    rasterize_atlas_with_fallbacks,
+    AtlasGlyph, GlyphFaceFonts, GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
+    rasterize_atlas_with_faces, rasterize_atlas_with_fallbacks,
 };
-use fm_render_canvas::{CanvasRenderConfig, GlyphAtlasPlan, GpuRenderPlan};
+use fm_render_canvas::{CanvasRenderConfig, GlyphAtlasPlan, GlyphFace, GpuRenderPlan};
 
 fn plan_for(label: &str) -> GpuRenderPlan {
     let ir = fm_parser::parse(&format!("flowchart LR\n  A[{label}]\n")).ir;
@@ -389,4 +389,290 @@ fn invalid_pixel_sizes_do_not_reach_the_font_rasteriser() {
         assert!(face.rasterize('A', px).is_none());
     }
     assert!(face.rasterize('A', 32.0).is_some());
+}
+
+fn styled_face(weight: &str) -> GlyphFace {
+    GlyphFace {
+        family: "Fixture Sans".into(),
+        weight: weight.into(),
+        style: "normal".into(),
+    }
+}
+
+fn cell_bitmap(plan: &GlyphAtlasPlan, bitmap: &[u8], face_index: u32, glyph: char) -> Vec<u8> {
+    let cell = plan
+        .cell_for_face(face_index, glyph)
+        .expect("requested face has a planned glyph");
+    let width = plan.texture_px[0] as usize;
+    let height = plan.texture_px[1] as usize;
+    let x0 = (cell.uv_min[0] * width as f32).round() as usize;
+    let y0 = (cell.uv_min[1] * height as f32).round() as usize;
+    let x1 = (cell.uv_max[0] * width as f32).round() as usize;
+    let y1 = (cell.uv_max[1] * height as f32).round() as usize;
+    (y0..y1)
+        .flat_map(|y| bitmap[y * width + x0..y * width + x1].iter().copied())
+        .collect()
+}
+
+#[test]
+fn each_declared_face_has_its_own_ordered_character_fallback_stack() {
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let regular_a = font('A', 200);
+    let regular_lambda = font('λ', 300);
+    let bold_a = font('A', 500);
+    let bold_lambda = font('λ', 600);
+    let regular_fonts = [&regular_a, &regular_lambda];
+    let bold_fonts = [&bold_a, &bold_lambda];
+    let plan =
+        GlyphAtlasPlan::for_styled_texts([(regular.clone(), "Aλ"), (bold.clone(), "Aλ")], 32);
+    let bindings = [
+        GlyphFaceFonts {
+            face: &regular,
+            fonts: &regular_fonts,
+        },
+        GlyphFaceFonts {
+            face: &bold,
+            fonts: &bold_fonts,
+        },
+    ];
+    let coverage = rasterize_atlas_with_faces(&plan, &bindings);
+    assert_eq!(coverage.rendered, 4);
+    assert!(coverage.missing_cells.is_empty());
+    assert!(coverage.unbound_faces.is_empty());
+    assert!(coverage.clipped_cells.is_empty());
+
+    // Each cell must match the actual selected font, including the fallback font. Checking only
+    // nonzero ink would let a character-only lookup paint regular outlines into both faces.
+    for (face, glyph, font) in [
+        (&regular, 'A', &regular_a),
+        (&regular, 'λ', &regular_lambda),
+        (&bold, 'A', &bold_a),
+        (&bold, 'λ', &bold_lambda),
+    ] {
+        let single = GlyphAtlasPlan::for_texts([glyph.to_string().as_str()], 32);
+        let reference = rasterize_atlas(&single, font);
+        assert_eq!(
+            cell_bitmap(
+                &plan,
+                &coverage.bitmap,
+                plan.face_index(face).expect("declared face"),
+                glyph,
+            ),
+            reference.bitmap,
+            "cell for {face:?}/{glyph} sampled the wrong font"
+        );
+    }
+    let reversed = [
+        GlyphFaceFonts {
+            face: &bold,
+            fonts: &bold_fonts,
+        },
+        GlyphFaceFonts {
+            face: &regular,
+            fonts: &regular_fonts,
+        },
+    ];
+    assert_eq!(coverage, rasterize_atlas_with_faces(&plan, &reversed));
+}
+
+#[test]
+fn a_missing_character_never_borrows_another_faces_font() {
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let regular_lambda = font('λ', 300);
+    let bold_a = font('A', 500);
+    let plan = GlyphAtlasPlan::for_styled_texts([(regular.clone(), "λ"), (bold.clone(), "λ")], 32);
+    let coverage = rasterize_atlas_with_faces(
+        &plan,
+        &[
+            GlyphFaceFonts {
+                face: &regular,
+                fonts: &[&regular_lambda],
+            },
+            GlyphFaceFonts {
+                face: &bold,
+                fonts: &[&bold_a],
+            },
+        ],
+    );
+    let bold_index = plan.face_index(&bold).expect("bold face");
+    assert_eq!(coverage.rendered, 1);
+    assert!(coverage.unbound_faces.is_empty());
+    assert_eq!(coverage.missing, ['λ']);
+    assert_eq!(
+        coverage.missing_cells,
+        [AtlasGlyph {
+            face_index: bold_index,
+            glyph: 'λ',
+        }]
+    );
+    assert!(
+        cell_bitmap(&plan, &coverage.bitmap, bold_index, 'λ')
+            .iter()
+            .all(|&pixel| pixel == 0)
+    );
+}
+
+#[test]
+fn unbound_faces_and_bound_empty_stacks_have_distinct_diagnostics() {
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let font = font('A', 300);
+    let plan = GlyphAtlasPlan::for_styled_texts([(regular.clone(), "A"), (bold.clone(), "A")], 32);
+    let regular_binding = GlyphFaceFonts {
+        face: &regular,
+        fonts: &[&font],
+    };
+    let absent = rasterize_atlas_with_faces(&plan, &[regular_binding]);
+    let bold_index = plan.face_index(&bold).expect("bold face");
+    assert_eq!(absent.rendered, 1);
+    assert_eq!(absent.unbound_faces, [bold_index]);
+    assert_eq!(
+        absent.missing_cells,
+        [AtlasGlyph {
+            face_index: bold_index,
+            glyph: 'A',
+        }]
+    );
+    let empty = rasterize_atlas_with_faces(
+        &plan,
+        &[
+            GlyphFaceFonts {
+                face: &regular,
+                fonts: &[&font],
+            },
+            GlyphFaceFonts {
+                face: &bold,
+                fonts: &[],
+            },
+        ],
+    );
+    assert!(empty.unbound_faces.is_empty());
+    assert_eq!(empty.missing_cells, absent.missing_cells);
+    assert_eq!(empty.bitmap, absent.bitmap);
+}
+
+#[test]
+fn single_font_entry_points_do_not_silently_discard_weight_or_style() {
+    let font = font('A', 300);
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let italic = GlyphFace {
+        style: "italic".into(),
+        ..regular.clone()
+    };
+    for faces in [vec![bold.clone()], vec![italic], vec![regular, bold]] {
+        let plan = GlyphAtlasPlan::for_styled_texts(faces.into_iter().map(|face| (face, "A")), 32);
+        for coverage in [
+            rasterize_atlas(&plan, &font),
+            rasterize_atlas_with_fallbacks(&plan, &[&font]),
+        ] {
+            assert_eq!(coverage.rendered, 0);
+            assert!(coverage.bitmap.iter().all(|&pixel| pixel == 0));
+            assert_eq!(coverage.unbound_faces.len(), plan.faces.len());
+            assert_eq!(coverage.missing_cells.len(), plan.cells.len());
+        }
+    }
+}
+
+#[test]
+fn declared_faces_fit_their_own_descenders_to_the_common_baseline() {
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let shallow = font('g', 200);
+    let deep = GlyphFont::from_bytes(&font_bytes('g', 200, 600, -600)).expect("deep face parses");
+    let plan = GlyphAtlasPlan::for_styled_texts([(regular.clone(), "g"), (bold.clone(), "g")], 32);
+    assert!(baseline_fits_font(&plan, &shallow));
+    assert!(baseline_fits_font(&plan, &deep));
+    let coverage = rasterize_atlas_with_faces(
+        &plan,
+        &[
+            GlyphFaceFonts {
+                face: &regular,
+                fonts: &[&shallow],
+            },
+            GlyphFaceFonts {
+                face: &bold,
+                fonts: &[&deep],
+            },
+        ],
+    );
+    assert_eq!(coverage.rendered, 2);
+    assert!(coverage.missing_cells.is_empty());
+    assert!(coverage.clipped_cells.is_empty());
+    let baseline = plan.baseline_px.round() as usize;
+    for face in [&regular, &bold] {
+        let pixels = cell_bitmap(
+            &plan,
+            &coverage.bitmap,
+            plan.face_index(face).expect("declared face"),
+            'g',
+        );
+        let bottom = pixels
+            .chunks_exact(plan.cell_px as usize)
+            .rposition(|row| row.iter().any(|&pixel| pixel > 0))
+            .expect("descender has ink");
+        assert!(bottom > baseline, "{face:?} lost its descender");
+    }
+}
+
+#[test]
+fn a_bad_cell_face_index_is_reported_without_using_an_unrelated_font() {
+    let font = font('A', 300);
+    let mut plan = GlyphAtlasPlan::for_texts(["A"], 32);
+    plan.cells[0].face_index = 99;
+    let coverage = rasterize_atlas(&plan, &font);
+    assert_eq!(coverage.rendered, 0);
+    assert_eq!(coverage.unbound_faces, [99]);
+    assert_eq!(
+        coverage.missing_cells,
+        [AtlasGlyph {
+            face_index: 99,
+            glyph: 'A',
+        }]
+    );
+    assert!(coverage.bitmap.iter().all(|&pixel| pixel == 0));
+}
+
+#[test]
+fn clipping_diagnostics_identify_the_face_that_lost_ink() {
+    let regular = styled_face("normal");
+    let bold = styled_face("bold");
+    let narrow = font('A', 200);
+    let oversized = font('A', 2000);
+    let plan = GlyphAtlasPlan::for_styled_texts([(regular.clone(), "A"), (bold.clone(), "A")], 32);
+    let coverage = rasterize_atlas_with_faces(
+        &plan,
+        &[
+            GlyphFaceFonts {
+                face: &regular,
+                fonts: &[&narrow],
+            },
+            GlyphFaceFonts {
+                face: &bold,
+                fonts: &[&oversized],
+            },
+        ],
+    );
+    assert_eq!(coverage.rendered, 2);
+    assert_eq!(coverage.clipped, ['A']);
+    assert_eq!(
+        coverage.clipped_cells,
+        [AtlasGlyph {
+            face_index: plan.face_index(&bold).expect("bold face"),
+            glyph: 'A',
+        }]
+    );
+    let reference = rasterize_atlas(&GlyphAtlasPlan::for_texts(["A"], 32), &narrow);
+    assert_eq!(
+        cell_bitmap(
+            &plan,
+            &coverage.bitmap,
+            plan.face_index(&regular).expect("regular face"),
+            'A',
+        ),
+        reference.bitmap,
+        "clipped face must not overwrite another face's glyph"
+    );
 }

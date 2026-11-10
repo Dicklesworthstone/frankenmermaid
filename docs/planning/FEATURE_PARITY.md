@@ -116,6 +116,7 @@ Current status in this file is grounded in:
 | Click/callback directives with tooltips | Complete | `click nodeId "url" "tooltip"` plus callback hooks; fixture-backed FrankenTUI conformance coverage exists |
 | ER cardinality labels | Complete | Notation parsed and rendered as endpoint labels |
 | Theme variable overrides | Complete | primaryColor, lineColor, clusterBkg, etc. mapped to palette |
+| Authored node typography in GPU text | Complete | Deterministic atlas cells distinguish family, weight, style, and character; node/card/cluster text and mirrored sequence headers consume resolved faces; browser and native rasterizers select each face explicitly |
 | Sequence notes SVG | Complete | Rounded-corner boxes near lifelines |
 | Sequence fragments SVG | Complete | Dashed-border rectangles with kind/label tabs |
 

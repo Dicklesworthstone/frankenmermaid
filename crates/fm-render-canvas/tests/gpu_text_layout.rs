@@ -3,8 +3,8 @@
 use fm_core::{FontMetrics, MermaidDiagramIr};
 use fm_layout::{DiagramLayout, LayoutConfig};
 use fm_render_canvas::{
-    Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GpuRenderPlan, GpuTextQuad, GpuTextRun,
-    GpuTextSource, MockCanvas2dContext,
+    Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GlyphFace, GpuRenderPlan, GpuTextQuad,
+    GpuTextRun, GpuTextSource, MockCanvas2dContext,
 };
 
 struct CanvasRow {
@@ -63,8 +63,14 @@ fn run_text(plan: &GpuRenderPlan, run: &GpuTextRun) -> String {
                 .cells
                 .iter()
                 .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                .map(|cell| {
+                    assert_eq!(
+                        cell.face_index, run.face_index,
+                        "a glyph sampled a different face"
+                    );
+                    cell.glyph
+                })
                 .expect("every emitted quad must address its glyph")
-                .glyph
         })
         .collect()
 }
@@ -293,4 +299,230 @@ fn gpu_multiline_sequence_messages_match_canvas_secondary_text() {
         let reference = rows.iter().find(|row| row.text == text).unwrap();
         assert_centered_row(&plan, run, reference, &config, 17.0);
     }
+}
+
+#[test]
+fn gpu_node_faces_follow_the_style_cascade_and_share_cells_across_sizes() {
+    let ir = fm_parser::parse(
+        "flowchart LR\n A[Shared]:::emphasis\n B[Shared]:::secondary\n C[Shared]\n D[Shared]:::emphasis\n \
+         classDef default font-family:serif,font-weight:400\n \
+         classDef emphasis font-family:monospace,font-weight:700,font-style:italic\n \
+         classDef secondary font-weight:600\n \
+         style B font-family:sans-serif,font-style:oblique\n style D font-size:32px\n",
+    ).ir;
+    assert_eq!(ir.nodes.len(), 4);
+    let config = CanvasRenderConfig {
+        auto_fit: false,
+        ..Default::default()
+    };
+    let layout = configured_layout(&ir, &config);
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let canvas = canvas_rows(&ir, &layout, &config);
+    let expected = [
+        ("A", "monospace", "700", "italic", 15.0),
+        ("B", "sans-serif", "600", "oblique", 15.0),
+        ("C", "serif", "400", "normal", 15.0),
+        ("D", "monospace", "700", "italic", 32.0),
+    ];
+    let mut ids = Vec::new();
+    for (id, family, weight, style, size) in expected {
+        let index = ir.nodes.iter().position(|node| node.id == id).unwrap();
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == GpuTextSource::Node && run.node_index as usize == index)
+            .unwrap();
+        assert_eq!(run_text(&plan, run), "Shared");
+        assert_eq!(
+            plan.glyph_atlas.faces[run.face_index as usize],
+            GlyphFace {
+                family: family.into(),
+                weight: weight.into(),
+                style: style.into()
+            }
+        );
+        let prefix = if style == "normal" {
+            String::new()
+        } else {
+            format!("{style} ")
+        };
+        let font = format!("{prefix}{weight} {size}px {family}");
+        assert!(
+            canvas
+                .iter()
+                .any(|row| row.text == "Shared" && row.font == font),
+            "Canvas must draw the same declared face: {font}"
+        );
+        assert!(
+            quads(&plan, run)
+                .iter()
+                .all(|quad| quad.half_extent == [size as f32 * 0.5; 2])
+        );
+        ids.push(run.face_index);
+    }
+    assert_eq!(ids[0], ids[3], "size does not create another raster face");
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_eq!(plan.glyph_atlas.faces.len(), 3);
+    assert_eq!(
+        plan.glyph_atlas.cells.len(),
+        "Shared".chars().count() * 3,
+        "duplicate labels and unrequested default faces add no cells"
+    );
+    assert_eq!(
+        plan,
+        GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+    );
+}
+
+fn assert_face_matches_canvas(plan: &GpuRenderPlan, run: &GpuTextRun, row: &CanvasRow) {
+    let (prefix, family) = row
+        .font
+        .split_once("px ")
+        .expect("Canvas font has a pixel size");
+    let mut parts: Vec<_> = prefix.split_whitespace().collect();
+    let size: f32 = parts.pop().unwrap().parse().unwrap();
+    let style = parts
+        .iter()
+        .copied()
+        .find(|part| matches!(*part, "italic" | "oblique"))
+        .unwrap_or("normal");
+    let weight = parts
+        .iter()
+        .copied()
+        .find(|part| !matches!(*part, "normal" | "italic" | "oblique"))
+        .unwrap_or("normal");
+    let face = &plan.glyph_atlas.faces[run.face_index as usize];
+    assert_eq!(
+        (&*face.family, &*face.weight, &*face.style),
+        (family, weight, style),
+        "font mismatch for {}",
+        row.text
+    );
+    assert_eq!(run_text(plan, run), row.text);
+    for quad in quads(plan, run) {
+        assert_near(quad.half_extent[1] * 2.0, size);
+    }
+}
+
+#[test]
+fn gpu_card_faces_keep_semantic_emphasis_and_declared_component_overrides() {
+    let fixtures = [
+        "classDiagram\n class Repository~T~ {\n <<interface>>\n +String identifier\n +fetch() List~T~\n +save()*\n }\n",
+        "erDiagram\n CUSTOMER {\n string identifier PK\n int age\n }\n",
+        "C4Context\n System(api, \"Catalog\", \"Stores product data\")\n",
+        "requirementDiagram\n functionalRequirement Secure {\n id: SEC-007\n text: Preserve data\n risk: high\n verifymethod: test\n }\n",
+    ];
+    let config = CanvasRenderConfig {
+        font_family: "serif".into(),
+        auto_fit: false,
+        ..Default::default()
+    };
+    for source in fixtures {
+        // Both direct parsed sources and typed IR styling are public renderer inputs. The latter
+        // must override row defaults independently, without changing their measured font sizes.
+        for declared in [
+            None,
+            Some("font-weight:400;font-style:normal;font-family:monospace"),
+            Some("font-weight:800;font-style:oblique;font-size:27px"),
+        ] {
+            let mut ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.nodes.len(), 1, "fixture must isolate one card");
+            if let Some(style) = declared {
+                ir.nodes[0].inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+            }
+            let layout = configured_layout(&ir, &config);
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let rows = canvas_rows(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::Node)
+                .collect();
+            assert!(
+                runs.len() >= 2,
+                "fixture must exercise multiple card roles: {source}"
+            );
+            for run in runs {
+                let text = run_text(&plan, run);
+                let row = rows.iter().find(|row| row.text == text).unwrap();
+                assert_face_matches_canvas(&plan, run, row);
+            }
+            if declared.is_none() {
+                assert!(
+                    plan.glyph_atlas.faces.len() >= 2,
+                    "semantic emphasis needs distinct faces"
+                );
+            } else {
+                assert_eq!(
+                    plan.glyph_atlas.faces.len(),
+                    1,
+                    "an explicit component overrides every row default"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gpu_and_canvas_sequence_mirrors_keep_the_participants_declared_face_and_rows() {
+    let mut ir = fm_parser::parse(
+        "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+         sequenceDiagram\n\
+         participant A as First<br/><br/>Last\n\
+         participant B as Other\n\
+         A->>B: Send\n",
+    )
+    .ir;
+    assert_eq!(ir.meta.init.config.sequence_mirror_actors, Some(true));
+    let participant = ir.nodes.iter().position(|node| node.id == "A").unwrap();
+    ir.nodes[participant].inline_style = Some(Box::new(fm_core::parse_style_string(
+        "font-size:26px;font-family:monospace;font-weight:700;font-style:italic",
+    )));
+    let config = CanvasRenderConfig {
+        font_size: 18.0,
+        line_height: 1.75,
+        auto_fit: false,
+        ..Default::default()
+    };
+    let layout = configured_layout(&ir, &config);
+    assert_eq!(layout.extensions.sequence_mirror_headers.len(), 2);
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let canvas = canvas_rows(&ir, &layout, &config);
+    let head: Vec<_> = plan
+        .text_runs
+        .iter()
+        .filter(|run| run.source == GpuTextSource::Node && run.node_index as usize == participant)
+        .collect();
+    let mirror: Vec<_> = plan
+        .text_runs
+        .iter()
+        .filter(|run| {
+            run.source == GpuTextSource::MirrorHeader && run.node_index as usize == participant
+        })
+        .collect();
+    assert_eq!((head.len(), mirror.len()), (2, 2));
+    for (head, mirror) in head.iter().zip(&mirror) {
+        assert_eq!(head.face_index, mirror.face_index);
+        let text = run_text(&plan, head);
+        assert_eq!(text, run_text(&plan, mirror));
+        let painted: Vec<_> = canvas.iter().filter(|row| row.text == text).collect();
+        assert_eq!(painted.len(), 2, "both participant rows render {text}");
+        for run in [*head, *mirror] {
+            let row = painted
+                .iter()
+                .min_by(|a, b| {
+                    (a.y - quads(&plan, run)[0].center[1])
+                        .abs()
+                        .total_cmp(&(b.y - quads(&plan, run)[0].center[1]).abs())
+                })
+                .unwrap();
+            assert_face_matches_canvas(&plan, run, row);
+            assert_near(quads(&plan, run)[0].center[1], row.y);
+        }
+    }
+    assert_near(
+        quads(&plan, mirror[1])[0].center[1] - quads(&plan, mirror[0])[0].center[1],
+        26.0 * 1.75 * 2.0,
+    );
 }

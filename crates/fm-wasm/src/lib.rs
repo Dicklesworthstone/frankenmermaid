@@ -379,8 +379,6 @@ impl From<&GpuRenderPlan> for WebGpuPlanSummary {
 struct PlannedWebGpuDiagram {
     #[cfg(test)]
     ir: fm_core::MermaidDiagramIr,
-    #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
-    font_family: String,
     plan: GpuRenderPlan,
 }
 
@@ -452,8 +450,6 @@ fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebG
     Ok(PlannedWebGpuDiagram {
         #[cfg(test)]
         ir: geometry.ir,
-        #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
-        font_family: geometry.canvas.font_family,
         plan,
     })
 }
@@ -2183,7 +2179,7 @@ pub async fn render_webgpu_to_rgba_js(
         None
     } else {
         Some(
-            browser_glyph_atlas::rasterize(&planned.plan.glyph_atlas, &planned.font_family)
+            browser_glyph_atlas::rasterize(&planned.plan.glyph_atlas)
                 .await
                 .map_err(js_error)?,
         )
@@ -5540,9 +5536,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "webgpu")]
     #[test]
-    fn webgpu_labels_retain_the_resolved_font_family() {
+    fn webgpu_labels_retain_resolved_and_authored_font_faces() {
         let _serial = config_guard();
         struct RestoreRuntime(RuntimeConfig);
         impl Drop for RestoreRuntime {
@@ -5556,9 +5551,42 @@ mod tests {
         // SVG typography is the resolved source of truth for layout and all raster surfaces.
         runtime.canvas.font_family = "stale canvas font".to_string();
         write_runtime_config(runtime);
-        let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
-        assert_eq!(planned.font_family, "Atlas Test Font, sans-serif");
-        assert!(!planned.plan.text_quads.is_empty());
+        let planned = build_webgpu_plan(
+            "flowchart LR\nA[Same] --> B[Same]\nstyle A font-family:monospace,font-weight:700,font-style:italic",
+            None,
+        )
+        .unwrap();
+        let node_runs: Vec<_> = planned
+            .plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node)
+            .collect();
+        assert_eq!(node_runs.len(), 2);
+        let mut first_cells = Vec::new();
+        for run in node_runs {
+            let node = &planned.ir.nodes[run.node_index as usize];
+            let face = &planned.plan.glyph_atlas.faces[run.face_index as usize];
+            if node.id == "A" {
+                assert_eq!(face.family, "monospace");
+                assert_eq!(face.weight, "700");
+                assert_eq!(face.style, "italic");
+            } else {
+                assert_eq!(node.id, "B");
+                assert_eq!(face.family, "Atlas Test Font, sans-serif");
+                assert_eq!(face.weight, "normal");
+                assert_eq!(face.style, "normal");
+            }
+            let first = &planned.plan.text_quads[run.first_quad as usize];
+            let cell = planned
+                .plan
+                .glyph_atlas
+                .cell_for_face(run.face_index, 'S')
+                .expect("the resolved face must supply the run's actual glyph");
+            assert_eq!(first.uv_min, cell.uv_min);
+            first_cells.push(first.uv_min);
+        }
+        assert_ne!(first_cells[0], first_cells[1]);
     }
 
     #[test]
