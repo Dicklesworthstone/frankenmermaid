@@ -19,9 +19,9 @@
 //!    would pass a thick link rendered thin; checking only the weight would pass an arrowhead
 //!    rendered as a circle.
 //!
-//! NOT ASSERTED: mermaid's `length` (its rank-distance hint, `A ---> B` pushing B one rank
-//! further). We do not model it, so there is nothing to compare; a row asserting it would be
-//! asserting against ourselves. Say it here rather than let the silence read as coverage.
+//! The recorded TSV predates rank-distance support and has no `length` column. The separate
+//! minimum-length cases below pin the values in Mermaid 11.15.0's `FlowDB.destructEndLink` and
+//! `addSingleLink`, including their ten-rank cap and the trailing operator of an inline label.
 //!
 //! The 8 tokens mermaid REJECTS (`--`, `==`, and those with a head) are deliberately not asserted
 //! as rejections: we accept them as plain lines, which is a lenience that predates this test and is
@@ -268,5 +268,123 @@ fn a_node_id_ending_in_o_or_x_keeps_its_last_byte() {
             .and_then(|id| result.ir.nodes.get(id.0))
             .map(|node| node.id.as_str());
         assert_eq!(resolved, Some(from), "{source:?}");
+    }
+}
+
+#[test]
+fn flowchart_min_length_preserves_the_complete_operator() {
+    // Values from the pinned FlowDB source, kept explicit so this test cannot repeat the
+    // parser's counting algorithm and reproduce the same mistake on both sides.
+    for (token, expected) in [
+        ("-->", 1),
+        ("--->", 2),
+        ("---->", 3),
+        ("---", 1),
+        ("----", 2),
+        ("-----", 3),
+        ("==>", 1),
+        ("===>", 2),
+        ("====>", 3),
+        ("===", 1),
+        ("====", 2),
+        ("-.->", 1),
+        ("-..->", 2),
+        ("-...->", 3),
+        ("-..-", 2),
+        ("..-", 2),
+        ("...->", 3),
+        ("<-->", 1),
+        ("<---->", 3),
+        ("<===>", 2),
+        ("<-...->", 3),
+        ("o--o", 1),
+        ("o----o", 3),
+        ("x===x", 2),
+        ("o-..-o", 2),
+        ("o-->", 2),
+        ("x==>", 2),
+        ("~~~", 1),
+        ("~~~~~", 3),
+        ("---------------->", 10),
+        ("-...............->", 10),
+    ] {
+        for separator in [" ", ""] {
+            // Without a boundary, the leading o/x belongs to the preceding identifier.
+            if separator.is_empty() && token.starts_with(['o', 'x']) {
+                continue;
+            }
+            let source = format!("flowchart LR\nA{separator}{token}{separator}B\n");
+            let result = parse(&source);
+            assert_eq!(result.ir.edges.len(), 1, "{source:?}");
+            let edge = &result.ir.edges[0];
+            let name = |endpoint: fm_core::IrEndpoint| {
+                let id = endpoint.resolved_node_id(&result.ir.ports).unwrap();
+                result.ir.nodes[id.0].id.as_str()
+            };
+            assert_eq!((name(edge.from), name(edge.to)), ("A", "B"), "{source:?}");
+            assert_eq!(edge.min_length(), expected, "{source:?}");
+        }
+    }
+}
+
+#[test]
+fn flowchart_min_length_survives_labels_chains_and_parallel_endpoints() {
+    for (statement, lengths, labels) in [
+        (
+            "A ---->|long| B --> C",
+            vec![3, 1],
+            vec![Some("long"), None],
+        ),
+        (
+            "A -- long ----> B --> C",
+            vec![3, 1],
+            vec![Some("long"), None],
+        ),
+        ("A == thick ====> B", vec![3], vec![Some("thick")]),
+        ("A -. dotted -...-> B", vec![3], vec![Some("dotted")]),
+        (
+            "A & B --->|pair| C & D --> E",
+            vec![2, 2, 2, 2, 1, 1],
+            vec![
+                Some("pair"),
+                Some("pair"),
+                Some("pair"),
+                Some("pair"),
+                None,
+                None,
+            ],
+        ),
+        (
+            "A edge1@----> B\nedge1@{ curve: linear }",
+            vec![3],
+            vec![None],
+        ),
+    ] {
+        let source = format!("flowchart LR\n{statement}\n");
+        let result = parse(&source);
+        assert_eq!(
+            result
+                .ir
+                .edges
+                .iter()
+                .map(fm_core::IrEdge::min_length)
+                .collect::<Vec<_>>(),
+            lengths,
+            "{source:?}"
+        );
+        let actual_labels = result
+            .ir
+            .edges
+            .iter()
+            .map(|edge| edge.label.map(|id| result.ir.labels[id.0].text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual_labels, labels, "{source:?}");
+    }
+
+    // The shared relationship parser must not reinterpret other diagram families as long links.
+    for source in ["classDiagram\nA <|-- B\n", "stateDiagram-v2\nA --> B\n"] {
+        let result = parse(source);
+        assert_eq!(result.ir.edges.len(), 1, "{source:?}");
+        assert_eq!(result.ir.edges[0].min_length(), 1, "{source:?}");
     }
 }

@@ -2000,6 +2000,7 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
 
         if endpoints_differ
             || left.arrow != right.arrow
+            || left.min_length() != right.min_length()
             || left.label != right.label
             || left.span != right.span
             || left.routing().or(previous.meta.edge_routing)
@@ -7735,9 +7736,15 @@ impl IncrementalLayoutEngine {
             }
         }
 
-        // Corridor refinement and component shelves couple geometry across regions. A change in
-        // component size or connectivity must rerun them; size-stable text-only reuse above is valid.
+        // Corridor refinement, component shelves, and long-link rank propagation couple geometry
+        // across regions. A change must rerun them; size-stable text-only reuse above is valid.
         if edge_labels::can_refine_graph_label_spacing(ir)
+            || ir.edges.iter().any(|edge| edge.min_length() > 1)
+            || cached_graph
+                .ir
+                .edges
+                .iter()
+                .any(|edge| edge.min_length() > 1)
             || (ir.constraints.is_empty()
                 && !config.collapse_cycle_clusters
                 && component_packing_groups(ir).len() > 4)
@@ -8111,6 +8118,12 @@ fn dispatch_layout_algorithm_with_config(
 
 /// Return a static reason string that explains *why* the auto-selector chose this algorithm.
 fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'static str {
+    if ir.diagram_type == DiagramType::Flowchart
+        && selected == LayoutAlgorithm::Sugiyama
+        && ir.edges.iter().any(|edge| edge.min_length() > 1)
+    {
+        return "auto_flowchart_min_length";
+    }
     match ir.diagram_type {
         DiagramType::Mindmap => return "auto_diagram_type_mindmap",
         DiagramType::Timeline => return "auto_diagram_type_timeline",
@@ -8152,6 +8165,20 @@ fn preferred_layout_algorithm_with_config(
     ir: &MermaidDiagramIr,
     config: &LayoutConfig,
 ) -> LayoutDispatch {
+    // Authored rank distances require a ranked layout even when topology alone would choose
+    // Force. Explicit algorithm requests bypass this Auto-only source constraint.
+    if ir.diagram_type == DiagramType::Flowchart
+        && ir.edges.iter().any(|edge| edge.min_length() > 1)
+    {
+        return LayoutDispatch {
+            requested: LayoutAlgorithm::Auto,
+            selected: LayoutAlgorithm::Sugiyama,
+            capability_unavailable: false,
+            decision_mode: "source_rank_constraint",
+            reason: auto_selection_reason(ir, LayoutAlgorithm::Sugiyama),
+            ..LayoutDispatch::default()
+        };
+    }
     let selected = match ir.diagram_type {
         DiagramType::Mindmap => LayoutAlgorithm::Radial,
         DiagramType::Timeline => LayoutAlgorithm::Timeline,
@@ -9439,7 +9466,11 @@ fn layout_diagram_tree_traced_impl(
         );
         nodes
     } else {
-        if let Some(path_order) = directed_path_order(ir) {
+        // The path specialization uses node index as depth. Authored long links need the
+        // weighted tree kernel below, which retains their empty ranks and label clearance.
+        if !ir.edges.iter().any(|edge| edge.min_length() > 1)
+            && let Some(path_order) = directed_path_order(ir)
+        {
             return layout_directed_path_tree_traced(
                 ir,
                 path_order,
@@ -9539,7 +9570,13 @@ fn tree_node_boxes(
         })
         .collect();
 
-    let span_centers = compute_tree_span_centers(&tree.roots, &tree.children, &span_sizes, spacing);
+    let span_centers = compute_tree_span_centers(
+        &tree.roots,
+        &tree.children,
+        &tree.depth,
+        &span_sizes,
+        spacing,
+    );
 
     let depth_level_sizes = tree_depth_level_sizes(&tree, node_sizes);
     let depth_centers = depth_level_centers(
@@ -9699,6 +9736,7 @@ pub fn certify_directed_path_layout_prefix(
     edge_count: usize,
 ) -> Option<DirectedPathLayoutPrefix> {
     if ir.direction != GraphDirection::LR
+        || ir.edges.iter().any(|edge| edge.min_length() > 1)
         || ir
             .graph
             .subgraphs
@@ -9800,7 +9838,9 @@ pub fn try_relayout_directed_path_suffix(
     let suffix_node_count = ir.nodes.len().saturating_sub(prefix.node_count);
     // A new nonempty subgraph reserves a compound frame and can move the existing path.
     // Reject it before mutation instead of reusing the flat path's fixed spacing cursor.
+    // Long links likewise invalidate that cursor and its node-index-as-rank assumption.
     if ir.direction != GraphDirection::LR
+        || ir.edges.iter().any(|edge| edge.min_length() > 1)
         || ir
             .graph
             .subgraphs
@@ -16745,6 +16785,14 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
         };
     }
 
+    // Weighted depths and the spanning forest must use the same acyclic orientation. Otherwise
+    // a feedback edge can make a tree child precede its parent, invalidating contour alignment.
+    let weighted_cycles = ir.edges.iter().any(|edge| edge.min_length() > 1).then(|| {
+        let priorities = stable_node_priorities(ir);
+        let cycles = cycle_removal(ir, CycleStrategy::default(), &priorities);
+        (priorities, cycles)
+    });
+
     // Pre-extract the node-id sort keys into a contiguous `Vec<&str>`. The three sorts below
     // order by node id (then index); reading `ir.nodes[idx].id` for a random `idx` during a
     // sort strides through the large `IrNode` struct array (a cache miss per comparison),
@@ -16774,16 +16822,22 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     // `indegree` still counts RAW edges (pre-dedup) exactly as the old push loop did.
     let mut indegree = vec![0_usize; node_count];
     let mut out_start = vec![0_usize; node_count + 1];
-    let resolve = |edge: &fm_core::IrEdge| -> Option<(usize, usize)> {
-        let source = endpoint_node_index(ir, edge.from)?;
-        let target = endpoint_node_index(ir, edge.to)?;
+    let resolve = |edge_index: usize, edge: &fm_core::IrEdge| -> Option<(usize, usize)> {
+        let mut source = endpoint_node_index(ir, edge.from)?;
+        let mut target = endpoint_node_index(ir, edge.to)?;
         if source >= node_count || target >= node_count || source == target {
             return None;
         }
+        if weighted_cycles
+            .as_ref()
+            .is_some_and(|(_, cycles)| cycles.reversed_edge_indexes.contains(&edge_index))
+        {
+            std::mem::swap(&mut source, &mut target);
+        }
         Some((source, target))
     };
-    for edge in &ir.edges {
-        if let Some((source, target)) = resolve(edge) {
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        if let Some((source, target)) = resolve(edge_index, edge) {
             out_start[source + 1] += 1;
             indegree[target] = indegree[target].saturating_add(1);
         }
@@ -16795,8 +16849,8 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     let mut out_len = vec![0_usize; node_count];
     {
         let mut cursor = out_start.clone();
-        for edge in &ir.edges {
-            if let Some((source, target)) = resolve(edge) {
+        for (edge_index, edge) in ir.edges.iter().enumerate() {
+            if let Some((source, target)) = resolve(edge_index, edge) {
                 out_flat[cursor[source]] = target;
                 cursor[source] += 1;
             }
@@ -16899,6 +16953,13 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
         );
     }
 
+    if let Some((priorities, cycles)) = weighted_cycles {
+        // A tree's visual depth is its weighted rank. Use the same propagation as Sugiyama
+        // so a longer branch also pushes a shared downstream node and all its successors.
+        for (node, rank) in rank_assignment(ir, &cycles, &priorities) {
+            depth[node] = rank;
+        }
+    }
     let max_depth = depth.iter().copied().max().unwrap_or(0);
     TreeLayoutStructure {
         roots,
@@ -16947,6 +17008,14 @@ impl TreeContour {
         self.levels
             .push_front((-half_span - self.offset, half_span - self.offset));
     }
+
+    /// Empty ranks have no occupied interval. Padding before merging compares siblings at
+    /// their actual logical depths when their connecting links request different lengths.
+    fn prepend_empty(&mut self, count: usize) {
+        for _ in 0..count {
+            self.levels.push_front((f32::INFINITY, f32::NEG_INFINITY));
+        }
+    }
 }
 
 /// Tidy-tree compaction against the actual contour, rather than a rectangle spanning every
@@ -16956,6 +17025,7 @@ impl TreeContour {
 fn compute_tree_span_centers(
     roots: &[usize],
     children: &TreeChildren,
+    node_depths: &[usize],
     node_span_sizes: &[f32],
     spacing: LayoutSpacing,
 ) -> Vec<f32> {
@@ -16973,12 +17043,13 @@ fn compute_tree_span_centers(
         let mut contour = TreeContour::default();
         let node_children = children.of(node);
         for &child in node_children {
-            centers[child] = contour.append(
-                contours[child]
-                    .take()
-                    .expect("child contour precedes parent"),
-                spacing.node_spacing,
+            let mut child_contour = contours[child]
+                .take()
+                .expect("child contour precedes parent");
+            child_contour.prepend_empty(
+                node_depths[child].saturating_sub(node_depths[node].saturating_add(1)),
             );
+            centers[child] = contour.append(child_contour, spacing.node_spacing);
         }
         let midpoint = node_children
             .last()
@@ -16993,10 +17064,9 @@ fn compute_tree_span_centers(
 
     let mut forest = TreeContour::default();
     for &root in roots {
-        centers[root] = forest.append(
-            contours[root].take().expect("root contour is complete"),
-            spacing.node_spacing * 1.5,
-        );
+        let mut contour = contours[root].take().expect("root contour is complete");
+        contour.prepend_empty(node_depths[root]);
+        centers[root] = forest.append(contour, spacing.node_spacing * 1.5);
     }
     // Coordinates above are relative to each parent. One iterative walk resolves them without
     // revisiting descendants during contour merges or recursing with the input's depth.
@@ -17034,15 +17104,35 @@ fn depth_level_centers(
     // unlabelled trees, and enlarge only the logical gap containing a label.
     let label_gaps = if (0..ir.edges.len()).any(|index| ir.graph_edge_caption(index).is_some()) {
         let ranks: BTreeMap<usize, usize> = node_depths.iter().copied().enumerate().collect();
-        let rank_to_index: BTreeMap<usize, usize> =
-            (0..level_sizes.len()).map(|rank| (rank, rank)).collect();
-        edge_label_rank_gaps(
+        let occupied_ranks: Vec<usize> = level_sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, &size)| (size > 0.0).then_some(rank))
+            .collect();
+        let rank_to_index: BTreeMap<usize, usize> = occupied_ranks
+            .iter()
+            .enumerate()
+            .map(|(index, &rank)| (rank, index))
+            .collect();
+        let occupied_gaps = edge_label_rank_gaps(
             ir,
             &ranks,
             &rank_to_index,
             matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
             metrics,
-        )
+        );
+        let mut gaps = BTreeMap::new();
+        for (index, needed) in occupied_gaps {
+            let start = occupied_ranks[index];
+            let end = occupied_ranks[index + 1];
+            // Spread a caption's clearance across the empty ranks of a long link. Otherwise
+            // a wide LR caption would be ignored because its two endpoints are not adjacent.
+            let per_rank = needed / (end - start) as f32;
+            for rank in start..end {
+                gaps.insert(rank, per_rank);
+            }
+        }
+        gaps
     } else {
         BTreeMap::new()
     };
@@ -19696,18 +19786,18 @@ fn rank_assignment(
 
     let mut ranks = vec![0_usize; node_count];
     let mut in_degree = vec![0_usize; node_count];
-    let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    let mut outgoing: Vec<Vec<(usize, usize)>> = vec![Vec::new(); node_count];
 
     for edge in &edges {
         if edge.source == edge.target {
             continue;
         }
         in_degree[edge.target] = in_degree[edge.target].saturating_add(1);
-        outgoing[edge.source].push(edge.target);
+        outgoing[edge.source].push((edge.target, ir.edges[edge.edge_index].min_length()));
     }
 
     for targets in &mut outgoing {
-        targets.sort_by(|left, right| compare_priority(*left, *right, node_priority));
+        targets.sort_by(|left, right| compare_priority(left.0, right.0, node_priority));
     }
 
     let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
@@ -19722,8 +19812,8 @@ fn rank_assignment(
         visited = visited.saturating_add(1);
         let source_rank = ranks[node_index];
 
-        for target in outgoing[node_index].iter().copied() {
-            let candidate_rank = source_rank.saturating_add(1);
+        for (target, min_length) in outgoing[node_index].iter().copied() {
+            let candidate_rank = source_rank.saturating_add(min_length);
             if candidate_rank > ranks[target] {
                 ranks[target] = candidate_rank;
             }
@@ -19745,7 +19835,8 @@ fn rank_assignment(
                 if edge.source == edge.target {
                     continue;
                 }
-                let candidate_rank = ranks[edge.source].saturating_add(1);
+                let candidate_rank =
+                    ranks[edge.source].saturating_add(ir.edges[edge.edge_index].min_length());
                 if candidate_rank > ranks[edge.target] {
                     ranks[edge.target] = candidate_rank;
                     changed = true;
@@ -19878,8 +19969,9 @@ fn lp_relaxation_layer_assignment(
 
     for edge in &edges {
         if edge.source != edge.target {
+            let min_length = ir.edges[edge.edge_index].min_length() as f64;
             model = model.with(constraint!(
-                rank_vars[edge.target] - rank_vars[edge.source] >= 1.0
+                rank_vars[edge.target] - rank_vars[edge.source] >= min_length
             ));
         }
     }
@@ -21598,7 +21690,9 @@ fn coordinate_assignment(
         .map(|(index, rank)| (*rank, index))
         .collect();
 
-    // Compute primary offsets (rank positions) — unchanged from before.
+    // Keep empty ranks requested by long links: compressing them here would undo the weighted
+    // rank assignment and draw `A ----> B` at the same distance as `A --> B`.
+    let preserve_rank_distances = ir.edges.iter().any(|edge| edge.min_length() > 1);
     let mut rank_span = vec![0.0_f32; ordered_ranks.len()];
     for (rank_index, rank) in ordered_ranks.iter().copied().enumerate() {
         let node_indexes = ordering_by_rank
@@ -21631,7 +21725,15 @@ fn coordinate_assignment(
             .and_then(|&next| label_gaps.get(&rank_index.min(next)))
             .copied()
             .unwrap_or(0.0);
-        primary_cursor += rank_span[rank_index] + spacing.rank_spacing.max(label_gap);
+        let rank_distance = if preserve_rank_distances {
+            iter_order.get(position + 1).map_or(1, |&next| {
+                ordered_ranks[rank_index].abs_diff(ordered_ranks[next])
+            })
+        } else {
+            1
+        };
+        let rank_gap = spacing.rank_spacing * rank_distance as f32;
+        primary_cursor += rank_span[rank_index] + rank_gap.max(label_gap);
     }
 
     // Compute secondary coordinates using Brandes-Köpf 4-way alignment.
@@ -29012,12 +29114,12 @@ mod tests {
         build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
         build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
         compute_node_size, constraint_solution_is_usable, coordinate_assignment,
-        dispatch_layout_algorithm,
-        er_compartment_dimensions, estimate_layout_cost, evaluate_layout_guardrails,
-        find_obstacle_nudge_x, find_obstacle_nudge_y, force_barnes_hut_repulsion,
-        force_direct_repulsion, incremental_overlap_alignment, is_directed_path, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
-        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
+        dispatch_layout_algorithm, er_compartment_dimensions, estimate_layout_cost,
+        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        force_barnes_hut_repulsion, force_direct_repulsion, incremental_overlap_alignment,
+        is_directed_path, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_mindmap_traced, layout_diagram_radial, layout_diagram_sankey,
         layout_diagram_sequence, layout_diagram_sequence_traced, layout_diagram_timeline,
         layout_diagram_traced, layout_diagram_traced_with_algorithm,
@@ -38117,6 +38219,382 @@ mod tests {
         assert_rank_gaps_follow_configured_font_metrics(LayoutAlgorithm::Tree);
     }
 
+    fn flowchart_min_length_clearance(
+        layout: &DiagramLayout,
+        direction: GraphDirection,
+        from: &str,
+        to: &str,
+    ) -> f32 {
+        let bounds = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == id)
+                .unwrap()
+                .bounds
+        };
+        let (a, b) = (bounds(from), bounds(to));
+        match direction {
+            GraphDirection::LR => b.x - a.x - a.width,
+            GraphDirection::RL => a.x - b.x - b.width,
+            GraphDirection::BT => a.y - b.y - b.height,
+            _ => b.y - a.y - a.height,
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_preserves_ranks_and_physical_gaps_in_every_direction() {
+        let rank_spacing = LayoutSpacing::default().rank_spacing;
+        for algorithm in [
+            LayoutAlgorithm::Auto,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Tree,
+        ] {
+            for direction in [
+                GraphDirection::TB,
+                GraphDirection::BT,
+                GraphDirection::LR,
+                GraphDirection::RL,
+            ] {
+                for statement in [
+                    "A---->B-->C",
+                    "A ---->|long| B --> C",
+                    "A -- long ----> B --> C",
+                ] {
+                    let mut ir = parse(&format!("flowchart TB\n{statement}\n")).ir;
+                    ir.direction = direction;
+                    let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    let layout = &traced.layout;
+                    let rank = |id: &str| {
+                        layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_id == id)
+                            .unwrap()
+                            .rank
+                    };
+                    assert_eq!(
+                        rank("B") - rank("A"),
+                        3,
+                        "{algorithm:?}, {direction:?}, {statement}"
+                    );
+                    assert_eq!(
+                        rank("C") - rank("B"),
+                        1,
+                        "the short successor must propagate the longer source rank"
+                    );
+                    let long_gap = flowchart_min_length_clearance(layout, direction, "A", "B");
+                    let short_gap = flowchart_min_length_clearance(layout, direction, "B", "C");
+                    assert!(
+                        long_gap + 0.01 >= 3.0 * rank_spacing,
+                        "empty ranks were compressed: gap={long_gap}, {algorithm:?}, {direction:?}, {statement}"
+                    );
+                    assert!(
+                        (short_gap - rank_spacing).abs() < 0.01,
+                        "the long-link hint leaked onto a unit successor: {short_gap}"
+                    );
+                    assert!(layout.is_geometry_valid());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_propagates_through_merges_and_uneven_tree_branches() {
+        let ir = parse("flowchart TB\nA --> B\nA ----> C\nB --> D\nC --> D\nD --> E\nA ==> C\n").ir;
+        for algorithm in [
+            LayoutAlgorithm::Auto,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Tree,
+        ] {
+            let first = layout_diagram_traced_with_algorithm(&ir, algorithm);
+            let repeated = layout_diagram_traced_with_algorithm(&ir, algorithm);
+            assert_eq!(
+                first.layout, repeated.layout,
+                "{algorithm:?} must remain deterministic"
+            );
+            let nodes = &first.layout.nodes;
+            for edge in &ir.edges {
+                let from = edge.from.resolved_node_id(&ir.ports).unwrap().0;
+                let to = edge.to.resolved_node_id(&ir.ports).unwrap().0;
+                assert!(
+                    nodes[to].rank >= nodes[from].rank + edge.min_length(),
+                    "{algorithm:?} lost a parallel or downstream constraint: {} -> {}",
+                    nodes[from].node_id,
+                    nodes[to].node_id
+                );
+            }
+            let last = nodes.iter().find(|node| node.node_id == "E").unwrap();
+            assert_eq!(last.rank, 5);
+            for (index, a) in nodes.iter().enumerate() {
+                for b in &nodes[index + 1..] {
+                    let overlap_x = a.bounds.x < b.bounds.x + b.bounds.width
+                        && b.bounds.x < a.bounds.x + a.bounds.width;
+                    let overlap_y = a.bounds.y < b.bounds.y + b.bounds.height
+                        && b.bounds.y < a.bounds.y + a.bounds.height;
+                    assert!(
+                        !(overlap_x && overlap_y),
+                        "weighted tree contours overlapped {} and {}",
+                        a.node_id,
+                        b.node_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_keeps_compound_directions_and_long_caption_clearance() {
+        let caption = "Confirm every requested item is available before committing the reservation";
+        let needed = fm_core::FontMetrics::default_metrics()
+            .estimate_width(caption)
+            .mul_add(1.4, 40.0);
+        for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+            for direction in [GraphDirection::LR, GraphDirection::RL] {
+                let mut ir = parse(&format!("flowchart LR\nA ---->|{caption}| B --> C\n")).ir;
+                ir.direction = direction;
+                let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                let gap = flowchart_min_length_clearance(&traced.layout, direction, "A", "B");
+                assert!(
+                    gap + 0.01 >= needed,
+                    "a caption spanning empty ranks lost its clearance: {gap} < {needed}"
+                );
+            }
+            let ir = parse("flowchart TB\nsubgraph group[Workers]\ndirection LR\nA ----> B --> C\nend\nOutside\n").ir;
+            let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+            let gap = flowchart_min_length_clearance(&traced.layout, GraphDirection::LR, "A", "B");
+            assert!(
+                gap + 0.01 >= 3.0 * LayoutSpacing::default().rank_spacing,
+                "compound placement dropped the operator length: {algorithm:?}, {gap}"
+            );
+            assert!(traced.layout.is_geometry_valid());
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_crosses_nested_frames_and_preserves_parallel_maximums() {
+        for algorithm in [
+            LayoutAlgorithm::Auto,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Tree,
+        ] {
+            for direction in [
+                GraphDirection::TB,
+                GraphDirection::BT,
+                GraphDirection::LR,
+                GraphDirection::RL,
+            ] {
+                for relationships in [
+                    "G ----> C\n",
+                    "a ----> C\n",
+                    "a --> C\nb ----> C\n",
+                    "b ----> C\na --> C\n",
+                ] {
+                    let mut ir = parse(&format!(
+                        "flowchart LR\nsubgraph G[Outer]\nsubgraph H[Inner]\na\nb\nend\nend\n{relationships}"
+                    )).ir;
+                    ir.direction = direction;
+                    let cluster = ir
+                        .graph
+                        .subgraphs
+                        .iter()
+                        .find(|group| group.key == "G")
+                        .and_then(|group| group.cluster)
+                        .unwrap();
+                    let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    let frame = traced
+                        .layout
+                        .clusters
+                        .iter()
+                        .find(|frame| frame.cluster_index == cluster.0)
+                        .unwrap()
+                        .bounds;
+                    let target = traced
+                        .layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == "C")
+                        .unwrap()
+                        .bounds;
+                    let gap = match direction {
+                        GraphDirection::LR => target.x - frame.x - frame.width,
+                        GraphDirection::RL => frame.x - target.x - target.width,
+                        GraphDirection::BT => frame.y - target.y - target.height,
+                        _ => target.y - frame.y - frame.height,
+                    };
+                    assert!(
+                        gap + 0.01 >= 3.0 * LayoutSpacing::default().rank_spacing,
+                        "collapsed parallel edges lost their longest hint: {algorithm:?}, {direction:?}, {relationships:?}, gap={gap}"
+                    );
+                    assert_eq!(traced.layout.edges.len(), ir.edges.len());
+                    assert!(traced.layout.is_geometry_valid());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_auto_uses_ranked_layout_for_dense_graphs() {
+        // This same topology selects Force without an authored rank constraint.
+        let edges: Vec<_> = (0..35)
+            .flat_map(|from| ((from + 1)..35).map(move |to| (from, to)))
+            .take(100)
+            .collect();
+        let mut ir = graph_ir(DiagramType::Flowchart, 35, &edges);
+        let config = LayoutConfig {
+            fnx_enabled: false,
+            ..LayoutConfig::default()
+        };
+        assert_eq!(
+            super::dispatch_layout_algorithm_with_config(&ir, LayoutAlgorithm::Auto, &config)
+                .selected,
+            LayoutAlgorithm::Force
+        );
+        ir.edges[0].extras_mut().min_length = Some(4);
+        let dispatch =
+            super::dispatch_layout_algorithm_with_config(&ir, LayoutAlgorithm::Auto, &config);
+        assert_eq!(dispatch.selected, LayoutAlgorithm::Sugiyama);
+        assert_eq!(dispatch.decision_mode, "source_rank_constraint");
+        assert_eq!(dispatch.reason, "auto_flowchart_min_length");
+        assert_eq!(
+            super::dispatch_layout_algorithm_with_config(&ir, LayoutAlgorithm::Force, &config)
+                .selected,
+            LayoutAlgorithm::Force,
+            "an explicit unranked algorithm remains an explicit choice"
+        );
+
+        // Generous guards make the source constraint, rather than a budget fallback, responsible
+        // for the ranked result. The long edge must still propagate through every successor.
+        let traced = layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            LayoutGuardrails {
+                max_layout_time_ms: 100_000,
+                max_layout_iterations: 100_000,
+                max_route_ops: 1_000_000,
+            },
+        );
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sugiyama);
+        assert!(!traced.trace.guard.fallback_applied);
+        for edge in &ir.edges {
+            let from = edge.from.resolved_node_id(&ir.ports).unwrap().0;
+            let to = edge.to.resolved_node_id(&ir.ports).unwrap().0;
+            assert!(
+                traced.layout.nodes[to].rank >= traced.layout.nodes[from].rank + edge.min_length()
+            );
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_survives_cycle_orientation_and_lp_layering() {
+        let ir = parse("flowchart TB\nA ----> B\nB --> C\nC --> A\nC --> D\n").ir;
+        let priorities = super::stable_node_priorities(&ir);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        assert!(!cycles.reversed_edge_indexes.is_empty());
+        let ranks = super::rank_assignment(&ir, &cycles, &priorities);
+        let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &ranks)
+            .expect("weighted layer inequalities have an integral optimum");
+        for assignment in [&ranks, &relaxed] {
+            for edge in super::oriented_edges(&ir, &cycles.reversed_edge_indexes) {
+                assert!(
+                    assignment[&edge.target]
+                        >= assignment[&edge.source] + ir.edges[edge.edge_index].min_length()
+                );
+            }
+        }
+        let tree = super::build_tree_layout_structure(&ir);
+        for node in 0..ir.nodes.len() {
+            for &child in tree.children.of(node) {
+                assert!(
+                    tree.depth[child] > tree.depth[node],
+                    "the contour forest must use the weighted ranks' cycle orientation"
+                );
+            }
+        }
+        for algorithm in [
+            LayoutAlgorithm::Auto,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Tree,
+        ] {
+            for source in [
+                "flowchart TB\nA ----> B\nB --> C\nC --> A\nC --> D\n",
+                "flowchart TB\nsubgraph group[Cycle]\ndirection LR\nA ----> B\nB --> C\nC --> A\nC --> D\nend\n",
+            ] {
+                let ir = parse(source).ir;
+                let first = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                let repeated = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                assert_eq!(first.layout, repeated.layout);
+                assert!(first.layout.is_geometry_valid());
+                assert_eq!(first.layout.edges.len(), ir.edges.len());
+                for (index, a) in first.layout.nodes.iter().enumerate() {
+                    for b in &first.layout.nodes[index + 1..] {
+                        let overlap_x = a.bounds.x < b.bounds.x + b.bounds.width
+                            && b.bounds.x < a.bounds.x + a.bounds.width;
+                        let overlap_y = a.bounds.y < b.bounds.y + b.bounds.height
+                            && b.bounds.y < a.bounds.y + a.bounds.height;
+                        assert!(
+                            !(overlap_x && overlap_y),
+                            "cyclic long links overlapped {} and {} in {algorithm:?}",
+                            a.node_id,
+                            b.node_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_min_length_edits_invalidate_incremental_ranks_and_prefix_reuse() {
+        let mut ir = large_subgraph_dependency_ir();
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = LayoutConfig::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let fingerprint = super::adapton::ir_fingerprint(&ir);
+        // Mutate only the hint: unchanged spans/endpoints must not hide this from the edit walk.
+        ir.edges[0].extras_mut().min_length = Some(4);
+        assert_ne!(fingerprint, super::adapton::ir_fingerprint(&ir));
+        let edited = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let fresh =
+            super::layout_diagram_traced_with_config(&ir, LayoutAlgorithm::Sugiyama, config);
+        assert_ne!(before.layout.nodes, edited.layout.nodes);
+        assert_eq!(edited.layout.nodes, fresh.layout.nodes);
+        assert_eq!(edited.layout.edges, fresh.layout.edges);
+        assert_eq!(edited.layout.bounds, fresh.layout.bounds);
+
+        let base = parse("flowchart LR\nA --> B --> C\n").ir;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2).unwrap();
+        let next = parse("flowchart LR\nA --> B --> C ----> D\n").ir;
+        let mut cached = before.clone();
+        assert!(!try_relayout_directed_path_suffix(
+            &next,
+            &mut cached,
+            &prefix
+        ));
+        assert_eq!(
+            cached, before,
+            "rejected unit-rank reuse must not mutate geometry"
+        );
+        let full = layout_diagram_tree(&next);
+        assert!(certify_directed_path_layout_prefix(&next, &full, 3, 2).is_none());
+        assert!(
+            flowchart_min_length_clearance(&full, GraphDirection::LR, "C", "D")
+                >= 3.0 * LayoutSpacing::default().rank_spacing
+        );
+    }
+
     #[test]
     fn c4_rank_gaps_measure_technology_rows_in_every_direction() {
         let metrics = fm_core::FontMetrics::default_metrics();
@@ -38651,6 +39129,7 @@ mod tests {
             let centers = super::compute_tree_span_centers(
                 &[0],
                 &children,
+                &(0..=DEPTH).chain(1..=DEPTH).collect::<Vec<_>>(),
                 &vec![100.0; count],
                 LayoutSpacing::default(),
             );

@@ -516,7 +516,12 @@ fn edge_dash_masks(pattern: &[f64]) -> Vec<([f32; 2], f32)> {
     if pattern.is_empty() {
         return vec![([0.0, 0.0], 0.0)];
     }
-    let count = pattern.len() * if pattern.len() % 2 == 0 { 1 } else { 2 };
+    let count = pattern.len()
+        * if pattern.len().is_multiple_of(2) {
+            1
+        } else {
+            2
+        };
     let period: f64 = pattern.iter().cycle().take(count).sum();
     if period <= 0.0 || !(period as f32).is_finite() {
         return vec![([0.0, 0.0], 0.0)];

@@ -2890,6 +2890,17 @@ impl IrBuilder {
         });
     }
 
+    /// Preserve the flowchart operator's rank-distance hint without allocating extras for
+    /// ordinary one-rank edges. Other diagram families reuse the edge parser but not this syntax.
+    pub(crate) fn set_last_edge_min_length(&mut self, min_length: u8) {
+        if self.ir.diagram_type == DiagramType::Flowchart
+            && min_length > 1
+            && let Some(edge) = self.ir.edges.last_mut()
+        {
+            edge.extras_mut().min_length = Some(min_length.min(10));
+        }
+    }
+
     /// Associate a source-level Mermaid edge ID with the edge just lowered.
     pub(crate) fn set_last_edge_id(&mut self, edge_id: &str) {
         let Some(edge_index) = self.ir.edges.len().checked_sub(1) else {

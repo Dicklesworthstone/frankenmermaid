@@ -856,6 +856,7 @@ enum FlowAst {
     Edge {
         from: FlowAstNode,
         arrow: ArrowType,
+        min_length: u8,
         label: Option<String>,
         edge_id: Option<String>,
         to: FlowAstNode,
@@ -1202,6 +1203,7 @@ fn flow_statement_parser<'a>()
         .map(|(((from, arrow_type), label_opt), to)| FlowAst::Edge {
             from,
             arrow: arrow_type,
+            min_length: 1,
             label: label_opt.flatten(),
             edge_id: None,
             to,
@@ -1354,6 +1356,7 @@ fn lower_flow_ast(
         FlowAst::Edge {
             from,
             arrow,
+            min_length,
             label,
             edge_id,
             to,
@@ -1364,6 +1367,7 @@ fn lower_flow_ast(
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
                 builder.push_flow_edge((f, &from.id), (t, &to.id), *arrow, label.as_deref(), span);
+                builder.set_last_edge_min_length(*min_length);
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);
                 }
@@ -3539,6 +3543,19 @@ fn fast_path_cannot_classify_run(statement: &str) -> bool {
     let bytes = statement.as_bytes();
     let mut i = 0_usize;
     while i < bytes.len() {
+        // The full grammar also accepts dotted links without a leading dash (`A ..-> B`).
+        // Their dots are identifier bytes, so a node fast path must not swallow the whole link.
+        if bytes[i] == b'.' {
+            let mut j = i;
+            while bytes.get(j) == Some(&b'.') {
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b'-') {
+                return true;
+            }
+            i = j;
+            continue;
+        }
         if bytes[i] != b'-' {
             i += 1;
             continue;
@@ -3568,10 +3585,10 @@ fn fast_path_cannot_classify_run(statement: &str) -> bool {
         while bytes.get(j) == Some(&b'-') {
             j += 1;
         }
-        // A run ending in `>` needs no help: `>` is not an identifier byte, so the node path
-        // rejects it and the full matcher gets the statement anyway. `o` and `x` ARE identifier
-        // bytes, and that is precisely the defect.
-        if j - i >= 3 && matches!(bytes.get(j), Some(b'o' | b'x')) {
+        // The fixed-token parsers must not split a long run into an ordinary operator plus an
+        // identifier dash (`A----B` -> `A --- -B`, or `A--->B` -> `A- --> B`). Only the full
+        // matcher retains the complete operator and therefore its minimum rank distance.
+        if j - i > 3 || (j - i >= 3 && matches!(bytes.get(j), Some(b'>' | b'o' | b'x'))) {
             return true;
         }
         i = j;
@@ -3602,6 +3619,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
             classes: Vec::new(),
         },
         arrow,
+        min_length: 1,
         label: None,
         edge_id: None,
         to: FlowAstNode {
@@ -5550,12 +5568,14 @@ fn with_edge_label(ast: FlowAst, label: &str) -> FlowAst {
         FlowAst::Edge {
             from,
             arrow,
+            min_length,
             label: existing,
             edge_id,
             to,
         } => FlowAst::Edge {
             from,
             arrow,
+            min_length,
             label: existing.or_else(|| Some(label.to_string())),
             edge_id,
             to,
@@ -5573,12 +5593,14 @@ fn swap_edge_endpoints(ast: FlowAst) -> FlowAst {
         FlowAst::Edge {
             from,
             arrow,
+            min_length,
             label,
             edge_id,
             to,
         } => FlowAst::Edge {
             from: to,
             arrow,
+            min_length,
             label,
             edge_id,
             to: from,
@@ -6209,12 +6231,14 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
                         FlowAst::Edge {
                             from,
                             arrow,
+                            min_length,
                             label,
                             edge_id,
                             to,
                         } => FlowAst::Edge {
                             from,
                             arrow,
+                            min_length,
                             label: label.or_else(|| Some(text.to_string())),
                             edge_id,
                             to,
@@ -6517,6 +6541,7 @@ fn lower_state_flow_ast(
         FlowAst::Edge {
             from,
             arrow,
+            min_length: _,
             label,
             edge_id,
             to,
@@ -15165,6 +15190,7 @@ fn parse_edge_statement_asts(
         let edge_label;
         let right_without_label;
         let mut current_arrow = arrow;
+        let mut current_min_length = flow_link_min_length(operator);
 
         // Check for A -- label --> B syntax
         if is_arrow_prefix(operator)
@@ -15173,6 +15199,8 @@ fn parse_edge_statement_asts(
             let label_part = trim_fast(&statement[rhs_start..n_idx]);
             edge_label = clean_label(Some(label_part));
             current_arrow = n_arrow;
+            // In `A -- label ----> B`, Mermaid takes length from the trailing LINK only.
+            current_min_length = flow_link_min_length(n_op);
 
             // Now we need to find the node AFTER the second operator
             let after_next_start = n_idx + n_op.len();
@@ -15196,6 +15224,7 @@ fn parse_edge_statement_asts(
                     asts.push(FlowAst::Edge {
                         from: from_node.clone().into(),
                         arrow,
+                        min_length: current_min_length,
                         label: None,
                         edge_id: (asts.is_empty() && edge_position == 0)
                             .then(|| edge_id.clone())
@@ -15231,6 +15260,7 @@ fn parse_edge_statement_asts(
                 asts.push(FlowAst::Edge {
                     from: from_node.clone().into(),
                     arrow: current_arrow,
+                    min_length: current_min_length,
                     label: edge_label.clone(),
                     edge_id: asts.is_empty().then(|| edge_id.clone()).flatten(),
                     to: to_node.clone().into(),
@@ -15619,6 +15649,34 @@ fn match_dotted_link(bytes: &[u8], start: usize) -> Option<usize> {
     }
     let len = lead + dots + 1;
     Some(len + usize::from(matches!(bytes.get(start + len), Some(b'x' | b'o' | b'>'))))
+}
+
+/// The rank-distance half of Mermaid 11.15.0's `FlowDB.destructEndLink` / `addSingleLink`.
+///
+/// Strip the terminal byte, then a matching leading marker, exactly as for the arrow below.
+/// Dotted links count dots; all other links count the remaining bytes minus one. In particular
+/// an unmatched head remains part of the length (`o-->` has length two), and invisible links
+/// follow the same rule (`~~~` has length one). Upstream caps every length at ten.
+fn flow_link_min_length(operator: &str) -> u8 {
+    let Some((&tail, mut line)) = operator.as_bytes().split_last() else {
+        return 1;
+    };
+    let paired_head = match tail {
+        b'x' => Some(b'x'),
+        b'o' => Some(b'o'),
+        b'>' => Some(b'<'),
+        _ => None,
+    };
+    if paired_head.is_some_and(|head| line.first() == Some(&head)) {
+        line = &line[1..];
+    }
+    let dots = line.iter().filter(|&&byte| byte == b'.').count();
+    let length = if dots > 0 {
+        dots
+    } else {
+        line.len().saturating_sub(1)
+    };
+    length.clamp(1, 10) as u8
 }
 
 /// mermaid's `destructEndLink`, step for step.

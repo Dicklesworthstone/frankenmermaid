@@ -3933,12 +3933,10 @@ pub struct IrEdge {
     pub arrow: ArrowType,
     pub label: Option<IrLabelId>,
     pub span: Span,
-    /// Diagram-specific edge metadata (ER cardinality, class cardinality, state guard/action),
-    /// boxed together because ALL of it is `None` on every flowchart/sequence edge — the
-    /// overwhelmingly common case. Grouping the five rarely-set fields behind one
-    /// `Option<Box<IrEdgeExtras>>` (8 B, heap only when present) instead of five inline
-    /// `Option<Box<str>>` (80 B) shrinks `IrEdge` 192 → 120 B, cutting the `ir.edges` Vec
-    /// allocation + per-edge move/copy on the hot parse path. Access the fields via the
+    /// Diagram-specific edge metadata (ER cardinality, class cardinality, state guard/action)
+    /// and explicit layout hints, boxed together because ordinary edges need none of them.
+    /// Keeping rarely-set fields behind one `Option<Box<IrEdgeExtras>>` avoids an allocation
+    /// for edges without extra metadata. Access the fields via the
     /// `er_notation()` / `guard()` / … accessors (read) and `extras_mut()` (write).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<Box<IrEdgeExtras>>,
@@ -3977,6 +3975,13 @@ impl GraphEdgeCaption<'_> {
 /// common flowchart/sequence edge pays only a null pointer for all of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrEdgeExtras {
+    /// Minimum rank distance requested by a flowchart link's authored length.
+    ///
+    /// Ordinary links span one rank. Extra dashes, equals signs, or dots request more ranks
+    /// (`A ----> B` spans at least three). Mermaid caps this hint at ten; consumers use
+    /// [`IrEdge::min_length`] to apply that bound to deserialized IR as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u8>,
     /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_notation: Option<Box<str>>,
@@ -4171,6 +4176,18 @@ impl ArchitectureSide {
 }
 
 impl IrEdge {
+    /// Minimum distance between the edge's endpoint ranks, bounded as in Mermaid flowcharts.
+    #[must_use]
+    pub fn min_length(&self) -> usize {
+        usize::from(
+            self.extras
+                .as_ref()
+                .and_then(|extras| extras.min_length)
+                .unwrap_or(1)
+                .clamp(1, 10),
+        )
+    }
+
     /// Raw ER cardinality operator, if any.
     #[must_use]
     pub fn er_notation(&self) -> Option<&str> {
@@ -16437,6 +16454,26 @@ mod tests {
         assert_eq!(edge.from, edge.to);
         assert_eq!(edge.arrow, ArrowType::Circle);
         assert_eq!(edge.label, Some(IrLabelId(3)));
+    }
+
+    #[test]
+    fn ir_edge_min_length_defaults_roundtrips_and_bounds_external_hints() {
+        let mut edge = IrEdge::default();
+        assert_eq!(edge.min_length(), 1);
+        assert!(!serde_json::to_string(&edge).unwrap().contains("min_length"));
+
+        edge.extras_mut().min_length = Some(3);
+        let encoded = serde_json::to_string(&edge).unwrap();
+        let decoded: IrEdge = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, edge);
+        assert_eq!(decoded.min_length(), 3);
+
+        edge.extras_mut().min_length = Some(0);
+        assert_eq!(edge.min_length(), 1);
+        edge.extras_mut().min_length = Some(u8::MAX);
+        assert_eq!(edge.min_length(), 10);
+        edge.extras_mut().min_length = None;
+        assert_eq!(edge.min_length(), 1);
     }
 
     #[test]

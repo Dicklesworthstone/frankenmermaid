@@ -398,6 +398,7 @@ pub fn ir_fingerprint(ir: &fm_core::MermaidDiagramIr) -> u64 {
         // Hash endpoint discriminants (Unresolved=0, Node=1, Port=2)
         hash_u64(&mut hash, endpoint_discriminant(&edge.from) as u64);
         hash_u64(&mut hash, endpoint_discriminant(&edge.to) as u64);
+        hash_u64(&mut hash, edge.min_length() as u64);
     }
 
     // Hash diagram direction (affects layout)
