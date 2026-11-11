@@ -1,6 +1,7 @@
 'use strict';
-// Pure composition/session tests. Only the unused browser-backend import is replaced;
-// renderer results are explicit fixtures, not evidence of native Mermaid parsing.
+// Composition/session fixtures plus existing-source tests against the shipped native WASM.
+// Only the unused browser-backend import is replaced. Fixture tests do not prove parsing;
+// the existing-directive section explicitly invokes parseLens and renderDeck from pkg/.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -308,4 +309,215 @@ test('external document replacement revokes undo and cannot erase the new docume
   assert.equal(h.s.canRedo, false);
   assert.throws(() => h.s.undo(), { name: 'AbortError' });
   assert.throws(() => h.s.redo(), { name: 'AbortError' });
+});
+
+let nativePromise;
+function nativeEngine() {
+  return nativePromise ||= (async () => {
+    const { pathToFileURL } = require('node:url');
+    const directory = path.join(__dirname, '../pkg');
+    const wasm = await import(pathToFileURL(path.join(directory, 'frankenmermaid.js')).href);
+    await wasm.default({ module_or_path: fs.readFileSync(path.join(directory, 'frankenmermaid_bg.wasm')) });
+    return wasm;
+  })();
+}
+const authoredBlock = "%%{deck: {title: 'Authored 雪', extension: {keep: 'yes'}, slides: [\r\n" +
+  "  /* preserve intro */ {id:'intro', title:'Introduction', nodes:['a','b'], custom:{value:42}},\r\n" +
+  "  {id:'detail', nodes:['b'], reveal:'auto'}, // preserve tail\r\n]}}%%";
+const authoredSource = '\uFEFF%% emoji 😀 and CRLF\r\nflowchart LR\r\n a[Alpha] --> b[Beta]\r\n' +
+  authoredBlock + '\r\n%%{deck: {options:{zoomMax:1.8}, slides:[{id:"last", nodes:["a"]}]}}%%\r\n';
+
+async function nativeSourceEdit(source = authoredSource) {
+  const wasm = await nativeEngine();
+  const api = await modulePromise;
+  const s = new api.DeckAuthoringSession({
+    renderDeck: async input => wasm.renderDeck(input),
+    renderSource: async input => ({ snapshot: wasm.parseLens(input) }),
+    checkElements: () => {}, // Actual DOM reference validation is exercised by the browser suite.
+  });
+  s.setSource(source);
+  const document = await s.loadDirectives();
+  const original = await s.editDirective(document, 0);
+  return { api, wasm, s, document, original };
+}
+
+test('native existing-deck load reads JSON5, original selectors and exact UTF-8 ranges', async () => {
+  const h = await nativeSourceEdit();
+  assert.equal(h.document.targets.length, 2);
+  assert.equal(h.document.targets[0].line, 4);
+  assert.equal(h.document.targets[0].raw, authoredBlock);
+  assert.equal(h.original.title, 'Authored 雪');
+  assert.deepEqual(h.original.slides.map(s => s.id), ['intro', 'detail']);
+  assert.equal(h.original.slides[1].reveal, 'auto');
+  assert.equal(h.s.source, authoredSource);
+  assert.equal(h.s.editingSource, true);
+});
+
+test('an unchanged existing deck is byte-identical including JSON5 comments and extensions', async () => {
+  const h = await nativeSourceEdit();
+  const form = structuredClone(h.original);
+  form.slides.forEach(s => { s.edges = 'induced'; }); // The form's implicit default is not a source edit.
+  const plan = h.api.planDeckSourceEdit(h.document, 0, h.original, JSON.stringify(form), [0, 1]);
+  assert.equal(plan.updatedSource, authoredSource);
+  const prepared = await h.s.prepare(JSON.stringify(form), [0, 1]);
+  assert.equal(prepared.updatedSource, authoredSource);
+  assert.equal(prepared.editingSource, true);
+  assert.equal(prepared.existingSlides, 1);
+});
+
+test('native directive comments around the JSON5 object remain verbatim', async () => {
+  const source = "flowchart LR\n a\n%%{deck: /*before*/ {slides:[{id:'s',nodes:['a']}]} /*after*/ }%%";
+  const h = await nativeSourceEdit(source);
+  const form = structuredClone(h.original); form.slides[0].title = 'Edited';
+  const prepared = await h.s.prepare(JSON.stringify(form), [0]);
+  assert.ok(prepared.updatedSource.includes('deck: /*before*/ {'));
+  assert.ok(prepared.updatedSource.endsWith(' /*after*/ }%%'));
+  assert.equal(prepared.deck.manifest.slides[0].title, 'Edited');
+});
+
+test('native editing and reordering changes only requested values and retains other directives', async () => {
+  const h = await nativeSourceEdit();
+  const form = structuredClone(h.original);
+  form.slides[0].title = 'Revised 😀';
+  form.slides.reverse();
+  const prepared = await h.s.prepare(JSON.stringify(form), [1, 0]);
+  const source = h.s.commit(prepared);
+  const target = h.document.targets[0];
+  assert.equal(source.slice(0, target.from), authoredSource.slice(0, target.from));
+  assert.ok(source.endsWith(authoredSource.slice(target.to)));
+  for (const text of ["extension: {keep: 'yes'}", 'custom:{value:42}', '/* preserve intro */', '// preserve tail']) {
+    assert.ok(source.includes(text), text);
+  }
+  assert.ok(source.includes("/* preserve intro */ {id:'intro'"));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['detail', 'intro', 'last']);
+  assert.equal(prepared.deck.manifest.slides[1].title, 'Revised 😀');
+  assert.equal(prepared.deck.manifest.slides[0].zoomMax, Math.fround(1.8));
+  assert.equal(h.s.undo(), authoredSource);
+  assert.equal(h.s.redo(), source);
+  const again = await h.s.prepare(JSON.stringify(form), [1, 0]);
+  assert.equal(again.updatedSource, source);
+});
+
+test('reordering keeps leading and inline comments with their authored slide', async () => {
+  const source = "flowchart LR\n a-->b\n%%{deck:{slides:[\n" +
+    " // intro lead\n {id:'intro',nodes:['a']} /* intro before comma */, // intro tail\n" +
+    " /* detail lead */ {id:'detail',nodes:['b']} // detail tail\n" +
+    " // array footer\n]}}%%";
+  const h = await nativeSourceEdit(source);
+  const noop = await h.s.prepare(JSON.stringify(h.original), [0, 1]);
+  assert.equal(noop.updatedSource, source);
+  const form = structuredClone(h.original); form.slides.reverse();
+  const prepared = await h.s.prepare(JSON.stringify(form), [1, 0]);
+  assert.ok(prepared.updatedSource.includes("/* detail lead */ {id:'detail',nodes:['b']} // detail tail\n,"));
+  assert.ok(prepared.updatedSource.includes("// intro lead\n {id:'intro',nodes:['a']} /* intro before comma */ // intro tail\n"));
+  assert.ok(prepared.updatedSource.endsWith(" // array footer\n]}}%%"));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['detail', 'intro']);
+});
+
+test('editing a later directive retains both earlier slides and last-writer-wins settings', async () => {
+  const h = await nativeSourceEdit();
+  const spec = await h.s.editDirective(h.document, 1);
+  const form = structuredClone(spec);
+  form.slides[0].title = 'Finale';
+  const prepared = await h.s.prepare(JSON.stringify(form), [0]);
+  assert.ok(prepared.updatedSource.startsWith(authoredSource.slice(0, h.document.targets[1].from)));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.title), ['Introduction', 'detail', 'Finale']);
+  assert.equal(prepared.deck.manifest.options.zoomMax, Math.fround(1.8));
+});
+
+test('native property additions, removals and delimiter text remain valid and preserve unknown keys', async () => {
+  const source = "flowchart LR\n a-->b\n%%{deck:{slides:[{id:'s',title:'Before',nodes:['a'],fitMargin:20,custom:{keep:true}}]}}%%";
+  const h = await nativeSourceEdit(source);
+  const form = structuredClone(h.original);
+  delete form.slides[0].title;
+  delete form.slides[0].fitMargin;
+  form.slides[0].caption = 'literal }%% and newline\n雪';
+  form.slides[0].nodes = ['a', 'b'];
+  const prepared = await h.s.prepare(JSON.stringify(form), [0]);
+  assert.ok(prepared.updatedSource.includes('custom:{keep:true}'));
+  assert.equal(prepared.deck.manifest.slides[0].title, 's');
+  assert.equal(prepared.deck.manifest.slides[0].caption, form.slides[0].caption);
+  assert.equal(prepared.deck.manifest.slides[0].fitMargin, 150);
+  assert.equal(prepared.deck.manifest.slides[0].nodes.length, 2);
+  assert.equal((prepared.updatedSource.match(/}\%\%/g) || []).length, 1);
+});
+
+test('removing final optional properties leaves a valid JSON5 object without dropping comments', async () => {
+  const source = "flowchart LR\n a\n%%{deck:{slides:[{id:'s',nodes:['a'], /*keep*/ caption:'old'}], title:'old'}}%%";
+  const h = await nativeSourceEdit(source);
+  const form = structuredClone(h.original);
+  delete form.title; delete form.slides[0].caption;
+  const prepared = await h.s.prepare(JSON.stringify(form), [0]);
+  assert.ok(prepared.updatedSource.includes('/*keep*/'));
+  assert.equal(prepared.deck.manifest.title, undefined);
+  assert.equal(prepared.deck.manifest.slides[0].caption ?? '', '');
+});
+
+test('existing-source mode refuses duplicate keys, escaped property names and lossy native normalization', async () => {
+  const { deckSourceDocument } = await modulePromise;
+  const wasm = await nativeEngine();
+  for (const block of [
+    "%%{deck:{slides:[{id:'s',id:'other',nodes:['a']}]}}%%",
+    "%%{deck:{'slid\\u0065s':[{id:'s',nodes:['a']}]}}%%",
+  ]) {
+    const source = 'flowchart LR\n a\n' + block;
+    assert.throws(() => deckSourceDocument(source, wasm.parseLens(source)), /property names/);
+  }
+  await assert.rejects(nativeSourceEdit("flowchart LR\n a\n%%{deck:{slides:[{id:'s',nodes:['a'],fitMargin:-1}]}}%%"), /source repair/);
+});
+
+test('existing-source mode rejects aliasing another directive and unsupported structural operations', async () => {
+  const h = await nativeSourceEdit();
+  const form = structuredClone(h.original); form.slides[0].id = 'last';
+  await assert.rejects(h.s.prepare(JSON.stringify(form), [0, 1]), /already used/);
+  for (const order of [[0, 0], [1], [0, 2]]) {
+    await assert.rejects(h.s.prepare(JSON.stringify(h.original), order), /every original slide/);
+  }
+  await assert.rejects(h.s.prepare(JSON.stringify({ ...h.original, options: { zoomMax: 2 } }), [0, 1]), /settings and tips/);
+  assert.equal(h.s.source, authoredSource);
+});
+
+test('source range verification refuses mismatched bytes, UTF-8 splits, overlaps and forged handles', async () => {
+  const h = await nativeSourceEdit();
+  for (const mutate of [
+    snapshot => { snapshot.parsed.format_complement.directives[0].text += 'x'; },
+    snapshot => { snapshot.parsed.format_complement.directives[0].textRange.startByte = 1; },
+    snapshot => { snapshot.parsed.format_complement.directives.reverse(); },
+  ]) {
+    const snapshot = structuredClone(h.wasm.parseLens(authoredSource)); mutate(snapshot);
+    assert.throws(() => h.api.deckSourceDocument(authoredSource, snapshot), /source ranges/);
+  }
+  await assert.rejects(h.s.editDirective({ ...h.document }, 0), { name: 'AbortError' });
+});
+
+test('typing or document replacement revokes a loaded directive and any prepared source edit', async () => {
+  const h = await nativeSourceEdit();
+  const form = structuredClone(h.original); form.slides[0].title = 'Changed';
+  const prepared = await h.s.prepare(JSON.stringify(form), [0, 1]);
+  const external = authoredSource.replace('Alpha', 'Externally edited');
+  assert.equal(h.s.observeSource(external), false);
+  assert.equal(h.s.editingSource, false);
+  assert.throws(() => h.s.commit(prepared), { name: 'AbortError' });
+  await assert.rejects(h.s.editDirective(h.document, 0), { name: 'AbortError' });
+  assert.equal(h.s.source, external);
+  assert.equal(h.s.canUndo, false);
+});
+
+test('cancelling a native directive load or selection prevents stale source ownership', async () => {
+  const wasm = await nativeEngine(), { DeckAuthoringSession } = await modulePromise;
+  let hold = false, gate;
+  const s = new DeckAuthoringSession({ renderDeck: async text => wasm.renderDeck(text), checkElements: () => {},
+    renderSource: async text => hold ? (gate = deferred()).promise : { snapshot: wasm.parseLens(text) } });
+  s.setSource(authoredSource);
+  hold = true;
+  const pending = s.loadDirectives();
+  s.setSource(authoredSource + '\n%% new revision');
+  gate.resolve({ snapshot: wasm.parseLens(authoredSource) });
+  await assert.rejects(pending, { name: 'AbortError' });
+  hold = false; s.setSource(authoredSource);
+  const document = await s.loadDirectives(); hold = true;
+  const loading = s.editDirective(document, 0); s.cancel();
+  gate.resolve({ snapshot: wasm.parseLens('flowchart LR\n' + authoredBlock) });
+  await assert.rejects(loading, { name: 'AbortError' });
+  assert.equal(s.editingSource, false);
 });

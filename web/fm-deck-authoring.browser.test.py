@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Chromium composition UI tests. Engine results and player startup are explicit fixtures.
+"""Chromium composition UI tests with fixture cases and native existing-directive editing.
 
 Run: python web/fm-deck-authoring.browser.test.py
-Uses the production composition/session/HTML packaging code. These tests do not execute
-Rust WASM or the canonical presentation runtime; neither boundary is a second diagram parser.
+Uses the production composition/session/HTML packaging code and executes
+Rust WASM in the existing-directive cases. Player startup is a fixture; canonical presentation
+runtime behavior is covered separately. Neither boundary is a second diagram parser.
 """
 import base64
 import json
@@ -90,6 +91,101 @@ class DeckAuthoringBrowserTests(unittest.TestCase):
 
     def source_spec(self):
         return self.page.evaluate('JSON.parse(document.querySelector("#source").value.split("%%{deck: ").at(-1).split("}%%")[0])')
+
+    def native_source(self):
+        package = MODULE.parent.parent / 'pkg'
+        self.page.evaluate(r'''async ({module, binary}) => {
+          const engine = await import(module);
+          await engine.default({module_or_path:Uint8Array.from(atob(binary), ch=>ch.charCodeAt(0))});
+          window.native = engine;
+          window.existingSource = '%% 雪 😀\r\nflowchart LR\r\n a-->b\r\n' +
+            "%%{deck:{title:'Original', extra:{keep:'yes'}, slides:[\r\n" +
+            " /*keep this*/ {id:'intro',title:'Introduction',nodes:['a','b'],custom:42},\r\n" +
+            " {id:'detail',nodes:['b']}\r\n]}}%%\r\n" +
+            "%%{deck:{slides:[{id:'last',nodes:['a']}],options:{zoomMax:2}}}%%\r\n";
+          document.querySelector('#source').value = existingSource;
+          options.backend = {
+            target:'packaged native WASM',
+            renderSource:async source=>({snapshot:engine.parseLens(source),svg:engine.renderSvg(source)}),
+            renderDeck:async source=>engine.renderDeck(source),
+            cancel(){cancels++},dispose(){disposals++}
+          };
+        }''', {
+            'module': 'data:text/javascript;base64,' + base64.b64encode((package / 'frankenmermaid.js').read_bytes()).decode(),
+            'binary': base64.b64encode((package / 'frankenmermaid_bg.wasm').read_bytes()).decode(),
+        })
+
+    def load_existing(self):
+        self.page.locator('#deck-compose-load-existing').click()
+        self.page.wait_for_function('!document.querySelector("#deck-compose-edit-existing").disabled')
+        self.page.locator('#deck-compose-edit-existing').click()
+        self.page.wait_for_function('document.querySelector("#deck-compose-id").value === "intro"')
+
+    def test_native_reopened_deck_can_edit_reorder_preview_apply_and_undo(self):
+        self.native_source()
+        self.mount()
+        original = self.page.locator('#source').input_value()
+        self.load_existing()
+        self.assertEqual(self.page.locator('#deck-compose-source-directive option').count(), 2)
+        self.assertEqual(self.page.locator('#deck-compose-slide-title').input_value(), 'Introduction')
+        self.assertTrue(self.page.locator('#deck-compose-add').is_disabled())
+        self.assertTrue(self.page.locator('#deck-compose-remove').is_disabled())
+        self.page.locator('#deck-compose-slide-title').fill('Revised 雪')
+        self.page.locator('#deck-compose-slides').select_option('1')
+        self.page.locator('#deck-compose-up').click()
+        self.prepare()
+        self.assertEqual(self.page.locator('#source').input_value(), original)
+        self.page.locator('#deck-compose-apply').click()
+        updated = self.page.locator('#source').input_value()
+        self.assertIn('/*keep this*/', updated)
+        self.assertIn("/*keep this*/ {id:'intro'", updated)
+        self.assertIn("extra:{keep:'yes'}", updated)
+        self.assertIn('custom:42', updated)
+        self.assertTrue(updated.endswith(original[original.index("%%{deck:{slides:[{id:'last'"):]))
+        self.assertEqual(self.page.evaluate('native.renderDeck(document.querySelector("#source").value).manifest.slides.map(s=>s.id)'), ['detail', 'intro', 'last'])
+        self.page.locator('#deck-compose-undo').click()
+        self.assertEqual(self.page.locator('#source').input_value(), original)
+        self.page.locator('#deck-compose-redo').click()
+        self.assertEqual(self.page.locator('#source').input_value(), updated)
+        self.page.evaluate('composer.dispose();document.querySelector("#panel").replaceChildren();window.composer=exports.mountDeckComposer(options)')
+        self.page.locator('#deck-compose-load-existing').click()
+        self.page.wait_for_function('!document.querySelector("#deck-compose-edit-existing").disabled')
+        self.page.locator('#deck-compose-edit-existing').click()
+        self.page.wait_for_function('document.querySelector("#deck-compose-id").value === "detail"')
+        self.page.locator('#deck-compose-slides').select_option('1')
+        self.assertEqual(self.page.locator('#deck-compose-slide-title').input_value(), 'Revised 雪')
+
+    def test_native_existing_deck_source_change_revokes_ranges_and_keeps_external_text(self):
+        self.native_source()
+        self.mount()
+        self.load_existing()
+        self.page.locator('#deck-compose-slide-title').fill('Prepared')
+        self.prepare()
+        external = self.page.locator('#source').input_value() + '\n%% external edit'
+        self.page.locator('#source').fill(external)
+        self.assertTrue(self.page.locator('#deck-compose-apply').is_disabled())
+        self.assertTrue(self.page.locator('#deck-compose-validate').is_disabled())
+        self.assertTrue(self.page.locator('#deck-compose-undo').is_disabled())
+        self.assertIn('Reload', self.page.locator('#deck-compose-status').inner_text())
+        self.assertEqual(self.page.locator('#source').input_value(), external)
+
+    def test_native_unchanged_empty_titles_and_caption_keep_authored_overrides(self):
+        self.native_source()
+        self.page.evaluate(r'''() => {
+          document.querySelector('#source').value = "flowchart LR\n a\n" +
+            "%%{deck:{title:'Earlier title'}}%%\n" +
+            "%%{deck:{title:'',slides:[{id:'intro',title:'',caption:'',nodes:['a']}]}}%%";
+        }''')
+        self.mount()
+        original = self.page.locator('#source').input_value()
+        self.load_existing()
+        self.assertEqual(self.page.locator('#deck-compose-title').input_value(), '')
+        self.assertEqual(self.page.locator('#deck-compose-slide-title').input_value(), '')
+        self.prepare()
+        self.page.locator('#deck-compose-apply').click()
+        self.assertEqual(self.page.locator('#source').input_value(), original)
+        self.assertEqual(self.page.evaluate('native.renderDeck(document.querySelector("#source").value).manifest.title'), '')
+        self.assertEqual(self.page.evaluate('native.renderDeck(document.querySelector("#source").value).manifest.slides[0].title'), '')
 
     def test_form_is_lazy_and_catalog_comes_from_addressable_engine_ids(self):
         self.mount()

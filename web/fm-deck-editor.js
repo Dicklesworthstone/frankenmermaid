@@ -279,6 +279,266 @@ export function appendDeckDraft(source, json) {
   return Object.freeze({ source, updatedSource, block, spec });
 }
 
+// Locate JSON5 values without interpreting them. The native parser decodes their meaning;
+// these bounds let a visual edit retain comments, unknown fields and original spellings.
+function deckTrivia(text, at) {
+  while (at < text.length) {
+    if (/\s/u.test(text[at])) { at++; continue; }
+    if (text.startsWith("//", at)) {
+      while (at < text.length && !/[\r\n]/u.test(text[at])) at++;
+      continue;
+    }
+    if (text.startsWith("/*", at)) {
+      const end = text.indexOf("*/", at + 2);
+      if (end < 0) throw new Error("Unclosed deck comment. Repair it in the source.");
+      at = end + 2; continue;
+    }
+    break;
+  }
+  return at;
+}
+
+function deckStringEnd(text, at) {
+  const quote = text[at++];
+  while (at < text.length) {
+    if (text[at] === "\\") { at += 2; continue; }
+    if (text[at++] === quote) return at;
+  }
+  throw new Error("Unclosed deck string. Repair it in the source.");
+}
+
+function deckValueEnd(text, start) {
+  if (text[start] === '"' || text[start] === "'") return deckStringEnd(text, start);
+  if (text[start] !== "{" && text[start] !== "[") {
+    let at = start;
+    while (at < text.length && !/[\s,}\]]/u.test(text[at]) &&
+      !text.startsWith("//", at) && !text.startsWith("/*", at)) at++;
+    if (at === start) throw new Error("Missing deck value.");
+    return at;
+  }
+  const stack = [text[start]];
+  for (let at = start + 1; at < text.length; at++) {
+    at = deckTrivia(text, at);
+    const character = text[at];
+    if (character === '"' || character === "'") { at = deckStringEnd(text, at) - 1; continue; }
+    if (character === "{" || character === "[") {
+      if (stack.length >= 128) throw new Error("Deck nesting exceeds the editing limit.");
+      stack.push(character);
+    } else if (character === "}" || character === "]") {
+      if (stack.pop() !== (character === "}" ? "{" : "[")) throw new Error("Mismatched deck delimiters.");
+      if (!stack.length) return at + 1;
+    }
+  }
+  throw new Error("Unclosed deck value. Repair it in the source.");
+}
+
+function deckMembers(text, start, end, array = false) {
+  if (text[start] !== (array ? "[" : "{") || text[end - 1] !== (array ? "]" : "}")) {
+    throw new Error("Deck slides must be objects in an array.");
+  }
+  const members = [], keys = new Set();
+  let at = deckTrivia(text, start + 1);
+  while (at < end - 1) {
+    const keyFrom = at;
+    let key;
+    if (!array) {
+      if (text[at] === '"' || text[at] === "'") {
+        const finish = deckStringEnd(text, at);
+        key = text.slice(at + 1, finish - 1);
+        if (key.includes("\\")) throw new Error("Escaped deck property names require source editing.");
+        at = finish;
+      } else {
+        const match = /^[A-Za-z_$][\w$]*/u.exec(text.slice(at, end));
+        if (!match) throw new Error("Cannot locate deck property names safely. Edit this directive in the source.");
+        key = match[0]; at += key.length;
+      }
+      if (keys.has(key)) throw new Error("Duplicate deck property names require source editing.");
+      keys.add(key);
+      at = deckTrivia(text, at);
+      if (text[at++] !== ":") throw new Error("Missing deck property separator.");
+      at = deckTrivia(text, at);
+    }
+    const from = at, to = deckValueEnd(text, at);
+    at = deckTrivia(text, to);
+    const comma = text[at] === "," ? at : null;
+    if (comma === null && at !== end - 1) throw new Error("Cannot locate a deck value boundary safely.");
+    members.push({ key, keyFrom, from, to, comma });
+    at = comma === null ? at : deckTrivia(text, at + 1);
+  }
+  return members;
+}
+
+// Same-line comments belong to the preceding slide. Comments starting on a later
+// line belong to the following slide; trivia after the final slide is the footer.
+function deckInlineCommentEnd(text, start, end) {
+  let at = start, found = false;
+  while (at < end) {
+    if (text[at] === "\r" || text[at] === "\n") {
+      return found ? at + (text[at] === "\r" && text[at + 1] === "\n" ? 2 : 1) : start;
+    }
+    if (/\s/u.test(text[at])) { at++; continue; }
+    if (text.startsWith("//", at)) {
+      while (at < end && !/[\r\n]/u.test(text[at])) at++;
+      found = true; continue;
+    }
+    if (text.startsWith("/*", at)) {
+      at = text.indexOf("*/", at + 2) + 2;
+      found = true; continue; // deckMembers already verified balanced comments.
+    }
+    break;
+  }
+  return found ? at : start;
+}
+
+/** Trust only engine-reported directive ranges that exactly match this UTF-8 source. */
+export function deckSourceDocument(source, snapshot) {
+  authorText(source, MAX_DECK_SOURCE, "Source");
+  const directives = snapshot?.parsed?.format_complement?.directives;
+  if (!Array.isArray(directives)) throw new Error("The engine did not return deck source ranges. Update the WASM package.");
+  const requested = new Set(directives.flatMap(directive => [directive.textRange?.startByte, directive.textRange?.endByte]));
+  const offsets = new Map([[0, 0]]);
+  let bytes = 0, units = 0;
+  for (const character of source) {
+    const code = character.codePointAt(0);
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    units += character.length;
+    if (requested.has(bytes)) offsets.set(bytes, units);
+  }
+  const targets = [];
+  let previous = 0;
+  for (const directive of directives) {
+    const from = offsets.get(directive.textRange?.startByte), to = offsets.get(directive.textRange?.endByte);
+    if (from === undefined || to === undefined || from < previous || from >= to ||
+      source.slice(from, to) !== directive.text) throw new Error("Deck source ranges are stale or invalid.");
+    previous = to;
+    const prefix = /^\s*%%\{\s*deck\s*:\s*/iu.exec(directive.text);
+    if (!prefix) continue;
+    const raw = directive.text, bodyStart = deckTrivia(raw, prefix[0].length), bodyEnd = deckValueEnd(raw, bodyStart);
+    const terminator = raw.trimEnd().length - 3;
+    if (raw.slice(terminator).trim() !== "}%%" || deckTrivia(raw.slice(0, terminator), bodyEnd) !== terminator) {
+      throw new Error("Unsupported deck directive boundary. Edit it in the source.");
+    }
+    const fields = deckMembers(raw, bodyStart, bodyEnd);
+    const slides = fields.find(field => field.key === "slides");
+    if (!slides) continue; // Options-only directives remain untouched.
+    const entries = deckMembers(raw, slides.from, slides.to, true);
+    if (!entries.length) continue;
+    const objects = entries.map(entry => deckMembers(raw, entry.from, entry.to));
+    targets.push({ from, to, raw, bodyStart, bodyEnd, fields, slides, entries, objects,
+      line: (source.slice(0, from).match(/\r\n|\r|\n/gu) || []).length + 1 });
+  }
+  return freezeDeck({ source, targets });
+}
+
+/** Decode a selected directive using its isolated native parse, never eval or a JS JSON5 parser.
+ * Only title and slide fields are editable here; settings, tips and extensions stay verbatim. */
+export function deckSourceDraft(target, snapshot) {
+  const parsed = JSON.parse(deckJson(snapshot))?.parsed;
+  const rawDeck = parsed?.ir?.deck;
+  if (!rawDeck || !Array.isArray(parsed.warnings) || !Array.isArray(rawDeck.slides) ||
+    rawDeck.slides.length !== target.entries.length) throw new Error("The engine could not read every slide in this directive. Repair it in the source.");
+  const lossy = parsed.warnings.find(warning => typeof warning !== "string" ||
+    (/deck/iu.test(warning) && !warning.startsWith("deck:") && !/unknown deck .*ignored/iu.test(warning)));
+  if (lossy) throw new Error(`The directive needs source repair before visual editing: ${lossy}`);
+  const spec = { slides: rawDeck.slides.map((slide, index) => {
+    const keys = new Set(target.objects[index].map(field => field.key));
+    const result = { id: slide.id, nodes: slide.nodes };
+    for (const key of ["title", "caption", "edges"]) if (keys.has(key)) result[key] = slide[key];
+    for (const [key, native] of [["fitMargin", "fit_margin"], ["zoomMax", "zoom_max"]]) {
+      if (keys.has(key)) result[key] = slide[native];
+    }
+    if (keys.has("reveal")) {
+      if (slide.reveal === "Auto") result.reveal = "auto";
+      else if (Array.isArray(slide.reveal?.Groups)) result.reveal = slide.reveal.Groups;
+      else throw new Error("The engine could not preserve the authored reveal groups.");
+    }
+    return result;
+  }) };
+  if (target.fields.some(field => field.key === "title")) spec.title = rawDeck.title;
+  return deckDraft(JSON.stringify(spec));
+}
+
+function spliceDeck(text, edits) {
+  let result = text;
+  for (const edit of edits.sort((a, b) => b.from - a.from)) {
+    result = result.slice(0, edit.from) + edit.text + result.slice(edit.to);
+  }
+  return result;
+}
+
+const deckLiteral = value => JSON.stringify(value).replace(/[%\u2028\u2029]/gu,
+  character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+function patchDeckObject(raw, start, end, fields, before, after) {
+  const edits = [], additions = [];
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+    // The form displays the implicit edge default without forcing it into source.
+    if (!(key in before) && key === "edges" && after[key] === "induced") continue;
+    const field = fields.find(item => item.key === key);
+    if (after[key] === undefined) {
+      if (field) {
+        edits.push({ from: field.keyFrom, to: field.to, text: "" });
+        if (field.comma !== null) edits.push({ from: field.comma, to: field.comma + 1, text: "" });
+      }
+    } else if (field) edits.push({ from: field.from, to: field.to, text: deckLiteral(after[key]) });
+    else additions.push(`${JSON.stringify(key)}: ${deckLiteral(after[key])}`);
+  }
+  if (additions.length) {
+    const retained = fields.filter(field => !(field.key in before) || after[field.key] !== undefined);
+    const comma = retained.length && retained.at(-1).comma === null ? ", " : "";
+    edits.push({ from: end - 1, to: end - 1, text: comma + additions.join(", ") });
+  }
+  return spliceDeck(raw.slice(start, end), edits.map(edit => ({ ...edit, from: edit.from - start, to: edit.to - start })));
+}
+
+/** Edit/reorder the selected directive's existing slides. The permutation tracks identities
+ * even when an author renames a slide. All other source bytes and unknown fields survive. */
+export function planDeckSourceEdit(document, index, original, json, order) {
+  const target = document.targets[index], spec = deckDraft(json);
+  if (!target || !Array.isArray(order) || order.length !== original.slides.length ||
+    spec.slides.length !== order.length || new Set(order).size !== order.length ||
+    order.some(item => !Number.isInteger(item) || item < 0 || item >= order.length)) {
+    throw new Error("Existing-deck editing requires every original slide exactly once. Add or remove slides in the source.");
+  }
+  if (Object.keys(spec).some(key => !["title", "slides"].includes(key))) {
+    throw new Error("Edit this directive's settings and tips in the source; the visual editor preserves them unchanged.");
+  }
+  const raw = target.raw, parts = ["["], close = target.slides.to - 1;
+  let leading = target.slides.from + 1;
+  const pieces = target.entries.map((entry, slot) => {
+    const before = raw.slice(leading, entry.from);
+    if (entry.comma === null) {
+      leading = deckInlineCommentEnd(raw, entry.to, close);
+      return { before, tail: raw.slice(entry.to, leading), afterComma: "" };
+    }
+    const limit = target.entries[slot + 1]?.from ?? close;
+    leading = deckInlineCommentEnd(raw, entry.comma + 1, limit);
+    return { before, tail: raw.slice(entry.to, entry.comma), afterComma: raw.slice(entry.comma + 1, leading) };
+  });
+  const footer = raw.slice(leading, close), trailingComma = target.entries.at(-1).comma !== null;
+  for (const [slot, origin] of order.entries()) {
+    const entry = target.entries[origin], piece = pieces[origin];
+    parts.push(piece.before, patchDeckObject(raw, entry.from, entry.to,
+      target.objects[origin], original.slides[origin], spec.slides[slot]), piece.tail,
+      slot < order.length - 1 || trailingComma ? "," : "", piece.afterComma);
+  }
+  parts.push(footer, "]");
+  const titleBefore = "title" in original ? { title: original.title } : {};
+  const titleAfter = "title" in spec ? { title: spec.title } : {};
+  // Apply the array first, then rescan only the chosen object for title offsets.
+  let replacement = spliceDeck(raw, [{ from: target.slides.from, to: target.slides.to, text: parts.join("") }]);
+  const end = deckValueEnd(replacement, target.bodyStart);
+  replacement = replacement.slice(0, target.bodyStart) + patchDeckObject(replacement, target.bodyStart, end,
+    deckMembers(replacement, target.bodyStart, end), titleBefore, titleAfter) + replacement.slice(end);
+  if (new TextEncoder().encode(replacement).length > MAX_DECK_BLOCK || replacement.split(/\r\n|\r|\n/u).length > 400) {
+    throw new Error("Edited deck directive exceeds the engine's source limits.");
+  }
+  const updatedSource = document.source.slice(0, target.from) + replacement + document.source.slice(target.to);
+  authorText(updatedSource, MAX_DECK_SOURCE, "Updated source");
+  return freezeDeck({ source: document.source, updatedSource, spec, index });
+}
+
 /** Read author IDs only from the engine's addressable SVG groups. This does not parse source
  * or mount SVG. Large catalogs are searchable by the UI without creating one control per node. */
 export function deckNodeCatalog(svg, DOMParserClass = globalThis.DOMParser) {
@@ -329,6 +589,7 @@ function checkAuthoredSlides(spec, before, after) {
  * supplies the paired SVG/manifest; JavaScript never computes graph membership or geometry. */
 export class DeckAuthoringSession {
   #render;
+  #renderSource;
   #cancel;
   #checkElements;
   #source = "";
@@ -337,27 +598,39 @@ export class DeckAuthoringSession {
   #prepared = null;
   #disposed = false;
   #change = null;
+  #document = null;
+  #sourceEdit = null;
 
-  constructor({ renderDeck, cancelRender = () => {}, checkElements = checkDeckElements }) {
+  constructor({ renderDeck, renderSource, cancelRender = () => {}, checkElements = checkDeckElements }) {
     if (![renderDeck, cancelRender, checkElements].every(fn => typeof fn === "function")) throw new TypeError("Deck authoring requires a renderer and SVG validator.");
     this.#render = renderDeck;
+    this.#renderSource = renderSource;
     this.#cancel = cancelRender;
     this.#checkElements = checkElements;
   }
   get source() { return this.#source; }
   get ownsComposition() { return this.#base !== this.#source; }
+  get editingSource() { return this.#sourceEdit !== null; }
   get canUndo() { return !this.#disposed && this.#change !== null && this.#source === this.#change.after && this.#change.before !== this.#change.after; }
   get canRedo() { return !this.#disposed && this.#change !== null && this.#source === this.#change.before && this.#change.before !== this.#change.after; }
   setSource(source) {
     if (this.#disposed) throw abortError();
     this.cancel();
     this.#change = null;
+    this.#document = this.#sourceEdit = null;
     authorText(source, MAX_DECK_SOURCE, "Source");
     this.#source = this.#base = source;
   }
   observeSource(source) {
     if (this.#disposed) throw abortError();
     this.cancel(); this.#change = null;
+    this.#document = null;
+    if (this.#sourceEdit) {
+      this.#sourceEdit = null;
+      authorText(source, MAX_DECK_SOURCE, "Source");
+      this.#source = this.#base = source;
+      return false; // An external edit always requires reloading verified directive ranges.
+    }
     authorText(source, MAX_DECK_SOURCE, "Source");
     // A known, unchanged trailing block can survive edits to the diagram before it. This
     // is an exact suffix check, not a search for similar directives or a source parser.
@@ -369,11 +642,38 @@ export class DeckAuthoringSession {
     return retained;
   }
   cancel() { this.#revision += 1; this.#prepared = null; this.#cancel(); }
-  async prepare(json) {
+  async loadDirectives() {
+    if (this.#disposed) throw abortError();
+    if (typeof this.#renderSource !== "function") throw new Error("This backend cannot read existing deck directives.");
+    this.cancel();
+    const version = this.#revision, source = this.#source;
+    const result = await this.#renderSource(source);
+    if (this.#disposed || version !== this.#revision || source !== this.#source) throw abortError();
+    this.#document = deckSourceDocument(source, result?.snapshot);
+    return this.#document;
+  }
+  async editDirective(document, index) {
+    if (this.#disposed || document !== this.#document || document.source !== this.#source ||
+      !document.targets[index]) throw abortError();
+    this.cancel();
+    const version = this.#revision, source = this.#source;
+    // Decode only the selected directive. Other directives' last-writer-wins settings
+    // must never be mistaken for the values authored in this one.
+    const result = await this.#renderSource(`flowchart LR\n${document.targets[index].raw}\n`);
+    if (this.#disposed || version !== this.#revision || source !== this.#source) throw abortError();
+    const original = deckSourceDraft(document.targets[index], result?.snapshot);
+    this.#sourceEdit = { document, index, original };
+    this.#base = source;
+    this.#change = null;
+    return original;
+  }
+  async prepare(json, order) {
     if (this.#disposed) throw abortError();
     this.cancel();
     const version = this.#revision, source = this.#source;
-    const plan = appendDeckDraft(this.#base, json);
+    const editing = this.#sourceEdit;
+    const plan = editing ? planDeckSourceEdit(editing.document, editing.index, editing.original, json, order)
+      : appendDeckDraft(this.#base, json);
     const live = () => {
       if (this.#disposed || version !== this.#revision || source !== this.#source) throw abortError();
     };
@@ -383,20 +683,35 @@ export class DeckAuthoringSession {
     live();
     if (typeof original?.svg !== "string" || !Array.isArray(original.warnings)) throw new Error("Invalid original deck result.");
     const previous = original.manifest == null ? null : checkedDeck(original).manifest;
-    if ((previous?.slides.length || 0) + plan.spec.slides.length > 64) throw new Error("The existing presentation plus this composition exceeds 64 slides.");
-    for (const slide of plan.spec.slides) if (previous?.slides.some(old => old.id === slide.id)) {
+    const first = editing ? previous?.slides.findIndex(slide => slide.id === editing.original.slides[0].id) : -1;
+    if (editing && (first == null || first < 0 || editing.original.slides.some((slide, index) =>
+      previous.slides[first + index]?.id !== slide.id))) {
+      throw new Error("Existing slides were dropped or renamed by the engine. Repair the source before visual editing.");
+    }
+    const others = editing ? previous.slides.filter((_slide, index) => index < first || index >= first + editing.original.slides.length)
+      : previous?.slides || [];
+    if (others.length + plan.spec.slides.length > 64) throw new Error("The existing presentation plus this composition exceeds 64 slides.");
+    for (const slide of plan.spec.slides) if (others.some(old => old.id === slide.id)) {
       throw new Error(`Slide ID '${slide.id}' is already used in the source. Choose another ID.`);
     }
     const result = await this.#render(plan.updatedSource);
     live();
     const deck = checkedDeck(result);
-    checkAuthoredSlides(plan.spec, previous, deck.manifest);
+    if (editing) {
+      const end = first + plan.spec.slides.length;
+      if (deck.manifest.slides.length !== previous.slides.length ||
+        deckJson(deck.manifest.slides.slice(0, first)) !== deckJson(previous.slides.slice(0, first)) ||
+        deckJson(deck.manifest.slides.slice(end)) !== deckJson(previous.slides.slice(end))) {
+        throw new Error("The edit changed another directive's slides. The source was not changed.");
+      }
+      checkAuthoredSlides(plan.spec, null, { slides: deck.manifest.slides.slice(first, end) });
+    } else checkAuthoredSlides(plan.spec, previous, deck.manifest);
     await this.#checkElements(deck);
     live();
     // Own all response data: a caller or a transport cannot mutate a reviewed confirmation.
     const snapshot = JSON.parse(deckJson(deck));
     this.#prepared = freezeDeck({ source, updatedSource: plan.updatedSource,
-      spec: plan.spec, deck: snapshot, existingSlides: previous?.slides.length || 0 });
+      spec: plan.spec, deck: snapshot, existingSlides: others.length, editingSource: !!editing });
     return this.#prepared;
   }
   commit(prepared) {
@@ -426,9 +741,11 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new RangeError("Invalid composition timeout.");
   const document = panelEl.ownerDocument, host = document.defaultView;
   const session = new DeckAuthoringSession({ renderDeck: source => backend.renderDeck(source),
+    renderSource: typeof backend.renderSource === "function" ? source => backend.renderSource(source) : undefined,
     cancelRender: () => backend.cancel(), checkElements: deck => checkDeckElements(deck, host.DOMParser) });
   session.setSource(sourceEl.value);
   let spec = { slides: [] }, selected = -1, catalog = [], usedIds = new Set();
+  let sourceDocument = null, sourceOrder = null;
   let prepared = null, frame = null, frameWait = null, frameNonce = null, operation = 0, cancelWait = null, deadline;
   let disposed = false, suspended = false, busy = false, ownInput = false, dirty = false;
   const listeners = [], urls = new Map();
@@ -458,7 +775,11 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     for (const [value, text] of entries) { const option = make("option", text, select); option.value = value; }
   }
   make("h3", "Compose presentation slides");
-  make("p", "Add slides without rewriting existing directives. Select nodes, arrange the draft, then validate and preview before applying it to source. Existing slides remain first. The draft stays here when this panel closes; download its JSON to keep it across page reloads.");
+  make("p", "Compose additional slides, or load an existing slide directive to edit its titles, membership, reveals and order. Validate and preview before applying. The draft stays here when this panel closes; download its JSON to keep it across page reloads.");
+  const loadExisting = button("Read existing slide directives", "load-existing");
+  const sourceChoice = field("Existing slide directive", "select", "source-directive");
+  const editExisting = button("Edit selected directive", "edit-existing");
+  const newComposition = button("Compose additional slides", "new");
   const deckTitle = field("Presentation title (blank inherits existing title)", "input", "title");
   const loadNodes = button("Load nodes from current diagram", "load-nodes");
   const catalogStatus = make("p", "Node choices have not been loaded.", panelEl, "catalog-status");
@@ -501,12 +822,17 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     const locked = disposed || suspended;
     for (const control of [deckTitle, loadNodes, slideList, add, downloadDraft, importDraft]) control.disabled = locked || busy;
     fields.disabled = locked || busy || selected < 0;
-    duplicate.disabled = locked || busy || selected < 0 || spec.slides.length >= 64;
-    remove.disabled = locked || busy || selected < 0;
+    const editing = sourceOrder !== null;
+    loadExisting.disabled = locked || busy || typeof backend.renderSource !== "function";
+    sourceChoice.disabled = editExisting.disabled = locked || busy || !sourceDocument?.targets.length || sourceDocument.source !== sourceEl.value;
+    newComposition.disabled = locked || busy;
+    duplicate.disabled = locked || busy || editing || selected < 0 || spec.slides.length >= 64;
+    remove.disabled = locked || busy || editing || selected < 0;
     up.disabled = locked || busy || selected <= 0;
     down.disabled = locked || busy || selected < 0 || selected >= spec.slides.length - 1;
-    add.disabled ||= spec.slides.length >= 64;
-    validate.disabled = locked || busy || !spec.slides.length;
+    add.disabled ||= editing || spec.slides.length >= 64;
+    importDraft.disabled ||= editing;
+    validate.disabled = locked || busy || !spec.slides.length || (editing && !session.editingSource);
     apply.disabled = locked || busy || !prepared || prepared.source !== sourceEl.value;
     undo.disabled = locked || busy || !session.canUndo || session.source !== sourceEl.value;
     redo.disabled = locked || busy || !session.canRedo || session.source !== sourceEl.value;
@@ -532,6 +858,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     if (selected >= 0) {
       const entry = { ...spec.slides[selected], id: id.value, nodes: JSON.parse(members.value) };
       for (const [key, control] of [["title", title], ["caption", caption], ["fitMargin", margin], ["zoomMax", zoom]]) {
+        if (control.value === String(entry[key] ?? "")) continue;
         if (control.value === "") delete entry[key];
         else entry[key] = control === margin || control === zoom ? Number(control.value) : control.value;
       }
@@ -540,7 +867,9 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       else entry.reveal = reveal.value === "auto" ? "auto" : JSON.parse(groups.value);
       spec.slides[selected] = entry;
     }
-    if (deckTitle.value) spec.title = deckTitle.value; else delete spec.title;
+    if (deckTitle.value !== (spec.title ?? "")) {
+      if (deckTitle.value) spec.title = deckTitle.value; else delete spec.title;
+    }
   }
   function fillNodes() {
     picker.replaceChildren();
@@ -616,13 +945,39 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       status.textContent = catalog.length ? "Choose slide members from the node list or enter group selectors." : "This diagram has no addressable node groups; deck composition may not be supported.";
     });
   }
+  async function readExisting() {
+    return execute("Reading existing slide directives from the engine…", async check => {
+      if (session.source !== sourceEl.value) session.observeSource(sourceEl.value);
+      const found = await session.loadDirectives(); check();
+      sourceDocument = found;
+      sourceChoice.replaceChildren();
+      for (const [index, target] of found.targets.entries()) {
+        const option = make("option", `Line ${target.line} — ${target.entries.length} slides`, sourceChoice);
+        option.value = String(index);
+      }
+      status.textContent = found.targets.length ? "Choose the directive to edit. Other directives, settings and comments are retained."
+        : "No editable slide directives found. Compose additional slides or edit the source directly.";
+    });
+  }
+  async function editSelectedDirective() {
+    if (dirty && !host.confirm("Replace this unsaved draft with the selected source directive? Download the draft first if you need to keep it.")) return;
+    const index = Number(sourceChoice.value), found = sourceDocument;
+    return execute("Loading the selected directive's authored slides…", async check => {
+      const loaded = await session.editDirective(found, index); check();
+      spec = JSON.parse(JSON.stringify(loaded)); selected = 0;
+      sourceOrder = spec.slides.map((_slide, origin) => origin);
+      dirty = false; fill();
+      status.textContent = `Editing ${spec.slides.length} existing slides from line ${found.targets[index].line}. ` +
+        "Titles, membership, reveals and ordering are editable. Add or remove slides in the source; settings, tips and other directives stay unchanged.";
+    });
+  }
   async function prepare() {
     try { saveCurrent(); }
     catch (error) { invalidate(`Repair draft JSON: ${error.message}`); return; }
     const json = JSON.stringify(spec);
     return execute("Resolving the draft presentation in the engine…", async (check, source) => {
       if (session.source !== source) session.observeSource(source);
-      const candidate = await session.prepare(json); check();
+      const candidate = await session.prepare(json, sourceOrder); check();
       const assets = await loadAssets(); check();
       const built = buildDeckHtml(candidate.deck, assets);
       frameNonce = built.nonce;
@@ -641,7 +996,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       const warnings = candidate.deck.warnings.map(warning => typeof warning === "string" ? warning : warning.message || "Deck warning");
       if (warnings.length) review.textContent += `\n\nEngine warnings:\n${warnings.join("\n")}`;
       prepared = candidate;
-      status.textContent = `${spec.slides.length} draft slides resolved; ${candidate.existingSlides} existing slides retained. Review the presentation${warnings.length ? " and warnings" : ""}, then Apply. Source is unchanged.`;
+      status.textContent = `${spec.slides.length} ${candidate.editingSource ? "edited" : "draft"} slides resolved; ${candidate.existingSlides} other slides retained. Review the presentation${warnings.length ? " and warnings" : ""}, then Apply. Source is unchanged.`;
     });
   }
   function applyDraft() {
@@ -653,7 +1008,9 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       try { sourceEl.value = updated; sourceEl.dispatchEvent(new host.Event("input", { bubbles: true })); }
       finally { ownInput = false; }
       if (sourceEl.value !== updated) { sourceChanged(true); return; }
-      status.textContent = "Composition applied to source. You can revise these draft slides again; only this composition's exact block will be replaced.";
+      status.textContent = session.editingSource
+        ? "Slide edits applied to the selected directive. You can revise them again or undo the exact source change."
+        : "Composition applied to source. You can revise these draft slides again; only this composition's exact block will be replaced.";
       controls();
     } catch (error) { invalidate(`Apply refused: ${error.message}`); }
   }
@@ -673,10 +1030,13 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
   function sourceChanged(force = false) {
     if (disposed || (ownInput && !force) || (!force && sourceEl.value === session.source)) return;
     invalidate();
+    sourceDocument = null; sourceChoice.replaceChildren();
     catalog = []; usedIds.clear(); catalogStatus.textContent = "Source changed; reload node choices.";
     try {
       const retained = force ? (session.setSource(sourceEl.value), false) : session.observeSource(sourceEl.value);
-      status.textContent = retained
+      status.textContent = sourceOrder !== null
+        ? "Source changed. Draft retained, but its directive ranges are no longer current. Reload the existing directive before editing it again."
+        : retained
         ? "Diagram source changed. Draft retained and its unchanged source block is still editable. Reload nodes and validate again."
         : "The source or document changed. Draft retained, but its old source block is no longer editable here. Revalidate as a new composition; existing IDs must be unique.";
     } catch (error) { status.textContent = error.message; }
@@ -711,12 +1071,22 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     });
   });
   listen(slideList, "change", () => { const index = Number(slideList.value); edit(() => { selected = index; }); });
+  listen(loadExisting, "click", () => { void readExisting(); });
+  listen(editExisting, "click", () => { void editSelectedDirective(); });
+  listen(newComposition, "click", () => {
+    if (dirty && !host.confirm("Start an empty composition and discard this unsaved draft? The source is unchanged.")) return;
+    invalidate(); session.setSource(sourceEl.value); sourceDocument = null; sourceOrder = null;
+    sourceChoice.replaceChildren(); spec = { slides: [] }; selected = -1; dirty = false; fill();
+    status.textContent = "New composition. Existing source directives remain unchanged.";
+  });
   listen(add, "click", () => edit(() => { spec.slides.push({ id: nextId(), nodes: [] }); selected = spec.slides.length - 1; }));
   listen(duplicate, "click", () => edit(() => { spec.slides.splice(selected + 1, 0, { ...JSON.parse(JSON.stringify(spec.slides[selected])), id: nextId() }); selected++; }));
   listen(remove, "click", () => edit(() => { spec.slides.splice(selected, 1); selected = Math.min(selected, spec.slides.length - 1); }));
   for (const [control, delta] of [[up, -1], [down, 1]]) listen(control, "click", () => edit(() => {
     const next = selected + delta;
-    [spec.slides[selected], spec.slides[next]] = [spec.slides[next], spec.slides[selected]]; selected = next;
+    [spec.slides[selected], spec.slides[next]] = [spec.slides[next], spec.slides[selected]];
+    if (sourceOrder) [sourceOrder[selected], sourceOrder[next]] = [sourceOrder[next], sourceOrder[selected]];
+    selected = next;
   }));
   listen(all, "click", () => edit(() => { spec.slides[selected].nodes = ["*"]; }));
   listen(loadNodes, "click", () => { void loadCatalog(); });
@@ -743,7 +1113,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     });
   });
   fill();
-  return { prepare, apply: applyDraft, loadCatalog, sourceChanged,
+  return { prepare, apply: applyDraft, loadCatalog, readExisting, editSelectedDirective, sourceChanged,
     suspend() { suspended = true; invalidate("Draft retained while the presentation panel is closed."); },
     resume() { if (!disposed) { suspended = false; sourceChanged(); controls(); } },
     dispose() {
