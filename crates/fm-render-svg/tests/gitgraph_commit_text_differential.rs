@@ -154,3 +154,71 @@ fn ornament_nodes_still_draw_nothing() {
         "the ordinary node stopped being drawn, so the check above proves nothing: {flowchart:?}"
     );
 }
+
+#[test]
+fn shared_scene_preserves_populated_branch_names_and_measures_their_bounds() {
+    use fm_layout::{RenderItem, RenderSource, TextAlign};
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_scene_to_svg, render_svg_with_config};
+
+    let branch = "release-with-a-name-longer-than-its-first-commit";
+    for direction in ["LR", "TB"] {
+        let source = format!(
+            "gitGraph {direction}\ncommit id: \"base\"\nbranch {branch}\ncommit id: \"feature\"\ncheckout main\ncommit id: \"next\"\nbranch unused\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        let labels = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("layout-band-labels") => {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .expect("branch captions must survive the scene projection");
+        let label = labels
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Text(text) if text.text == branch => Some(text),
+                _ => None,
+            })
+            .expect("the full branch name is drawable text");
+        assert_eq!(label.source, RenderSource::Diagram);
+        assert_eq!(label.align, TextAlign::Start);
+        let label_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: label.font_size,
+            ..metrics.config().clone()
+        });
+        assert!(label.x >= scene.bounds.x);
+        assert!(
+            label.x + label_metrics.estimate_width(branch) <= scene.bounds.x + scene.bounds.width,
+            "the full caption must fit inside the scene clip"
+        );
+
+        for svg in [
+            render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    ..Default::default()
+                },
+            ),
+            render_scene_to_svg(&scene, &SvgRenderConfig::default()),
+        ] {
+            let runs = text_runs(&svg);
+            for name in ["main", branch, "base", "feature", "next"] {
+                assert_eq!(
+                    runs.iter().filter(|run| run.as_str() == name).count(),
+                    1,
+                    "{direction}: {name} must be drawn exactly once: {runs:?}"
+                );
+            }
+            assert!(!runs.iter().any(|run| run == "unused"));
+        }
+    }
+}

@@ -144,3 +144,53 @@ fn only_sankey_nodes_gain_a_total() {
         );
     }
 }
+
+#[test]
+fn shared_scene_exports_draw_the_same_names_and_throughputs_as_direct_svg() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_scene_to_svg, render_svg_with_config};
+
+    for (source, expected) in [
+        (UNBALANCED, vec!["A", "10", "M", "10", "B", "3"]),
+        (
+            "sankey-beta\nSource A,Process X,100\nSource A,Process Y,50\n",
+            vec!["Source A", "150", "Process X", "100", "Process Y", "50"],
+        ),
+        (
+            "sankey-beta\nA,B,1.5\nA,C,2.25\n",
+            vec!["A", "3.75", "B", "1.5", "C", "2.25"],
+        ),
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let mut expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
+        expected.sort();
+
+        for (surface, svg) in [
+            ("direct", fm_render_svg::render_svg(&ir)),
+            (
+                "scene backend",
+                render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend: SvgBackend::Scene,
+                        ..Default::default()
+                    },
+                ),
+            ),
+            (
+                "standalone scene",
+                render_scene_to_svg(&scene, &SvgRenderConfig::default()),
+            ),
+        ] {
+            // Compare drawn text, including duplicate values at distinct nodes. Accessibility
+            // descriptions contain the quantities too and cannot prove that they were painted.
+            let mut rows: Vec<String> = text_blocks(&svg)
+                .iter()
+                .flat_map(|block| block.lines().map(str::to_owned))
+                .collect();
+            rows.sort();
+            assert_eq!(rows, expected, "{surface}: {source}");
+        }
+    }
+}

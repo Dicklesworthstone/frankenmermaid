@@ -124,7 +124,7 @@ Current status in this file is grounded in:
 
 | Surface | Current status | Notes |
 |---|---|---|
-| Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers |
+| Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers; shared scenes retain painted node details separately from routing boundaries, layout-band captions, and Sankey node throughputs |
 | Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 23 algorithms + Auto |
 | SVG renderer | Partial | 23 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
 | Terminal renderer | Partial | 4 sub-cell modes, `Outline`/`Compact`/`Normal`/`Rich` fidelity selection, `SelectionState` and directional navigation, `MermaidLinkMode::Footnote`, diff engine, minimap, glyphs, ASCII normalization, and an opt-in viewport-bounded debug panel (crossings, bends, symmetry, node/edge/rank/cycle counts) |

@@ -55,13 +55,13 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::LinedDocument => draw_lined_document(ctx, x, y, width, height),
         NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
         NodeShape::Flag => draw_flag(ctx, x, y, width, height),
-        NodeShape::HalfRoundedRect => draw_half_rounded_rect(ctx, x, y, width, height),
+        NodeShape::HalfRoundedRect | NodeShape::CurvedTrapezoid | NodeShape::BowTieRect => {
+            draw_shared_paint_paths(ctx, shape, x, y, width, height);
+        }
         NodeShape::StackedDocument => draw_stacked_document(ctx, x, y, width, height),
         NodeShape::StackedRect => draw_stacked_rect(ctx, x, y, width, height),
         NodeShape::Bang => draw_bang(ctx, x, y, width, height),
-        NodeShape::CurvedTrapezoid => draw_curved_trapezoid(ctx, x, y, width, height),
         NodeShape::TaggedDocument => draw_tagged_document(ctx, x, y, width, height),
-        NodeShape::BowTieRect => draw_bow_tie_rect(ctx, x, y, width, height),
         NodeShape::Hourglass => draw_hourglass(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, rounded_corners * 0.55),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, rounded_corners),
@@ -497,62 +497,74 @@ fn draw_hourglass<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f6
     ctx.stroke();
 }
 
-/// Draw the stored-data block — mermaid's `bow-rect` (bd-7ls21).
-///
-/// Both sides bow the SAME way so the blocks tile; cubics stand in for the SVG path's arcs.
-fn draw_bow_tie_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    ctx.begin_path();
-    ctx.move_to(x + w * 0.179, y);
-    ctx.line_to(x + w, y);
-    ctx.bezier_curve_to(
-        x + w * 0.887,
-        y + h * 0.15,
-        x + w * 0.873,
-        y + h * 0.85,
-        x + w * 0.948,
-        y + h,
-    );
-    ctx.line_to(x + w * 0.127, y + h);
-    ctx.bezier_curve_to(
-        x + w * 0.010,
-        y + h * 0.85,
-        x - w * 0.010,
-        y + h * 0.15,
-        x + w * 0.179,
-        y,
-    );
-    ctx.close_path();
-    ctx.fill();
-    ctx.stroke();
-}
+/// Draw the canonical visible contours for shapes whose curved boundaries are also used by
+/// shared scenes and GPU plans. Keep the placement in f64 so viewport offsets do not lose
+/// precision when the shape's local f32 geometry is translated onto the canvas.
+#[allow(clippy::cast_possible_truncation)]
+fn draw_shared_paint_paths<C: Canvas2dContext>(
+    ctx: &mut C,
+    shape: NodeShape,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    use fm_layout::PathCmd;
 
-/// Draw the CRT-screen silhouette — mermaid's `curv-trap` (bd-7ls21). Same measured controls.
-fn draw_curved_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    ctx.begin_path();
-    ctx.move_to(x + w * 0.265, y);
-    ctx.line_to(x + w * 0.469, y);
-    // Canvas has no elliptical-arc-to-point primitive, so the SVG path's arcs are approximated
-    // here by their cubic equivalents through the same measured apexes.
-    ctx.bezier_curve_to(
-        x + w * 1.02,
-        y + h * 0.16,
-        x + w * 1.02,
-        y + h * 0.84,
-        x + w * 0.438,
-        y + h,
-    );
-    ctx.line_to(x + w * 0.302, y + h);
-    ctx.bezier_curve_to(
-        x - w * 0.02,
-        y + h * 0.84,
-        x - w * 0.02,
-        y + h * 0.16,
-        x + w * 0.265,
-        y,
-    );
-    ctx.close_path();
-    ctx.fill();
-    ctx.stroke();
+    for piece in fm_layout::node_paint_paths(
+        fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+        },
+        shape,
+    ) {
+        ctx.begin_path();
+        for command in piece.commands {
+            match command {
+                PathCmd::MoveTo { x: px, y: py } => {
+                    ctx.move_to(x + f64::from(px), y + f64::from(py));
+                }
+                PathCmd::LineTo { x: px, y: py } => {
+                    ctx.line_to(x + f64::from(px), y + f64::from(py));
+                }
+                PathCmd::QuadTo {
+                    cx,
+                    cy,
+                    x: px,
+                    y: py,
+                } => ctx.quadratic_curve_to(
+                    x + f64::from(cx),
+                    y + f64::from(cy),
+                    x + f64::from(px),
+                    y + f64::from(py),
+                ),
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x: px,
+                    y: py,
+                } => ctx.bezier_curve_to(
+                    x + f64::from(c1x),
+                    y + f64::from(c1y),
+                    x + f64::from(c2x),
+                    y + f64::from(c2y),
+                    x + f64::from(px),
+                    y + f64::from(py),
+                ),
+                PathCmd::Close => ctx.close_path(),
+            }
+        }
+        if piece.fill {
+            ctx.fill();
+        }
+        if piece.stroke {
+            ctx.stroke();
+        }
+    }
 }
 
 /// Draw a 14-pointed starburst — mermaid's `bang` (bd-7ls21).
@@ -611,23 +623,6 @@ fn draw_stacked_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64
         let leaf_y = y + offset_y * f64::from(2 - step);
         draw_document(ctx, leaf_x, leaf_y, leaf_w, leaf_h);
     }
-}
-
-/// Draw a rectangle with a semicircular right end — mermaid's `delay` (bd-7ls21).
-///
-/// The radius is half the HEIGHT, matching the measurement; a width fraction would balloon the cap
-/// on a wide node.
-fn draw_half_rounded_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    let radius = (h / 2.0).min(w / 2.0);
-
-    ctx.begin_path();
-    ctx.move_to(x, y);
-    ctx.line_to(x + w - radius, y);
-    ctx.arc(x + w - radius, y + radius, radius, -PI / 2.0, PI / 2.0);
-    ctx.line_to(x, y + h);
-    ctx.close_path();
-    ctx.fill();
-    ctx.stroke();
 }
 
 /// Draw a banner with both edges waved in opposite phase — mermaid's `flag` (bd-7ls21).
@@ -1249,6 +1244,77 @@ mod tests {
         for ((x, y), (expected_x, expected_y)) in actual.iter().zip(expected) {
             assert_near(*x, *expected_x);
             assert_near(*y, *expected_y);
+        }
+    }
+
+    #[test]
+    fn narrow_delay_cap_spans_the_full_height_without_leaving_its_box() {
+        let ops = recorded_shape(NodeShape::HalfRoundedRect, 10.0, 20.0, 20.0, 200.0);
+        let curves: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::BezierCurveTo(c1x, c1y, c2x, c2y, x, y) => {
+                    Some([(*c1x, *c1y), (*c2x, *c2y), (*x, *y)])
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(curves.len(), 2, "the end cap is two quarter ellipses");
+        for &(x, y) in curves.iter().flatten() {
+            assert!((10.0 - 0.0001..=30.0 + 0.0001).contains(&x));
+            assert!((20.0 - 0.0001..=220.0 + 0.0001).contains(&y));
+        }
+        assert_near(curves[0][2].0, 30.0);
+        assert_near(curves[0][2].1, 120.0);
+        assert_near(curves[1][2].0, 20.0);
+        assert_near(curves[1][2].1, 220.0);
+        assert_eq!(
+            ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+            1
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| **op == DrawOperation::Stroke)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn curved_notation_uses_full_arc_contours_and_preserves_translucent_fill() {
+        for shape in [NodeShape::CurvedTrapezoid, NodeShape::BowTieRect] {
+            let ops = recorded_shape(shape, 10.0, 20.0, 200.0, 100.0);
+            assert!(
+                ops.iter()
+                    .filter(|op| matches!(op, DrawOperation::BezierCurveTo(..)))
+                    .count()
+                    >= 4,
+                "both curved sides require separate quarter-arc segments: {shape:?}"
+            );
+            let fills: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::SetFillStyle(fill) => Some(fill.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fills, ["rgba(20,40,60,0.5)"]);
+            assert_eq!(
+                ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+                1
+            );
+            assert_eq!(
+                ops.iter()
+                    .filter(|op| **op == DrawOperation::Stroke)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                ops.iter()
+                    .filter(|op| **op == DrawOperation::ClosePath)
+                    .count(),
+                1
+            );
         }
     }
 

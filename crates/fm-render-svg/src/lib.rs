@@ -2642,7 +2642,7 @@ fn render_scene_group(
         ir.and_then(|ir| resolve_treemap_scene_typography(ir, group.id.as_deref()));
     let furniture_theme = matches!(
         group.id.as_deref(),
-        Some("gantt-sections" | "sequence-lifelines")
+        Some("gantt-sections" | "sequence-lifelines" | "layout-bands" | "layout-band-labels")
     )
     .then(|| resolve_theme(ir, config));
     let sequence_number_theme =
@@ -2722,9 +2722,21 @@ fn render_scene_group(
                     .fill_opacity(1.0)
                     .stroke(&theme.colors.cluster_stroke)
                     .stroke_width(0.75)
+            } else if group.id.as_deref() == Some("layout-bands") {
+                rendered
+                    .fill(&theme.colors.cluster_fill)
+                    .stroke(&theme.colors.cluster_stroke)
+                    .stroke_width(1.0)
             } else {
                 rendered.stroke(&theme.colors.node_stroke).stroke_width(1.0)
             };
+        }
+        if group.id.as_deref() == Some("layout-band-labels") && matches!(child, RenderItem::Text(_))
+        {
+            rendered = rendered.attr("font-weight", "600").class("fm-band-label");
+            if let Some(theme) = &furniture_theme {
+                rendered = rendered.fill(&theme.colors.text);
+            }
         }
         if group.id.as_deref() == Some("gantt-labels")
             && matches!(child, RenderItem::Text(text) if text.source == RenderSource::Diagram)
@@ -13278,13 +13290,14 @@ fn render_node(
             group
         }
         NodeShape::HalfRoundedRect => {
-            // Straight for `w - h/2`, then a true semicircle of radius `h/2` capping the right end.
-            // `min` keeps a very wide cap from swallowing the straight portion on a squat node.
+            // A semicircle for ordinary boxes, compressed horizontally for tall, narrow boxes.
+            // Using the smaller radius on both axes makes SVG enlarge the arc to span h,
+            // which pushes the cap outside the layout bounds and into neighbouring nodes.
             let radius = (h / 2.0).min(w / 2.0);
             let path = PathBuilder::new()
                 .move_to(x, y)
                 .line_to(x + w - radius, y)
-                .arc_to(radius, radius, 0.0, false, true, x + w - radius, y + h)
+                .arc_to(radius, h / 2.0, 0.0, false, true, x + w - radius, y + h)
                 .line_to(x, y + h)
                 .close()
                 .build();

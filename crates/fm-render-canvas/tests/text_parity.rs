@@ -10,6 +10,107 @@
 
 use fm_render_canvas::{CanvasRenderConfig, MockCanvas2dContext, render_to_canvas};
 
+#[test]
+fn standalone_scenes_keep_sankey_quantities_and_git_branch_captions() {
+    use fm_layout::{RenderItem, RenderSource};
+    use fm_render_canvas::{DrawOperation, render_scene_to_canvas};
+
+    for (source, expected) in [
+        (
+            "sankey-beta\nA,M,10\nM,B,3\n",
+            vec!["A", "10", "M", "10", "B", "3"],
+        ),
+        (
+            "sankey-beta\nA,B,1.5\nA,C,2.25\n",
+            vec!["A", "3.75", "B", "1.5", "C", "2.25"],
+        ),
+        (
+            "gitGraph LR\ncommit id: \"base\"\nbranch development\ncommit id: \"change\"\ncheckout main\ncommit id: \"next\"\n",
+            vec!["main", "development", "base", "change", "next"],
+        ),
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            ..Default::default()
+        };
+        let rendered = render_scene_to_canvas(&scene, &mut context, &config);
+        let mut rows: Vec<&str> = context
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut expected = expected;
+        rows.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(rows, expected, "{source}");
+        assert_eq!(rendered.labels_drawn, rows.len());
+
+        if ir.diagram_type == fm_core::DiagramType::Sankey {
+            let layer = scene
+                .root
+                .children
+                .iter()
+                .find_map(|item| match item {
+                    RenderItem::Group(group) if group.id.as_deref() == Some("labels") => {
+                        Some(group)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            for node in &layout.nodes {
+                let labels: Vec<_> = layer
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Text(text)
+                            if text.source == RenderSource::Node(node.node_index) =>
+                        {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(labels.len(), 2, "name and throughput belong to each node");
+                assert!(labels[0].y < labels[1].y);
+                assert_eq!(labels[0].x, labels[1].x);
+                assert!(labels[0].y >= node.bounds.y);
+                assert!(labels[1].y <= node.bounds.y + node.bounds.height);
+            }
+        }
+    }
+}
+
+#[test]
+fn scene_bands_do_not_duplicate_timeline_or_journey_captions() {
+    use fm_render_canvas::{DrawOperation, render_scene_to_canvas};
+
+    for (source, caption) in [
+        ("timeline\nsection Era\n2001 : Launch\n", "Era"),
+        ("journey\nsection Morning\nWake: 5: Me\n", "Morning"),
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        render_scene_to_canvas(&scene, &mut context, &CanvasRenderConfig::default());
+        let occurrences = context
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(operation, DrawOperation::FillText(text, _, _) if text == caption)
+            })
+            .count();
+        assert_eq!(occurrences, 1, "{source}");
+    }
+}
+
 /// Text passed to `fill_text`, recovered from the recorded operations.
 ///
 /// `DrawOperation` is not re-exported from the crate root, so an integration test cannot match the

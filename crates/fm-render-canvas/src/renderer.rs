@@ -991,6 +991,7 @@ impl Canvas2dRenderer {
                 }
                 RenderItem::Text(text) => {
                     let font_weight = match group.id.as_deref() {
+                        Some("layout-band-labels") => "600 ",
                         Some(id) if id.starts_with("fm-cluster-caption-") => "600 ",
                         Some(id) if id.starts_with("fm-cluster-type-caption-") => "400 ",
                         Some(id)

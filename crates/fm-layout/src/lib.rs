@@ -3884,6 +3884,8 @@ pub fn build_render_scene_with_metrics(
             include_packing_bounds(&mut content_bounds, number.bounds);
         }
     }
+    let (bands, band_labels) =
+        build_layout_band_scene_layers(ir, layout, metrics, &mut content_bounds);
     let bounds = RenderRect::from(content_bounds.unwrap_or(label_bounds));
 
     let mut root =
@@ -3897,6 +3899,9 @@ pub fn build_render_scene_with_metrics(
         f: 0.0,
     });
     root.clip = Some(RenderClip::Rect(bounds));
+    if !bands.children.is_empty() {
+        root.children.push(RenderItem::Group(bands));
+    }
     root.children
         .push(RenderItem::Group(build_cluster_layer(ir, layout)));
     if ir.diagram_type == DiagramType::Sequence {
@@ -3910,6 +3915,9 @@ pub fn build_render_scene_with_metrics(
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
     root.children.push(RenderItem::Group(node_layer));
     root.children.push(RenderItem::Group(label_layer));
+    if !band_labels.children.is_empty() {
+        root.children.push(RenderItem::Group(band_labels));
+    }
     if ir.diagram_type == DiagramType::Sequence {
         let numbers = build_sequence_number_layer(ir, layout, metrics);
         if !numbers.children.is_empty() {
@@ -3934,6 +3942,81 @@ pub fn build_render_scene_with_metrics(
     }
 
     RenderScene { bounds, root }
+}
+
+/// Preserve semantic panels and their captions when a layout is exported as a standalone
+/// scene. In particular, GitGraph branch names exist only on these bands, not on IR nodes.
+/// Sequence lanes are lifelines and chart-specific builders own their own axes and sections.
+fn build_layout_band_scene_layers(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+    bounds: &mut Option<LayoutRect>,
+) -> (RenderGroup, RenderGroup) {
+    let mut panels = RenderGroup::new(Some(String::from("layout-bands")));
+    let mut labels = RenderGroup::new(Some(String::from("layout-band-labels")));
+    if ir.diagram_type == DiagramType::Sequence {
+        return (panels, labels);
+    }
+    for band in &layout.extensions.bands {
+        // The timeline cluster owns its declared paints and caption. A second opaque panel
+        // would conceal those paints even if its duplicated caption were suppressed.
+        if ir.diagram_type == DiagramType::Timeline
+            && band.kind == LayoutBandKind::Section
+            && layout
+                .clusters
+                .iter()
+                .any(|cluster| cluster.bounds == band.bounds)
+        {
+            continue;
+        }
+        let rect = band.bounds;
+        panels.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Diagram,
+            commands: rounded_rect_path(rect, 4.0),
+            fill: Some(FillStyle::Solid {
+                color: String::from("#f8fafc"),
+                opacity: 1.0,
+            }),
+            stroke: Some(StrokeStyle::solid("#cbd5e1", 1.0)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        }));
+        include_packing_bounds(
+            bounds,
+            LayoutRect {
+                x: rect.x - 0.5,
+                y: rect.y - 0.5,
+                width: rect.width + 1.0,
+                height: rect.height + 1.0,
+            },
+        );
+        let repeated_caption = (ir.diagram_type == DiagramType::Journey
+            && band.kind == LayoutBandKind::Lane)
+            || (ir.diagram_type == DiagramType::Timeline && band.kind == LayoutBandKind::Section);
+        if band.label.is_empty() || repeated_caption {
+            continue;
+        }
+        append_measured_scene_text(
+            &mut labels,
+            bounds,
+            RenderText {
+                source: RenderSource::Diagram,
+                text: band.label.clone(),
+                x: rect.x + 8.0,
+                y: rect.y + 16.0,
+                font_size: (metrics.font_size() * 0.82).max(8.0),
+                align: TextAlign::Start,
+                baseline: TextBaseline::Alphabetic,
+                fill: FillStyle::Solid {
+                    color: String::from("#334155"),
+                    opacity: 1.0,
+                },
+            },
+            metrics,
+        );
+    }
+    (panels, labels)
 }
 
 /// A packet field can occupy several rows while retaining one semantic node. Project every
@@ -5465,6 +5548,7 @@ pub mod spectral;
 pub use cache_oblivious::BlockedEdgeGroups;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub use fnx_cache::{AnalysisCache, CacheConfig, CacheKey, CacheStats};
+pub use shapes::{NodePaintPath, node_paint_paths};
 use shapes::{node_path, rounded_rect_path};
 
 /// State and class notes have no graph node of their own. Keep their resolved boxes, leaders and
@@ -5677,12 +5761,16 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         .with_source(RenderSource::Diagram)
         .with_resolved_paints();
 
-    for node_box in &layout.nodes {
+    // Mirror headers are another rendering of the same participant, so their shapes and styles
+    // must go through the same composition as the original header.
+    for node_box in layout
+        .nodes
+        .iter()
         // The cluster already paints the composite boundary. Its routing node shares that
         // boundary, so painting it again would cover all child states and concurrency dividers.
-        if is_composite_state_node(ir, node_box) {
-            continue;
-        }
+        .filter(|node| !is_composite_state_node(ir, node))
+        .chain(&layout.extensions.sequence_mirror_headers)
+    {
         let shape = ir
             .nodes
             .get(node_box.node_index)
@@ -5692,81 +5780,41 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             .get(node_box.node_index)
             .and_then(|node| node.requirement_meta.as_deref());
         let declared = ir.resolved_node_style(node_box.node_index);
-        let mut path = RenderPath {
-            source: RenderSource::Node(node_box.node_index),
-            commands: node_path(node_box.bounds, shape),
-            fill: Some(FillStyle::Solid {
-                color: requirement
-                    .and_then(fm_core::requirement_risk_fill)
-                    .map(str::to_owned)
-                    .or_else(|| journey_score_fill(ir, node_box.node_index).map(str::to_owned))
-                    .or_else(|| {
-                        (ir.diagram_type == DiagramType::State
-                            && matches!(
-                                shape,
-                                fm_core::NodeShape::FilledCircle
-                                    | fm_core::NodeShape::HorizontalBar
-                            ))
-                        .then(|| String::from("#475569"))
-                    })
-                    .unwrap_or_else(|| "#ffffff".to_owned()),
-                opacity: 1.0,
-            }),
-            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
-            marker_start: MarkerKind::None,
-            marker_end: MarkerKind::None,
-        };
-        apply_scene_path_style(&mut path, &declared);
-        layer.children.push(RenderItem::Path(path));
-        if ir.diagram_type == DiagramType::State && shape == fm_core::NodeShape::DoubleCircle {
-            // A final state is a ring around a solid disc. The generic shape path describes only
-            // its outer boundary, so the disc must be a separate primitive inside that boundary.
-            let center = node_box.bounds.center();
-            let radius = node_box.bounds.width.min(node_box.bounds.height) / 2.0;
-            let inner_radius = (radius - 4.0).max(radius * 0.5);
+        let body_fill = requirement
+            .and_then(fm_core::requirement_risk_fill)
+            .or_else(|| journey_score_fill(ir, node_box.node_index))
+            .or_else(|| {
+                (ir.diagram_type == DiagramType::State
+                    && matches!(
+                        shape,
+                        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar
+                    ))
+                .then_some("#475569")
+            })
+            .unwrap_or("#ffffff");
+        for (piece_index, piece) in node_paint_paths(node_box.bounds, shape)
+            .into_iter()
+            .enumerate()
+        {
+            // A flowchart double circle has two hollow rings; a terminal state has a solid
+            // inner disc. The geometry is shared, while this meaning belongs to the diagram.
+            let terminal_disc = ir.diagram_type == DiagramType::State
+                && shape == fm_core::NodeShape::DoubleCircle
+                && piece_index == 1;
             let mut path = RenderPath {
                 source: RenderSource::Node(node_box.node_index),
-                commands: node_path(
-                    LayoutRect {
-                        x: center.x - inner_radius,
-                        y: center.y - inner_radius,
-                        width: 2.0 * inner_radius,
-                        height: 2.0 * inner_radius,
-                    },
-                    fm_core::NodeShape::Circle,
-                ),
-                fill: Some(FillStyle::Solid {
-                    color: String::from("#475569"),
+                commands: piece.commands,
+                fill: (piece.fill || terminal_disc).then(|| FillStyle::Solid {
+                    color: String::from(if terminal_disc { "#475569" } else { body_fill }),
                     opacity: 1.0,
                 }),
-                stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+                stroke: piece.stroke.then(|| StrokeStyle::solid("#94a3b8", 1.5)),
                 marker_start: MarkerKind::None,
                 marker_end: MarkerKind::None,
             };
             apply_scene_path_style(&mut path, &declared);
             layer.children.push(RenderItem::Path(path));
         }
-    }
-
-    for node_box in &layout.extensions.sequence_mirror_headers {
-        let shape = ir
-            .nodes
-            .get(node_box.node_index)
-            .map_or(fm_core::NodeShape::Rect, |node| node.shape);
-
-        let mut path = RenderPath {
-            source: RenderSource::Node(node_box.node_index),
-            commands: node_path(node_box.bounds, shape),
-            fill: Some(FillStyle::Solid {
-                color: String::from("#ffffff"),
-                opacity: 1.0,
-            }),
-            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
-            marker_start: MarkerKind::None,
-            marker_end: MarkerKind::None,
-        };
-        apply_scene_path_style(&mut path, &ir.resolved_node_style(node_box.node_index));
-        layer.children.push(RenderItem::Path(path));
     }
 
     layer
@@ -6199,7 +6247,10 @@ fn build_label_layer(
         }
         let styled_metrics = ir.effective_node_font_metrics(node_box.node_index, metrics);
         let metrics = styled_metrics.as_ref();
-        let label_text = if node.class_meta.is_some() {
+        let sankey_label = sankey_node_label(ir, node_box.node_index);
+        let label_text = if let Some(label) = sankey_label {
+            std::borrow::Cow::Owned(label)
+        } else if node.class_meta.is_some() {
             std::borrow::Cow::Owned(display_node_label(ir, node))
         } else {
             ir.node_layout_text(node, metrics)
@@ -34950,6 +35001,168 @@ mod tests {
             }
         }
         texts
+    }
+
+    #[test]
+    fn render_scene_preserves_extended_shape_ink_and_author_paint_roles() {
+        use super::FillStyle;
+
+        for (alias, shape, path_count, fill_count, stroke_count) in [
+            ("text", NodeShape::TextBlock, 0, 0, 0),
+            ("brace-l", NodeShape::BraceLeft, 1, 0, 1),
+            ("brace-r", NodeShape::BraceRight, 1, 0, 1),
+            ("braces", NodeShape::Braces, 2, 0, 2),
+            ("subproc", NodeShape::Subroutine, 2, 1, 2),
+            ("cross-circ", NodeShape::CrossedCircle, 2, 1, 2),
+            ("dbl-circ", NodeShape::DoubleCircle, 2, 1, 2),
+            ("fr-circ", NodeShape::FramedCircle, 2, 2, 2),
+            ("lin-rect", NodeShape::LinedRect, 2, 1, 2),
+            ("div-rect", NodeShape::DividedRect, 2, 1, 2),
+            ("win-pane", NodeShape::WindowPane, 2, 1, 2),
+            ("datastore", NodeShape::DataStore, 2, 1, 1),
+            ("cyl", NodeShape::Cylinder, 2, 1, 2),
+            ("h-cyl", NodeShape::HorizontalCylinder, 2, 1, 2),
+            ("lin-cyl", NodeShape::LinedCylinder, 2, 1, 2),
+            ("lin-doc", NodeShape::LinedDocument, 2, 1, 2),
+            ("tag-doc", NodeShape::TaggedDocument, 2, 1, 2),
+            ("tag-rect", NodeShape::TaggedRect, 2, 1, 2),
+            ("st-rect", NodeShape::StackedRect, 3, 3, 3),
+            ("docs", NodeShape::StackedDocument, 3, 3, 3),
+            ("flag", NodeShape::Flag, 1, 1, 1),
+            ("delay", NodeShape::HalfRoundedRect, 1, 1, 1),
+            ("curv-trap", NodeShape::CurvedTrapezoid, 1, 1, 1),
+            ("bow-rect", NodeShape::BowTieRect, 1, 1, 1),
+        ] {
+            let ir = parse(&format!(
+                "flowchart LR\nA@{{shape: {alias}, label: \"Visible label\"}}\n\
+                 style A fill:#123456,stroke:#abcdef,stroke-width:3px,stroke-dasharray:5 2,opacity:0.8,fill-opacity:0.5\n",
+            )).ir;
+            assert_eq!(ir.nodes.len(), 1, "{alias}");
+            assert_eq!(ir.nodes[0].shape, shape, "{alias}");
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+            assert_eq!(paths.len(), path_count, "{alias}");
+            assert_eq!(
+                paths.iter().filter(|path| path.fill.is_some()).count(),
+                fill_count,
+                "{alias}: author fill must not fill interior rules or braces"
+            );
+            assert_eq!(
+                paths.iter().filter(|path| path.stroke.is_some()).count(),
+                stroke_count,
+                "{alias}"
+            );
+            for path in paths {
+                assert_eq!(path.source, RenderSource::Node(0));
+                if let Some(fill) = &path.fill {
+                    assert_eq!(
+                        *fill,
+                        FillStyle::Solid {
+                            color: "#123456".into(),
+                            opacity: 0.4
+                        },
+                        "{alias}"
+                    );
+                }
+                if let Some(stroke) = &path.stroke {
+                    assert_eq!(
+                        (stroke.color.as_str(), stroke.width, stroke.opacity),
+                        ("#abcdef", 3.0, 0.8),
+                        "{alias}"
+                    );
+                    assert_eq!(stroke.dash_array, [5.0, 2.0], "{alias}");
+                }
+            }
+            let labels = scene_texts(gantt_scene_group(&scene, "labels"));
+            assert_eq!(
+                labels.len(),
+                1,
+                "{alias}: text must remain even when the node paints no box"
+            );
+            assert_eq!(labels[0].source, RenderSource::Node(0));
+            assert_eq!(labels[0].text, "Visible label");
+        }
+    }
+
+    #[test]
+    fn render_scene_disabled_strokes_do_not_reappear_on_shape_details() {
+        for alias in [
+            "braces",
+            "subproc",
+            "dbl-circ",
+            "fr-circ",
+            "datastore",
+            "docs",
+            "lin-cyl",
+            "tag-doc",
+        ] {
+            let ir = parse(&format!(
+                "flowchart LR\nA@{{shape: {alias}, label: \"Visible label\"}}\nstyle A fill:#123456,stroke:none\n",
+            )).ir;
+            let scene = build_render_scene(&ir, &layout_diagram(&ir));
+            let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+            assert!(!paths.is_empty(), "{alias}");
+            assert!(paths.iter().all(|path| path.stroke.is_none()), "{alias}");
+            if alias == "braces" {
+                assert!(
+                    paths.iter().all(|path| path.fill.is_none()),
+                    "author fill cannot turn a brace into a filled sliver"
+                );
+            }
+            if alias == "dbl-circ" {
+                assert!(paths[0].fill.is_some());
+                assert!(
+                    paths[1].fill.is_none(),
+                    "a flowchart ring must not become a terminal-state disc"
+                );
+            }
+            assert_eq!(scene_texts(gantt_scene_group(&scene, "labels")).len(), 1);
+        }
+    }
+
+    #[test]
+    fn render_scene_sequence_mirrors_repeat_composite_shape_details() {
+        let mut ir = parse(
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+             sequenceDiagram\nparticipant A as Alpha\nparticipant B as Beta\nA->>B: hello\n\
+             style A fill:#123456,stroke:#abcdef,stroke-width:3px\n",
+        )
+        .ir;
+        // Structured IR callers can choose participant shapes independently of the sequence
+        // syntax. Both visible headers still represent the same authored participant.
+        ir.nodes[0].shape = NodeShape::Subroutine;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_mirror_headers.len(), 2);
+        let scene = build_render_scene(&ir, &layout);
+        let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+        let repeated: Vec<_> = paths
+            .iter()
+            .filter(|path| path.source == RenderSource::Node(0))
+            .collect();
+        assert_eq!(repeated.len(), 4);
+        for header in repeated.chunks_exact(2) {
+            assert!(header[0].fill.is_some() && header[1].fill.is_none());
+            assert_eq!(
+                header[1]
+                    .commands
+                    .iter()
+                    .filter(|cmd| matches!(cmd, super::PathCmd::LineTo { .. }))
+                    .count(),
+                2
+            );
+            assert_eq!(header[0].stroke, header[1].stroke);
+            assert_eq!(header[1].stroke.as_ref().unwrap().color, "#abcdef");
+        }
+        assert_eq!(repeated[0].fill, repeated[2].fill);
+        assert_eq!(repeated[1].stroke, repeated[3].stroke);
+        let first = gantt_scene_path_extents(repeated[1]);
+        let mirror = gantt_scene_path_extents(repeated[3]);
+        assert_eq!(
+            (first.x, first.width, first.height),
+            (mirror.x, mirror.width, mirror.height)
+        );
+        assert!(mirror.y > first.y);
     }
 
     #[test]

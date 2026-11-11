@@ -281,6 +281,644 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
     }
 }
 
+/// One ordered piece of a node's visible geometry.
+///
+/// Fill and stroke are independent: an open data store has a filled body and only two stroked
+/// edges, while braces and composite-shape details are never filled. Consumers paint these
+/// pieces in order so the front sheets of a stack cover the sheets behind them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodePaintPath {
+    pub commands: Vec<PathCmd>,
+    pub fill: bool,
+    pub stroke: bool,
+}
+
+impl NodePaintPath {
+    fn body(commands: Vec<PathCmd>) -> Self {
+        Self {
+            commands,
+            fill: true,
+            stroke: true,
+        }
+    }
+
+    fn outline(commands: Vec<PathCmd>) -> Self {
+        Self {
+            commands,
+            fill: false,
+            stroke: true,
+        }
+    }
+}
+
+/// Visible node geometry, distinct from [`node_path`]'s routing boundary.
+///
+/// A text node still has a routing box but paints no box. Interior rules, folds, rings and
+/// stacked sheets carry meaning and must reach scene and GPU renderers just as they reach the
+/// direct SVG and Canvas surfaces. A double circle's inner ring is unfilled here; a state
+/// renderer may fill that second piece to express a terminal state.
+#[must_use]
+pub fn node_paint_paths(bounds: LayoutRect, shape: NodeShape) -> Vec<NodePaintPath> {
+    let bounds = canonical_bounds(bounds);
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
+    if ![x, y, w, h].into_iter().all(f32::is_finite) || w < 0.0 || h < 0.0 {
+        return Vec::new();
+    }
+    match shape {
+        NodeShape::TextBlock => return Vec::new(),
+        NodeShape::BraceLeft => {
+            return vec![NodePaintPath::outline(brace_paint_path(bounds, true))];
+        }
+        NodeShape::BraceRight => {
+            return vec![NodePaintPath::outline(brace_paint_path(bounds, false))];
+        }
+        NodeShape::Braces => {
+            return vec![
+                NodePaintPath::outline(brace_paint_path(bounds, true)),
+                NodePaintPath::outline(brace_paint_path(bounds, false)),
+            ];
+        }
+        NodeShape::DataStore => {
+            return vec![
+                NodePaintPath {
+                    commands: rounded_rect_path(bounds, 0.0),
+                    fill: true,
+                    stroke: false,
+                },
+                NodePaintPath::outline(vec![
+                    PathCmd::MoveTo { x, y },
+                    PathCmd::LineTo { x: x + w, y },
+                    PathCmd::MoveTo { x, y: y + h },
+                    PathCmd::LineTo { x: x + w, y: y + h },
+                ]),
+            ];
+        }
+        NodeShape::StackedRect | NodeShape::StackedDocument => {
+            let (dx, dy) = if shape == NodeShape::StackedDocument {
+                (w * 0.165, h * 0.169)
+            } else {
+                (w * 0.099, h * 0.078)
+            };
+            return [2.0, 1.0, 0.0]
+                .into_iter()
+                .map(|step| {
+                    let leaf = LayoutRect {
+                        x: x + dx * step,
+                        y: y + dy * (2.0 - step),
+                        width: w - 2.0 * dx,
+                        height: h - 2.0 * dy,
+                    };
+                    NodePaintPath::body(if shape == NodeShape::StackedDocument {
+                        document_path(leaf)
+                    } else {
+                        rounded_rect_path(leaf, 0.0)
+                    })
+                })
+                .collect();
+        }
+        _ => {}
+    }
+
+    let body = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => ellipse_paint_path(circle_bounds(bounds)),
+        NodeShape::SmallCircle | NodeShape::FramedCircle => {
+            centered_circle_paint_path(bounds, fm_core::SMALL_CIRCLE_RADIUS)
+        }
+        NodeShape::Cylinder | NodeShape::LinedCylinder => cylinder_paint_body(bounds),
+        NodeShape::CurvedTrapezoid => curved_trapezoid_paint_path(bounds),
+        NodeShape::BowTieRect => bow_tie_paint_path(bounds),
+        NodeShape::Flag => flag_paint_path(bounds),
+        NodeShape::HalfRoundedRect => half_rounded_paint_path(bounds),
+        _ => node_path(bounds, shape),
+    };
+    let mut paths = vec![NodePaintPath::body(body)];
+    let mut detail = Vec::new();
+    let mut line = |x1, y1, x2, y2| {
+        detail.push(PathCmd::MoveTo { x: x1, y: y1 });
+        detail.push(PathCmd::LineTo { x: x2, y: y2 });
+    };
+    match shape {
+        NodeShape::Subroutine => {
+            let inset = 8.0_f32.min(w * 0.5);
+            line(x + inset, y, x + inset, y + h);
+            line(x + w - inset, y, x + w - inset, y + h);
+        }
+        NodeShape::CrossedCircle => {
+            let center = bounds.center();
+            let offset = w.min(h) * 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+            line(
+                center.x - offset,
+                center.y - offset,
+                center.x + offset,
+                center.y + offset,
+            );
+            line(
+                center.x + offset,
+                center.y - offset,
+                center.x - offset,
+                center.y + offset,
+            );
+        }
+        NodeShape::DoubleCircle => {
+            let radius = w.min(h) * 0.5;
+            paths.push(NodePaintPath::outline(centered_circle_paint_path(
+                bounds,
+                (radius - 4.0).max(radius * 0.5),
+            )));
+        }
+        NodeShape::FramedCircle => paths.push(NodePaintPath::body(centered_circle_paint_path(
+            bounds,
+            fm_core::FRAMED_CIRCLE_INNER_RADIUS,
+        ))),
+        NodeShape::LinedRect => {
+            let rule = x + (w * 0.14).min(16.0);
+            line(rule, y, rule, y + h);
+        }
+        NodeShape::DividedRect => {
+            let band = y + h * fm_core::DIVIDED_RECT_HEADER_RATIO;
+            line(x, band, x + w, band);
+        }
+        NodeShape::WindowPane => {
+            let inset_x = fm_core::WINDOW_PANE_INSET.min(w * 0.4);
+            let inset_y = fm_core::WINDOW_PANE_INSET.min(h * 0.4);
+            line(x, y + inset_y, x + w, y + inset_y);
+            line(x + inset_x, y, x + inset_x, y + h);
+        }
+        NodeShape::LinedDocument => line(x + w * 0.045, y, x + w * 0.045, y + h * 0.94),
+        NodeShape::TaggedRect => {
+            let fold = h * fm_core::TAGGED_RECT_FOLD_RATIO;
+            detail = vec![
+                PathCmd::MoveTo {
+                    x: x + w - fold,
+                    y: y + h,
+                },
+                PathCmd::LineTo { x: x + w, y: y + h },
+                PathCmd::LineTo {
+                    x: x + w,
+                    y: y + h - fold,
+                },
+                PathCmd::Close,
+            ];
+        }
+        NodeShape::Note => {
+            let fold = 10.0_f32.min(w * 0.4);
+            detail = vec![
+                PathCmd::MoveTo { x: x + w - fold, y },
+                PathCmd::LineTo {
+                    x: x + w - fold,
+                    y: y + fold,
+                },
+                PathCmd::LineTo {
+                    x: x + w,
+                    y: y + fold,
+                },
+            ];
+        }
+        NodeShape::TaggedDocument => {
+            detail = scaled_paint_path(
+                bounds,
+                &[
+                    PathCmd::MoveTo {
+                        x: 0.818,
+                        y: 0.8384,
+                    },
+                    PathCmd::LineTo { x: 1.0, y: 0.58 },
+                    PathCmd::LineTo { x: 1.0, y: 0.80 },
+                    PathCmd::QuadTo {
+                        cx: 0.909,
+                        cy: 0.8146,
+                        x: 0.818,
+                        y: 0.8384,
+                    },
+                    PathCmd::Close,
+                ],
+            )
+        }
+        NodeShape::Cylinder | NodeShape::LinedCylinder => {
+            detail = cylinder_paint_rim(bounds, y + h * 0.1);
+            if shape == NodeShape::LinedCylinder {
+                detail.extend(cylinder_paint_rim(bounds, y + h * 0.2));
+            }
+        }
+        NodeShape::HorizontalCylinder => {
+            let rx = w * 0.1;
+            let ry = h * 0.5;
+            let left = x + rx;
+            let cy = y + ry;
+            let kx = rx * ELLIPSE_KAPPA;
+            let ky = ry * ELLIPSE_KAPPA;
+            detail = vec![
+                PathCmd::MoveTo { x: left, y },
+                PathCmd::CubicTo {
+                    c1x: left + kx,
+                    c1y: y,
+                    c2x: left + rx,
+                    c2y: cy - ky,
+                    x: left + rx,
+                    y: cy,
+                },
+                PathCmd::CubicTo {
+                    c1x: left + rx,
+                    c1y: cy + ky,
+                    c2x: left + kx,
+                    c2y: y + h,
+                    x: left,
+                    y: y + h,
+                },
+            ];
+        }
+        _ => {}
+    }
+    if !detail.is_empty() {
+        paths.push(NodePaintPath::outline(detail));
+    }
+    paths
+}
+
+const ELLIPSE_KAPPA: f32 = 0.552_284_8;
+
+fn scaled_paint_path(bounds: LayoutRect, commands: &[PathCmd]) -> Vec<PathCmd> {
+    let x = |value| bounds.x + bounds.width * value;
+    let y = |value| bounds.y + bounds.height * value;
+    commands
+        .iter()
+        .map(|command| match *command {
+            PathCmd::MoveTo { x: px, y: py } => PathCmd::MoveTo { x: x(px), y: y(py) },
+            PathCmd::LineTo { x: px, y: py } => PathCmd::LineTo { x: x(px), y: y(py) },
+            PathCmd::QuadTo {
+                cx,
+                cy,
+                x: px,
+                y: py,
+            } => PathCmd::QuadTo {
+                cx: x(cx),
+                cy: y(cy),
+                x: x(px),
+                y: y(py),
+            },
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x: px,
+                y: py,
+            } => PathCmd::CubicTo {
+                c1x: x(c1x),
+                c1y: y(c1y),
+                c2x: x(c2x),
+                c2y: y(c2y),
+                x: x(px),
+                y: y(py),
+            },
+            PathCmd::Close => PathCmd::Close,
+        })
+        .collect()
+}
+
+fn centered_circle_paint_path(bounds: LayoutRect, radius: f32) -> Vec<PathCmd> {
+    let center = bounds.center();
+    ellipse_paint_path(LayoutRect {
+        x: center.x - radius,
+        y: center.y - radius,
+        width: 2.0 * radius,
+        height: 2.0 * radius,
+    })
+}
+
+fn ellipse_paint_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let k = ELLIPSE_KAPPA * 0.5;
+    scaled_paint_path(
+        bounds,
+        &[
+            PathCmd::MoveTo { x: 1.0, y: 0.5 },
+            PathCmd::CubicTo {
+                c1x: 1.0,
+                c1y: 0.5 + k,
+                c2x: 0.5 + k,
+                c2y: 1.0,
+                x: 0.5,
+                y: 1.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.5 - k,
+                c1y: 1.0,
+                c2x: 0.0,
+                c2y: 0.5 + k,
+                x: 0.0,
+                y: 0.5,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.0,
+                c1y: 0.5 - k,
+                c2x: 0.5 - k,
+                c2y: 0.0,
+                x: 0.5,
+                y: 0.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.5 + k,
+                c1y: 0.0,
+                c2x: 1.0,
+                c2y: 0.5 - k,
+                x: 1.0,
+                y: 0.5,
+            },
+            PathCmd::Close,
+        ],
+    )
+}
+
+fn cylinder_paint_body(bounds: LayoutRect) -> Vec<PathCmd> {
+    scaled_paint_path(
+        bounds,
+        &[
+            PathCmd::MoveTo { x: 0.0, y: 0.1 },
+            PathCmd::LineTo { x: 0.0, y: 0.9 },
+            PathCmd::CubicTo {
+                c1x: 0.0,
+                c1y: 0.955,
+                c2x: 0.22,
+                c2y: 1.0,
+                x: 0.5,
+                y: 1.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.78,
+                c1y: 1.0,
+                c2x: 1.0,
+                c2y: 0.955,
+                x: 1.0,
+                y: 0.9,
+            },
+            PathCmd::LineTo { x: 1.0, y: 0.1 },
+            PathCmd::CubicTo {
+                c1x: 1.0,
+                c1y: 0.045,
+                c2x: 0.78,
+                c2y: 0.0,
+                x: 0.5,
+                y: 0.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.22,
+                c1y: 0.0,
+                c2x: 0.0,
+                c2y: 0.045,
+                x: 0.0,
+                y: 0.1,
+            },
+            PathCmd::Close,
+        ],
+    )
+}
+
+fn cylinder_paint_rim(bounds: LayoutRect, top: f32) -> Vec<PathCmd> {
+    scaled_paint_path(
+        LayoutRect {
+            y: top,
+            height: bounds.height * 0.1,
+            ..bounds
+        },
+        &[
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::CubicTo {
+                c1x: 0.0,
+                c1y: 0.55,
+                c2x: 0.22,
+                c2y: 1.0,
+                x: 0.5,
+                y: 1.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 0.78,
+                c1y: 1.0,
+                c2x: 1.0,
+                c2y: 0.55,
+                x: 1.0,
+                y: 0.0,
+            },
+        ],
+    )
+}
+
+fn flag_paint_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    scaled_paint_path(
+        bounds,
+        &[
+            PathCmd::MoveTo { x: 0.0, y: 0.917 },
+            PathCmd::QuadTo {
+                cx: 0.25,
+                cy: 1.09,
+                x: 0.5,
+                y: 0.91,
+            },
+            PathCmd::QuadTo {
+                cx: 0.75,
+                cy: 0.79,
+                x: 1.0,
+                y: 0.893,
+            },
+            PathCmd::LineTo { x: 1.0, y: 0.083 },
+            PathCmd::QuadTo {
+                cx: 0.75,
+                cy: -0.09,
+                x: 0.5,
+                y: 0.09,
+            },
+            PathCmd::QuadTo {
+                cx: 0.25,
+                cy: 0.21,
+                x: 0.0,
+                y: 0.107,
+            },
+            PathCmd::Close,
+        ],
+    )
+}
+
+fn half_rounded_paint_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
+    let radius = (h * 0.5).min(w * 0.5);
+    let right = x + w - radius;
+    let mut path = vec![PathCmd::MoveTo { x, y }, PathCmd::LineTo { x: right, y }];
+    ellipse_arc_to(&mut path, (right, y), (right, y + h), radius, h * 0.5, true);
+    path.push(PathCmd::LineTo { x, y: y + h });
+    path.push(PathCmd::Close);
+    path
+}
+
+fn curved_trapezoid_paint_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let mut path = vec![
+        PathCmd::MoveTo { x: 0.265, y: 0.0 },
+        PathCmd::LineTo { x: 0.469, y: 0.0 },
+    ];
+    ellipse_arc_to(&mut path, (0.469, 0.0), (0.438, 1.0), 0.547, 0.5, true);
+    path.push(PathCmd::LineTo { x: 0.302, y: 1.0 });
+    ellipse_arc_to(&mut path, (0.302, 1.0), (0.265, 0.0), 0.276, 0.5, true);
+    path.push(PathCmd::Close);
+    scaled_paint_path(bounds, &path)
+}
+
+fn bow_tie_paint_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let mut path = vec![
+        PathCmd::MoveTo { x: 0.179, y: 0.0 },
+        PathCmd::LineTo { x: 1.0, y: 0.0 },
+    ];
+    ellipse_arc_to(&mut path, (1.0, 0.0), (0.978, 1.0), 0.101, 0.5, false);
+    path.push(PathCmd::LineTo { x: 0.157, y: 1.0 });
+    ellipse_arc_to(&mut path, (0.157, 1.0), (0.179, 0.0), 0.138, 0.5, false);
+    path.push(PathCmd::Close);
+    scaled_paint_path(bounds, &path)
+}
+
+/// Convert a non-rotated SVG small arc to cubic segments no larger than a quarter turn.
+/// The radius correction matters for the measured asymmetric ends of display/stored-data
+/// shapes: one cubic spanning the whole half ellipse visibly flattens their sides.
+fn ellipse_arc_to(
+    path: &mut Vec<PathCmd>,
+    from: (f32, f32),
+    to: (f32, f32),
+    radius_x: f32,
+    radius_y: f32,
+    sweep: bool,
+) {
+    if radius_x <= 0.0 || radius_y <= 0.0 || from == to {
+        path.push(PathCmd::LineTo { x: to.0, y: to.1 });
+        return;
+    }
+    let (dx, dy) = (
+        (f64::from(from.0) - f64::from(to.0)) * 0.5,
+        (f64::from(from.1) - f64::from(to.1)) * 0.5,
+    );
+    let (mut rx, mut ry) = (f64::from(radius_x), f64::from(radius_y));
+    let scale = ((dx / rx).powi(2) + (dy / ry).powi(2)).sqrt().max(1.0);
+    rx *= scale;
+    ry *= scale;
+    let denominator = (rx * dy).powi(2) + (ry * dx).powi(2);
+    let factor = (((rx * ry).powi(2) - denominator) / denominator)
+        .max(0.0)
+        .sqrt()
+        * if sweep { -1.0 } else { 1.0 };
+    let (offset_x, offset_y) = (factor * rx * dy / ry, -factor * ry * dx / rx);
+    let (cx, cy) = (
+        (f64::from(from.0) + f64::from(to.0)) * 0.5 + offset_x,
+        (f64::from(from.1) + f64::from(to.1)) * 0.5 + offset_y,
+    );
+    let (ux, uy) = ((dx - offset_x) / rx, (dy - offset_y) / ry);
+    let (vx, vy) = ((-dx - offset_x) / rx, (-dy - offset_y) / ry);
+    let start = uy.atan2(ux);
+    let mut angle = (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    if sweep && angle < 0.0 {
+        angle += std::f64::consts::TAU;
+    } else if !sweep && angle > 0.0 {
+        angle -= std::f64::consts::TAU;
+    }
+    let segments = (angle.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+    let step = angle / segments as f64;
+    let tangent = (step * 0.25).tan() * (4.0 / 3.0);
+    for index in 0..segments {
+        let first = start + index as f64 * step;
+        let last = first + step;
+        let (sin_first, cos_first) = first.sin_cos();
+        let (sin_last, cos_last) = last.sin_cos();
+        path.push(PathCmd::CubicTo {
+            c1x: (cx + rx * (cos_first - tangent * sin_first)) as f32,
+            c1y: (cy + ry * (sin_first + tangent * cos_first)) as f32,
+            c2x: (cx + rx * (cos_last + tangent * sin_last)) as f32,
+            c2y: (cy + ry * (sin_last - tangent * cos_last)) as f32,
+            x: if index + 1 == segments {
+                to.0
+            } else {
+                (cx + rx * cos_last) as f32
+            },
+            y: if index + 1 == segments {
+                to.1
+            } else {
+                (cy + ry * sin_last) as f32
+            },
+        });
+    }
+}
+
+fn brace_paint_path(bounds: LayoutRect, left: bool) -> Vec<PathCmd> {
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
+    let radius = (h * fm_core::BRACE_RADIUS_RATIO)
+        .max(fm_core::BRACE_MIN_RADIUS)
+        .min(h * 0.25)
+        .min(w * 0.25);
+    let (edge, direction) = if left {
+        (x + 2.0 * radius, -1.0)
+    } else {
+        (x + w - 2.0 * radius, 1.0)
+    };
+    let spine = edge + direction * radius;
+    let spur = edge + direction * 2.0 * radius;
+    let mid = y + h * 0.5;
+    let k = radius * ELLIPSE_KAPPA;
+    vec![
+        PathCmd::MoveTo { x: edge, y },
+        PathCmd::CubicTo {
+            c1x: edge + direction * k,
+            c1y: y,
+            c2x: spine,
+            c2y: y + radius - k,
+            x: spine,
+            y: y + radius,
+        },
+        PathCmd::LineTo {
+            x: spine,
+            y: mid - radius,
+        },
+        PathCmd::CubicTo {
+            c1x: spine,
+            c1y: mid - radius + k,
+            c2x: spur - direction * k,
+            c2y: mid,
+            x: spur,
+            y: mid,
+        },
+        PathCmd::CubicTo {
+            c1x: spur - direction * k,
+            c1y: mid,
+            c2x: spine,
+            c2y: mid + radius - k,
+            x: spine,
+            y: mid + radius,
+        },
+        PathCmd::LineTo {
+            x: spine,
+            y: y + h - radius,
+        },
+        PathCmd::CubicTo {
+            c1x: spine,
+            c1y: y + h - radius + k,
+            c2x: edge + direction * k,
+            c2y: y + h,
+            x: edge,
+            y: y + h,
+        },
+    ]
+}
+
 /// A single top-left cut, matching the SVG and Canvas notch rather than its enclosing rectangle.
 #[must_use]
 pub fn notched_rect_path(bounds: LayoutRect) -> Vec<PathCmd> {
@@ -1041,6 +1679,244 @@ mod tests {
         for ((x, y), (expected_x, expected_y)) in actual.iter().zip(expected) {
             assert_near(*x, *expected_x);
             assert_near(*y, *expected_y);
+        }
+    }
+
+    #[test]
+    fn node_paint_paths_keep_text_empty_and_braces_open() {
+        let bounds = test_bounds();
+        assert!(!node_path(bounds, NodeShape::TextBlock).is_empty());
+        assert!(node_paint_paths(bounds, NodeShape::TextBlock).is_empty());
+        let braces = node_paint_paths(bounds, NodeShape::Braces);
+        assert_eq!(braces.len(), 2);
+        for piece in &braces {
+            assert!(!piece.fill && piece.stroke);
+            assert!(!piece.commands.contains(&PathCmd::Close));
+            assert_eq!(
+                piece
+                    .commands
+                    .iter()
+                    .filter(|cmd| matches!(cmd, PathCmd::CubicTo { .. }))
+                    .count(),
+                4,
+            );
+        }
+        let left = coordinates(&braces[0].commands);
+        let right = coordinates(&braces[1].commands);
+        for (left, right) in left.chunks_exact(2).zip(right.chunks_exact(2)) {
+            assert_near(left[0] + right[0], 2.0 * bounds.center().x);
+            assert_near(left[1], right[1]);
+        }
+        assert!(braces[0].commands.iter().any(|cmd| matches!(cmd,
+            PathCmd::CubicTo { x, y, .. } if *x == bounds.x && *y == bounds.center().y)));
+        assert!(braces[1].commands.iter().any(|cmd| matches!(cmd,
+            PathCmd::CubicTo { x, y, .. } if *x == bounds.x + bounds.width && *y == bounds.center().y)));
+        assert_eq!(
+            node_paint_paths(bounds, NodeShape::BraceLeft),
+            [braces[0].clone()]
+        );
+        assert_eq!(
+            node_paint_paths(bounds, NodeShape::BraceRight),
+            [braces[1].clone()]
+        );
+    }
+
+    #[test]
+    fn node_paint_paths_preserve_open_sides_and_composite_details() {
+        let bounds = test_bounds();
+        let store = node_paint_paths(bounds, NodeShape::DataStore);
+        assert_eq!(store.len(), 2);
+        assert!(store[0].fill && !store[0].stroke);
+        assert!(!store[1].fill && store[1].stroke);
+        assert_vertices(
+            &store[1].commands,
+            &[(10.0, 20.0), (210.0, 20.0), (10.0, 120.0), (210.0, 120.0)],
+        );
+        assert!(!store[1].commands.contains(&PathCmd::Close));
+
+        let subroutine = node_paint_paths(bounds, NodeShape::Subroutine);
+        assert_eq!(subroutine.len(), 2);
+        assert!(subroutine[0].fill && !subroutine[1].fill);
+        assert_vertices(
+            &subroutine[1].commands,
+            &[(18.0, 20.0), (18.0, 120.0), (202.0, 20.0), (202.0, 120.0)],
+        );
+
+        let crossed = node_paint_paths(bounds, NodeShape::CrossedCircle);
+        assert_eq!(crossed.len(), 2);
+        assert!(!crossed[1].fill);
+        for (x, y) in vertices(&crossed[1].commands) {
+            assert_near((x - bounds.center().x).hypot(y - bounds.center().y), 50.0);
+        }
+        for (shape, radius, inner_radius, inner_fill) in [
+            (NodeShape::DoubleCircle, 50.0, 46.0, false),
+            (
+                NodeShape::FramedCircle,
+                fm_core::SMALL_CIRCLE_RADIUS,
+                fm_core::FRAMED_CIRCLE_INNER_RADIUS,
+                true,
+            ),
+        ] {
+            let circles = node_paint_paths(bounds, shape);
+            assert_eq!(circles.len(), 2);
+            assert!(circles[0].fill);
+            assert_eq!(circles[1].fill, inner_fill);
+            for (piece, radius) in circles.iter().zip([radius, inner_radius]) {
+                assert_eq!(
+                    piece.commands[0],
+                    PathCmd::MoveTo {
+                        x: bounds.center().x + radius,
+                        y: bounds.center().y
+                    }
+                );
+                assert!(piece.stroke);
+            }
+        }
+    }
+
+    #[test]
+    fn node_paint_paths_stack_sheets_back_to_front() {
+        let bounds = test_bounds();
+        for (shape, dx, dy) in [
+            (
+                NodeShape::StackedRect,
+                bounds.width * 0.099,
+                bounds.height * 0.078,
+            ),
+            (
+                NodeShape::StackedDocument,
+                bounds.width * 0.165,
+                bounds.height * 0.169,
+            ),
+        ] {
+            let pieces = node_paint_paths(bounds, shape);
+            assert_eq!(pieces.len(), 3);
+            for (piece, step) in pieces.iter().zip([2.0, 1.0, 0.0]) {
+                assert!(piece.fill && piece.stroke);
+                assert_eq!(
+                    piece.commands[0],
+                    PathCmd::MoveTo {
+                        x: bounds.x + dx * step,
+                        y: bounds.y + dy * (2.0 - step)
+                    }
+                );
+                assert!(piece.commands.contains(&PathCmd::Close));
+                if shape == NodeShape::StackedDocument {
+                    assert_eq!(
+                        piece
+                            .commands
+                            .iter()
+                            .filter(|cmd| matches!(cmd, PathCmd::QuadTo { .. }))
+                            .count(),
+                        2
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn node_paint_paths_keep_measured_curves_instead_of_routing_boxes() {
+        let bounds = test_bounds();
+        for shape in [
+            NodeShape::CurvedTrapezoid,
+            NodeShape::BowTieRect,
+            NodeShape::HalfRoundedRect,
+            NodeShape::Flag,
+        ] {
+            let paint = node_paint_paths(bounds, shape);
+            assert_eq!(paint.len(), 1);
+            assert_ne!(paint[0].commands, node_path(bounds, shape));
+        }
+        let display = node_paint_paths(bounds, NodeShape::CurvedTrapezoid);
+        let curve_ends: Vec<_> = display[0]
+            .commands
+            .iter()
+            .filter_map(|cmd| match *cmd {
+                PathCmd::CubicTo { x, y, .. } => Some((x, y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            curve_ends.len(),
+            4,
+            "two quarter arcs preserve each half ellipse's fullness"
+        );
+        assert!(curve_ends[0].0 > bounds.x + bounds.width * 0.99);
+        assert!(curve_ends[2].0 < bounds.x + bounds.width * 0.015);
+        assert_near(curve_ends[1].0, bounds.x + bounds.width * 0.438);
+        assert_near(curve_ends[1].1, bounds.y + bounds.height);
+        let bow = node_paint_paths(bounds, NodeShape::BowTieRect);
+        assert!(bow[0].commands.iter().any(|cmd| matches!(cmd,
+            PathCmd::CubicTo { x, y, .. } if (*x - (bounds.x + bounds.width * 0.978)).abs() < 0.0001 && *y == bounds.y + bounds.height)));
+
+        let tall = LayoutRect {
+            width: 20.0,
+            height: 100.0,
+            ..bounds
+        };
+        let delay = node_paint_paths(tall, NodeShape::HalfRoundedRect);
+        for point in coordinates(&delay[0].commands).chunks_exact(2) {
+            assert!(point[0] >= tall.x && point[0] <= tall.x + tall.width);
+            assert!(point[1] >= tall.y && point[1] <= tall.y + tall.height);
+        }
+        assert!(
+            delay[0].commands.iter().any(|cmd| matches!(cmd,
+            PathCmd::CubicTo { x, y, .. } if *x == tall.x + tall.width && *y == tall.center().y)),
+            "a narrow delay cap is elliptical and stays within its routing box"
+        );
+    }
+
+    #[test]
+    fn node_paint_paths_reject_invalid_boxes_and_canonicalize_tiny_extents() {
+        let bounds = test_bounds();
+        let shapes = [
+            NodeShape::Rect,
+            NodeShape::TextBlock,
+            NodeShape::Braces,
+            NodeShape::CrossedCircle,
+            NodeShape::DoubleCircle,
+            NodeShape::FramedCircle,
+            NodeShape::Cylinder,
+            NodeShape::LinedCylinder,
+            NodeShape::HorizontalCylinder,
+            NodeShape::StackedDocument,
+            NodeShape::StackedRect,
+            NodeShape::Flag,
+            NodeShape::HalfRoundedRect,
+            NodeShape::CurvedTrapezoid,
+            NodeShape::BowTieRect,
+        ];
+        for shape in shapes {
+            for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+                assert!(
+                    node_paint_paths(
+                        LayoutRect {
+                            width: invalid,
+                            ..bounds
+                        },
+                        shape
+                    )
+                    .is_empty(),
+                    "{shape:?}, {invalid}"
+                );
+            }
+            for extent in [0.0, f32::MIN_POSITIVE, f32::MIN_POSITIVE * 0.5, 0.0001] {
+                let tiny = LayoutRect {
+                    x: -0.0,
+                    y: f32::MIN_POSITIVE,
+                    width: extent,
+                    height: extent,
+                };
+                let pieces = node_paint_paths(tiny, shape);
+                assert_eq!(pieces, node_paint_paths(tiny, shape));
+                for coordinate in pieces.iter().flat_map(|piece| coordinates(&piece.commands)) {
+                    assert!(
+                        coordinate.is_finite() && !coordinate.is_subnormal(),
+                        "{shape:?}, {extent}: {coordinate}"
+                    );
+                }
+            }
         }
     }
 
