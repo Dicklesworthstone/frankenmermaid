@@ -427,7 +427,9 @@ export function deckSourceDocument(source, snapshot) {
     targets.push({ from, to, raw, bodyStart, bodyEnd, fields, slides, entries, objects,
       line: (source.slice(0, from).match(/\r\n|\r|\n/gu) || []).length + 1 });
   }
-  return freezeDeck({ source, targets });
+  const slideIds = (snapshot?.parsed?.ir?.deck?.slides || []).map(slide => slide.id)
+    .filter(id => typeof id === "string");
+  return freezeDeck({ source, targets, slideIds });
 }
 
 /** Decode a selected directive using its isolated native parse, never eval or a JS JSON5 parser.
@@ -492,14 +494,25 @@ function patchDeckObject(raw, start, end, fields, before, after) {
   return spliceDeck(raw.slice(start, end), edits.map(edit => ({ ...edit, from: edit.from - start, to: edit.to - start })));
 }
 
-/** Edit/reorder the selected directive's existing slides. The permutation tracks identities
- * even when an author renames a slide. All other source bytes and unknown fields survive. */
+/** Edit the selected directive's slides without guessing identity from editable IDs.
+ * Each order entry is an original index, null for a new slide, or {copyOf: index} for an
+ * explicit duplicate. Retained originals occur at most once; copies keep their source
+ * extensions and comments. Omitted originals are removed with their attached comments. */
 export function planDeckSourceEdit(document, index, original, json, order) {
   const target = document.targets[index], spec = deckDraft(json);
-  if (!target || !Array.isArray(order) || order.length !== original.slides.length ||
-    spec.slides.length !== order.length || new Set(order).size !== order.length ||
-    order.some(item => !Number.isInteger(item) || item < 0 || item >= order.length)) {
-    throw new Error("Existing-deck editing requires every original slide exactly once. Add or remove slides in the source.");
+  if (!target || !Array.isArray(order) || spec.slides.length !== order.length ||
+    original.slides.length !== target.entries.length) {
+    throw new Error("Every draft slide needs a valid source identity.");
+  }
+  const retained = new Set();
+  for (const item of order) {
+    if (item === null) continue;
+    const copy = item && typeof item === "object" && !Array.isArray(item) &&
+      Object.keys(item).length === 1 && Object.hasOwn(item, "copyOf");
+    const origin = copy ? item.copyOf : item;
+    if (!Number.isInteger(origin) || origin < 0 || origin >= original.slides.length ||
+      (!copy && retained.has(origin))) throw new Error("Every draft slide needs a valid source identity; use an explicit copy to duplicate a slide.");
+    if (!copy) retained.add(origin);
   }
   if (Object.keys(spec).some(key => !["title", "slides"].includes(key))) {
     throw new Error("Edit this directive's settings and tips in the source; the visual editor preserves them unchanged.");
@@ -517,10 +530,16 @@ export function planDeckSourceEdit(document, index, original, json, order) {
     return { before, tail: raw.slice(entry.to, entry.comma), afterComma: raw.slice(entry.comma + 1, leading) };
   });
   const footer = raw.slice(leading, close), trailingComma = target.entries.at(-1).comma !== null;
-  for (const [slot, origin] of order.entries()) {
-    const entry = target.entries[origin], piece = pieces[origin];
-    parts.push(piece.before, patchDeckObject(raw, entry.from, entry.to,
-      target.objects[origin], original.slides[origin], spec.slides[slot]), piece.tail,
+  const newline = /\r\n|\r|\n/u.exec(raw)?.[0];
+  const firstLine = raw.slice(0, target.entries[0].from).split(/\r\n|\r|\n/u).at(-1);
+  const newLeading = newline ? newline + /^\s*/u.exec(firstLine)[0] : " ";
+  for (const [slot, item] of order.entries()) {
+    const origin = item !== null && typeof item === "object" ? item.copyOf : item;
+    const entry = origin === null ? null : target.entries[origin];
+    const piece = entry ? pieces[origin] : { before: newLeading, tail: "", afterComma: "" };
+    const value = entry ? patchDeckObject(raw, entry.from, entry.to,
+      target.objects[origin], original.slides[origin], spec.slides[slot]) : deckLiteral(spec.slides[slot]);
+    parts.push(piece.before, value, piece.tail,
       slot < order.length - 1 || trailingComma ? "," : "", piece.afterComma);
   }
   parts.push(footer, "]");
@@ -698,10 +717,10 @@ export class DeckAuthoringSession {
     live();
     const deck = checkedDeck(result);
     if (editing) {
-      const end = first + plan.spec.slides.length;
-      if (deck.manifest.slides.length !== previous.slides.length ||
+      const end = first + plan.spec.slides.length, previousEnd = first + editing.original.slides.length;
+      if (deck.manifest.slides.length !== others.length + plan.spec.slides.length ||
         deckJson(deck.manifest.slides.slice(0, first)) !== deckJson(previous.slides.slice(0, first)) ||
-        deckJson(deck.manifest.slides.slice(end)) !== deckJson(previous.slides.slice(end))) {
+        deckJson(deck.manifest.slides.slice(end)) !== deckJson(previous.slides.slice(previousEnd))) {
         throw new Error("The edit changed another directive's slides. The source was not changed.");
       }
       checkAuthoredSlides(plan.spec, null, { slides: deck.manifest.slides.slice(first, end) });
@@ -775,7 +794,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     for (const [value, text] of entries) { const option = make("option", text, select); option.value = value; }
   }
   make("h3", "Compose presentation slides");
-  make("p", "Compose additional slides, or load an existing slide directive to edit its titles, membership, reveals and order. Validate and preview before applying. The draft stays here when this panel closes; download its JSON to keep it across page reloads.");
+  make("p", "Compose additional slides, or load an existing slide directive to add, duplicate, remove or reorder slides and edit their content. Validate and preview before applying. The draft stays here when this panel closes; download its JSON to keep it across page reloads.");
   const loadExisting = button("Read existing slide directives", "load-existing");
   const sourceChoice = field("Existing slide directive", "select", "source-directive");
   const editExisting = button("Edit selected directive", "edit-existing");
@@ -826,11 +845,11 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     loadExisting.disabled = locked || busy || typeof backend.renderSource !== "function";
     sourceChoice.disabled = editExisting.disabled = locked || busy || !sourceDocument?.targets.length || sourceDocument.source !== sourceEl.value;
     newComposition.disabled = locked || busy;
-    duplicate.disabled = locked || busy || editing || selected < 0 || spec.slides.length >= 64;
-    remove.disabled = locked || busy || editing || selected < 0;
+    duplicate.disabled = locked || busy || selected < 0 || spec.slides.length >= 64;
+    remove.disabled = locked || busy || selected < 0 || (editing && spec.slides.length === 1);
     up.disabled = locked || busy || selected <= 0;
     down.disabled = locked || busy || selected < 0 || selected >= spec.slides.length - 1;
-    add.disabled ||= editing || spec.slides.length >= 64;
+    add.disabled ||= spec.slides.length >= 64;
     importDraft.disabled ||= editing;
     validate.disabled = locked || busy || !spec.slides.length || (editing && !session.editingSource);
     apply.disabled = locked || busy || !prepared || prepared.source !== sourceEl.value;
@@ -950,6 +969,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       if (session.source !== sourceEl.value) session.observeSource(sourceEl.value);
       const found = await session.loadDirectives(); check();
       sourceDocument = found;
+      usedIds = new Set(found.slideIds);
       sourceChoice.replaceChildren();
       for (const [index, target] of found.targets.entries()) {
         const option = make("option", `Line ${target.line} — ${target.entries.length} slides`, sourceChoice);
@@ -968,7 +988,7 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       sourceOrder = spec.slides.map((_slide, origin) => origin);
       dirty = false; fill();
       status.textContent = `Editing ${spec.slides.length} existing slides from line ${found.targets[index].line}. ` +
-        "Titles, membership, reveals and ordering are editable. Add or remove slides in the source; settings, tips and other directives stay unchanged.";
+        "Add, duplicate, remove or reorder slides and edit their content. Keep at least one slide in this directive. Settings, tips and other directives stay unchanged.";
     });
   }
   async function prepare() {
@@ -1079,9 +1099,24 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
     sourceChoice.replaceChildren(); spec = { slides: [] }; selected = -1; dirty = false; fill();
     status.textContent = "New composition. Existing source directives remain unchanged.";
   });
-  listen(add, "click", () => edit(() => { spec.slides.push({ id: nextId(), nodes: [] }); selected = spec.slides.length - 1; }));
-  listen(duplicate, "click", () => edit(() => { spec.slides.splice(selected + 1, 0, { ...JSON.parse(JSON.stringify(spec.slides[selected])), id: nextId() }); selected++; }));
-  listen(remove, "click", () => edit(() => { spec.slides.splice(selected, 1); selected = Math.min(selected, spec.slides.length - 1); }));
+  listen(add, "click", () => edit(() => {
+    spec.slides.push({ id: nextId(), nodes: [] });
+    if (sourceOrder) sourceOrder.push(null);
+    selected = spec.slides.length - 1;
+  }));
+  listen(duplicate, "click", () => edit(() => {
+    spec.slides.splice(selected + 1, 0, { ...JSON.parse(JSON.stringify(spec.slides[selected])), id: nextId() });
+    if (sourceOrder) {
+      const origin = sourceOrder[selected];
+      sourceOrder.splice(selected + 1, 0, typeof origin === "number" ? { copyOf: origin } : origin && { ...origin });
+    }
+    selected++;
+  }));
+  listen(remove, "click", () => edit(() => {
+    spec.slides.splice(selected, 1);
+    if (sourceOrder) sourceOrder.splice(selected, 1);
+    selected = Math.min(selected, spec.slides.length - 1);
+  }));
   for (const [control, delta] of [[up, -1], [down, 1]]) listen(control, "click", () => edit(() => {
     const next = selected + delta;
     [spec.slides[selected], spec.slides[next]] = [spec.slides[next], spec.slides[selected]];
@@ -1183,6 +1218,10 @@ export function mountDeckEditor({ sourceEl, panelEl, loadModule, workerOptions =
           renderDeck(source) {
             authorBackend ||= createSourceEditorBackend({ loadModule, ...workerOptions });
             return authorBackend.renderDeck(source);
+          },
+          renderSource(source) {
+            authorBackend ||= createSourceEditorBackend({ loadModule, ...workerOptions });
+            return authorBackend.renderSource(source);
           },
           cancel() { authorBackend?.cancel(); },
           dispose() { authorBackend?.dispose(); },

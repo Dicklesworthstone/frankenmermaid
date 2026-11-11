@@ -466,15 +466,135 @@ test('existing-source mode refuses duplicate keys, escaped property names and lo
   await assert.rejects(nativeSourceEdit("flowchart LR\n a\n%%{deck:{slides:[{id:'s',nodes:['a'],fitMargin:-1}]}}%%"), /source repair/);
 });
 
-test('existing-source mode rejects aliasing another directive and unsupported structural operations', async () => {
+test('existing-source mode rejects aliasing another directive and invalid source identities', async () => {
   const h = await nativeSourceEdit();
   const form = structuredClone(h.original); form.slides[0].id = 'last';
   await assert.rejects(h.s.prepare(JSON.stringify(form), [0, 1]), /already used/);
-  for (const order of [[0, 0], [1], [0, 2]]) {
-    await assert.rejects(h.s.prepare(JSON.stringify(h.original), order), /every original slide/);
+  for (const order of [[0, 0], [1], [0, 2], [0, -1], [0, 0.5], [0, undefined], [0, ,],
+    [0, {}], [0, { copyOf: 2 }], [0, { copyOf: 0, extra: true }], [0, [1]], [0, '1']]) {
+    await assert.rejects(h.s.prepare(JSON.stringify(h.original), order), /source identity/);
   }
   await assert.rejects(h.s.prepare(JSON.stringify({ ...h.original, options: { zoomMax: 2 } }), [0, 1]), /settings and tips/);
   assert.equal(h.s.source, authoredSource);
+});
+
+test('native structural editing inserts and reorders slides between unchanged directives', async () => {
+  const prefix = "%%{deck:{slides:[{id:'before',nodes:['a'],caption:'Keep before'}]}}%%\r\n";
+  const source = authoredSource.replace(authoredBlock, prefix + authoredBlock);
+  const h = await nativeSourceEdit(source);
+  const original = await h.s.editDirective(h.document, 1);
+  const renamed = { ...original.slides[0], id: 'renamed', caption: 'Snow 雪 and literal }%%\nnext line' };
+  const form = { ...original, slides: [
+    { id: 'new-first', nodes: ['a'] }, original.slides[1],
+    { id: 'new-middle', nodes: ['a', 'b'], reveal: [['b']] }, renamed,
+    { id: 'new-last', nodes: ['b'], edges: 'none' },
+  ] };
+  const order = [null, 1, null, 0, null];
+  const prepared = await h.s.prepare(JSON.stringify(form), order);
+  const target = h.document.targets[1];
+  assert.equal(prepared.updatedSource.slice(0, target.from), source.slice(0, target.from));
+  assert.ok(prepared.updatedSource.endsWith(source.slice(target.to)));
+  assert.ok(prepared.updatedSource.includes('custom:{value:42}'));
+  assert.ok(prepared.updatedSource.includes('/* preserve intro */'));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['before', 'new-first', 'detail', 'new-middle', 'renamed', 'new-last', 'last']);
+  assert.equal(prepared.deck.manifest.slides[4].caption, renamed.caption);
+  assert.equal(prepared.deck.manifest.slides[3].nodes.find(node => node.sourceId === 'b').step, 1);
+  assert.equal(prepared.existingSlides, 2);
+  assert.equal(h.s.source, source);
+  const updated = h.s.commit(prepared);
+  assert.equal(h.s.undo(), source);
+  assert.equal(h.s.redo(), updated);
+  assert.equal((await h.s.prepare(JSON.stringify(form), order)).updatedSource, updated);
+});
+
+test('native slide duplication keeps source extensions and comments while giving the copy its own fields', async () => {
+  const h = await nativeSourceEdit();
+  const duplicate = { ...h.original.slides[0], id: 'copy', title: 'Copied', nodes: ['b'], edges: 'none' };
+  const form = { ...h.original, slides: [h.original.slides[0], duplicate, h.original.slides[1]] };
+  const prepared = await h.s.prepare(JSON.stringify(form), [0, { copyOf: 0 }, 1]);
+  assert.equal(prepared.updatedSource.split('custom:{value:42}').length - 1, 2);
+  assert.equal(prepared.updatedSource.split('/* preserve intro */').length - 1, 2);
+  assert.ok(prepared.updatedSource.includes("{id:'intro', title:'Introduction', nodes:['a','b'], custom:{value:42}}"));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['intro', 'copy', 'detail', 'last']);
+  assert.equal(prepared.deck.manifest.slides[1].title, 'Copied');
+  assert.deepEqual(prepared.deck.manifest.slides[1].nodes.map(node => node.sourceId), ['b']);
+  assert.equal((prepared.deck.manifest.slides[1].edges || []).length, 0);
+});
+
+test('native removal keeps retained slide comments, array footer and source outside the selected block', async () => {
+  const block = "%%{deck:{extension:'keep',slides:[\n" +
+    " // first lead\n {id:'first',nodes:['a'],extra:1}, // first tail\n" +
+    " /* middle lead */ {id:'middle',nodes:['b'],extra:2}, /* middle tail */\n" +
+    " // last lead\n {id:'last-in-block',nodes:['a'],extra:3} // last tail\n" +
+    " // array footer\n]}}%%";
+  const source = 'flowchart LR\n a-->b\n' + block + "\n%%{deck:{slides:[{id:'outside',nodes:['a']}]}}%%";
+  const h = await nativeSourceEdit(source);
+  const form = { slides: [h.original.slides[1]] };
+  const prepared = await h.s.prepare(JSON.stringify(form), [1]);
+  assert.ok(prepared.updatedSource.includes("/* middle lead */ {id:'middle',nodes:['b'],extra:2} /* middle tail */"));
+  assert.ok(prepared.updatedSource.includes(" // array footer\n]}}%%"));
+  assert.ok(prepared.updatedSource.includes("extension:'keep'"));
+  for (const removed of ['first lead', 'first tail', 'last lead', 'last tail', 'extra:1', 'extra:3']) {
+    assert.ok(!prepared.updatedSource.includes(removed), removed);
+  }
+  assert.ok(prepared.updatedSource.endsWith(source.slice(h.document.targets[0].to)));
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['middle', 'outside']);
+});
+
+test('replacing all original slides retains the directive but refuses removing its final slide', async () => {
+  const h = await nativeSourceEdit();
+  const form = { ...h.original, slides: [{ id: 'replacement', nodes: ['b'] }] };
+  const prepared = await h.s.prepare(JSON.stringify(form), [null]);
+  assert.deepEqual(prepared.deck.manifest.slides.map(s => s.id), ['replacement', 'last']);
+  assert.ok(prepared.updatedSource.includes("extension: {keep: 'yes'}"));
+  assert.ok(!prepared.updatedSource.includes('custom:{value:42}'));
+  await assert.rejects(h.s.prepare(JSON.stringify({ ...h.original, slides: [] }), []), /1–64/);
+  assert.equal(h.s.source, authoredSource);
+});
+
+test('structural edits enforce merged capacity and may reuse an ID removed from the same directive', async () => {
+  const additional = JSON.stringify({ slides: Array.from({ length: 62 }, (_, i) => ({ id: `other-${i}`, nodes: ['a'] })) });
+  const source = 'flowchart LR\n a-->b\n' + authoredBlock + `\n%%{deck:${additional}}%%`;
+  const h = await nativeSourceEdit(source);
+  assert.equal(h.document.slideIds.length, 64);
+  const over = { ...h.original, slides: [...h.original.slides, { id: 'overflow', nodes: ['a'] }] };
+  await assert.rejects(h.s.prepare(JSON.stringify(over), [0, 1, null]), /exceeds 64/);
+  const replacement = { ...h.original, slides: [h.original.slides[0], { id: 'detail', title: 'Replacement', nodes: ['a'] }] };
+  const prepared = await h.s.prepare(JSON.stringify(replacement), [0, null]);
+  assert.equal(prepared.deck.manifest.slides.length, 64);
+  assert.equal(prepared.deck.manifest.slides[1].title, 'Replacement');
+  replacement.slides[1].id = 'other-61';
+  await assert.rejects(h.s.prepare(JSON.stringify(replacement), [0, null]), /already used/);
+});
+
+test('new or copied source slides cannot exceed the engine block byte or line limits', async () => {
+  const largeSource = `flowchart LR\n a\n%%{deck:{slides:[{id:'s',nodes:['a'],extra:'${'雪'.repeat(5500)}'}]}}%%`;
+  const h = await nativeSourceEdit(largeSource);
+  const doubled = { slides: [h.original.slides[0], { ...h.original.slides[0], id: 'copy' }] };
+  await assert.rejects(h.s.prepare(JSON.stringify(doubled), [0, { copyOf: 0 }]), /source limits/);
+  const manyLines = "flowchart LR\n a\n%%{deck:{slides:[\n" + '\n'.repeat(396) + "{id:'s',nodes:['a']}\n]}}%%";
+  const lined = await nativeSourceEdit(manyLines);
+  const form = { slides: [lined.original.slides[0], { id: 'new-1', nodes: ['a'] }, { id: 'new-2', nodes: ['a'] }] };
+  await assert.rejects(lined.s.prepare(JSON.stringify(form), [0, null, null]), /source limits/);
+});
+
+test('changed-count validation rejects native results that alter untouched prefix or suffix slides', async () => {
+  const source = authoredSource.replace(authoredBlock, "%%{deck:{slides:[{id:'before',nodes:['a']}]}}%%\r\n" + authoredBlock);
+  const wasm = await nativeEngine(), { DeckAuthoringSession } = await modulePromise;
+  for (const change of [deck => { deck.manifest.slides[0].title = 'Changed prefix'; },
+    deck => { deck.manifest.slides.at(-1).caption = 'Changed suffix'; },
+    deck => { deck.manifest.slides.pop(); }]) {
+    const s = new DeckAuthoringSession({ renderDeck: async text => {
+      const deck = wasm.renderDeck(text);
+      if (text !== source) change(deck);
+      return deck;
+    }, renderSource: async text => ({ snapshot: wasm.parseLens(text) }), checkElements: () => {} });
+    s.setSource(source);
+    const document = await s.loadDirectives(), original = await s.editDirective(document, 1);
+    await assert.rejects(s.prepare(JSON.stringify({ ...original, slides: [original.slides[1]] }), [1]), /another directive/);
+    assert.equal(s.source, source);
+    assert.equal(s.canUndo, false);
+  }
 });
 
 test('source range verification refuses mismatched bytes, UTF-8 splits, overlaps and forged handles', async () => {
