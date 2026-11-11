@@ -239,7 +239,7 @@ pub fn parse_paint_rgba(value: &str) -> Option<[f32; 4]> {
     }
     let lower = value.to_ascii_lowercase();
 
-    if lower == "transparent" {
+    if matches!(lower.as_str(), "transparent" | "none") {
         return Some([0.0, 0.0, 0.0, 0.0]);
     }
     if let Some(rgba) = named_paint_rgba(&lower) {
@@ -590,6 +590,9 @@ fn push_dashed_border(
     dash: [f32; 2],
     node_index: usize,
 ) {
+    if width <= 0.0 || stroke[3] <= 0.0 {
+        return;
+    }
     let points = border_polyline(bounds, shape);
     if points.len() < 2 {
         return;
@@ -638,8 +641,9 @@ fn border_polyline(bounds: fm_layout::LayoutRect, shape: GpuNodeShape) -> Vec<[f
     }
 }
 
-/// These shapes have an authored outline that is already shared by layout and the scene
-/// renderer. Preserve that outline instead of assigning every many-sided node one SDF.
+/// Shapes whose painted geometry is richer than the available SDF primitives.
+/// Use the same bodies and details as the shared scene rather than the routing boundary:
+/// braces have no fill, open data stores have no side borders, and cylinders have rims.
 fn node_uses_shared_path(shape: NodeShape) -> bool {
     matches!(
         shape,
@@ -660,7 +664,25 @@ fn node_uses_shared_path(shape: NodeShape) -> bool {
             | NodeShape::Hourglass
             | NodeShape::LightningBolt
             | NodeShape::Bang
+            | NodeShape::Note
             | NodeShape::Document
+            | NodeShape::LinedDocument
+            | NodeShape::TaggedDocument
+            | NodeShape::LinedRect
+            | NodeShape::DividedRect
+            | NodeShape::TaggedRect
+            | NodeShape::WindowPane
+            | NodeShape::DataStore
+            | NodeShape::BraceLeft
+            | NodeShape::BraceRight
+            | NodeShape::Braces
+            | NodeShape::Cylinder
+            | NodeShape::LinedCylinder
+            | NodeShape::HorizontalCylinder
+            | NodeShape::CurvedTrapezoid
+            | NodeShape::BowTieRect
+            | NodeShape::Flag
+            | NodeShape::HalfRoundedRect
             | NodeShape::BlockArrowRight
             | NodeShape::BlockArrowLeft
             | NodeShape::BlockArrowUp
@@ -675,8 +697,8 @@ fn append_node_path(
     fills: &mut Vec<GpuTriangleInstance>,
     borders: &mut Vec<GpuEdgeSegment>,
     commands: &[PathCmd],
-    fill: [f32; 4],
-    stroke: [f32; 4],
+    fill: Option<[f32; 4]>,
+    stroke: Option<[f32; 4]>,
     width: f32,
     dash: [f32; 2],
     node_index: usize,
@@ -692,15 +714,17 @@ fn append_node_path(
                 return;
             }
             segments.push((from, to));
-            borders.push(GpuEdgeSegment {
-                from: [from.x, from.y],
-                to: [to.x, to.y],
-                edge_index: u32::try_from(node_index).unwrap_or(u32::MAX),
-                color: stroke,
-                dash_phase: phase,
-                dash,
-                width,
-            });
+            if let Some(color) = stroke.filter(|color| color[3] > 0.0 && width > 0.0) {
+                borders.push(GpuEdgeSegment {
+                    from: [from.x, from.y],
+                    to: [to.x, to.y],
+                    edge_index: u32::try_from(node_index).unwrap_or(u32::MAX),
+                    color,
+                    dash_phase: phase,
+                    dash,
+                    width,
+                });
+            }
             phase += length;
         };
         match *command {
@@ -719,7 +743,9 @@ fn append_node_path(
         }
     }
     // The same nonzero rule covers concave and crossing outlines without alpha overdraw.
-    tessellate_nonzero_fill(&segments, fill, fills);
+    if let Some(color) = fill.filter(|color| color[3] > 0.0) {
+        tessellate_nonzero_fill(&segments, color, fills);
+    }
 }
 
 fn circular_node_bounds(bounds: LayoutRect, shape: NodeShape) -> LayoutRect {
@@ -763,6 +789,9 @@ fn append_node_details(
     } = bounds;
     let center = bounds.center();
     let mut line = |from, to| {
+        if width <= 0.0 || stroke[3] <= 0.0 {
+            return;
+        }
         borders.push(GpuEdgeSegment {
             from,
             to,
@@ -2651,11 +2680,22 @@ impl GpuRenderPlan {
             // render of the same document cannot disagree about what the author asked for. An
             // undeclared or unparsable colour falls back to the theme constant rather than to
             // whatever happens to be in the instance buffer.
+            let authored = ir.resolved_node_style(node.node_index);
+            let channel_opacity = |key: &str| {
+                authored
+                    .get(key)
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .filter(|value| value.is_finite())
+                    .map_or(1.0, |value| value.clamp(0.0, 1.0))
+            };
             let (declared_fill, declared_stroke) =
                 crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
-            let fill = declared_fill
-                .as_deref()
-                .and_then(parse_paint_rgba)
+            // The Canvas resolver may already fold fill-opacity into a hexadecimal fill.
+            // Start with the authored paint so every channel opacity is applied exactly once.
+            let fill = authored
+                .get("fill")
+                .and_then(|paint| parse_paint_rgba(paint))
+                .or_else(|| declared_fill.as_deref().and_then(parse_paint_rgba))
                 .or_else(|| parse_paint_rgba(&config.node_fill))
                 .unwrap_or(DEFAULT_NODE_FILL_RGBA);
             let stroke = declared_stroke
@@ -2676,14 +2716,33 @@ impl GpuRenderPlan {
             let opacity = crate::renderer::resolve_node_opacity(ir, node.node_index)
                 .map(|value| value.clamp(0.0, 1.0) as f32)
                 .unwrap_or(1.0);
-            let fill = [fill[0], fill[1], fill[2], fill[3] * opacity];
-            let stroke = [stroke[0], stroke[1], stroke[2], stroke[3] * opacity];
+            let fill = [
+                fill[0],
+                fill[1],
+                fill[2],
+                fill[3] * opacity * channel_opacity("fill-opacity"),
+            ];
+            let stroke = [
+                stroke[0],
+                stroke[1],
+                stroke[2],
+                stroke[3] * opacity * channel_opacity("stroke-opacity"),
+            ];
 
-            // Same resolver the Canvas2D pass uses, so a `classDef stroke-width` reaches the GPU
-            // exactly as it reaches the raster path instead of the GPU inventing a second rule.
+            // Zero is an intentional absent border, not a request for the default width.
             let stroke_width = crate::renderer::resolve_node_stroke_width(ir, node.node_index)
-                .map(|width| width as f32)
-                .filter(|width| width.is_finite() && *width > 0.0)
+                .or_else(|| {
+                    authored
+                        .get("stroke-width")
+                        .and_then(|value| {
+                            value.trim().trim_end_matches("px").trim().parse::<f32>().ok()
+                        })
+                        .filter(|width| *width == 0.0)
+                })
+                .or_else(|| {
+                    let width = config.node_stroke_width as f32;
+                    (width.is_finite() && width >= 0.0).then_some(width)
+                })
                 .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
             // DASHED BORDERS ARE DRAWN AS SEGMENTS, NOT BY THE SDF (bd-l3nsf).
             //
@@ -2701,16 +2760,18 @@ impl GpuRenderPlan {
             let dash = crate::renderer::resolve_node_stroke_dasharray(ir, node.node_index)
                 .and_then(|pattern| dash_pair(&pattern));
             if node_uses_shared_path(authored_shape) {
-                append_node_path(
-                    &mut node_fill_triangles,
-                    &mut node_border_segments,
-                    &fm_layout::shapes::node_path(node.bounds, authored_shape),
-                    fill,
-                    stroke,
-                    stroke_width,
-                    dash.unwrap_or([0.0; 2]),
-                    node.node_index,
-                );
+                for piece in fm_layout::node_paint_paths(node.bounds, authored_shape) {
+                    append_node_path(
+                        &mut node_fill_triangles,
+                        &mut node_border_segments,
+                        &piece.commands,
+                        piece.fill.then_some(fill),
+                        piece.stroke.then_some(stroke),
+                        stroke_width,
+                        dash.unwrap_or([0.0; 2]),
+                        node.node_index,
+                    );
+                }
                 continue;
             }
             let bounds = circular_node_bounds(node.bounds, authored_shape);
@@ -2750,12 +2811,13 @@ impl GpuRenderPlan {
                 stroke_width,
                 dash.unwrap_or([0.0; 2]),
                 (ir.diagram_type == fm_core::DiagramType::State).then(|| {
-                    let mut color = declared_fill
-                        .as_deref()
-                        .and_then(parse_paint_rgba)
+                    let mut color = authored
+                        .get("fill")
+                        .and_then(|paint| parse_paint_rgba(paint))
+                        .or_else(|| declared_fill.as_deref().and_then(parse_paint_rgba))
                         .or_else(|| parse_paint_rgba(&config.edge_stroke))
                         .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
-                    color[3] *= opacity;
+                    color[3] *= opacity * channel_opacity("fill-opacity");
                     color
                 }),
             );
@@ -6192,6 +6254,234 @@ mod tests {
         }
     }
 
+    fn gpu_shape_fixture(
+        alias: &str,
+        style: &str,
+    ) -> (fm_layout::DiagramLayout, super::GpuRenderPlan) {
+        let ir = fm_parser::parse(&format!(
+            "flowchart LR\nA@{{ shape: {alias}, label: \"Visible label\" }}\nstyle A {style}\n"
+        ))
+        .ir;
+        assert_eq!(ir.nodes.len(), 1);
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        (layout, plan)
+    }
+
+    fn gpu_fill_contains(plan: &super::GpuRenderPlan, point: [f32; 2]) -> bool {
+        let cross = |a: [f32; 2], b: [f32; 2]| {
+            (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
+        };
+        plan.node_fill_triangles.iter().any(|triangle| {
+            let signs = [
+                cross(triangle.a, triangle.b),
+                cross(triangle.b, triangle.c),
+                cross(triangle.c, triangle.a),
+            ];
+            signs.iter().all(|value| *value >= -0.001)
+                || signs.iter().all(|value| *value <= 0.001)
+        })
+    }
+
+    #[test]
+    fn gpu_braces_preserve_open_strokes_without_filling_the_label_box() {
+        for alias in ["brace", "brace-r", "braces"] {
+            let (layout, plan) = gpu_shape_fixture(
+                alias,
+                "fill:#ff0000,stroke:#2468ac,stroke-width:3,opacity:0.5,stroke-dasharray:6 4",
+            );
+            let bounds = layout.nodes[0].bounds;
+            assert!(plan.node_instances.is_empty(), "{alias} retained a box");
+            assert!(plan.node_fill_triangles.is_empty(), "{alias} filled its interior");
+            assert!(!plan.text_quads.is_empty(), "{alias} lost its label");
+            assert!(plan.node_border_segments.len() > 6, "{alias} lost its curves");
+            let middle = bounds.x + bounds.width * 0.5;
+            for border in &plan.node_border_segments {
+                assert_eq!(border.width, 3.0);
+                assert_eq!(border.dash, [6.0, 4.0]);
+                assert_eq!(border.color, [36.0 / 255.0, 104.0 / 255.0, 172.0 / 255.0, 0.5]);
+                assert!(
+                    (border.from[0] <= middle && border.to[0] <= middle)
+                        || (border.from[0] >= middle && border.to[0] >= middle),
+                    "{alias} drew a line across the label"
+                );
+            }
+            for (needed, x) in [
+                (alias != "brace-r", bounds.x),
+                (alias != "brace", bounds.x + bounds.width),
+            ] {
+                let reaches_spur = plan.node_border_segments.iter().any(|border| {
+                    [border.from, border.to].iter().any(|point| {
+                        (point[0] - x).abs() < 0.001
+                            && (point[1] - bounds.center().y).abs() < 0.001
+                    })
+                });
+                assert_eq!(reaches_spur, needed, "{alias} has the wrong brace orientation");
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_open_data_store_has_a_body_and_only_two_horizontal_borders() {
+        let (layout, plan) = gpu_shape_fixture(
+            "datastore",
+            "fill:#204060,stroke:#c02040,stroke-width:3,opacity:0.5",
+        );
+        let bounds = layout.nodes[0].bounds;
+        assert!(plan.node_instances.is_empty());
+        assert_eq!(plan.node_border_segments.len(), 2);
+        for (border, y) in plan
+            .node_border_segments
+            .iter()
+            .zip([bounds.y, bounds.y + bounds.height])
+        {
+            assert_eq!(border.from, [bounds.x, y]);
+            assert_eq!(border.to, [bounds.x + bounds.width, y]);
+            assert_eq!(border.width, 3.0);
+            assert_eq!(border.color[3], 0.5);
+        }
+        assert!(gpu_fill_contains(&plan, [bounds.center().x, bounds.center().y]));
+        let filled_area: f32 = plan.node_fill_triangles.iter().map(|triangle| {
+            assert_eq!(triangle.color, [32.0 / 255.0, 64.0 / 255.0, 96.0 / 255.0, 0.5]);
+            let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+            ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+        }).sum();
+        assert!((filled_area - bounds.width * bounds.height).abs() < 0.1);
+    }
+
+    #[test]
+    fn gpu_cylinders_and_delay_preserve_curved_silhouettes_and_rims() {
+        for alias in ["cyl", "lin-cyl", "h-cyl", "delay"] {
+            let (layout, plan) = gpu_shape_fixture(alias, "fill:#204060,stroke:#c02040");
+            let bounds = layout.nodes[0].bounds;
+            assert!(plan.node_instances.is_empty(), "{alias} retained an SDF substitute");
+            assert!(gpu_fill_contains(&plan, [bounds.center().x, bounds.center().y]));
+            assert!(
+                !gpu_fill_contains(&plan, [
+                    bounds.x + bounds.width * 0.99,
+                    bounds.y + bounds.height * 0.01,
+                ]),
+                "{alias} filled the empty corner outside its curved end"
+            );
+            let expected = match alias {
+                "cyl" => Some([bounds.center().x, bounds.y + bounds.height * 0.2]),
+                "lin-cyl" => Some([bounds.center().x, bounds.y + bounds.height * 0.3]),
+                "h-cyl" => Some([bounds.x + bounds.width * 0.2, bounds.center().y]),
+                _ => None,
+            };
+            if let Some(rim) = expected {
+                assert!(plan.node_border_segments.iter().any(|border| {
+                    [border.from, border.to].iter().any(|point| {
+                        (point[0] - rim[0]).abs() < 0.01 && (point[1] - rim[1]).abs() < 0.01
+                    })
+                }), "{alias} lost the interior rim");
+            } else {
+                assert!(gpu_fill_contains(&plan, [
+                    bounds.x + bounds.width * 0.01,
+                    bounds.y + bounds.height * 0.01,
+                ]), "a delay has square left corners");
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_node_compartments_and_folds_retain_their_interior_strokes() {
+        for alias in [
+            "lin-rect", "div-rect", "win-pane", "tag-rect", "note", "lin-doc", "tag-doc",
+        ] {
+            let (layout, plan) = gpu_shape_fixture(alias, "fill:#204060,stroke:#c02040");
+            let bounds = layout.nodes[0].bounds;
+            let (x, y, w, h) = (bounds.x, bounds.y, bounds.width, bounds.height);
+            assert!(plan.node_instances.is_empty(), "{alias} retained a plain box");
+            assert!(!plan.node_fill_triangles.is_empty(), "{alias} lost its body");
+            let (from, to) = match alias {
+                "lin-rect" => {
+                    let rule = x + (w * 0.14).min(16.0);
+                    ([rule, y], [rule, y + h])
+                }
+                "div-rect" => {
+                    let band = y + h * fm_core::DIVIDED_RECT_HEADER_RATIO;
+                    ([x, band], [x + w, band])
+                }
+                "win-pane" => {
+                    let band = y + fm_core::WINDOW_PANE_INSET.min(h * 0.4);
+                    ([x, band], [x + w, band])
+                }
+                "tag-rect" => {
+                    let fold = h * fm_core::TAGGED_RECT_FOLD_RATIO;
+                    ([x + w, y + h - fold], [x + w - fold, y + h])
+                }
+                "note" => {
+                    let fold = 10.0_f32.min(w * 0.4);
+                    ([x + w - fold, y + fold], [x + w, y + fold])
+                }
+                "lin-doc" => ([x + w * 0.045, y], [x + w * 0.045, y + h * 0.94]),
+                "tag-doc" => ([x + w * 0.818, y + h * 0.8384], [x + w, y + h * 0.58]),
+                _ => unreachable!(),
+            };
+            assert!(
+                plan.node_border_segments.iter().any(|border| {
+                    (0..2).all(|axis| {
+                        (border.from[axis] - from[axis]).abs() < 0.001
+                            && (border.to[axis] - to[axis]).abs() < 0.001
+                    })
+                }),
+                "{alias} lost the interior rule or fold"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_shared_shape_paints_keep_channel_opacity_and_explicit_absence() {
+        for fill in ["#204060", "rgb(32,64,96)", "red", "#20406080"] {
+            let (_, plan) = gpu_shape_fixture(
+                "cyl",
+                &format!(
+                    "fill:{fill},stroke:#c02040,opacity:0.5,fill-opacity:0.25,stroke-opacity:0.5"
+                ),
+            );
+            let expected_alpha = if fill.ends_with("80") {
+                128.0 / 255.0 * 0.125
+            } else {
+                0.125
+            };
+            let expected_rgb = if fill == "red" {
+                [1.0, 0.0, 0.0]
+            } else {
+                [32.0 / 255.0, 64.0 / 255.0, 96.0 / 255.0]
+            };
+            assert!(!plan.node_fill_triangles.is_empty());
+            assert!(!plan.node_border_segments.is_empty());
+            for triangle in &plan.node_fill_triangles {
+                for (actual, expected) in triangle.color[..3].iter().zip(expected_rgb) {
+                    assert!((*actual - expected).abs() < 0.000_001, "{fill}");
+                }
+                assert!((triangle.color[3] - expected_alpha).abs() < 0.000_001, "{fill}");
+            }
+            for border in &plan.node_border_segments {
+                assert_eq!(border.color[3], 0.25, "{fill}");
+            }
+        }
+        let (_, default_fill) = gpu_shape_fixture("cyl", "fill-opacity:0.25,opacity:0.5");
+        assert!(!default_fill.node_fill_triangles.is_empty());
+        assert!(default_fill.node_fill_triangles.iter().all(|triangle| {
+            (triangle.color[3] - 0.125).abs() < 0.000_001
+        }));
+
+        for (style, filled, stroked) in [
+            ("fill:none,stroke:#123456", false, true),
+            ("fill:#123456,stroke:none", true, false),
+            ("fill:#123456,stroke-width:0px", true, false),
+            ("fill:#123456,fill-opacity:0", false, true),
+            ("fill:#123456,stroke-opacity:0", true, false),
+            ("fill:#123456,opacity:0", false, false),
+        ] {
+            let (_, plan) = gpu_shape_fixture("cyl", style);
+            assert_eq!(!plan.node_fill_triangles.is_empty(), filled, "{style}");
+            assert_eq!(!plan.node_border_segments.is_empty(), stroked, "{style}");
+        }
+    }
+
     #[test]
     fn gpu_composite_nodes_preserve_rings_crosses_subroutine_rules_and_text_only_nodes() {
         use fm_core::NodeShape;
@@ -6547,14 +6837,27 @@ mod tests {
 
         let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
 
-        assert_eq!(plan.node_instances.len(), 2);
+        assert_eq!(plan.node_instances.len(), 1);
         assert_eq!(plan.node_instances[0].center, [30.0, 35.0]);
         assert_eq!(plan.node_instances[0].half_extent, [20.0, 15.0]);
         assert_eq!(
             plan.node_instances[0].shape,
             GpuNodeShape::RoundedRect as u32
         );
-        assert_eq!(plan.node_instances[1].shape, GpuNodeShape::Cylinder as u32);
+        assert!(gpu_fill_contains(&plan, [100.0, 30.0]));
+        assert!(!gpu_fill_contains(&plan, [109.8, 20.2]));
+        assert!(plan.node_border_segments.iter().all(|border| {
+            border.edge_index == 1
+                && [border.from, border.to].iter().all(|point| {
+                    (89.999..=110.001).contains(&point[0])
+                        && (19.999..=40.001).contains(&point[1])
+                })
+        }));
+        assert!(plan.node_border_segments.iter().any(|border| {
+            [border.from, border.to].iter().any(|point| {
+                (point[0] - 100.0).abs() < 0.001 && (point[1] - 24.0).abs() < 0.001
+            })
+        }), "the database must retain its interior rim");
     }
 
     #[test]
@@ -7437,7 +7740,7 @@ mod tests {
 
     #[test]
     fn paint_parsing_accepts_the_forms_a_diagram_writes() {
-        let cases: [(&str, [f32; 4]); 7] = [
+        let cases: [(&str, [f32; 4]); 8] = [
             ("#ff0000", [1.0, 0.0, 0.0, 1.0]),
             ("#F00", [1.0, 0.0, 0.0, 1.0]),
             ("#ff000080", [1.0, 0.0, 0.0, 0.501_960_8]),
@@ -7445,6 +7748,7 @@ mod tests {
             ("rgba(255, 0, 0, 0.5)", [1.0, 0.0, 0.0, 0.5]),
             ("red", [1.0, 0.0, 0.0, 1.0]),
             ("transparent", [0.0, 0.0, 0.0, 0.0]),
+            ("none", [0.0, 0.0, 0.0, 0.0]),
         ];
         for (input, want) in cases {
             let got =
@@ -10482,7 +10786,7 @@ mod tests {
     }
 
     #[test]
-    fn flowchart_role_paints_match_the_canvas_in_default_gpu_instances() {
+    fn flowchart_role_paints_match_the_canvas_in_gpu_geometry() {
         let config = crate::CanvasRenderConfig::default();
         for (prefix, declaration, semantic) in [
             ("", "A{Decision}", true),
@@ -10498,7 +10802,15 @@ mod tests {
                 assert_eq!(ir.nodes.len(), 1, "the fixture must have exactly one node");
                 let layout = fm_layout::layout_diagram(&ir);
                 let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
-                let instance = plan.node_instances.first().expect("planned node");
+                let (planned_fill, planned_stroke) = plan.node_instances.first().map_or_else(
+                    || {
+                        (
+                            plan.node_fill_triangles.first().expect("planned node fill").color,
+                            plan.node_border_segments.first().expect("planned node border").color,
+                        )
+                    },
+                    |instance| (instance.fill, instance.stroke),
+                );
 
                 let mut context = crate::MockCanvas2dContext::new(800.0, 600.0);
                 crate::render_to_canvas(&ir, &mut context, &config);
@@ -10528,22 +10840,22 @@ mod tests {
                     }
                 }
                 assert_eq!(
-                    instance.fill,
+                    planned_fill,
                     painted_fill.expect("actual shape fill"),
                     "{source}"
                 );
                 assert_eq!(
-                    instance.stroke,
+                    planned_stroke,
                     painted_stroke.expect("actual shape stroke"),
                     "{source}"
                 );
                 if style.is_empty() {
-                    assert_eq!(instance.fill != super::DEFAULT_NODE_FILL_RGBA, semantic);
-                    assert_eq!(instance.stroke != super::DEFAULT_NODE_STROKE_RGBA, semantic);
+                    assert_eq!(planned_fill != super::DEFAULT_NODE_FILL_RGBA, semantic);
+                    assert_eq!(planned_stroke != super::DEFAULT_NODE_STROKE_RGBA, semantic);
                 } else if style.contains("fill:") {
-                    assert_eq!(instance.fill, super::parse_paint_rgba("#ff0000").unwrap());
+                    assert_eq!(planned_fill, super::parse_paint_rgba("#ff0000").unwrap());
                 } else {
-                    assert_eq!(instance.stroke, super::parse_paint_rgba("#008800").unwrap());
+                    assert_eq!(planned_stroke, super::parse_paint_rgba("#008800").unwrap());
                 }
             }
         }
