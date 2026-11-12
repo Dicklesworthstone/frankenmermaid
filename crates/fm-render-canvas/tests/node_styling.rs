@@ -582,7 +582,7 @@ fn scene_svg_resolves_default_named_and_direct_node_styles() {
             let text = scene_node_element(&svg, "text", index);
             assert_style(shape, "fill", fill);
             assert_style(shape, "stroke", "#445566");
-            assert_style(shape, "stroke-width", "3px");
+            assert_style(shape, "stroke-width", "3");
             assert_style(text, "fill", color);
         }
     }
@@ -647,14 +647,22 @@ fn scene_svg_honors_named_and_direct_styles_without_a_default_class() {
         "#445566",
     );
     assert_style(scene_node_element(&svg, "text", styled), "fill", "#123456");
-    assert_eq!(
-        attribute(scene_node_element(&svg, "path", plain), "style"),
-        None
+    // Resolved scene paints are inline so embedded theme CSS cannot replace them. An
+    // unstyled sibling must still match the same node rendered without any author styles.
+    let reference = render_svg_with_config(
+        &fm_parser::parse("flowchart LR\nB[Plain]\n").ir,
+        &SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            ..SvgRenderConfig::default()
+        },
     );
-    assert_eq!(
-        attribute(scene_node_element(&svg, "text", plain), "style"),
-        None
-    );
+    for tag in ["path", "text"] {
+        assert_eq!(
+            attribute(scene_node_element(&svg, tag, plain), "style"),
+            attribute(scene_node_element(&reference, tag, 0), "style"),
+            "named and direct styles leaked into the unstyled sibling's {tag}"
+        );
+    }
 }
 
 #[test]
@@ -699,16 +707,35 @@ fn scene_svg_sanitizes_programmatic_node_styles() {
             "disallowed property reached an authored node style"
         );
     }
-    assert_eq!(
-        attribute(shape, "style"),
-        Some("stroke:#445566"),
-        "shape values must not inject additional declarations"
-    );
-    assert_eq!(
-        attribute(label, "style"),
-        Some("fill:#778899"),
-        "label values must not inject additional declarations"
-    );
+    for (element, allowed) in [
+        (
+            shape,
+            &[
+                "fill",
+                "fill-opacity",
+                "stroke",
+                "stroke-opacity",
+                "stroke-width",
+                "stroke-dasharray",
+                "stroke-linecap",
+                "stroke-linejoin",
+            ][..],
+        ),
+        (label, &["fill", "fill-opacity"][..]),
+    ] {
+        let style = attribute(element, "style").unwrap();
+        for declaration in style.split(';').filter(|entry| !entry.trim().is_empty()) {
+            let (property, value) = declaration.split_once(':').unwrap();
+            assert!(
+                allowed.contains(&property.trim()),
+                "unsafe author input introduced a declaration: {style}"
+            );
+            assert!(
+                !value.contains("javascript:") && !value.contains("url("),
+                "unsafe author input introduced a paint: {style}"
+            );
+        }
+    }
 }
 
 #[test]

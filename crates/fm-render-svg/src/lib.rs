@@ -2767,6 +2767,9 @@ fn render_scene_group(
                 rendered = rendered.attr(property.clone(), value.as_str());
             }
         }
+        if matches!(child, RenderItem::Path(_) | RenderItem::Text(_)) {
+            rendered = inline_scene_paints(rendered);
+        }
         // Group-specific paint and typography belong on the actual geometry. Finish interaction
         // wrappers afterwards so explicit leaf attributes cannot override a themed wrapper.
         let rendered = match child {
@@ -2787,6 +2790,66 @@ fn render_scene_group(
     interactions.inherited_node = inherited_node;
     interactions.paints_resolved = inherited_paints;
     elem
+}
+
+/// A scene's final presentation values must outrank the embedded theme stylesheet. In particular,
+/// `.fm-cluster-label` otherwise replaces an authored caption color even though its fill attribute
+/// is correct. Copy the effective values only after chart and group theme overrides have run.
+///
+/// Resolved layers already folded author opacity into fill/stroke opacity, so never reconstruct
+/// those values from author styles or add another element opacity. An attribute and an inline
+/// declaration of the same channel are alternatives in the CSS cascade, not multiplying layers.
+/// Unresolved layers retain their explicit inline author declarations, which already take priority
+/// over their default presentation attributes.
+fn inline_scene_paints(element: Element) -> Element {
+    let mut style = match element.attribute("style") {
+        Some(AttributeValue::String(value)) => value.clone(),
+        _ => String::new(),
+    };
+    for property in [
+        "fill",
+        "fill-opacity",
+        "stroke",
+        "stroke-width",
+        "stroke-opacity",
+        "stroke-dasharray",
+        "stroke-linecap",
+        "stroke-linejoin",
+    ] {
+        if style.split(';').any(|declaration| {
+            declaration
+                .split_once(':')
+                .is_some_and(|(name, _)| name.trim() == property)
+        }) {
+            continue;
+        }
+        let Some(value) = element.attribute(property) else {
+            continue;
+        };
+        let value = match value {
+            AttributeValue::String(value) => value.clone(),
+            value => value.to_string(),
+        };
+        // Public RenderScene values are strings, so moving a presentation attribute into CSS
+        // must not turn a semicolon or resource-loading paint into an injected declaration.
+        if value.contains(';') {
+            continue;
+        }
+        let Some(value) = fm_core::sanitize_style_value(&value) else {
+            continue;
+        };
+        if !style.is_empty() && !style.ends_with(';') {
+            style.push(';');
+        }
+        style.push_str(property);
+        style.push(':');
+        style.push_str(&value);
+    }
+    if style.is_empty() {
+        element
+    } else {
+        element.attr_owned("style", style)
+    }
 }
 
 fn resolve_treemap_scene_typography(
@@ -22540,6 +22603,15 @@ mod tests {
             .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value))
     }
 
+    fn scene_style_property<'a>(tag: &'a str, property: &str) -> Option<&'a str> {
+        scene_attribute(tag, "style")?
+            .split(';')
+            .filter_map(|declaration| declaration.trim().split_once(':'))
+            .filter(|(name, _)| *name == property)
+            .map(|(_, value)| value.trim())
+            .next_back()
+    }
+
     #[test]
     fn scene_svg_preserves_resolved_paints_with_and_without_semantic_ir() {
         let ir = fm_parser::parse(
@@ -22587,6 +22659,11 @@ mod tests {
                     (cluster_text, "fill", "#123456"),
                 ] {
                     assert_eq!(scene_attribute(tag, name), Some(expected), "{tag}");
+                    assert_eq!(
+                        scene_style_property(tag, name),
+                        Some(expected),
+                        "resolved paint must win over theme CSS: {tag}"
+                    );
                 }
                 for (tag, name, expected) in [
                     (node, "fill-opacity", 0.2_f32),
@@ -22602,21 +22679,21 @@ mod tests {
                 ] {
                     let actual: f32 = scene_attribute(tag, name).unwrap().parse().unwrap();
                     assert!((actual - expected).abs() < 0.001, "{name} in {tag}");
+                    let inline: f32 = scene_style_property(tag, name).unwrap().parse().unwrap();
+                    assert!(
+                        (inline - expected).abs() < 0.001,
+                        "inline {name} must keep the composed scene value: {tag}"
+                    );
                     assert_eq!(
                         scene_attribute(tag, "opacity"),
                         None,
                         "opacity applied twice: {tag}"
                     );
-                    if let Some(style) = scene_attribute(tag, "style") {
-                        assert!(
-                            !style.split(';').any(|entry| {
-                                entry
-                                    .split_once(':')
-                                    .is_some_and(|(key, _)| is_scene_paint_property(key.trim()))
-                            }),
-                            "paint cascade applied twice: {tag}"
-                        );
-                    }
+                    assert_eq!(
+                        scene_style_property(tag, "opacity"),
+                        None,
+                        "raw author opacity must not multiply resolved channel opacity: {tag}"
+                    );
                 }
                 if with_ir {
                     let typography = scene_attribute(node_text, "style").unwrap();
@@ -22670,6 +22747,8 @@ mod tests {
         let source = scene_tag_for_source(&svg, "path", "node", 0);
         assert_eq!(scene_attribute(source, "fill"), Some("none"));
         assert_eq!(scene_attribute(source, "stroke"), Some("none"));
+        assert_eq!(scene_style_property(source, "fill"), Some("none"));
+        assert_eq!(scene_style_property(source, "stroke"), Some("none"));
         let target = scene_tag_for_source(&svg, "path", "node", 1);
         assert_eq!(scene_attribute(target, "fill"), Some("none"));
         assert_eq!(scene_attribute(target, "stroke"), Some("none"));
@@ -22687,7 +22766,13 @@ mod tests {
             .parse()
             .unwrap();
         assert!((alpha - 0.2).abs() < 0.001);
-        assert_eq!(scene_attribute(edge, "style"), None);
+        assert_eq!(scene_style_property(edge, "stroke"), Some("#654321"));
+        let inline_alpha: f32 = scene_style_property(edge, "stroke-opacity")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((inline_alpha - 0.2).abs() < 0.001);
+        assert_eq!(scene_style_property(edge, "opacity"), None);
     }
 
     #[test]
@@ -22980,10 +23065,12 @@ mod tests {
             assert!(progress.contains("fill=\"#0f172a\""));
             assert!(progress.contains("fill-opacity=\"0.22\""));
             assert!(progress.contains("stroke=\"none\""));
-            assert!(
-                !progress.contains(" style="),
-                "task CSS replaced progress paint: {progress}"
-            );
+            let progress_tag = scene_tag_for_source(progress, "path", "node", 0);
+            assert_eq!(scene_style_property(progress_tag, "fill"), Some("#0f172a"));
+            assert_eq!(scene_style_property(progress_tag, "fill-opacity"), Some("0.22"));
+            assert_eq!(scene_style_property(progress_tag, "stroke"), Some("none"));
+            assert_eq!(scene_style_property(progress_tag, "opacity"), None);
+            assert!(!progress.contains("#ff0000") && !progress.contains("#00ff00"));
             assert!(!progress.contains("stroke-dasharray"));
             match expected {
                 Some(expected) => assert!(
@@ -23041,6 +23128,10 @@ mod tests {
             text_element("Design").contains(&format!("fill=\"{}\"", colors.background)),
             "text inside a light status bar needs dark ink"
         );
+        assert_eq!(
+            scene_style_property(text_element("Design"), "fill"),
+            Some(colors.background.as_str())
+        );
         for label in [
             "Release schedule",
             "Verification with a deliberately long name",
@@ -23049,6 +23140,11 @@ mod tests {
             assert!(
                 text_element(label).contains(&format!("fill=\"{}\"", colors.text)),
                 "{label} sits on the dark page and needs the theme's text paint"
+            );
+            assert_eq!(
+                scene_style_property(text_element(label), "fill"),
+                Some(colors.text.as_str()),
+                "the final themed paint must also win in inline CSS: {label}"
             );
         }
     }

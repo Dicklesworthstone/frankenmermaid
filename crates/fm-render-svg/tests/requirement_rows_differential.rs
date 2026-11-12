@@ -429,13 +429,18 @@ fn requirement_rows_honor_author_color_font_and_opacity_in_both_backends() {
                 assert_eq!(inline_property(tag, "font-size"), Some("24px!important"));
                 if backend == fm_render_svg::SvgBackend::Scene {
                     assert!(tag.contains(" fill=\"#fedcba\""), "{tag}");
-                    assert_eq!(inline_property(tag, "fill"), None);
+                    assert_eq!(inline_property(tag, "fill"), Some("#fedcba"));
                     assert_eq!(inline_property(tag, "opacity"), None);
                     assert!(!tag.contains(" opacity=\""));
                     assert!(
                         (numeric_attr(tag, "fill-opacity") - 0.4).abs() < 0.001,
                         "resolved text paint applies node opacity exactly once: {tag}"
                     );
+                    let opacity: f32 = inline_property(tag, "fill-opacity")
+                        .expect("resolved opacity must outrank theme CSS")
+                        .parse()
+                        .unwrap();
+                    assert!((opacity - 0.4).abs() < 0.001, "{tag}");
                 } else {
                     assert_eq!(inline_property(tag, "fill"), Some("#fedcba"));
                     assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
@@ -474,19 +479,30 @@ fn requirement_rows_honor_author_color_font_and_opacity_in_both_backends() {
                 if tag.contains("data-fm-source-kind=\"node\"") {
                     if backend == fm_render_svg::SvgBackend::Scene {
                         scene_node_paths += 1;
-                        assert_eq!(inline_property(tag, "fill"), None);
                         assert_eq!(inline_property(tag, "opacity"), None);
                         assert!(!tag.contains(" opacity=\""));
                         if tag.contains(" fill=\"none\"") {
+                            assert_eq!(inline_property(tag, "fill"), Some("none"));
                             assert!(!tag.contains(" fill-opacity=\""));
                         } else {
+                            assert_eq!(inline_property(tag, "fill"), Some("#102030"));
                             assert!(tag.contains(" fill=\"#102030\""));
                             assert!((numeric_attr(tag, "fill-opacity") - 0.4).abs() < 0.001);
+                            let opacity: f32 = inline_property(tag, "fill-opacity")
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            assert!((opacity - 0.4).abs() < 0.001, "{tag}");
                         }
                         assert!(
                             (numeric_attr(tag, "stroke-opacity") - 0.4).abs() < 0.001,
                             "the outline and divider apply node opacity exactly once: {tag}"
                         );
+                        let opacity: f32 = inline_property(tag, "stroke-opacity")
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        assert!((opacity - 0.4).abs() < 0.001, "{tag}");
                     } else {
                         assert_eq!(inline_property(tag, "opacity"), Some("0.4"));
                         if tag.contains(" fill-opacity=\"") {

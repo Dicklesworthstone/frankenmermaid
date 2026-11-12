@@ -617,6 +617,11 @@ impl Element {
         self.kind
     }
 
+    /// Inspect a presentation value after backend-specific styling has been applied.
+    pub(crate) fn attribute(&self, name: &str) -> Option<&crate::attributes::AttributeValue> {
+        self.attrs.get(name)
+    }
+
     /// Render the element to a string.
     #[must_use]
     pub fn render(&self) -> String {

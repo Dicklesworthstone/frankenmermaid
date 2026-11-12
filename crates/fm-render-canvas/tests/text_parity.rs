@@ -1900,6 +1900,21 @@ mod journey {
             .collect()
     }
 
+    fn svg_opacity(tag: &str, property: &str) -> f64 {
+        // Inline CSS and the matching presentation attribute are competing declarations of
+        // ONE property, not independent alpha multipliers. Overall opacity and fill-opacity
+        // are separate properties and must be multiplied exactly once.
+        attr(tag, "style")
+            .into_iter()
+            .flat_map(|style| style.split(';'))
+            .filter_map(|declaration| declaration.split_once(':'))
+            .filter(|(name, _)| name.trim() == property)
+            .map(|(_, value)| value.trim())
+            .next_back()
+            .or_else(|| attr(tag, property))
+            .map_or(1.0, |value| value.parse().unwrap())
+    }
+
     #[test]
     fn exact_scores_and_task_actors_share_geometry_across_graphical_backends() {
         let ir = fm_parser::parse(SOURCE).ir;
@@ -2211,7 +2226,10 @@ mod journey {
                     let style = attr(tag, "style").unwrap();
                     assert!(style.contains("fill:#abcdef"));
                     assert!(style.contains("font-size:24px"));
-                    assert!(style.contains("opacity:0.5"));
+                    close(
+                        svg_opacity(tag, "opacity") * svg_opacity(tag, "fill-opacity"),
+                        0.5,
+                    );
                 }
             }
         }
