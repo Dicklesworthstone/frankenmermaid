@@ -4978,7 +4978,12 @@ fn lower_sequence_statement(
             participants,
             text,
         } => {
-            builder.add_sequence_note(position, &participants, text);
+            builder.add_sequence_note(
+                position,
+                &participants,
+                text,
+                span_for(line_number, source_line),
+            );
         }
         SequenceStatement::Activate(name) => {
             builder.activate_participant(&name);
@@ -25057,6 +25062,110 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(meta.notes.len(), 1);
         assert_eq!(meta.notes[0].participants.len(), 2);
         assert_eq!(meta.notes[0].text, "Span");
+    }
+
+    #[test]
+    fn sequence_note_only_diagrams_declare_their_lifelines() {
+        for placement in ["left of", "right of", "over"] {
+            let input = format!("sequenceDiagram\n  Note {placement} Alice: Ready");
+            let parsed = parse_mermaid(&input);
+            assert!(
+                parsed.warnings.is_empty(),
+                "{placement}: {:?}",
+                parsed.warnings
+            );
+            assert_eq!(parsed.ir.nodes.len(), 1, "{placement}");
+            assert_eq!(parsed.ir.nodes[0].id, "Alice");
+            assert_eq!(parsed.ir.nodes[0].span_primary.start.line, 2);
+            assert!(!parsed.ir.nodes[0].implicit);
+            assert!(parsed.ir.edges.is_empty());
+            let meta = parsed.ir.sequence_meta.expect("note metadata");
+            assert_eq!(meta.notes.len(), 1);
+            assert_eq!(meta.notes[0].participants, vec![fm_core::IrNodeId(0)]);
+            assert_eq!(meta.notes[0].text, "Ready");
+            assert_eq!(meta.timeline, vec![fm_core::IrSequenceStep::Note]);
+        }
+    }
+
+    #[test]
+    fn sequence_notes_keep_forward_references_and_later_aliases() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram\n  participant Alice\n  Note over Bob,Alice: Before the request\n  participant Bob as Backend\n  Alice->>Bob: Request\n  Note right of Bob: After the request",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.nodes[0].id, "Alice");
+        assert_eq!(parsed.ir.nodes[1].id, "Bob");
+        let label = parsed.ir.nodes[1].label.expect("later alias");
+        assert_eq!(parsed.ir.labels[label.0].text, "Backend");
+        assert_eq!(
+            parsed.ir.edges[0].from,
+            fm_core::IrEndpoint::Node(fm_core::IrNodeId(0))
+        );
+        assert_eq!(
+            parsed.ir.edges[0].to,
+            fm_core::IrEndpoint::Node(fm_core::IrNodeId(1))
+        );
+        let meta = parsed.ir.sequence_meta.expect("note metadata");
+        assert_eq!(
+            meta.notes[0].participants,
+            vec![fm_core::IrNodeId(1), fm_core::IrNodeId(0)],
+        );
+        assert_eq!(meta.notes[1].participants, vec![fm_core::IrNodeId(1)]);
+        assert_eq!(
+            meta.timeline,
+            vec![
+                fm_core::IrSequenceStep::Note,
+                fm_core::IrSequenceStep::Message,
+                fm_core::IrSequenceStep::Note,
+            ],
+        );
+    }
+
+    #[test]
+    fn sequence_notes_preserve_first_use_order_and_declared_shapes() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram\n  Note over Backend,backend: Different services\n  actor backend as Client\n  participant Backend {\"type\":\"database\",\"alias\":\"Store\"}\n  Note left of Backend: Connected",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.nodes[0].id, "Backend");
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Cylinder);
+        assert_eq!(parsed.ir.nodes[1].id, "backend");
+        assert_eq!(parsed.ir.nodes[1].shape, NodeShape::Stadium);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| { &parsed.ir.labels[node.label.expect("declared alias").0].text })
+                .collect::<Vec<_>>(),
+            vec!["Store", "Client"],
+        );
+        let meta = parsed.ir.sequence_meta.expect("note metadata");
+        assert_eq!(
+            meta.notes[0].participants,
+            vec![fm_core::IrNodeId(0), fm_core::IrNodeId(1)],
+        );
+        assert_eq!(meta.notes[1].participants, vec![fm_core::IrNodeId(0)]);
+    }
+
+    #[test]
+    fn sequence_note_with_no_valid_participant_does_not_make_an_unanchored_note() {
+        let parsed = parse_mermaid("sequenceDiagram\n  Note over \"\": Missing participant");
+        assert!(parsed.ir.nodes.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty node identifier"))
+        );
+        assert!(
+            parsed
+                .ir
+                .sequence_meta
+                .is_none_or(|meta| meta.notes.is_empty())
+        );
     }
 
     #[test]

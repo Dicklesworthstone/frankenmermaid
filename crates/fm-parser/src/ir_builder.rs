@@ -1038,16 +1038,22 @@ impl IrBuilder {
         position: NotePosition,
         participant_names: &[String],
         text: String,
+        span: Span,
     ) {
-        // Resolve participant names to node IDs
+        // A note declares its participants on first use, just like a message. Looking up only
+        // existing nodes loses note-only diagrams and attaches forward references to the wrong
+        // lifeline. Leave the label unset so a later declaration can still supply an alias or
+        // a participant shape without changing the identity referenced by this note.
         let participants: Vec<IrNodeId> = participant_names
             .iter()
             .filter_map(|name| {
-                // Lookup only: the owned String was allocated purely to be borrowed here.
                 let normalized = normalize_identifier_cow(name);
-                self.node_id_index.get(normalized.as_ref(), &self.ir.nodes)
+                self.intern_node(normalized.as_ref(), None, NodeShape::Rect, span)
             })
             .collect();
+        if participants.is_empty() {
+            return;
+        }
 
         self.ir
             .sequence_meta
