@@ -11714,21 +11714,27 @@ fn layout_diagram_sequence_traced_with_metrics(
                 .iter()
                 .enumerate()
                 .filter_map(|(group_index, group)| {
-                    let member_indexes: Vec<usize> = group
+                    // Notes and messages can introduce participants before a later box
+                    // declaration lists them in a different order. Group membership does not
+                    // imply left-to-right layout order; enclose every valid member.
+                    let mut member_bounds = group
                         .participants
                         .iter()
-                        .map(|participant| participant.0)
-                        .collect();
-                    let first_member = member_indexes.first().copied()?;
-                    let last_member = member_indexes.last().copied()?;
-                    let first_box = nodes.get(first_member)?;
-                    let last_box = nodes.get(last_member)?;
+                        .filter_map(|participant| nodes.get(participant.0))
+                        .map(|node| node.bounds);
+                    let first = member_bounds.next()?;
+                    let (left, right) = member_bounds.fold(
+                        (first.x, first.x + first.width),
+                        |(left, right), bounds| {
+                            (left.min(bounds.x), right.max(bounds.x + bounds.width))
+                        },
+                    );
 
                     let x_padding = spacing.cluster_padding * 0.45;
                     let top_padding = spacing.cluster_padding * 0.7;
                     let bottom_padding = spacing.cluster_padding * 0.3;
-                    let min_x = first_box.bounds.x - x_padding;
-                    let max_x = last_box.bounds.x + last_box.bounds.width + x_padding;
+                    let min_x = left - x_padding;
+                    let max_x = right + x_padding;
                     let min_y = header_y - top_padding;
                     let max_y = diagram_bottom + bottom_padding;
 
