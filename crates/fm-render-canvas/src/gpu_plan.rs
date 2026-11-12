@@ -2731,6 +2731,7 @@ impl GpuRenderPlan {
 
             // Zero is an intentional absent border, not a request for the default width.
             let stroke_width = crate::renderer::resolve_node_stroke_width(ir, node.node_index)
+                .map(|width| width as f32)
                 .or_else(|| {
                     authored
                         .get("stroke-width")

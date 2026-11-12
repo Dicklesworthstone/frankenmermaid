@@ -35141,7 +35141,7 @@ mod tests {
             .filter(|path| path.source == RenderSource::Node(0))
             .collect();
         assert_eq!(repeated.len(), 4);
-        for header in repeated.chunks_exact(2) {
+        for header in repeated.as_chunks::<2>().0 {
             assert!(header[0].fill.is_some() && header[1].fill.is_none());
             assert_eq!(
                 header[1]

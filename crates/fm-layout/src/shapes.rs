@@ -1703,7 +1703,7 @@ mod tests {
         }
         let left = coordinates(&braces[0].commands);
         let right = coordinates(&braces[1].commands);
-        for (left, right) in left.chunks_exact(2).zip(right.chunks_exact(2)) {
+        for (left, right) in left.as_chunks::<2>().0.iter().zip(right.as_chunks::<2>().0) {
             assert_near(left[0] + right[0], 2.0 * bounds.center().x);
             assert_near(left[1], right[1]);
         }
@@ -1856,7 +1856,7 @@ mod tests {
             ..bounds
         };
         let delay = node_paint_paths(tall, NodeShape::HalfRoundedRect);
-        for point in coordinates(&delay[0].commands).chunks_exact(2) {
+        for point in coordinates(&delay[0].commands).as_chunks::<2>().0 {
             assert!(point[0] >= tall.x && point[0] <= tall.x + tall.width);
             assert!(point[1] >= tall.y && point[1] <= tall.y + tall.height);
         }
