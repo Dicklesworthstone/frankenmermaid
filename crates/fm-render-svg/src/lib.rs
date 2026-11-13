@@ -4318,13 +4318,9 @@ fn resolve_scene_node_inline_styles(
         })
         .collect();
     let (shape, mut text) = split_style_properties(&properties);
-    // These card rows occupy a separate layer in the scene backend. Preserve node opacity on
-    // their text instead of relying on inheritance from the shape's group.
-    if matches!(
-        ir.diagram_type,
-        DiagramType::Journey | DiagramType::Requirement
-    ) && let Some(opacity) = shape.get("opacity")
-    {
+    // Labels are siblings of their shapes, so overall author opacity must reach each label
+    // once. Resolved scenes already folded it into their paints and filtered it out above.
+    if let Some(opacity) = shape.get("opacity") {
         text.insert("opacity".to_owned(), opacity.clone());
     }
     (style_map_to_css(&shape), style_map_to_css(&text))
@@ -4351,15 +4347,21 @@ fn resolve_node_inline_styles(
         node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
     };
 
-    if let Some(props) = properties {
-        let (shape_props, text_props) = split_style_properties(&props);
-        return (
-            style_map_to_css(&shape_props),
-            style_map_to_css(&text_props),
-        );
+    let (shape_props, mut text_props) = split_style_properties(&properties.unwrap_or_default());
+    // Class opacity is emitted on .fm-node-shape, not the enclosing node group. Resolve the
+    // complete cascade for the sibling text as well, without putting opacity on its tspans.
+    if let Some(opacity) = ir
+        .resolved_node_style(node_index)
+        .get("opacity")
+        .filter(|value| !value.contains(';'))
+        .and_then(|value| fm_core::sanitize_style_value(value))
+    {
+        text_props.insert("opacity".to_owned(), opacity);
     }
-
-    (None, None)
+    (
+        style_map_to_css(&shape_props),
+        style_map_to_css(&text_props),
+    )
 }
 
 /// Resolve inline style for an edge based on `linkStyle` directives.
@@ -4408,7 +4410,12 @@ fn resolve_cluster_inline_styles(
     if paints_resolved {
         merged.retain(|property, _| !is_scene_paint_property(property));
     }
-    let (shape, text) = split_style_properties(&merged);
+    let (shape, mut text) = split_style_properties(&merged);
+    // A cluster caption is a sibling of its frame, and must fade with that frame rather than
+    // inheriting opacity through a group that would also fade the cluster's contained nodes.
+    if let Some(opacity) = shape.get("opacity") {
+        text.insert("opacity".to_owned(), opacity.clone());
+    }
     (style_map_to_css(&shape), style_map_to_css(&text))
 }
 
@@ -16970,22 +16977,38 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             .fill(&colors.text)
             .class("edge-label")
             .build();
-        let label_style = if centered {
-            // Both sections inherit the same authored face and color used for measurement.
-            let mut style = String::from("font-size:");
-            let _ = attributes::write_number_into(&mut style, label_font_size);
-            style.push_str("px");
-            if let Some(color) = fm_layout::edge_labels::edge_label_style(ir, edge_index)
-                .get("color")
-                .and_then(|value| sanitize_svg_paint(value))
-            {
-                style.push_str(";fill:");
-                style.push_str(&color);
+        let authored_label_style = fm_layout::edge_labels::edge_label_style(ir, edge_index);
+        let mut label_style = String::new();
+        if centered {
+            // Both sections use the same authored size that positioned the measured caption.
+            label_style.push_str("font-size:");
+            let _ = attributes::write_number_into(&mut label_style, label_font_size);
+            label_style.push_str("px");
+        }
+        if let Some(color) = authored_label_style
+            .get("color")
+            .and_then(|value| sanitize_svg_paint(value))
+        {
+            if !label_style.is_empty() {
+                label_style.push(';');
             }
-            Some(style)
-        } else {
-            None
-        };
+            label_style.push_str("fill:");
+            label_style.push_str(&color);
+        }
+        // The connector's inline opacity does not inherit to its sibling caption. Apply the
+        // overall author alpha once to text, keeping stroke-opacity confined to the connector.
+        if let Some(opacity) = authored_label_style
+            .get("opacity")
+            .filter(|value| !value.contains(';'))
+            .and_then(|value| fm_core::sanitize_style_value(value))
+        {
+            if !label_style.is_empty() {
+                label_style.push(';');
+            }
+            label_style.push_str("opacity:");
+            label_style.push_str(&opacity);
+        }
+        let label_style = (!label_style.is_empty()).then_some(label_style);
         if let Some(style) = &label_style {
             text = text.attr("style", style);
         }
@@ -22613,6 +22636,56 @@ mod tests {
     }
 
     #[test]
+    fn svg_label_opacity_follows_author_cascade_in_both_backends() {
+        let ir = fm_parser::parse(
+            "flowchart LR\nsubgraph G[Payments]\nA[Alpha] -->|request| B[Beta]\nend\n\
+             classDef default opacity:0.2\nclassDef hot opacity:0.3\nclass A hot\n\
+             style A color:#223344,opacity:0.5\nstyle G color:#123456,opacity:0.5\n\
+             linkStyle default color:#334455,opacity:0.5,stroke-opacity:0.6\n",
+        )
+        .ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let svg = render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend,
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                for (label, expected) in [
+                    ("Alpha", 0.5_f32),
+                    ("Beta", 0.2),
+                    ("request", 0.5),
+                    ("Payments", 0.5),
+                ] {
+                    let tag = svg
+                        .split("<text ")
+                        .skip(1)
+                        .find_map(|fragment| {
+                            let (tag, body) = fragment.split_once('>')?;
+                            body.starts_with(&format!("{label}</text>")).then_some(tag)
+                        })
+                        .unwrap_or_else(|| panic!("missing {label} in {backend:?}"));
+                    let property = if backend == SvgBackend::Scene {
+                        assert_eq!(scene_style_property(tag, "opacity"), None, "{tag}");
+                        "fill-opacity"
+                    } else {
+                        assert_eq!(scene_attribute(tag, "fill-opacity"), None, "{tag}");
+                        "opacity"
+                    };
+                    let actual: f32 = scene_style_property(tag, property)
+                        .unwrap_or_else(|| panic!("missing {property} in {tag}"))
+                        .parse()
+                        .unwrap();
+                    assert!((actual - expected).abs() < 0.001, "{tag}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn scene_svg_preserves_resolved_paints_with_and_without_semantic_ir() {
         let ir = fm_parser::parse(
             "flowchart LR\nsubgraph G[Styled group]\nA[Alpha] -->|request| B[Beta]\nend\n\
@@ -23067,7 +23140,10 @@ mod tests {
             assert!(progress.contains("stroke=\"none\""));
             let progress_tag = scene_tag_for_source(progress, "path", "node", 0);
             assert_eq!(scene_style_property(progress_tag, "fill"), Some("#0f172a"));
-            assert_eq!(scene_style_property(progress_tag, "fill-opacity"), Some("0.22"));
+            assert_eq!(
+                scene_style_property(progress_tag, "fill-opacity"),
+                Some("0.22")
+            );
             assert_eq!(scene_style_property(progress_tag, "stroke"), Some("none"));
             assert_eq!(scene_style_property(progress_tag, "opacity"), None);
             assert!(!progress.contains("#ff0000") && !progress.contains("#00ff00"));
@@ -26284,7 +26360,17 @@ marker#arrow-open path {
             assert!(circle.contains("style=\"fill:#f97316; stroke:#020617\""));
             assert!(!circle.contains("opacity:"));
         }
-        assert_eq!(svg.matches("opacity:0.5").count(), 1);
+        let label = svg
+            .split("<text ")
+            .find_map(|fragment| {
+                let (tag, body) = fragment.split_once('>')?;
+                body.starts_with("Ready</text>").then_some(tag)
+            })
+            .expect("double-circle label");
+        assert_eq!(scene_style_property(label, "opacity"), Some("0.5"));
+        // The shared ring group and its sibling label each receive opacity once; neither
+        // individual ring repeats the group opacity, and there is no faded outer wrapper.
+        assert_eq!(svg.matches("opacity:0.5").count(), 2);
     }
 
     /// An `alt` / `opt` / `loop` / `par` frame must be drawn INSIDE the canvas (bd-zwh3).
