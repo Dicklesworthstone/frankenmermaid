@@ -107,14 +107,10 @@ fn a_fully_transparent_node_is_honoured() {
     );
 }
 
-/// CONTROL: a malformed or out-of-range opacity is REFUSED.
-///
-/// `globalAlpha` outside `0..=1` is IGNORED by a canvas, which leaves the PREVIOUS alpha in force
-/// — so forwarding `1.5` would not merely fail to fade this node, it would fade whatever came
-/// next, or not, depending on draw order. Refusing is the visible failure.
+/// CONTROL: malformed and non-finite opacity must never reach Canvas state.
 #[test]
 fn a_malformed_opacity_is_refused() {
-    for declared in ["ghostly", "-0.5", "1.5", "NaN"] {
+    for declared in ["ghostly", "NaN", "inf", "NaN%", "inf%"] {
         let source = format!("flowchart TD\n  a[Alpha]\n  style a opacity:{declared}\n");
         let ops = canvas_ops(&source);
 
@@ -126,5 +122,41 @@ fn a_malformed_opacity_is_refused() {
             !ops.contains("SetGlobalAlpha"),
             "{declared}: a malformed opacity was forwarded to the canvas: {ops}"
         );
+    }
+}
+
+#[test]
+fn node_opacity_accepts_percentages_and_clamps_finite_css_values() {
+    for (declared, expected) in [
+        ("50%", 0.5),
+        ("0%", 0.0),
+        ("100%", 1.0),
+        ("-0.5", 0.0),
+        ("1.5", 1.0),
+        ("-25%", 0.0),
+        ("150%", 1.0),
+    ] {
+        let ir = fm_parser::parse(&format!(
+            "flowchart TD\nA[Alpha]\nB[Control]\nstyle A opacity:{declared}\n"
+        ))
+        .ir;
+        let mut context = MockCanvas2dContext::new(800.0, 600.0);
+        render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+        let mut alpha = 1.0;
+        let mut painted = std::collections::BTreeMap::new();
+        for operation in context.operations() {
+            match operation {
+                fm_render_canvas::DrawOperation::SetGlobalAlpha(value) => {
+                    assert!(value.is_finite() && (0.0..=1.0).contains(value));
+                    alpha = *value;
+                }
+                fm_render_canvas::DrawOperation::FillText(label, _, _) => {
+                    painted.insert(label.as_str(), alpha);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(painted.get("Alpha"), Some(&expected), "{declared}");
+        assert_eq!(painted.get("Control"), Some(&1.0), "{declared} leaked");
     }
 }

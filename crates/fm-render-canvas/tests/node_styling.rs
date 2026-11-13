@@ -396,6 +396,242 @@ fn single_node_paints(source: &str, config: &CanvasRenderConfig) -> (String, Str
     )
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct AlphaPaint {
+    color: String,
+    alpha: f64,
+}
+
+#[derive(Debug, Default)]
+struct AlphaDraws {
+    fills: Vec<AlphaPaint>,
+    strokes: Vec<AlphaPaint>,
+    texts: BTreeMap<String, AlphaPaint>,
+}
+
+fn alpha_draws(operations: &[DrawOperation]) -> AlphaDraws {
+    let mut draws = AlphaDraws::default();
+    let mut state = (String::new(), String::new(), 1.0);
+    let mut stack = Vec::new();
+    for operation in operations {
+        match operation {
+            DrawOperation::Save => stack.push(state.clone()),
+            DrawOperation::Restore => state = stack.pop().expect("balanced canvas state"),
+            DrawOperation::SetFillStyle(value) => state.0.clone_from(value),
+            DrawOperation::SetStrokeStyle(value) => state.1.clone_from(value),
+            DrawOperation::SetGlobalAlpha(value) => state.2 = *value,
+            DrawOperation::Fill | DrawOperation::FillRect(..) => draws.fills.push(AlphaPaint {
+                color: state.0.clone(),
+                alpha: state.2,
+            }),
+            DrawOperation::Stroke | DrawOperation::StrokeRect(..) => {
+                draws.strokes.push(AlphaPaint {
+                    color: state.1.clone(),
+                    alpha: state.2,
+                });
+            }
+            DrawOperation::FillText(label, _, _) => {
+                draws.texts.insert(
+                    label.clone(),
+                    AlphaPaint {
+                        color: state.0.clone(),
+                        alpha: state.2,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(stack.is_empty());
+    draws
+}
+
+fn inline_property<'a>(element: &'a str, property: &str) -> Option<&'a str> {
+    attribute(element, "style")?
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .filter(|(name, _)| name.trim() == property)
+        .map(|(_, value)| value.trim())
+        .next_back()
+}
+
+#[test]
+fn canvas_channel_opacity_matches_shared_scene_without_rewriting_authored_colors() {
+    for (paint, intrinsic_alpha) in [
+        ("#12345680", 128.0 / 255.0),
+        ("rgba(18,52,86,0.5)", 0.5),
+        ("red", 1.0),
+        ("rebeccapurple", 1.0),
+        ("rgb(18 52 86 / 50%)", 0.5),
+        ("hsla(210,50%,40%,0.5)", 0.5),
+    ] {
+        let source = format!(
+            "flowchart LR\nA[Alpha]\n\
+             classDef default fill:#102030,stroke:#203040,color:#304050,opacity:0.8,fill-opacity:0.9,stroke-opacity:0.7\n\
+             classDef faded opacity:50%,fill-opacity:40%,stroke-opacity:60%\n\
+             class A faded\nstyle A fill:{paint},stroke:{paint},color:{paint}\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        assert_eq!(ir.nodes.len(), 1, "{source}");
+        let config = CanvasRenderConfig::default();
+        let mut direct_context = MockCanvas2dContext::new(800.0, 600.0);
+        render_to_canvas(&ir, &mut direct_context, &config);
+        let direct = alpha_draws(direct_context.operations());
+        let scene = fm_layout::build_render_scene(&ir, &fm_layout::layout_diagram(&ir));
+        let mut scene_context = MockCanvas2dContext::new(800.0, 600.0);
+        fm_render_canvas::render_scene_to_canvas(&scene, &mut scene_context, &config);
+        let projected = alpha_draws(scene_context.operations());
+        for draws in [&direct, &projected] {
+            assert_eq!(draws.fills.len(), 1, "{paint}: {draws:?}");
+            assert_eq!(draws.strokes.len(), 1, "{paint}: {draws:?}");
+            for (actual, channel_alpha) in [
+                (&draws.fills[0], 0.2),
+                (&draws.strokes[0], 0.3),
+                (draws.texts.get("Alpha").unwrap(), 0.5),
+            ] {
+                assert_eq!(
+                    actual.color, paint,
+                    "intrinsic color alpha must be retained"
+                );
+                assert!(
+                    (actual.alpha * intrinsic_alpha - channel_alpha * intrinsic_alpha).abs() < 1e-6,
+                    "{paint}: expected intrinsic alpha × {channel_alpha}, got {actual:?}"
+                );
+            }
+        }
+        for embed_theme_css in [false, true] {
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    embed_theme_css,
+                    ..SvgRenderConfig::default()
+                },
+            );
+            let shape = scene_node_element(&svg, "path", 0);
+            let text = scene_node_element(&svg, "text", 0);
+            for (element, color_property, alpha_property, alpha) in [
+                (shape, "fill", "fill-opacity", 0.2_f64),
+                (shape, "stroke", "stroke-opacity", 0.3),
+                (text, "fill", "fill-opacity", 0.5),
+            ] {
+                assert_eq!(inline_property(element, color_property), Some(paint));
+                let actual: f64 = inline_property(element, alpha_property)
+                    .expect("resolved alpha must survive theme CSS")
+                    .parse()
+                    .unwrap();
+                assert!((actual - alpha).abs() < 1e-6, "{element}");
+                assert_eq!(inline_property(element, "opacity"), None);
+                assert_eq!(attribute(element, "opacity"), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn channel_opacity_reaches_default_paints_and_restores_labels_and_siblings() {
+    let ir = fm_parser::parse(
+        "flowchart LR\nA[Alpha]\nB[Control]\n\
+         style A opacity:0.5,fill-opacity:0.4,stroke-opacity:0.6\n",
+    )
+    .ir;
+    let config = CanvasRenderConfig::default();
+    let mut context = MockCanvas2dContext::new(800.0, 600.0);
+    render_to_canvas(&ir, &mut context, &config);
+    let draws = alpha_draws(context.operations());
+    assert_eq!(draws.fills.len(), 2);
+    assert_eq!(draws.strokes.len(), 2);
+    for (paint, expected) in draws.fills.iter().zip([0.2, 1.0]) {
+        assert_eq!(paint.color, config.node_fill);
+        assert!((paint.alpha - expected).abs() < 1e-6, "{paint:?}");
+    }
+    for (paint, expected) in draws.strokes.iter().zip([0.3, 1.0]) {
+        assert_eq!(paint.color, config.node_stroke);
+        assert!((paint.alpha - expected).abs() < 1e-6, "{paint:?}");
+    }
+    assert_eq!(draws.texts["Alpha"].alpha, 0.5);
+    assert_eq!(draws.texts["Control"].alpha, 1.0);
+}
+
+#[test]
+fn channel_opacity_reaches_every_piece_of_composite_node_geometry() {
+    for declaration in [
+        "A[(Alpha)]",
+        "A@{shape: lin-doc, label: Alpha}",
+        "A@{shape: div-rect, label: Alpha}",
+    ] {
+        let ir = fm_parser::parse(&format!(
+            "flowchart LR\n{declaration}\n\
+             style A fill:rebeccapurple,stroke:red,opacity:0.5,fill-opacity:0.4,stroke-opacity:0.6\n"
+        ))
+        .ir;
+        let mut context = MockCanvas2dContext::new(800.0, 600.0);
+        render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+        let draws = alpha_draws(context.operations());
+        assert!(
+            !draws.fills.is_empty() && draws.strokes.len() > 1,
+            "{declaration}"
+        );
+        assert!(
+            draws.fills.iter().all(|paint| {
+                paint.color == "rebeccapurple" && (paint.alpha - 0.2).abs() < 1e-6
+            })
+        );
+        assert!(
+            draws
+                .strokes
+                .iter()
+                .all(|paint| { paint.color == "red" && (paint.alpha - 0.3).abs() < 1e-6 })
+        );
+        assert_eq!(draws.texts["Alpha"].alpha, 0.5);
+    }
+}
+
+#[test]
+fn channel_opacity_reaches_cluster_and_edge_geometry_without_fading_their_labels_twice() {
+    let ir = fm_parser::parse(
+        "flowchart LR\nsubgraph G[Group]\nA[Alpha] -->|Request| B[Beta]\nend\n\
+         style G fill:rgba(12,34,56,0.5),stroke:red,color:blue,opacity:50%,fill-opacity:40%,stroke-opacity:60%\n\
+         linkStyle 0 stroke:green,color:purple,opacity:50%,stroke-opacity:40%\n",
+    )
+    .ir;
+    let config = CanvasRenderConfig::default();
+    let mut direct_context = MockCanvas2dContext::new(800.0, 600.0);
+    render_to_canvas(&ir, &mut direct_context, &config);
+    let scene = fm_layout::build_render_scene(&ir, &fm_layout::layout_diagram(&ir));
+    let mut scene_context = MockCanvas2dContext::new(800.0, 600.0);
+    fm_render_canvas::render_scene_to_canvas(&scene, &mut scene_context, &config);
+    for draws in [
+        alpha_draws(direct_context.operations()),
+        alpha_draws(scene_context.operations()),
+    ] {
+        for (paints, color, expected) in [
+            (&draws.fills, "rgba(12,34,56,0.5)", 0.2),
+            (&draws.strokes, "red", 0.3),
+            (&draws.strokes, "green", 0.2),
+            (&draws.fills, "green", 0.2),
+        ] {
+            let matching: Vec<_> = paints.iter().filter(|paint| paint.color == color).collect();
+            assert!(!matching.is_empty(), "missing {color}: {draws:?}");
+            assert!(
+                matching
+                    .iter()
+                    .all(|paint| (paint.alpha - expected).abs() < 1e-6)
+            );
+        }
+        for (label, color) in [("Group", "blue"), ("Request", "purple")] {
+            assert_eq!(draws.texts[label].color, color);
+            assert!((draws.texts[label].alpha - 0.5).abs() < 1e-6);
+        }
+        for label in ["Alpha", "Beta"] {
+            assert_eq!(
+                draws.texts[label].alpha, 1.0,
+                "cluster or edge alpha leaked"
+            );
+        }
+    }
+}
+
 fn canvas_theme(preset: ThemePreset) -> CanvasRenderConfig {
     let colors = ThemeColors::from_preset(preset);
     CanvasRenderConfig {

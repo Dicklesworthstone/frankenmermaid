@@ -2,7 +2,7 @@
 //!
 //! Draws diagrams to Canvas2D contexts using computed layouts.
 
-use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
+use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics};
 use crate::shapes::{
     draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
     draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape, trace_rounded_rect,
@@ -15,6 +15,132 @@ use fm_layout::{
     RenderTransform, StrokeStyle, TextAlign as IrTextAlign, TextBaseline as IrTextBaseline,
 };
 use std::collections::BTreeSet;
+
+/// Apply a geometry channel's alpha without rewriting its CSS color or fading adjacent text.
+/// The color keeps its intrinsic alpha, which Canvas multiplies by this global alpha once.
+fn with_paint_opacity<C: Canvas2dContext>(
+    ctx: &mut C,
+    overall: f64,
+    channel: f64,
+    paint: impl FnOnce(&mut C),
+) {
+    if channel != 1.0 {
+        ctx.set_global_alpha(overall * channel);
+    }
+    paint(ctx);
+    if channel != 1.0 {
+        ctx.set_global_alpha(overall);
+    }
+}
+
+/// Existing shape writers interleave fills and strokes, including interior rules and folds.
+/// Intercept their paint operations so every piece receives the correct channel opacity while
+/// preserving geometry and all supported CSS colors. A color parser here would lose valid names,
+/// modern RGB/HSL syntax, or precision in intrinsic alpha. Unit channel values emit no extra ops.
+struct PaintOpacityContext<'a, C> {
+    context: &'a mut C,
+    overall: f64,
+    fill: f64,
+    stroke: f64,
+    saved_opacities: Vec<f64>,
+}
+
+macro_rules! forward_paint_context_methods {
+    ($(fn $name:ident($($argument:ident: $kind:ty),*);)*) => {
+        $(fn $name(&mut self, $($argument: $kind),*) {
+            self.context.$name($($argument),*);
+        })*
+    };
+}
+
+impl<C: Canvas2dContext> Canvas2dContext for PaintOpacityContext<'_, C> {
+    fn width(&self) -> f64 {
+        self.context.width()
+    }
+
+    fn height(&self) -> f64 {
+        self.context.height()
+    }
+
+    fn measure_text(&self, text: &str) -> TextMetrics {
+        self.context.measure_text(text)
+    }
+
+    fn save(&mut self) {
+        self.saved_opacities.push(self.overall);
+        self.context.save();
+    }
+
+    fn restore(&mut self) {
+        self.context.restore();
+        if let Some(overall) = self.saved_opacities.pop() {
+            self.overall = overall;
+        }
+    }
+
+    fn set_global_alpha(&mut self, alpha: f64) {
+        self.overall = alpha;
+        self.context.set_global_alpha(alpha);
+    }
+
+    fn fill(&mut self) {
+        with_paint_opacity(self.context, self.overall, self.fill, Canvas2dContext::fill);
+    }
+
+    fn stroke(&mut self) {
+        with_paint_opacity(
+            self.context,
+            self.overall,
+            self.stroke,
+            Canvas2dContext::stroke,
+        );
+    }
+
+    fn fill_rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        with_paint_opacity(self.context, self.overall, self.fill, |ctx| {
+            ctx.fill_rect(x, y, width, height);
+        });
+    }
+
+    fn stroke_rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        with_paint_opacity(self.context, self.overall, self.stroke, |ctx| {
+            ctx.stroke_rect(x, y, width, height);
+        });
+    }
+
+    forward_paint_context_methods! {
+        fn set_fill_style(color: &str);
+        fn set_stroke_style(color: &str);
+        fn set_line_width(width: f64);
+        fn set_line_cap(cap: LineCap);
+        fn set_line_join(join: LineJoin);
+        fn set_line_dash(pattern: &[f64]);
+        fn set_font(font: &str);
+        fn set_text_align(align: TextAlign);
+        fn set_text_baseline(baseline: TextBaseline);
+        fn begin_path();
+        fn close_path();
+        fn move_to(x: f64, y: f64);
+        fn line_to(x: f64, y: f64);
+        fn quadratic_curve_to(cpx: f64, cpy: f64, x: f64, y: f64);
+        fn bezier_curve_to(cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64);
+        fn arc(x: f64, y: f64, radius: f64, start_angle: f64, end_angle: f64);
+        fn arc_to(x1: f64, y1: f64, x2: f64, y2: f64, radius: f64);
+        fn rect(x: f64, y: f64, width: f64, height: f64);
+        fn clear_rect(x: f64, y: f64, width: f64, height: f64);
+        fn fill_text(text: &str, x: f64, y: f64);
+        fn stroke_text(text: &str, x: f64, y: f64);
+        fn set_transform(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64);
+        fn reset_transform();
+        fn translate(x: f64, y: f64);
+        fn scale(x: f64, y: f64);
+        fn rotate(angle: f64);
+        fn clip();
+        fn set_shadow_blur(blur: f64);
+        fn set_shadow_color(color: &str);
+        fn set_shadow_offset(x: f64, y: f64);
+    }
+}
 
 /// Configuration for Canvas2D rendering.
 #[derive(Debug, Clone)]
@@ -1372,6 +1498,11 @@ impl Canvas2dRenderer {
             if let Some(alpha) = cluster_opacity {
                 ctx.set_global_alpha(alpha);
             }
+            let paint_style = merged_cluster_style(ir, cluster_box.cluster_index);
+            let fill_opacity =
+                parse_opacity(paint_style.get("fill-opacity").map(String::as_str)).unwrap_or(1.0);
+            let stroke_opacity =
+                parse_opacity(paint_style.get("stroke-opacity").map(String::as_str)).unwrap_or(1.0);
             ctx.set_fill_style(&fill);
             ctx.set_stroke_style(&stroke);
             // The border WIDTH and DASH were the two channels this surface still discarded: the
@@ -1401,8 +1532,18 @@ impl Canvas2dRenderer {
                     self.config.rounded_corners * 1.5
                 },
             );
-            ctx.fill();
-            ctx.stroke();
+            with_paint_opacity(
+                ctx,
+                cluster_opacity.unwrap_or(1.0),
+                fill_opacity,
+                Canvas2dContext::fill,
+            );
+            with_paint_opacity(
+                ctx,
+                cluster_opacity.unwrap_or(1.0),
+                stroke_opacity,
+                Canvas2dContext::stroke,
+            );
             if cluster_dash.is_some() {
                 ctx.set_line_dash(&[]);
             }
@@ -2996,8 +3137,17 @@ impl Canvas2dRenderer {
             if let Some(alpha) = edge_opacity {
                 ctx.set_global_alpha(alpha);
             }
+            let stroke_opacity = parse_opacity(
+                merged_edge_style(ir, edge_path.edge_index)
+                    .get("stroke-opacity")
+                    .map(String::as_str),
+            )
+            .unwrap_or(1.0);
 
             if !labels_only {
+                if stroke_opacity != 1.0 {
+                    ctx.set_global_alpha(edge_opacity.unwrap_or(1.0) * stroke_opacity);
+                }
                 ctx.set_stroke_style(stroke);
                 ctx.set_line_width(stroke_width);
                 ctx.set_line_dash(dash);
@@ -3053,6 +3203,9 @@ impl Canvas2dRenderer {
                             stroke,
                         );
                     }
+                }
+                if stroke_opacity != 1.0 {
+                    ctx.set_global_alpha(edge_opacity.unwrap_or(1.0));
                 }
             }
             if !labels_only && self.edge_label_layout.is_some() {
@@ -3446,6 +3599,12 @@ impl Canvas2dRenderer {
             if let Some(alpha) = declared_opacity {
                 ctx.set_global_alpha(alpha);
             }
+            let paint_style = merged_node_style(ir, node_box.node_index);
+            let fill_opacity =
+                parse_opacity(paint_style.get("fill-opacity").map(String::as_str)).unwrap_or(1.0);
+            let stroke_opacity =
+                parse_opacity(paint_style.get("stroke-opacity").map(String::as_str)).unwrap_or(1.0);
+            let overall_opacity = declared_opacity.unwrap_or(1.0);
             let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
             let declared_parts = resolve_declared_node_font(ir, node_box.node_index);
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
@@ -3474,11 +3633,22 @@ impl Canvas2dRenderer {
                 ctx.set_line_width(stroke_width);
                 ctx.begin_path();
                 self.emit_path_commands(ctx, &commands, offset_x, offset_y);
-                ctx.fill();
-                ctx.stroke();
+                with_paint_opacity(ctx, overall_opacity, fill_opacity, Canvas2dContext::fill);
+                with_paint_opacity(
+                    ctx,
+                    overall_opacity,
+                    stroke_opacity,
+                    Canvas2dContext::stroke,
+                );
             } else {
                 draw_shape(
-                    ctx,
+                    &mut PaintOpacityContext {
+                        context: ctx,
+                        overall: overall_opacity,
+                        fill: fill_opacity,
+                        stroke: stroke_opacity,
+                        saved_opacities: Vec::new(),
+                    },
                     if is_state_terminal {
                         NodeShape::Circle
                     } else {
@@ -3506,8 +3676,13 @@ impl Canvas2dRenderer {
                     0.0,
                     std::f64::consts::TAU,
                 );
-                ctx.fill();
-                ctx.stroke();
+                with_paint_opacity(ctx, overall_opacity, fill_opacity, Canvas2dContext::fill);
+                with_paint_opacity(
+                    ctx,
+                    overall_opacity,
+                    stroke_opacity,
+                    Canvas2dContext::stroke,
+                );
             }
             if dash.is_some() {
                 ctx.set_line_dash(&[]);
@@ -3580,17 +3755,19 @@ impl Canvas2dRenderer {
                         border,
                         false,
                     ));
-                    ctx.fill_rect(
-                        x + 0.75,
-                        y + 0.75,
-                        w - 1.5,
-                        f64::from(compartments.header_height).min(h) - 0.75,
-                    );
+                    with_paint_opacity(ctx, overall_opacity, fill_opacity, |ctx| {
+                        ctx.fill_rect(
+                            x + 0.75,
+                            y + 0.75,
+                            w - 1.5,
+                            f64::from(compartments.header_height).min(h) - 0.75,
+                        );
+                    });
                     self.draw_calls += 1;
                 }
                 ctx.set_stroke_style(border);
                 ctx.set_line_width(0.75);
-                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.65);
+                ctx.set_global_alpha(overall_opacity * stroke_opacity * 0.65);
                 for separator_y in compartments.separator_ys {
                     ctx.begin_path();
                     ctx.move_to(x + 0.75, y + f64::from(separator_y));
@@ -3665,7 +3842,12 @@ impl Canvas2dRenderer {
                 ctx.begin_path();
                 ctx.move_to(x + 2.0, y + f64::from(card.header_height));
                 ctx.line_to(x + w - 2.0, y + f64::from(card.header_height));
-                ctx.stroke();
+                with_paint_opacity(
+                    ctx,
+                    overall_opacity,
+                    stroke_opacity,
+                    Canvas2dContext::stroke,
+                );
                 self.draw_calls += 1;
                 ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
@@ -3731,7 +3913,12 @@ impl Canvas2dRenderer {
                     ctx.begin_path();
                     ctx.move_to(x + 2.0, top + f64::from(card.header_height));
                     ctx.line_to(x + w - 2.0, top + f64::from(card.header_height));
-                    ctx.stroke();
+                    with_paint_opacity(
+                        ctx,
+                        overall_opacity,
+                        stroke_opacity,
+                        Canvas2dContext::stroke,
+                    );
                     self.draw_calls += 1;
                 }
                 for row in card.rows {
@@ -4273,9 +4460,9 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
         if let Some(rest) = value.to_ascii_lowercase().strip_prefix(prefix) {
             let args = rest.strip_suffix(')')?;
             let ok = !args.is_empty()
-                && args
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'.' | b'%' | b' ' | b'-'));
+                && args.bytes().all(|b| {
+                    b.is_ascii_digit() || matches!(b, b',' | b'.' | b'%' | b' ' | b'-' | b'/')
+                });
             return ok.then(|| value.to_ascii_lowercase());
         }
     }
@@ -4606,18 +4793,10 @@ pub(crate) fn resolve_node_colors(
     node_index: usize,
 ) -> (Option<String>, Option<String>) {
     let merged = merged_node_style(ir, node_index);
-    // `fill-opacity` fades the FILL alone — the outline and label keep full strength, which is
-    // what separates it from `opacity`. A canvas has one `fillStyle` per shape, so the fade has to
-    // travel inside the colour itself; folding it into an `rgba()` here gives the Canvas2D pass and
-    // the GPU plan (which reads this same function) one answer. Overlapping translucent shapes —
-    // venn-beta's set circles are the reason this exists — would otherwise paint opaque and bury
-    // each other.
-    let fill = merged.get("fill").map(|fill| {
-        parse_opacity(merged.get("fill-opacity").map(String::as_str))
-            .and_then(|opacity| hex_fill_with_opacity(fill, opacity))
-            .unwrap_or_else(|| fill.clone())
-    });
-    (fill, merged.get("stroke").cloned())
+    // Keep intrinsic color alpha intact. Geometry applies fill/stroke opacity after semantic
+    // defaults are chosen; folding it into one color spelling here misses other CSS colors and
+    // default paints, and lets consumers compose the same channel twice.
+    (merged.get("fill").cloned(), merged.get("stroke").cloned())
 }
 
 /// Semantic defaults are fallbacks for each paint channel, never author declarations.
@@ -4727,43 +4906,6 @@ pub(crate) fn resolve_node_colors_with_defaults(
     )
 }
 
-/// A `#rgb`/`#rrggbb` (with optional alpha) colour as `rgba()` with `opacity` multiplied into its
-/// alpha; `None` for anything that is not a hex colour, so the caller keeps the declaration as is.
-fn hex_fill_with_opacity(fill: &str, opacity: f64) -> Option<String> {
-    let hex = fill.trim().strip_prefix('#')?;
-    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let channel = |text: &str| u8::from_str_radix(text, 16).ok();
-    let doubled = |c: char| channel(&format!("{c}{c}"));
-    let chars: Vec<char> = hex.chars().collect();
-    let (r, g, b, a) = match chars.len() {
-        3 | 4 => (
-            doubled(chars[0])?,
-            doubled(chars[1])?,
-            doubled(chars[2])?,
-            chars.get(3).map_or(Some(255), |c| doubled(*c))?,
-        ),
-        6 | 8 => (
-            channel(&hex[0..2])?,
-            channel(&hex[2..4])?,
-            channel(&hex[4..6])?,
-            hex.get(6..8).map_or(Some(255), channel)?,
-        ),
-        _ => return None,
-    };
-    // Thousandths as an INTEGER: formatting the f64 would link core's float formatter into the
-    // WASM bundle for this one string.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let milli = (f64::from(a) / 255.0 * opacity.clamp(0.0, 1.0) * 1000.0).round() as u32;
-    let alpha = match milli {
-        0 => "0".to_string(),
-        1000.. => "1".to_string(),
-        _ => format!("0.{}", format!("{milli:03}").trim_end_matches('0')),
-    };
-    Some(format!("rgba({r}, {g}, {b}, {alpha})"))
-}
-
 /// The author's declared TEXT colour for this node, if any (bd-lvj3).
 ///
 /// `style a color:#f00`, a `classDef` carrying `color:`, or an inline style all set the LABEL
@@ -4868,25 +5010,22 @@ fn parse_declared_font_size(raw: Option<&str>) -> Option<f64> {
 /// Measured against the SVG arm, which emits `opacity:0.5` for `style a opacity:0.5` and lets the
 /// browser apply it to the whole element, while this renderer drew every node fully opaque.
 ///
-/// `0.0` is ACCEPTED rather than treated as junk: a fully transparent node is a thing an author
-/// can legitimately ask for, and SVG honours it. Anything outside `0..=1` or non-finite is
-/// refused, because `globalAlpha` outside that range is ignored by a canvas — which would leave
-/// the PREVIOUS alpha in force and fade whatever came next instead.
 /// Parse a CSS `opacity` into a canvas `globalAlpha`.
 ///
-/// Shared by the node, edge and cluster resolvers so all three refuse the same things rather than
-/// drifting apart — the same reason `parse_dash_array` is shared.
-///
-/// `0.0` is ACCEPTED: a fully transparent element is something an author can legitimately ask for,
-/// and SVG honours it. Anything outside `0..=1` or non-finite is refused, because `globalAlpha`
-/// outside that range is IGNORED by a canvas — which leaves the PREVIOUS alpha in force and fades
-/// whatever comes next instead.
-fn parse_opacity(raw: Option<&str>) -> Option<f64> {
+/// Node, edge and cluster styles share CSS number/percentage semantics with the scene projection:
+/// clamp finite values to `0..=1` and reject malformed or non-finite input. Canvas itself ignores
+/// out-of-range `globalAlpha`, so passing an unclamped value would retain a previous draw's alpha.
+pub(crate) fn parse_opacity(raw: Option<&str>) -> Option<f64> {
     raw.and_then(|raw| {
-        raw.trim()
+        let raw = raw.trim();
+        let (number, divisor) = raw
+            .strip_suffix('%')
+            .map_or((raw, 1.0), |number| (number.trim(), 100.0));
+        number
             .parse::<f64>()
             .ok()
-            .filter(|alpha| alpha.is_finite() && (0.0..=1.0).contains(alpha))
+            .filter(|alpha| alpha.is_finite())
+            .map(|alpha| (alpha / divisor).clamp(0.0, 1.0))
     })
 }
 
@@ -5490,24 +5629,22 @@ mod tests {
             ]))),
             ..IrNode::default()
         });
-        let (fill, stroke) = resolve_node_colors(&ir, 0);
-        assert_eq!(fill.as_deref(), Some("rgba(79, 107, 237, 0.1)"));
-        assert_eq!(
-            stroke.as_deref(),
-            Some("#4f6bed"),
-            "the outline keeps full strength"
-        );
-        // Short hex, an existing alpha channel, and a non-hex colour left untouched.
-        assert_eq!(
-            hex_fill_with_opacity("#f00", 0.5).as_deref(),
-            Some("rgba(255, 0, 0, 0.5)")
-        );
-        assert_eq!(
-            hex_fill_with_opacity("#ff000080", 0.5).as_deref(),
-            Some("rgba(255, 0, 0, 0.251)")
-        );
-        assert_eq!(hex_fill_with_opacity("red", 0.5), None);
-        assert_eq!(hex_fill_with_opacity("#ggg", 0.5), None);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        let fill = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#4f6bed")
+            .expect("node fill must be drawn");
+        assert!((fill.paint.alpha - 0.1).abs() < 1e-6);
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        let stroke = strokes
+            .iter()
+            .find(|stroke| stroke.color == "#4f6bed")
+            .expect("node border must be drawn");
+        assert_eq!(stroke.opacity, 1.0, "the outline keeps full strength");
+        assert!(!texts.is_empty());
+        assert!(texts.iter().all(|text| text.paint.alpha == 1.0));
     }
 
     #[test]
@@ -8608,12 +8745,26 @@ mod tests {
         let (fills, text) = record_gantt_canvas_paint(ctx.operations());
         let styled = fills
             .iter()
-            .find(|fill| fill.paint.fill == "rgba(18, 52, 86, 0.6)")
+            .find(|fill| fill.paint.fill == "#123456")
             .expect("authored fill and fill opacity");
         assert_eq!(styled.paint.stroke, "#abcdef");
         assert_eq!(styled.paint.line_width, 4.0);
         assert_eq!(styled.paint.dash, [7.0, 3.0]);
-        assert_eq!(styled.paint.alpha, 0.4);
+        assert!(
+            (styled.paint.alpha - 0.24).abs() < 1e-6,
+            "fill opacity and overall opacity compose once at the fill draw"
+        );
+        let strokes = recorded_canvas_strokes(ctx.operations());
+        let border = strokes
+            .iter()
+            .find(|stroke| stroke.color == "#abcdef")
+            .expect("authored border must be drawn");
+        assert_eq!(border.width, 4.0);
+        assert_eq!(border.dashes, [7.0, 3.0]);
+        assert!(
+            (border.opacity - 0.4).abs() < 1e-6,
+            "fill opacity must not fade the border"
+        );
         let overlay = fills
             .iter()
             .find(|fill| fill.paint.fill == "#0f172a")

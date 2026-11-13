@@ -136,7 +136,7 @@ fn an_undeclared_diagram_touches_neither_channel() {
 /// CONTROL: malformed opacity is refused on both surfaces.
 #[test]
 fn a_malformed_opacity_is_refused_on_both_surfaces() {
-    for declared in ["ghostly", "-0.5", "1.5"] {
+    for declared in ["ghostly", "NaN", "inf", "NaN%", "inf%"] {
         for source in [
             format!("flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 opacity:{declared}\n"),
             format!(
@@ -148,6 +148,50 @@ fn a_malformed_opacity_is_refused_on_both_surfaces() {
                 !ops.contains("SetGlobalAlpha"),
                 "opacity:{declared} was forwarded to the canvas: {ops}"
             );
+        }
+    }
+}
+
+#[test]
+fn edge_and_cluster_opacity_accept_percentages_and_clamp_finite_css_values() {
+    for (declared, expected) in [
+        ("50%", 0.5),
+        ("0%", 0.0),
+        ("100%", 1.0),
+        ("-0.5", 0.0),
+        ("1.5", 1.0),
+        ("-25%", 0.0),
+        ("150%", 1.0),
+    ] {
+        for source in [
+            format!("flowchart TD\nA -->|Styled| B\nlinkStyle 0 opacity:{declared}\n"),
+            format!(
+                "flowchart TD\nsubgraph G[Styled]\nA[Control]\nend\nstyle G opacity:{declared}\n"
+            ),
+        ] {
+            let ir = fm_parser::parse(&source).ir;
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+            let mut alpha = 1.0;
+            let mut painted = std::collections::BTreeMap::new();
+            for operation in context.operations() {
+                match operation {
+                    fm_render_canvas::DrawOperation::SetGlobalAlpha(value) => {
+                        assert!(value.is_finite() && (0.0..=1.0).contains(value));
+                        alpha = *value;
+                    }
+                    fm_render_canvas::DrawOperation::FillText(label, _, _) => {
+                        painted.insert(label.as_str(), alpha);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(painted.get("Styled"), Some(&expected), "{source}");
+            for label in ["A", "B", "Control"] {
+                if let Some(alpha) = painted.get(label) {
+                    assert_eq!(*alpha, 1.0, "{declared} leaked into {label}");
+                }
+            }
         }
     }
 }

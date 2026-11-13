@@ -2682,16 +2682,13 @@ impl GpuRenderPlan {
             // whatever happens to be in the instance buffer.
             let authored = ir.resolved_node_style(node.node_index);
             let channel_opacity = |key: &str| {
-                authored
-                    .get(key)
-                    .and_then(|value| value.trim().parse::<f32>().ok())
-                    .filter(|value| value.is_finite())
-                    .map_or(1.0, |value| value.clamp(0.0, 1.0))
+                crate::renderer::parse_opacity(authored.get(key).map(String::as_str)).unwrap_or(1.0)
+                    as f32
             };
             let (declared_fill, declared_stroke) =
                 crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
-            // The Canvas resolver may already fold fill-opacity into a hexadecimal fill.
-            // Start with the authored paint so every channel opacity is applied exactly once.
+            // Keep intrinsic paint alpha separate from overall and per-channel opacity until
+            // the final multiplication, just as the Canvas drawing operations do.
             let fill = authored
                 .get("fill")
                 .and_then(|paint| parse_paint_rgba(paint))
@@ -2736,7 +2733,12 @@ impl GpuRenderPlan {
                     authored
                         .get("stroke-width")
                         .and_then(|value| {
-                            value.trim().trim_end_matches("px").trim().parse::<f32>().ok()
+                            value
+                                .trim()
+                                .trim_end_matches("px")
+                                .trim()
+                                .parse::<f32>()
+                                .ok()
                         })
                         .filter(|width| *width == 0.0)
                 })
@@ -6279,8 +6281,7 @@ mod tests {
                 cross(triangle.b, triangle.c),
                 cross(triangle.c, triangle.a),
             ];
-            signs.iter().all(|value| *value >= -0.001)
-                || signs.iter().all(|value| *value <= 0.001)
+            signs.iter().all(|value| *value >= -0.001) || signs.iter().all(|value| *value <= 0.001)
         })
     }
 
@@ -6293,14 +6294,23 @@ mod tests {
             );
             let bounds = layout.nodes[0].bounds;
             assert!(plan.node_instances.is_empty(), "{alias} retained a box");
-            assert!(plan.node_fill_triangles.is_empty(), "{alias} filled its interior");
+            assert!(
+                plan.node_fill_triangles.is_empty(),
+                "{alias} filled its interior"
+            );
             assert!(!plan.text_quads.is_empty(), "{alias} lost its label");
-            assert!(plan.node_border_segments.len() > 6, "{alias} lost its curves");
+            assert!(
+                plan.node_border_segments.len() > 6,
+                "{alias} lost its curves"
+            );
             let middle = bounds.x + bounds.width * 0.5;
             for border in &plan.node_border_segments {
                 assert_eq!(border.width, 3.0);
                 assert_eq!(border.dash, [6.0, 4.0]);
-                assert_eq!(border.color, [36.0 / 255.0, 104.0 / 255.0, 172.0 / 255.0, 0.5]);
+                assert_eq!(
+                    border.color,
+                    [36.0 / 255.0, 104.0 / 255.0, 172.0 / 255.0, 0.5]
+                );
                 assert!(
                     (border.from[0] <= middle && border.to[0] <= middle)
                         || (border.from[0] >= middle && border.to[0] >= middle),
@@ -6313,11 +6323,13 @@ mod tests {
             ] {
                 let reaches_spur = plan.node_border_segments.iter().any(|border| {
                     [border.from, border.to].iter().any(|point| {
-                        (point[0] - x).abs() < 0.001
-                            && (point[1] - bounds.center().y).abs() < 0.001
+                        (point[0] - x).abs() < 0.001 && (point[1] - bounds.center().y).abs() < 0.001
                     })
                 });
-                assert_eq!(reaches_spur, needed, "{alias} has the wrong brace orientation");
+                assert_eq!(
+                    reaches_spur, needed,
+                    "{alias} has the wrong brace orientation"
+                );
             }
         }
     }
@@ -6341,12 +6353,22 @@ mod tests {
             assert_eq!(border.width, 3.0);
             assert_eq!(border.color[3], 0.5);
         }
-        assert!(gpu_fill_contains(&plan, [bounds.center().x, bounds.center().y]));
-        let filled_area: f32 = plan.node_fill_triangles.iter().map(|triangle| {
-            assert_eq!(triangle.color, [32.0 / 255.0, 64.0 / 255.0, 96.0 / 255.0, 0.5]);
-            let (a, b, c) = (triangle.a, triangle.b, triangle.c);
-            ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
-        }).sum();
+        assert!(gpu_fill_contains(
+            &plan,
+            [bounds.center().x, bounds.center().y]
+        ));
+        let filled_area: f32 = plan
+            .node_fill_triangles
+            .iter()
+            .map(|triangle| {
+                assert_eq!(
+                    triangle.color,
+                    [32.0 / 255.0, 64.0 / 255.0, 96.0 / 255.0, 0.5]
+                );
+                let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+            })
+            .sum();
         assert!((filled_area - bounds.width * bounds.height).abs() < 0.1);
     }
 
@@ -6355,13 +6377,22 @@ mod tests {
         for alias in ["cyl", "lin-cyl", "h-cyl", "delay"] {
             let (layout, plan) = gpu_shape_fixture(alias, "fill:#204060,stroke:#c02040");
             let bounds = layout.nodes[0].bounds;
-            assert!(plan.node_instances.is_empty(), "{alias} retained an SDF substitute");
-            assert!(gpu_fill_contains(&plan, [bounds.center().x, bounds.center().y]));
             assert!(
-                !gpu_fill_contains(&plan, [
-                    bounds.x + bounds.width * 0.99,
-                    bounds.y + bounds.height * 0.01,
-                ]),
+                plan.node_instances.is_empty(),
+                "{alias} retained an SDF substitute"
+            );
+            assert!(gpu_fill_contains(
+                &plan,
+                [bounds.center().x, bounds.center().y]
+            ));
+            assert!(
+                !gpu_fill_contains(
+                    &plan,
+                    [
+                        bounds.x + bounds.width * 0.99,
+                        bounds.y + bounds.height * 0.01,
+                    ]
+                ),
                 "{alias} filled the empty corner outside its curved end"
             );
             let expected = match alias {
@@ -6371,16 +6402,25 @@ mod tests {
                 _ => None,
             };
             if let Some(rim) = expected {
-                assert!(plan.node_border_segments.iter().any(|border| {
-                    [border.from, border.to].iter().any(|point| {
-                        (point[0] - rim[0]).abs() < 0.01 && (point[1] - rim[1]).abs() < 0.01
-                    })
-                }), "{alias} lost the interior rim");
+                assert!(
+                    plan.node_border_segments.iter().any(|border| {
+                        [border.from, border.to].iter().any(|point| {
+                            (point[0] - rim[0]).abs() < 0.01 && (point[1] - rim[1]).abs() < 0.01
+                        })
+                    }),
+                    "{alias} lost the interior rim"
+                );
             } else {
-                assert!(gpu_fill_contains(&plan, [
-                    bounds.x + bounds.width * 0.01,
-                    bounds.y + bounds.height * 0.01,
-                ]), "a delay has square left corners");
+                assert!(
+                    gpu_fill_contains(
+                        &plan,
+                        [
+                            bounds.x + bounds.width * 0.01,
+                            bounds.y + bounds.height * 0.01,
+                        ]
+                    ),
+                    "a delay has square left corners"
+                );
             }
         }
     }
@@ -6390,11 +6430,30 @@ mod tests {
         for alias in [
             "lin-rect", "div-rect", "win-pane", "tag-rect", "note", "lin-doc", "tag-doc",
         ] {
-            let (layout, plan) = gpu_shape_fixture(alias, "fill:#204060,stroke:#c02040");
+            let (layout, plan) = if alias == "note" {
+                // Note is a DOT/typed-IR shape, not a Mermaid metadata alias.
+                let ir = fm_parser::parse(
+                    r##"digraph G { A [shape=note, label="Visible label", fillcolor="#204060", color="#c02040"]; }"##,
+                )
+                .ir;
+                assert_eq!(ir.nodes.len(), 1);
+                assert_eq!(ir.nodes[0].shape, fm_core::NodeShape::Note);
+                let layout = fm_layout::layout_diagram(&ir);
+                let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+                (layout, plan)
+            } else {
+                gpu_shape_fixture(alias, "fill:#204060,stroke:#c02040")
+            };
             let bounds = layout.nodes[0].bounds;
             let (x, y, w, h) = (bounds.x, bounds.y, bounds.width, bounds.height);
-            assert!(plan.node_instances.is_empty(), "{alias} retained a plain box");
-            assert!(!plan.node_fill_triangles.is_empty(), "{alias} lost its body");
+            assert!(
+                plan.node_instances.is_empty(),
+                "{alias} retained a plain box"
+            );
+            assert!(
+                !plan.node_fill_triangles.is_empty(),
+                "{alias} lost its body"
+            );
             let (from, to) = match alias {
                 "lin-rect" => {
                     let rule = x + (w * 0.14).min(16.0);
@@ -6433,6 +6492,59 @@ mod tests {
     }
 
     #[test]
+    fn gpu_node_paint_opacity_uses_css_percentages_and_clamping() {
+        for alias in ["rect", "cyl"] {
+            for (overall, fill, stroke, expected_fill, expected_stroke) in [
+                ("50%", "25%", "50%", 128.0 / 255.0 * 0.125, 0.125),
+                ("150%", "200%", "125%", 128.0 / 255.0, 0.5),
+            ] {
+                let (_, plan) = gpu_shape_fixture(
+                    alias,
+                    &format!(
+                        "fill:#20406080,stroke:rgba(192,32,64,0.5),opacity:{overall},fill-opacity:{fill},stroke-opacity:{stroke}"
+                    ),
+                );
+                let fill_alphas: Vec<_> = plan
+                    .node_instances
+                    .iter()
+                    .map(|instance| instance.fill[3])
+                    .chain(
+                        plan.node_fill_triangles
+                            .iter()
+                            .map(|triangle| triangle.color[3]),
+                    )
+                    .collect();
+                let stroke_alphas: Vec<_> = plan
+                    .node_instances
+                    .iter()
+                    .map(|instance| instance.stroke[3])
+                    .chain(
+                        plan.node_border_segments
+                            .iter()
+                            .map(|segment| segment.color[3]),
+                    )
+                    .collect();
+                assert!(
+                    !fill_alphas.is_empty() && !stroke_alphas.is_empty(),
+                    "{alias}"
+                );
+                for alpha in fill_alphas {
+                    assert!(
+                        (alpha - expected_fill).abs() < 0.000_001,
+                        "{alias}: {alpha}"
+                    );
+                }
+                for alpha in stroke_alphas {
+                    assert!(
+                        (alpha - expected_stroke).abs() < 0.000_001,
+                        "{alias}: {alpha}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gpu_shared_shape_paints_keep_channel_opacity_and_explicit_absence() {
         for fill in ["#204060", "rgb(32,64,96)", "red", "#20406080"] {
             let (_, plan) = gpu_shape_fixture(
@@ -6457,7 +6569,10 @@ mod tests {
                 for (actual, expected) in triangle.color[..3].iter().zip(expected_rgb) {
                     assert!((*actual - expected).abs() < 0.000_001, "{fill}");
                 }
-                assert!((triangle.color[3] - expected_alpha).abs() < 0.000_001, "{fill}");
+                assert!(
+                    (triangle.color[3] - expected_alpha).abs() < 0.000_001,
+                    "{fill}"
+                );
             }
             for border in &plan.node_border_segments {
                 assert_eq!(border.color[3], 0.25, "{fill}");
@@ -6465,9 +6580,12 @@ mod tests {
         }
         let (_, default_fill) = gpu_shape_fixture("cyl", "fill-opacity:0.25,opacity:0.5");
         assert!(!default_fill.node_fill_triangles.is_empty());
-        assert!(default_fill.node_fill_triangles.iter().all(|triangle| {
-            (triangle.color[3] - 0.125).abs() < 0.000_001
-        }));
+        assert!(
+            default_fill
+                .node_fill_triangles
+                .iter()
+                .all(|triangle| { (triangle.color[3] - 0.125).abs() < 0.000_001 })
+        );
 
         for (style, filled, stroked) in [
             ("fill:none,stroke:#123456", false, true),
@@ -6850,15 +6968,17 @@ mod tests {
         assert!(plan.node_border_segments.iter().all(|border| {
             border.edge_index == 1
                 && [border.from, border.to].iter().all(|point| {
-                    (89.999..=110.001).contains(&point[0])
-                        && (19.999..=40.001).contains(&point[1])
+                    (89.999..=110.001).contains(&point[0]) && (19.999..=40.001).contains(&point[1])
                 })
         }));
-        assert!(plan.node_border_segments.iter().any(|border| {
-            [border.from, border.to].iter().any(|point| {
-                (point[0] - 100.0).abs() < 0.001 && (point[1] - 24.0).abs() < 0.001
-            })
-        }), "the database must retain its interior rim");
+        assert!(
+            plan.node_border_segments.iter().any(|border| {
+                [border.from, border.to].iter().any(|point| {
+                    (point[0] - 100.0).abs() < 0.001 && (point[1] - 24.0).abs() < 0.001
+                })
+            }),
+            "the database must retain its interior rim"
+        );
     }
 
     #[test]
@@ -8497,8 +8617,18 @@ mod tests {
     }
 
     #[test]
-    fn gpu_zero_and_invalid_opacity_keep_node_and_cluster_text_in_sync() {
-        for (declared, expected) in [("0", 0.0), ("bad", 1.0), ("-0.5", 1.0), ("2", 1.0)] {
+    fn gpu_css_opacity_keeps_node_and_cluster_text_in_sync() {
+        for (declared, expected) in [
+            ("0", 0.0),
+            ("25%", 0.25),
+            ("-0.5", 0.0),
+            ("-25%", 0.0),
+            ("2", 1.0),
+            ("150%", 1.0),
+            ("bad", 1.0),
+            ("NaN", 1.0),
+            ("inf", 1.0),
+        ] {
             let ir = fm_parser::parse(&format!(
                 "flowchart TD\n subgraph group[Group]\n a[Alpha]\n end\n\
                  style a opacity:{declared}\n style group opacity:{declared}\n"
@@ -10806,8 +10936,14 @@ mod tests {
                 let (planned_fill, planned_stroke) = plan.node_instances.first().map_or_else(
                     || {
                         (
-                            plan.node_fill_triangles.first().expect("planned node fill").color,
-                            plan.node_border_segments.first().expect("planned node border").color,
+                            plan.node_fill_triangles
+                                .first()
+                                .expect("planned node fill")
+                                .color,
+                            plan.node_border_segments
+                                .first()
+                                .expect("planned node border")
+                                .color,
                         )
                     },
                     |instance| (instance.fill, instance.stroke),
