@@ -524,3 +524,230 @@ fn portable_background_covers_the_viewbox_before_content_in_both_backends() {
         }
     }
 }
+
+/// GH #21 is a CSS-cascade defect: an attribute-only assertion can pass while the browser paints
+/// the theme's colour. Run this explicitly on release hosts with a real Chromium installation:
+/// `FM_CHROMIUM_BIN=/usr/bin/chromium cargo test -p fm-render-svg --test subgraph_style
+/// browser_computed_paints_honor_authored_cascade_once -- --ignored --nocapture`.
+#[test]
+#[ignore = "requires Chromium; set FM_CHROMIUM_BIN and run this release probe with --ignored"]
+fn browser_computed_paints_honor_authored_cascade_once() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset, render_svg_with_config};
+    use serde_json::json;
+
+    const CONTROL: &str =
+        "flowchart LR\nsubgraph G[Payments]\nA[Alpha] -->|request| B[Beta]\nend\n";
+    const COMPOSED: &str = "flowchart LR\nsubgraph G[Payments]\nA[Alpha] -->|request| B[Beta]\nend\n\
+        classDef default fill:#aabbcc,stroke:#112233,color:#223344,opacity:0.5\n\
+        classDef hot fill:#ffcc00,stroke-width:3px\nclass A hot\n\
+        style A fill:rgba(171,205,239,0.5),fill-opacity:0.4,stroke-opacity:0.8\n\
+        style G fill:#fedcba,stroke:#654321,color:#123456,opacity:0.5,fill-opacity:0.6,stroke-opacity:0.4\n\
+        linkStyle default stroke:#224466,color:#334455,stroke-width:4px,opacity:0.5,stroke-opacity:0.6\n";
+    const OPAQUE: &str = "flowchart LR\nsubgraph G[Payments]\nA[Alpha] -->|request| B[Beta]\nend\n\
+        style A fill:#abcdef,stroke:#112233,color:#223344,stroke-width:3px,opacity:1\n\
+        style G fill:#fedcba,stroke:#654321,color:#123456,opacity:1,fill-opacity:1,stroke-opacity:1\n\
+        linkStyle default stroke:#224466,color:#334455,stroke-width:4px,opacity:1\n";
+
+    let chromium = std::env::var_os("FM_CHROMIUM_BIN")
+        .expect("set FM_CHROMIUM_BIN to the Chromium executable before running this ignored test");
+    let mut fixtures = Vec::new();
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        for theme in [ThemePreset::Default, ThemePreset::Dark] {
+            for portable in [false, true] {
+                let mut config = SvgRenderConfig {
+                    backend,
+                    theme,
+                    node_gradients: false,
+                    cluster_fill_opacity: 0.08,
+                    ..Default::default()
+                };
+                if portable {
+                    config.make_portable();
+                }
+                for (kind, source) in [
+                    ("control", CONTROL),
+                    ("composed", COMPOSED),
+                    ("opaque", OPAQUE),
+                ] {
+                    let ir = fm_parser::parse(source).ir;
+                    let svg = render_svg_with_config(&ir, &config);
+                    fixtures.push(json!({
+                        "name": format!("{backend:?}/{theme:?}/portable={portable}/{kind}"),
+                        "scene": backend == SvgBackend::Scene,
+                        "embedded": config.embed_theme_css,
+                        "kind": kind,
+                        "svg": svg,
+                    }));
+                }
+            }
+        }
+    }
+
+    // A connected document is essential: computed style on a detached SVG can be empty. Each
+    // fixture is attached and removed in turn so theme selectors from another SVG cannot leak in.
+    let script = r#"
+const failures = [], measurements = [];
+let checks = 0, negativeControls = 0;
+function expect(condition, message) { if (!condition) throw Error(message); }
+function near(actual, expected, name) {
+  expect(Number.isFinite(actual) && Math.abs(actual - expected) < 0.002,
+    `${name}: expected ${expected}, computed ${actual}`);
+}
+function alpha(element, property) {
+  const style = getComputedStyle(element);
+  const paint = style.getPropertyValue(property);
+  const match = paint.match(/^rgba?\(([^)]+)\)$/);
+  expect(match, `${property}: expected a solid RGB colour, computed ${paint}`);
+  const components = match[1].split(',').map(Number);
+  let value = (components[3] ?? 1) * Number(style.getPropertyValue(`${property}-opacity`));
+  for (let node = element; node instanceof SVGElement; node = node.parentElement) {
+    value *= Number(getComputedStyle(node).opacity);
+  }
+  return value;
+}
+for (const fixture of fixtures) {
+  const host = document.createElement('div');
+  host.innerHTML = fixture.svg;
+  document.body.append(host);
+  try {
+    const svg = host.querySelector('svg');
+    expect(svg && svg.isConnected, 'missing connected SVG');
+    const one = selector => {
+      const matches = svg.querySelectorAll(selector);
+      expect(matches.length === 1, `${selector}: expected one element, got ${matches.length}`);
+      return matches[0];
+    };
+    const label = content => {
+      const matches = [...svg.querySelectorAll('text')].filter(el => el.textContent.trim() === content);
+      expect(matches.length === 1, `${content}: expected one caption, got ${matches.length}`);
+      return matches[0];
+    };
+    const node = one(fixture.scene
+      ? 'path[data-fm-source-kind="node"][data-fm-source-index="0"]'
+      : '.fm-node[data-id="A"] > rect');
+    const edge = one(fixture.scene
+      ? 'path[data-fm-source-kind="edge"][data-fm-source-index="0"]'
+      : 'path.fm-edge[data-fm-edge-id="0"]');
+    const cluster = one(fixture.scene
+      ? 'path[data-fm-source-kind="cluster"][data-fm-source-index="0"]'
+      : 'rect.fm-cluster');
+    const nodeLabel = label('Alpha'), edgeLabel = label('request'), caption = label('Payments');
+    measurements.push({
+      name: fixture.name,
+      nodeFill: getComputedStyle(node).fill,
+      nodeFillAlpha: alpha(node, 'fill'),
+      nodeStrokeAlpha: alpha(node, 'stroke'),
+      edgeStrokeAlpha: alpha(edge, 'stroke'),
+      clusterFillAlpha: alpha(cluster, 'fill'),
+      clusterStrokeAlpha: alpha(cluster, 'stroke'),
+      nodeLabelAlpha: alpha(nodeLabel, 'fill'),
+      edgeLabelAlpha: alpha(edgeLabel, 'fill'),
+      captionAlpha: alpha(caption, 'fill'),
+    });
+    if (fixture.kind === 'control') {
+      expect(getComputedStyle(node).fill !== 'rgb(171, 205, 239)', 'unstyled node acquired author fill');
+      expect(getComputedStyle(caption).fill !== 'rgb(18, 52, 86)', 'unstyled caption acquired author colour');
+      near(alpha(nodeLabel, 'fill'), 1, 'unstyled node label alpha');
+      near(alpha(caption, 'fill'), 1, 'unstyled caption alpha');
+    } else {
+      const composed = fixture.kind === 'composed';
+      for (const [element, property, expected] of [
+        [node, 'fill', composed ? 'rgba(171, 205, 239, 0.5)' : 'rgb(171, 205, 239)'],
+        [node, 'stroke', 'rgb(17, 34, 51)'],
+        [edge, 'stroke', 'rgb(34, 68, 102)'],
+        [cluster, 'fill', 'rgb(254, 220, 186)'],
+        [cluster, 'stroke', 'rgb(101, 67, 33)'],
+        [nodeLabel, 'fill', 'rgb(34, 51, 68)'],
+        [edgeLabel, 'fill', 'rgb(51, 68, 85)'],
+        [caption, 'fill', 'rgb(18, 52, 86)'],
+      ]) {
+        expect(getComputedStyle(element).getPropertyValue(property) === expected,
+          `${element.tagName} ${property}: expected ${expected}, computed ${getComputedStyle(element).getPropertyValue(property)}`);
+      }
+      near(parseFloat(getComputedStyle(node).strokeWidth), 3, 'node stroke width');
+      near(parseFloat(getComputedStyle(edge).strokeWidth), 4, 'edge stroke width');
+      for (const [element, property, expected, name] of [
+        [node, 'fill', composed ? 0.1 : 1, 'node fill alpha'],
+        [node, 'stroke', composed ? 0.4 : 1, 'node stroke alpha'],
+        [edge, 'stroke', composed ? 0.3 : 1, 'edge stroke alpha'],
+        [cluster, 'fill', composed ? 0.3 : 1, 'cluster fill alpha'],
+        [cluster, 'stroke', composed ? 0.2 : 1, 'cluster stroke alpha'],
+        [nodeLabel, 'fill', composed ? 0.5 : 1, 'node label alpha'],
+        [edgeLabel, 'fill', composed ? 0.5 : 1, 'edge label alpha'],
+        [caption, 'fill', composed ? 0.5 : 1, 'cluster caption alpha'],
+      ]) near(alpha(element, property), expected, name);
+
+      if (fixture.embedded) {
+        // Recreate a429492f in the browser itself. A probe that merely read the presentation
+        // attribute would still say #123456 and miss this deliberately reintroduced regression.
+        caption.setAttribute('fill', '#123456');
+        caption.style.removeProperty('fill');
+        expect(getComputedStyle(caption).fill !== 'rgb(18, 52, 86)',
+          'attribute-only negative control did not lose to embedded theme CSS');
+        negativeControls++;
+      }
+    }
+    checks++;
+  } catch (error) {
+    failures.push(`${fixture.name}: ${error.message}`);
+  } finally {
+    host.remove();
+  }
+}
+const result = document.createElement('pre');
+result.id = 'paint-results';
+result.textContent = JSON.stringify({checks, negativeControls, failures,
+  measurements: failures.length ? measurements : []});
+document.body.replaceChildren(result);
+"#;
+    let fixtures_json = serde_json::to_string(&fixtures)
+        .expect("serialize browser fixtures")
+        .replace('<', "\\u003c");
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\
+         <script>const fixtures={fixtures_json};{script}</script></body></html>"
+    );
+    let fixture_timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after Unix epoch")
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fm-scene-paint-browser-{}-{fixture_timestamp_ns}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).expect("create isolated browser fixture directory");
+    let document = directory.join("paint.html");
+    std::fs::write(&document, html).expect("write browser fixture");
+    let output = std::process::Command::new(chromium)
+        .args([
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--no-first-run",
+            "--dump-dom",
+        ])
+        .arg(format!(
+            "--user-data-dir={}",
+            directory.join("profile").display()
+        ))
+        .arg(format!("file://{}", document.display()))
+        .output()
+        .expect("launch Chromium");
+    assert!(
+        output.status.success(),
+        "Chromium failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dom = String::from_utf8(output.stdout).expect("Chromium returned UTF-8 DOM");
+    let result = dom
+        .split_once("<pre id=\"paint-results\">")
+        .and_then(|(_, rest)| rest.split_once("</pre>"))
+        .map(|(json, _)| json)
+        .unwrap_or_else(|| panic!("Chromium did not finish the paint probe: {dom}"));
+    let result: serde_json::Value = serde_json::from_str(result).expect("browser paint report");
+    assert_eq!(result["failures"], json!([]), "{result:#}");
+    assert_eq!(result["checks"], json!(fixtures.len()), "{result:#}");
+    assert_eq!(result["negativeControls"], json!(8), "{result:#}");
+}
