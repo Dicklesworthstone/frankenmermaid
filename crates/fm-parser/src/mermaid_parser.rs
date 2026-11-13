@@ -7996,6 +7996,9 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
     let mut previous_step = None;
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
+    let mut current_section_title: Option<String> = None;
+    let mut pending_section: Option<(String, Span)> = None;
+    let mut section_keys = FxHashSet::default();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -8047,41 +8050,10 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
                 builder.add_warning(format!(
                     "Line {line_number}: journey section name is empty: {trimmed}"
                 ));
-                current_section = None;
-                current_section_subgraph = None;
+                pending_section = None;
                 continue;
             };
-            let section_key = format!(
-                "journey-section-{}",
-                normalize_compound_identifier(&section_title)
-            );
-            let Some(cluster_index) =
-                builder.ensure_cluster(&section_key, Some(&section_title), span)
-            else {
-                builder.add_warning(format!(
-                    "Line {line_number}: invalid journey section identifier: {trimmed}"
-                ));
-                current_section = None;
-                current_section_subgraph = None;
-                continue;
-            };
-            let Some(subgraph_index) = builder.ensure_subgraph(
-                &section_key,
-                &section_key,
-                Some(&section_title),
-                span,
-                None,
-                Some(cluster_index),
-            ) else {
-                builder.add_warning(format!(
-                    "Line {line_number}: invalid journey section declaration: {trimmed}"
-                ));
-                current_section = None;
-                current_section_subgraph = None;
-                continue;
-            };
-            current_section = Some(cluster_index);
-            current_section_subgraph = Some(subgraph_index);
+            pending_section = Some((section_title, span));
             continue;
         }
 
@@ -8091,14 +8063,61 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             ));
             continue;
         };
-        let step_id = normalize_compound_identifier(&step.name);
+        // A task caption is content, not an authored ID: every source row owns its score,
+        // actors, and position in the journey. Keep existing unique-caption keys, but never
+        // intern a repeated caption (or two captions with the same normalized spelling) into
+        // the earlier task. `@` cannot occur in a normalized key, so the line suffix cannot
+        // collide with a later caption; it also gives punctuation-only tasks a usable key.
+        let mut step_id = normalize_compound_identifier(&step.name);
         if step_id.is_empty() {
-            builder.add_warning(format!(
-                "Line {line_number}: journey step identifier could not be derived: {trimmed}"
-            ));
-            continue;
+            step_id = format!("journey-step@{line_number}");
+        } else if builder.node_id_by_key(&step_id).is_some() {
+            step_id = format!("{step_id}@{line_number}");
         }
 
+        // Mermaid groups consecutive tasks with the same section caption, not section
+        // declarations. Defer a new run until a task exists: an empty intervening section
+        // must neither draw a group nor split two otherwise consecutive tasks in one run.
+        if current_section_title.as_deref()
+            != pending_section.as_ref().map(|(title, _)| title.as_str())
+        {
+            current_section = None;
+            current_section_subgraph = None;
+            current_section_title = None;
+            if let Some((section_title, section_span)) = &pending_section {
+                let mut section_key = format!(
+                    "journey-section-{}",
+                    normalize_compound_identifier(section_title)
+                );
+                if !section_keys.insert(section_key.clone()) {
+                    section_key = format!("{section_key}@{}", section_span.start.line);
+                }
+                let group = builder
+                    .ensure_cluster(&section_key, Some(section_title), *section_span)
+                    .and_then(|cluster_index| {
+                        builder
+                            .ensure_subgraph(
+                                &section_key,
+                                &section_key,
+                                Some(section_title),
+                                *section_span,
+                                None,
+                                Some(cluster_index),
+                            )
+                            .map(|subgraph_index| (cluster_index, subgraph_index))
+                    });
+                if let Some((cluster_index, subgraph_index)) = group {
+                    current_section = Some(cluster_index);
+                    current_section_subgraph = Some(subgraph_index);
+                    current_section_title = Some(section_title.clone());
+                } else {
+                    builder.add_warning(format!(
+                        "Line {}: invalid journey section declaration: {section_title}",
+                        section_span.start.line
+                    ));
+                }
+            }
+        }
         let current_step =
             builder.intern_node(&step_id, Some(&step.name), NodeShape::Rounded, span);
         if let Some(step_node) = current_step {
@@ -20397,6 +20416,7 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use fm_core::FxHashSet;
     #[test]
     fn identifier_mentions_preserve_unicode_and_overlapping_boundaries() {
         for (haystack, token, expected) in [
@@ -22712,6 +22732,215 @@ mod tests {
         let second_section = &parsed.ir.graph.subgraphs[1];
         assert_eq!(first_section.members.len(), 1);
         assert_eq!(second_section.members.len(), 1);
+    }
+
+    #[test]
+    fn journey_repeated_tasks_keep_scores_actors_and_section_runs() {
+        let source = concat!(
+            "journey\n",
+            "section Purchase\n",
+            "Review: 5: Alice, Bob\n",
+            "Review: 2: Carol\n",
+            "section Fulfillment\n",
+            "Review: 3: Dan\n",
+            "section Purchase\n",
+            "Review: 1\n",
+            "section Purchase\n",
+            "Finish: 4: Eve\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(
+            ir.nodes.len(),
+            5,
+            "each task row must remain a distinct step"
+        );
+        assert_eq!(ir.nodes[0].id, "Review");
+        assert_eq!(ir.nodes[4].id, "Finish", "unique task keys stay stable");
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<FxHashSet<_>>()
+                .len(),
+            5
+        );
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect::<Vec<_>>(),
+            ["Review", "Review", "Review", "Review", "Finish"]
+        );
+        let expected_actors: [&[&str]; 5] =
+            [&["Alice", "Bob"], &["Carol"], &["Dan"], &[], &["Eve"]];
+        for (index, node) in ir.nodes.iter().enumerate() {
+            let scores: Vec<_> = node
+                .classes
+                .iter()
+                .filter_map(|class| class.strip_prefix("journey-score-"))
+                .collect();
+            assert_eq!(scores, [["5"], ["2"], ["3"], ["1"], ["4"]][index]);
+            let actors: Vec<_> = node
+                .journey_meta
+                .iter()
+                .flat_map(|meta| meta.actors.iter().map(String::as_str))
+                .collect();
+            assert_eq!(actors, expected_actors[index]);
+            let actor_classes: Vec<_> = node
+                .classes
+                .iter()
+                .filter_map(|class| class.strip_prefix("journey-actor-"))
+                .collect();
+            assert_eq!(actor_classes, expected_actors[index]);
+            assert_eq!(node.span_primary.start.line, [3, 4, 6, 8, 10][index]);
+        }
+        assert_eq!(ir.edges.len(), 4);
+        for (index, edge) in ir.edges.iter().enumerate() {
+            assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(index)));
+            assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(index + 1)));
+        }
+        assert_eq!(ir.clusters.len(), 3);
+        assert_eq!(ir.graph.subgraphs.len(), 3);
+        for (index, (title, members)) in [
+            ("Purchase", vec![0, 1]),
+            ("Fulfillment", vec![2]),
+            ("Purchase", vec![3, 4]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cluster = &ir.clusters[index];
+            assert_eq!(
+                ir.labels[cluster.title.expect("section title").0].text,
+                title
+            );
+            assert_eq!(
+                cluster
+                    .members
+                    .iter()
+                    .map(|node| node.0)
+                    .collect::<Vec<_>>(),
+                members
+            );
+            assert_eq!(ir.graph.subgraphs[index].members, cluster.members);
+            for node in &cluster.members {
+                assert_eq!(ir.graph.nodes[node.0].clusters, [cluster.id]);
+                assert_eq!(
+                    ir.graph.nodes[node.0].subgraphs,
+                    [ir.graph.subgraphs[index].id]
+                );
+            }
+        }
+        assert_eq!(parsed.ir, parse_mermaid(source).ir);
+    }
+
+    #[test]
+    fn journey_empty_sections_do_not_split_consecutive_task_runs() {
+        let source = concat!(
+            "journey\n",
+            "section Empty leading section\n",
+            "section A\n",
+            "First: 5\n",
+            "section B\n",
+            "section A\n",
+            "Second: 3\n",
+            "section Empty trailing section\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(ir.nodes.len(), 2);
+        assert_eq!(ir.edges.len(), 1);
+        assert_eq!(ir.clusters.len(), 1);
+        assert_eq!(ir.graph.subgraphs.len(), 1);
+        let section = &ir.clusters[0];
+        assert_eq!(ir.labels[section.title.expect("section title").0].text, "A");
+        assert_eq!(section.span.start.line, 3);
+        assert_eq!(
+            section.members,
+            [fm_core::IrNodeId(0), fm_core::IrNodeId(1)]
+        );
+        assert_eq!(ir.graph.subgraphs[0].members, section.members);
+        assert_eq!(ir.graph.subgraphs[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn journey_caption_normalization_cannot_merge_task_or_section_occurrences() {
+        let source = concat!(
+            "journey\n",
+            "section Phase one\n",
+            "A B: 5: Alice\n",
+            "A_B: 4: Bob\n",
+            "A_B@4: 3: Carol\n",
+            "A_B_4: 2: Dan\n",
+            "section Phase_one\n",
+            "?: 1: Eve\n",
+            "?: 2: Alice\n",
+            "section Phase one\n",
+            "A B: 3: Frank\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(ir.nodes.len(), 7);
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<FxHashSet<_>>()
+                .len(),
+            7,
+            "generated task keys must not alias any caption or another occurrence"
+        );
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect::<Vec<_>>(),
+            ["A B", "A_B", "A_B@4", "A_B_4", "?", "?", "A B"]
+        );
+        assert_eq!(ir.nodes[0].id, "A_B");
+        assert_eq!(ir.nodes[2].id, "A_B_4");
+        assert_eq!(ir.edges.len(), 6);
+        for (index, edge) in ir.edges.iter().enumerate() {
+            assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(index)));
+            assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(index + 1)));
+        }
+        let sections: Vec<_> = ir
+            .clusters
+            .iter()
+            .map(|section| {
+                (
+                    ir.labels[section.title.expect("section title").0]
+                        .text
+                        .as_str(),
+                    section
+                        .members
+                        .iter()
+                        .map(|node| node.0)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                ("Phase one", vec![0, 1, 2, 3]),
+                ("Phase_one", vec![4, 5]),
+                ("Phase one", vec![6]),
+            ]
+        );
+        assert_eq!(
+            ir.graph
+                .subgraphs
+                .iter()
+                .map(|section| &section.key)
+                .collect::<FxHashSet<_>>()
+                .len(),
+            3
+        );
     }
 
     #[test]
