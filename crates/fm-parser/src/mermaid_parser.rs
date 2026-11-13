@@ -2886,7 +2886,9 @@ fn parse_flowchart_statement_asts(
         return Some(vec![ast]);
     }
     // Returns one `ClickDirective` PER NODE — `click A,B "url"` is two (bd-8mlk).
-    if let Some(asts) = parse_click_directive_ast(statement, line_number, warnings) {
+    if let Some(asts) =
+        parse_click_directive_ast(statement, line_number, warnings, normalize_identifier)
+    {
         return Some(asts);
     }
     if is_non_graph_statement(statement) {
@@ -7804,6 +7806,7 @@ fn parse_click_directive_ast(
     statement: &str,
     line_number: usize,
     warnings: &mut Vec<String>,
+    normalize_node: fn(&str) -> String,
 ) -> Option<Vec<FlowAst>> {
     let rest = statement.strip_prefix("click ")?;
 
@@ -7841,7 +7844,7 @@ fn parse_click_directive_ast(
     }
     let nodes: Vec<String> = node_text
         .split(',')
-        .map(normalize_identifier)
+        .map(normalize_node)
         .filter(|node| !node.is_empty())
         .collect();
     if nodes.is_empty() {
@@ -11500,7 +11503,10 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // predicates here; these three omitted the a11y half, so the directive was interned as
         // a visible gantt TASK. Worst of the family: the phantom carries the author's
         // accessibility text as its own accessible name, so assistive tech announces it too.
-        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+        if is_accessibility_directive_statement(trimmed)
+            || is_non_graph_statement(trimmed)
+            || (trimmed.starts_with("class ") && !trimmed.contains(':'))
+        {
             continue;
         }
 
@@ -11538,9 +11544,12 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             .strip_prefix("click")
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
         {
-            if let Some(directives) =
-                parse_click_directive_ast(trimmed, line_number, &mut click_warnings)
-            {
+            if let Some(directives) = parse_click_directive_ast(
+                trimmed,
+                line_number,
+                &mut click_warnings,
+                normalize_compound_identifier,
+            ) {
                 pending_clicks.push((directives, line_number, span_for(line_number, line)));
             }
             continue;
@@ -16675,7 +16684,14 @@ fn normalize_compound_identifier(raw: &str) -> String {
     let mut normalized = String::with_capacity(cleaned.len());
     let mut previous_was_sep = false;
     for ch in cleaned.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+        // These are complete identities, not syntax that can be truncated at the first
+        // non-ASCII character. Retain Unicode, including combining marks and emoji: otherwise
+        // non-English tasks disappear, and distinct Gantt dependencies or Kanban columns alias.
+        // Whitespace and controls still normalize to separators, as they do for ASCII input.
+        if ch.is_ascii_alphanumeric()
+            || matches!(ch, '_' | '-' | '.' | '/')
+            || (!ch.is_ascii() && !ch.is_whitespace() && !ch.is_control())
+        {
             normalized.push(ch);
             previous_was_sep = false;
         } else if !previous_was_sep {
@@ -19868,6 +19884,30 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
         return;
     }
 
+    // Gantt declarations use an authored task ID while their nodes have generated keys.
+    // Resolve that identity after the full body is parsed, just as Gantt click targets do,
+    // so forward declarations and non-ASCII IDs can be styled without creating phantom nodes.
+    // Preserve first-declaration semantics for duplicate IDs. Authored Gantt IDs take precedence
+    // over generated keys so styling, dependencies and clicks cannot select different tasks.
+    let is_gantt = builder.ir().diagram_type == DiagramType::Gantt;
+    let mut gantt_task_nodes = FxHashMap::default();
+    if let Some(meta) = builder.ir().gantt_meta.as_ref() {
+        for task in &meta.tasks {
+            if let Some(task_id) = &task.task_id {
+                gantt_task_nodes.entry(task_id.clone()).or_insert(task.node);
+            }
+        }
+    }
+    let declared_gantt_node = |target: &str| {
+        if gantt_task_nodes.is_empty() {
+            return None;
+        }
+        gantt_task_nodes
+            .get(target)
+            .or_else(|| gantt_task_nodes.get(&normalize_compound_identifier(target)))
+            .copied()
+    };
+
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
@@ -19958,7 +19998,9 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                         if target.is_empty() {
                             continue;
                         }
-                        if let Some(node_id) = builder.node_id_by_key(target) {
+                        if let Some(node_id) =
+                            declared_gantt_node(target).or_else(|| builder.node_id_by_key(target))
+                        {
                             builder.push_style_ref(
                                 fm_core::IrStyleTarget::Node(node_id),
                                 style.to_string(),
@@ -20115,6 +20157,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             let rest = rest.trim();
             if let Some((nodes_raw, class_name)) = rest.rsplit_once(' ')
                 && !rest.ends_with('{')
+                && !(is_gantt && rest.contains(':'))
             {
                 let class_name = class_name.trim();
                 if !class_name.is_empty() {
@@ -20150,7 +20193,8 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                         // is deliberately left alone rather than changed by analogy in the opposite
                         // direction — which is the mistake being corrected.
                         //
-                        if let Some(edge_index) = builder.edge_index_by_id(node_key) {
+                        let edge = builder.edge_index_by_id(node_key);
+                        if let Some(edge_index) = edge {
                             edge_classes.push((edge_index, class_name.to_string(), span));
                         }
                         let cluster = builder.cluster_index_by_key(node_key);
@@ -20159,8 +20203,17 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                         }
                         // `setClass` only mutates an existing vertex. An unknown target (including
                         // an edge ID) must not be interned as a phantom node.
-                        if builder.node_id_by_key(node_key).is_some() {
-                            builder.add_class_to_node(node_key, class_name, span);
+                        if let Some(node_id) = declared_gantt_node(node_key)
+                            .or_else(|| builder.node_id_by_key(node_key))
+                        {
+                            for name in class_name.split(',') {
+                                builder.add_class_to_node_id(node_id, name);
+                            }
+                        } else if is_gantt && cluster.is_none() && edge.is_none() {
+                            builder.add_warning(format!(
+                                "class directive target `{node_key}` matches no gantt task id; \
+                                 the class was ignored"
+                            ));
                         }
                     }
                 }
@@ -22662,6 +22715,83 @@ mod tests {
     }
 
     #[test]
+    fn journey_unicode_tasks_sections_and_actors_keep_distinct_identities() {
+        let source = concat!(
+            "journey\n",
+            "section 阶段一\n",
+            "開始: 5: 张三\n",
+            "Build一: 4: 李四\n",
+            "Build二: 3: 张三\n",
+            "section 阶段二\n",
+            "café: 2: José\n",
+            "cafe\u{301}: 1: Jose\u{301}\n",
+            "🚀: 5: 张三\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let expected = ["開始", "Build一", "Build二", "café", "cafe\u{301}", "🚀"];
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "non-ASCII task identities must not be discarded or merged"
+        );
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(ir.edges.len(), 5);
+        for (index, edge) in ir.edges.iter().enumerate() {
+            assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(index)));
+            assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(index + 1)));
+        }
+        let sections: Vec<_> = ir
+            .clusters
+            .iter()
+            .map(|section| {
+                (
+                    ir.labels[section.title.expect("section title").0]
+                        .text
+                        .as_str(),
+                    section
+                        .members
+                        .iter()
+                        .map(|node| node.0)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            [("阶段一", vec![0, 1, 2]), ("阶段二", vec![3, 4, 5])]
+        );
+        for (node, score, actor) in [
+            (0, 5, "张三"),
+            (1, 4, "李四"),
+            (3, 2, "José"),
+            (4, 1, "Jose\u{301}"),
+        ] {
+            assert!(
+                ir.nodes[node]
+                    .classes
+                    .contains(&format!("journey-score-{score}"))
+            );
+            assert!(
+                ir.nodes[node]
+                    .classes
+                    .contains(&format!("journey-actor-{actor}"))
+            );
+        }
+        assert_eq!(parsed.ir, parse_mermaid(source).ir);
+    }
+
+    #[test]
     fn timeline_parses_periods_and_events() {
         let parsed = parse_mermaid("timeline\n2025 : kickoff\n2026 : launch");
         assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
@@ -24862,6 +24992,62 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
         assert_eq!(parsed.ir.nodes.len(), 2, "Should have 2 card nodes");
+    }
+
+    #[test]
+    fn kanban_unicode_columns_and_cards_preserve_labels_and_membership() {
+        let parsed = parse_mermaid(concat!(
+            "kanban\n",
+            "  待办[待处理]\n",
+            "    任务一\n",
+            "    Build一\n",
+            "    Build二\n",
+            "  完成\n",
+            "    café\n",
+            "    cafe\u{301}\n",
+            "    检查[完成检查]\n",
+            "    🚀\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect::<Vec<_>>(),
+            [
+                "任务一",
+                "Build一",
+                "Build二",
+                "café",
+                "cafe\u{301}",
+                "完成检查",
+                "🚀"
+            ]
+        );
+        let ids: std::collections::BTreeSet<_> = ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(ids.len(), 7, "every authored card must retain its identity");
+        assert_eq!(ir.graph.subgraphs.len(), 2);
+        let sections: Vec<_> = ir
+            .clusters
+            .iter()
+            .map(|section| {
+                (
+                    ir.labels[section.title.expect("column title").0]
+                        .text
+                        .as_str(),
+                    section
+                        .members
+                        .iter()
+                        .map(|node| node.0)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            [("待处理", vec![0, 1, 2]), ("完成", vec![3, 4, 5, 6])]
+        );
     }
 
     #[test]
@@ -28237,6 +28423,253 @@ Rel_Back(db, app, "Responds")"#,
             assert_eq!(edge.to, fm_core::IrEndpoint::Node(meta.tasks[0].node));
         }
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_unicode_forward_dependencies_preserve_authored_ids() {
+        let parsed = parse_mermaid(concat!(
+            "gantt\n",
+            "等待 :等待, 2026-03-01, until Build一 Build二 café cafe\u{301}\n",
+            "发布 :发布, after Build一 Build二 café cafe\u{301} Build一, 1d\n",
+            "第一项 :Build一, 2026-03-02, 2d\n",
+            "第二项 :Build二, 2026-03-03, 2d\n",
+            "第三项 :café, 2026-03-04, 2d\n",
+            "第四项 :cafe\u{301}, 2026-03-05, 2d\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        let targets = ["Build一", "Build二", "café", "cafe\u{301}"];
+        assert_eq!(
+            meta.tasks
+                .iter()
+                .map(|task| task.task_id.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("等待"),
+                Some("发布"),
+                Some("Build一"),
+                Some("Build二"),
+                Some("café"),
+                Some("cafe\u{301}")
+            ]
+        );
+        assert_eq!(meta.tasks[1].depends_on, targets);
+        assert_eq!(
+            meta.tasks[0].end,
+            Some(GanttDate::UntilTasks(
+                targets.iter().map(|id| (*id).to_string()).collect()
+            ))
+        );
+        let edges: Vec<_> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect();
+        let expected: Vec<_> = meta.tasks[2..]
+            .iter()
+            .map(|task| {
+                (
+                    IrEndpoint::Node(task.node),
+                    IrEndpoint::Node(meta.tasks[1].node),
+                )
+            })
+            .chain(meta.tasks[2..].iter().map(|task| {
+                (
+                    IrEndpoint::Node(meta.tasks[0].node),
+                    IrEndpoint::Node(task.node),
+                )
+            }))
+            .collect();
+        assert_eq!(
+            edges, expected,
+            "after and until must connect each distinct referenced task"
+        );
+    }
+
+    #[test]
+    fn gantt_unicode_clicks_resolve_the_same_ids_as_the_schedule() {
+        let parsed = parse_mermaid(concat!(
+            "gantt\n",
+            "click Build一, Build二 href \"https://example.com/build\" \"构建\"\n",
+            "click café call inspect() \"检查\"\n",
+            "click cafe\u{301} href \"https://example.com/decomposed\" \"组合字符\"\n",
+            "第一项 :Build一, 2026-03-02, 2d\n",
+            "第二项 :Build二, 2026-03-03, 2d\n",
+            "第三项 :café, 2026-03-04, 2d\n",
+            "第四项 :cafe\u{301}, 2026-03-05, 2d\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            4,
+            "clicks must not introduce phantom tasks"
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        for task in &meta.tasks[..2] {
+            let node = &parsed.ir.nodes[task.node.0];
+            assert_eq!(node.href(), Some("https://example.com/build"));
+            assert_eq!(node.tooltip(), Some("构建"));
+        }
+        let composed = &parsed.ir.nodes[meta.tasks[2].node.0];
+        let decomposed = &parsed.ir.nodes[meta.tasks[3].node.0];
+        assert_eq!(composed.callback(), Some("inspect()"));
+        assert_eq!(composed.tooltip(), Some("检查"));
+        assert!(composed.href().is_none());
+        assert_eq!(decomposed.href(), Some("https://example.com/decomposed"));
+        assert_eq!(decomposed.tooltip(), Some("组合字符"));
+        assert!(decomposed.callback().is_none());
+    }
+
+    #[test]
+    fn gantt_declared_ids_resolve_forward_styles_and_classes() {
+        let parsed = parse_mermaid(concat!(
+            "gantt\n",
+            "style design,Build一 fill:#ff0000,stroke:#345678\n",
+            "class design,Build一 emphasis,readable\n",
+            "classDef emphasis stroke-width:4px,fill:#aa0000\n",
+            "classDef readable color:#abcdef\n",
+            "Design :design, 2026-03-02, 2d\n",
+            "Build :Build一, after design, 2d\n",
+            "style design fill:#0000ff\n",
+            "class Build一 muted\n",
+            "classDef muted opacity:0.4\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        for (task, fill) in meta.tasks.iter().zip(["#0000ff", "#ff0000"]) {
+            let node = &parsed.ir.nodes[task.node.0];
+            assert!(node.classes.iter().any(|name| name == "emphasis"));
+            assert!(node.classes.iter().any(|name| name == "readable"));
+            let style = &node.inline_style.as_ref().expect("task style").properties;
+            assert_eq!(style.get("fill").map(String::as_str), Some(fill));
+            assert_eq!(style.get("stroke").map(String::as_str), Some("#345678"));
+            assert_eq!(style.get("stroke-width").map(String::as_str), Some("4px"));
+            assert_eq!(style.get("color").map(String::as_str), Some("#abcdef"));
+        }
+        let design = &parsed.ir.nodes[meta.tasks[0].node.0];
+        let build = &parsed.ir.nodes[meta.tasks[1].node.0];
+        assert!(!design.classes.iter().any(|name| name == "muted"));
+        assert_eq!(
+            build
+                .inline_style
+                .as_ref()
+                .unwrap()
+                .properties
+                .get("opacity")
+                .map(String::as_str),
+            Some("0.4")
+        );
+        let targets: Vec<_> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter_map(|reference| match reference.target {
+                fm_core::IrStyleTarget::Node(node) => Some(node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            [meta.tasks[0].node, meta.tasks[1].node, meta.tasks[0].node]
+        );
+    }
+
+    #[test]
+    fn gantt_unknown_style_and_class_targets_do_not_create_tasks() {
+        let parsed = parse_mermaid(concat!(
+            "gantt\n",
+            "class review :design, 2026-03-02, 2d\n",
+            "classDef emphasis fill:#ff0000\n",
+            "class design emphasis\n",
+            "style Missing fill:#0000ff\n",
+            "class 不存在 emphasis\n",
+        ));
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "class review"
+        );
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|name| name == "emphasis")
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("style directive target `Missing`"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("class directive target `不存在`"))
+        );
+        assert_eq!(parsed.warnings.len(), 2, "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_declared_ids_take_precedence_over_generated_node_keys() {
+        let parsed = parse_mermaid(concat!(
+            "gantt\n",
+            "First :Second_3, 2026-03-02, 2d\n",
+            "Second :other, 2026-03-03, 2d\n",
+            "style Second_3 fill:#ff0000\n",
+            "class Second_3 emphasis\n",
+            "click Second_3 href \"https://example.com/first\"\n",
+            "Later :later, after Second_3, 1d\n",
+            "style Later_7 fill:#0000ff\n",
+            "classDef emphasis stroke:#00ff00\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        let first = &parsed.ir.nodes[meta.tasks[0].node.0];
+        let second = &parsed.ir.nodes[meta.tasks[1].node.0];
+        let later = &parsed.ir.nodes[meta.tasks[2].node.0];
+        assert_eq!(
+            second.id, "Second_3",
+            "the generated key must exercise the collision"
+        );
+        assert_eq!(first.href(), Some("https://example.com/first"));
+        assert!(first.classes.iter().any(|name| name == "emphasis"));
+        let first_style = &first
+            .inline_style
+            .as_ref()
+            .expect("first task style")
+            .properties;
+        assert_eq!(first_style.get("fill").map(String::as_str), Some("#ff0000"));
+        assert_eq!(
+            first_style.get("stroke").map(String::as_str),
+            Some("#00ff00")
+        );
+        assert!(
+            second.inline_style.is_none(),
+            "generated keys cannot steal authored references"
+        );
+        assert!(second.href().is_none());
+        assert_eq!(
+            later
+                .inline_style
+                .as_ref()
+                .expect("generated-key fallback")
+                .properties
+                .get("fill")
+                .map(String::as_str),
+            Some("#0000ff")
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(
+            parsed.ir.edges[0].from,
+            IrEndpoint::Node(meta.tasks[0].node)
+        );
+        assert_eq!(parsed.ir.edges[0].to, IrEndpoint::Node(meta.tasks[2].node));
     }
 
     #[test]
