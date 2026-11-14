@@ -438,6 +438,7 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
     target.pie_meta.clone_from(&source.pie_meta);
     target.quadrant_meta.clone_from(&source.quadrant_meta);
     target.packet_meta.clone_from(&source.packet_meta);
+    target.kanban_meta.clone_from(&source.kanban_meta);
     target.git_graph_meta.clone_from(&source.git_graph_meta);
     target.state_notes.clone_from(&source.state_notes);
     target.diagnostics.clone_from(&source.diagnostics);
@@ -543,6 +544,7 @@ impl IrBuilder {
         self.ir.pie_meta.clone_from(&source.ir.pie_meta);
         self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
         self.ir.packet_meta.clone_from(&source.ir.packet_meta);
+        self.ir.kanban_meta.clone_from(&source.ir.kanban_meta);
         self.ir.git_graph_meta.clone_from(&source.ir.git_graph_meta);
         self.ir.state_notes.clone_from(&source.ir.state_notes);
         self.ir.diagnostics.clone_from(&source.ir.diagnostics);
@@ -3251,6 +3253,17 @@ mod tests {
     }
 
     fn set_test_chart_metadata(builder: &mut IrBuilder, label: &str) {
+        builder.ir.kanban_meta = Some(fm_core::IrKanbanMeta {
+            columns: vec![fm_core::IrKanbanColumn {
+                cluster: fm_core::IrClusterId(0),
+                wip_limit: Some(0),
+            }],
+            cards: vec![fm_core::IrKanbanCard {
+                node: IrNodeId(0),
+                assigned: Some(label.to_string()),
+                ..Default::default()
+            }],
+        });
         builder.ir.treemap_meta = Some(fm_core::IrTreemapMeta {
             nodes: vec![fm_core::IrTreemapItem {
                 label: label.to_string(),
@@ -3315,6 +3328,7 @@ mod tests {
         scratch.reset_from(&source);
         assert_eq!(scratch.ir, source.ir);
 
+        source.ir.kanban_meta = None;
         source.ir.treemap_meta = None;
         source.ir.radar_meta = None;
         scratch.reset_from(&source);
@@ -3414,6 +3428,7 @@ mod tests {
         scratch.reset_reusable_suffix_from(&source);
         assert_eq!(scratch.ir, source.ir);
 
+        source.ir.kanban_meta = None;
         source.ir.treemap_meta = None;
         source.ir.radar_meta = None;
         scratch.begin_reusable_suffix(&source);

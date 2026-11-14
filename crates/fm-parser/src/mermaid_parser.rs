@@ -10620,7 +10620,27 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
     let mut current_column: Option<usize> = None;
     let mut current_column_subgraph: Option<usize> = None;
     let mut current_column_indent: Option<usize> = None;
-    let mut card_count = 0_usize;
+    let mut columns: Vec<Option<fm_core::IrKanbanColumn>> = Vec::new();
+    let mut cards: Vec<Option<fm_core::IrKanbanCard>> = Vec::new();
+    let mut in_acc_descr_block = false;
+
+    // Reserve explicit identities before generating anonymous ones. Otherwise a later authored
+    // identifier can absorb a preceding anonymous card whose generated key happens to match it.
+    let declared_ids: FxHashSet<String> = byte_lines(input)
+        .filter_map(|line| {
+            let text = trim_fast(line);
+            if text.is_empty() || is_comment(text) {
+                return None;
+            }
+            let text = kanban_metadata_start(text).map_or(text, |at| text[..at].trim());
+            let item = parse_kanban_item(text);
+            item.explicit_id.then_some(item.id)
+        })
+        .collect();
+    let declared_column_keys: FxHashSet<String> = declared_ids
+        .iter()
+        .map(|id| format!("kanban-col-{}", normalize_compound_identifier(id)))
+        .collect();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -10628,39 +10648,58 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
-
         if trimmed == "kanban" || trimmed.starts_with("kanban ") {
+            continue;
+        }
+        // These directives have already been extracted into diagram metadata/styles. They are
+        // not columns or cards, even when their indentation resembles board content.
+        if in_acc_descr_block {
+            in_acc_descr_block = trimmed != "}";
+            continue;
+        }
+        if trimmed
+            .strip_prefix("accDescr")
+            .is_some_and(|rest| rest.trim() == "{")
+        {
+            in_acc_descr_block = true;
+            continue;
+        }
+        if is_accessibility_directive_statement(trimmed)
+            || is_non_graph_statement(trimmed)
+            || is_diagram_level_directive_statement(trimmed)
+        {
             continue;
         }
 
         let span = span_for(line_number, line);
-
-        // Determine indentation level using standard mindmap/indent utility
         let indent_width = leading_indent_width(line);
-
-        // Strip @{} metadata and parse item.
         let (clean_text, metadata) = strip_kanban_metadata(trimmed);
-        let (item_id, item_label) = parse_kanban_item(clean_text);
-
-        // It is a column header if there is no current column, or if the indent
-        // is less than or equal to the current column's indent.
-        let is_column_header = match current_column_indent {
-            None => true,
-            Some(col_indent) => indent_width <= col_indent,
-        };
+        for warning in &metadata.warnings {
+            builder.add_warning(format!("Line {line_number}: {warning}"));
+        }
+        let item = parse_kanban_item(clean_text);
+        let is_column_header = current_column_indent.is_none_or(|indent| indent_width <= indent);
 
         if is_column_header {
-            // This is a column header.
-            current_column_indent = Some(indent_width);
-            let column_key = format!("kanban-col-{}", normalize_compound_identifier(&item_id));
+            let mut column_key =
+                format!("kanban-col-{}", normalize_compound_identifier(&item.id));
             if column_key == "kanban-col-" {
                 builder.add_warning(format!(
                     "Line {line_number}: kanban column name is empty: {trimmed}"
                 ));
                 continue;
             }
+            if !item.explicit_id {
+                column_key = unique_kanban_key(
+                    column_key,
+                    line_number,
+                    &declared_column_keys,
+                    |key| builder.cluster_index_by_key(key).is_some(),
+                );
+            }
 
-            let Some(cluster_index) = builder.ensure_cluster(&column_key, Some(&item_label), span)
+            let Some(cluster_index) =
+                builder.ensure_cluster(&column_key, Some(&item.label), span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid kanban column identifier: {trimmed}"
@@ -10673,7 +10712,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &column_key,
                 &column_key,
-                Some(&item_label),
+                Some(&item.label),
                 span,
                 None,
                 Some(cluster_index),
@@ -10688,148 +10727,363 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
             };
             current_column = Some(cluster_index);
             current_column_subgraph = Some(subgraph_index);
+            current_column_indent = Some(indent_width);
 
-            // Apply WIP limit from @{wip: N} metadata.
-            if let Some(wip) = metadata.wip {
-                builder.set_cluster_grid_span(cluster_index, wip);
+            columns.resize_with(builder.ir().clusters.len(), || None);
+            let column = columns[cluster_index].get_or_insert(fm_core::IrKanbanColumn {
+                cluster: fm_core::IrClusterId(cluster_index),
+                wip_limit: None,
+            });
+            if metadata.wip.is_some() {
+                column.wip_limit = metadata.wip;
             }
         } else {
-            // This is a card within the current column.
-            let card_key = if item_id == item_label {
-                // No explicit ID; generate one from the label.
-                format!("kanban-card-{}", normalize_compound_identifier(&item_label))
+            // Labels do not identify anonymous tasks. Keep their first-use key when possible,
+            // but give every later occurrence its own node and lane membership.
+            if item.id.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: kanban metadata has no card to describe; ignored"
+                ));
+                continue;
+            }
+            let mut card_key = if !item.explicit_id && item.id == item.label {
+                format!("kanban-card-{}", normalize_compound_identifier(&item.id))
             } else {
-                item_id.clone()
+                item.id
             };
-
             if card_key.is_empty() {
                 builder.add_warning(format!(
                     "Line {line_number}: kanban card identifier could not be derived: {trimmed}"
                 ));
                 continue;
             }
+            if !item.explicit_id {
+                card_key = unique_kanban_key(card_key, line_number, &declared_ids, |key| {
+                    builder.node_id_by_key(key).is_some()
+                });
+            }
 
-            let node_id =
-                builder.intern_node(&card_key, Some(&item_label), NodeShape::Rounded, span);
-            if let Some(nid) = node_id {
-                builder.add_class_to_node(&card_key, "kanban-card", span);
+            let Some(node) =
+                builder.intern_node(&card_key, Some(&item.label), NodeShape::Rounded, span)
+            else {
+                continue;
+            };
+            builder.add_class_to_node_id(node, "kanban-card");
+            if let Some(priority) = &metadata.priority {
+                builder.ir_mut().nodes[node.0]
+                    .classes
+                    .retain(|class| !class.starts_with("kanban-priority-"));
+                builder.add_class_to_node_id(
+                    node,
+                    &format!("kanban-priority-{}", kanban_class_suffix(priority)),
+                );
+            }
+            if let Some(assigned) = &metadata.assigned {
+                builder.ir_mut().nodes[node.0]
+                    .classes
+                    .retain(|class| !class.starts_with("kanban-assigned-"));
+                builder.add_class_to_node_id(
+                    node,
+                    &format!("kanban-assigned-{}", kanban_class_suffix(assigned)),
+                );
+            }
+            for tag in &metadata.tags {
+                builder.add_class_to_node_id(
+                    node,
+                    &format!("kanban-tag-{}", kanban_class_suffix(tag)),
+                );
+            }
+            if let Some(cluster) = current_column {
+                builder.add_node_to_cluster(cluster, node);
+            }
+            if let Some(subgraph) = current_column_subgraph {
+                builder.add_node_to_subgraph(subgraph, node);
+            }
 
-                // Apply priority CSS class.
-                if let Some(ref priority) = metadata.priority {
-                    builder.add_class_to_node(
-                        &card_key,
-                        &format!("kanban-priority-{}", priority.to_ascii_lowercase()),
-                        span,
-                    );
+            cards.resize_with(builder.ir().nodes.len(), || None);
+            let card = cards[node.0].get_or_insert(fm_core::IrKanbanCard {
+                node,
+                ..Default::default()
+            });
+            if metadata.assigned.is_some() {
+                card.assigned = metadata.assigned;
+            }
+            if metadata.priority.is_some() {
+                card.priority = metadata.priority;
+            }
+            if metadata.ticket.is_some() {
+                card.ticket = metadata.ticket;
+            }
+            for tag in metadata.tags {
+                if !card.tags.contains(&tag) {
+                    card.tags.push(tag);
                 }
-                // Apply assigned CSS class.
-                if let Some(ref assigned) = metadata.assigned {
-                    let sanitized = assigned
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
-                        .to_ascii_lowercase();
-                    builder.add_class_to_node(
-                        &card_key,
-                        &format!("kanban-assigned-{sanitized}"),
-                        span,
-                    );
-                }
-                // Apply tag classes.
-                for tag in &metadata.tags {
-                    let sanitized = tag
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
-                        .to_ascii_lowercase();
-                    builder.add_class_to_node(&card_key, &format!("kanban-tag-{sanitized}"), span);
-                }
-
-                if let Some(cluster_idx) = current_column {
-                    builder.add_node_to_cluster(cluster_idx, nid);
-                }
-                if let Some(subgraph_idx) = current_column_subgraph {
-                    builder.add_node_to_subgraph(subgraph_idx, nid);
-                }
-                card_count += 1;
+            }
+            if metadata.wip.is_some() {
+                builder.add_warning(format!(
+                    "Line {line_number}: kanban wip limits apply to columns, not cards"
+                ));
             }
         }
     }
 
-    if card_count == 0 && current_column.is_none() {
+    if columns.is_empty() && cards.is_empty() {
         builder.add_warning("No kanban columns or cards found");
+    } else {
+        builder.ir_mut().kanban_meta = Some(fm_core::IrKanbanMeta {
+            columns: columns.into_iter().flatten().collect(),
+            cards: cards.into_iter().flatten().collect(),
+        });
     }
 }
 
-/// Parse a kanban item that may have bracket syntax: `id[Label]` or plain text.
-/// Parsed kanban `@{key: value}` metadata.
+fn unique_kanban_key(
+    base: String,
+    mut discriminator: usize,
+    reserved: &FxHashSet<String>,
+    exists: impl Fn(&str) -> bool,
+) -> String {
+    let mut key = base.clone();
+    while reserved.contains(&key) || exists(&key) {
+        key = format!("{base}__{discriminator}");
+        discriminator += 1;
+    }
+    key
+}
+
+fn kanban_class_suffix(value: &str) -> String {
+    value
+        .replace(|ch: char| !ch.is_ascii_alphanumeric(), "-")
+        .to_ascii_lowercase()
+}
+
+#[derive(Default)]
 struct KanbanMetadata {
     priority: Option<String>,
     assigned: Option<String>,
+    ticket: Option<String>,
     wip: Option<usize>,
     tags: Vec<String>,
+    warnings: Vec<String>,
 }
 
-/// Strip `@{...}` metadata from end of line and parse key-value pairs.
-fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
-    let mut meta = KanbanMetadata {
-        priority: None,
-        assigned: None,
-        wip: None,
-        tags: Vec::new(),
-    };
-
-    let Some(at_pos) = text.find("@{") else {
-        return (text, meta);
-    };
-    let Some(close_pos) = text[at_pos..].find('}') else {
-        return (text, meta);
-    };
-    let body = &text[at_pos + 2..at_pos + close_pos];
-    let clean_text = text[..at_pos].trim();
-
-    for pair in body.split(',') {
-        let pair = pair.trim();
-        if let Some((key, value)) = pair.split_once(':') {
-            let key = key.trim().to_ascii_lowercase();
-            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
-            match key.as_str() {
-                "priority" => meta.priority = Some(value.to_string()),
-                "assigned" | "assign" => meta.assigned = Some(value.to_string()),
-                "wip" => meta.wip = value.parse().ok(),
-                "tag" | "tags" => {
-                    meta.tags.extend(value.split_whitespace().map(String::from));
-                }
-                _ => {}
-            }
+/// Find metadata outside a bracketed caption. An authored @{} example inside a card label
+/// is ordinary text and must not consume the rest of that card.
+fn kanban_metadata_start(text: &str) -> Option<usize> {
+    let mut brackets = 0_usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            '@' if brackets == 0 && text[index..].starts_with("@{") => return Some(index),
+            _ => {}
         }
     }
+    None
+}
 
+/// Accept JSON5 metadata and Mermaid's ordinary unquoted scalar values. Commas, braces and
+/// escaped quotes inside strings or arrays never terminate a field.
+fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
+    let mut meta = KanbanMetadata::default();
+    let Some(at) = kanban_metadata_start(text) else {
+        return (text, meta);
+    };
+    let clean_text = text[..at].trim();
+    let raw = text[at + 1..].trim();
+    let Some(close) = raw.rfind('}') else {
+        meta.warnings
+            .push("kanban metadata is missing its closing brace; metadata ignored".to_string());
+        return (clean_text, meta);
+    };
+    let trailing = raw[close + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with("%%") {
+        meta.warnings
+            .push("unexpected text after kanban metadata; metadata ignored".to_string());
+        return (clean_text, meta);
+    }
+
+    let object = if let Ok(Value::Object(object)) = json5::from_str::<Value>(&raw[..=close]) {
+        object
+    } else {
+        let fields = match split_kanban_metadata_fields(&raw[1..close]) {
+            Ok(fields) => fields,
+            Err(reason) => {
+                meta.warnings.push(format!("invalid kanban metadata: {reason}; metadata ignored"));
+                return (clean_text, meta);
+            }
+        };
+        let mut object = serde_json::Map::new();
+        for field in fields {
+            let Some((key, value)) = field.split_once(':') else {
+                meta.warnings.push(format!("kanban metadata field {field:?} has no colon; ignored"));
+                continue;
+            };
+            let key = key.trim();
+            let key = if key.starts_with(['"', '\'']) {
+                match json5::from_str::<String>(key) {
+                    Ok(key) => key,
+                    Err(_) => {
+                        meta.warnings.push(format!("invalid kanban metadata key {key:?}; ignored"));
+                        continue;
+                    }
+                }
+            } else {
+                key.to_string()
+            };
+            let value = value.trim();
+            let value = match json5::from_str::<Value>(value) {
+                Ok(value) => value,
+                Err(_) if !value.is_empty()
+                    && !value.starts_with(['"', '\'', '[', '{'])
+                    && !value.contains(['"', '[', ']', '{', '}', ':', ',']) =>
+                {
+                    Value::String(value.to_string())
+                }
+                Err(_) => {
+                    meta.warnings.push(format!("invalid kanban metadata value for {key:?}; ignored"));
+                    continue;
+                }
+            };
+            object.insert(key, value);
+        }
+        object
+    };
+
+    for (key, value) in object {
+        let normalized_key = key.to_ascii_lowercase();
+        match normalized_key.as_str() {
+            "priority" | "assigned" | "assign" | "ticket" => {
+                let text = match value {
+                    Value::String(text) => Some(text),
+                    Value::Number(number) if normalized_key != "priority" => {
+                        Some(number.to_string())
+                    }
+                    _ => None,
+                };
+                let Some(text) = text else {
+                    meta.warnings.push(format!("kanban metadata {key:?} must be text or a number; ignored"));
+                    continue;
+                };
+                match normalized_key.as_str() {
+                    "priority" => meta.priority = Some(text),
+                    "ticket" => meta.ticket = Some(text),
+                    _ => meta.assigned = Some(text),
+                }
+            }
+            "wip" => {
+                meta.wip = match value {
+                    Value::Number(number) => number.as_u64().and_then(|n| usize::try_from(n).ok()),
+                    Value::String(text) => text.trim().parse().ok(),
+                    _ => None,
+                };
+                if meta.wip.is_none() {
+                    meta.warnings.push("kanban wip must be a non-negative integer; ignored".to_string());
+                }
+            }
+            "tag" | "tags" => match value {
+                Value::String(tags) => meta.tags.extend(tags.split_whitespace().map(String::from)),
+                Value::Array(tags) => {
+                    for tag in tags {
+                        if let Value::String(tag) = tag {
+                            meta.tags.push(tag);
+                        } else {
+                            meta.warnings.push("kanban tag array entries must be strings; entry ignored".to_string());
+                        }
+                    }
+                }
+                _ => meta.warnings.push("kanban tags must be text or an array of strings; ignored".to_string()),
+            },
+            _ => meta.warnings.push(format!("unsupported kanban metadata key {key:?}; ignored")),
+        }
+    }
     (clean_text, meta)
 }
 
-fn parse_kanban_item(text: &str) -> (String, String) {
-    // ⚠️ THE LABEL GOES THROUGH THE SHARED NORMALIZER (bd-kmtia). Both arms below used to build it
-    // with a bare `to_string()`, so a kanban card was the one label site that saw neither the
-    // `<br>` conversion nor the entity decode — `one<br/>two` was drawn with the tag showing while
-    // the same text in a flowchart node drew two lines.
-    let normalize = |raw: &str| clean_label(Some(raw)).unwrap_or_else(|| raw.to_string());
-
-    // Try to parse id[Label] syntax.
-    if let Some(bracket_start) = text.find('[')
-        && let Some(bracket_end) = text.rfind(']')
-        && bracket_end > bracket_start
-    {
-        let id = text[..bracket_start].trim().to_string();
-        let label = normalize(text[bracket_start + 1..bracket_end].trim());
-        if !id.is_empty() && !label.is_empty() {
-            return (id, label);
+fn split_kanban_metadata_fields(body: &str) -> Result<Vec<&str>, &'static str> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut nesting = Vec::new();
+    let mut previous = None;
+    for (index, ch) in body.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            continue;
         }
-        if !label.is_empty() {
-            return (normalize_compound_identifier(&label), label);
+        match ch {
+            '"' | '\'' if previous.is_none_or(|p| matches!(p, ':' | ',' | '[' | '{')) => {
+                quote = Some(ch);
+            }
+            '[' | '{' => nesting.push(ch),
+            ']' | '}' => {
+                let expected = if ch == ']' { '[' } else { '{' };
+                if nesting.pop() != Some(expected) {
+                    return Err("unbalanced brackets or braces");
+                }
+            }
+            ',' if nesting.is_empty() => {
+                let field = body[start..index].trim();
+                if field.is_empty() {
+                    return Err("empty field between commas");
+                }
+                fields.push(field);
+                start = index + 1;
+            }
+            _ => {}
+        }
+        if !ch.is_whitespace() {
+            previous = Some(ch);
         }
     }
-    // Plain text: use normalized form as ID. The ID is derived from the RAW text, not the
-    // normalized label — a card's identity must not shift when its `<br/>` becomes a newline.
-    let label = normalize(text);
-    let id = normalize_compound_identifier(text);
-    (id, label)
+    if quote.is_some() || !nesting.is_empty() {
+        return Err("unclosed quoted string, bracket or brace");
+    }
+    let last = body[start..].trim();
+    if !last.is_empty() {
+        fields.push(last);
+    }
+    Ok(fields)
+}
+
+struct KanbanItem {
+    id: String,
+    label: String,
+    explicit_id: bool,
+}
+
+fn parse_kanban_item(text: &str) -> KanbanItem {
+    let normalize = |raw: &str| clean_label(Some(raw)).unwrap_or_else(|| raw.to_string());
+    if let Some(start) = text.find('[')
+        && let Some(end) = text.rfind(']')
+        && end > start
+    {
+        let id = text[..start].trim();
+        let label = normalize(text[start + 1..end].trim());
+        if !label.is_empty() {
+            return KanbanItem {
+                id: if id.is_empty() {
+                    normalize_compound_identifier(&label)
+                } else {
+                    id.to_string()
+                },
+                label,
+                explicit_id: !id.is_empty(),
+            };
+        }
+    }
+    KanbanItem {
+        id: normalize_compound_identifier(text),
+        label: normalize(text),
+        explicit_id: false,
+    }
 }
 
 const TIMELINE_SECTION_CLASSES: [&str; 8] = [
@@ -34314,6 +34568,169 @@ Rel_Back(db, app, "Responds")"#,
                 .any(|c| c.starts_with("kanban-priority-")),
             "card without metadata should not have priority class"
         );
+    }
+
+    #[test]
+    fn kanban_metadata_preserves_authored_text_arrays_and_zero_limit() {
+        let parsed = parse_mermaid(
+            r#"kanban
+  todo[Work] @{ wip: 0 }
+    task[Design] @{ assigned: 'Zoë O\'Neil, 团队', priority: 'Very High', ticket: MC-2037, tags: ['release train', 'UI, polish'] }
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.kanban_meta.as_ref().expect("Kanban metadata");
+        assert_eq!(meta.columns.len(), 1);
+        assert_eq!(meta.columns[0].cluster, fm_core::IrClusterId(0));
+        assert_eq!(meta.columns[0].wip_limit, Some(0));
+        assert_eq!(parsed.ir.clusters[0].grid_span, 1, "WIP is not a grid span");
+        assert_eq!(meta.cards.len(), 1);
+        assert_eq!(meta.cards[0].node, fm_core::IrNodeId(0));
+        assert_eq!(meta.cards[0].assigned.as_deref(), Some("Zoë O'Neil, 团队"));
+        assert_eq!(meta.cards[0].priority.as_deref(), Some("Very High"));
+        assert_eq!(meta.cards[0].ticket.as_deref(), Some("MC-2037"));
+        assert_eq!(meta.cards[0].tags, ["release train", "UI, polish"]);
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|class| class == "kanban-priority-very-high")
+        );
+        let encoded = serde_json::to_string(&parsed.ir).expect("serialize Kanban IR");
+        let decoded: fm_core::MermaidDiagramIr =
+            serde_json::from_str(&encoded).expect("deserialize Kanban IR");
+        assert_eq!(decoded, parsed.ir, "typed metadata must survive public IR transport");
+    }
+
+    #[test]
+    fn kanban_metadata_accepts_json5_and_numeric_ticket_and_assignee() {
+        let parsed = parse_mermaid(
+            r#"kanban
+  todo[Work]
+    first[First] @{ assigned: 42, ticket: 2038, priority: 'Very Low', tags: ['team, alpha', 'review'], }
+    second[Second] @{ assigned: Alice, tag: backend urgent, ticket: ENG-17 }
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let cards = &parsed.ir.kanban_meta.as_ref().expect("Kanban metadata").cards;
+        assert_eq!(cards[0].assigned.as_deref(), Some("42"));
+        assert_eq!(cards[0].ticket.as_deref(), Some("2038"));
+        assert_eq!(cards[0].priority.as_deref(), Some("Very Low"));
+        assert_eq!(cards[0].tags, ["team, alpha", "review"]);
+        assert_eq!(cards[1].assigned.as_deref(), Some("Alice"));
+        assert_eq!(cards[1].ticket.as_deref(), Some("ENG-17"));
+        assert_eq!(cards[1].tags, ["backend", "urgent"]);
+    }
+
+    #[test]
+    fn kanban_anonymous_occurrences_do_not_alias_each_other_or_explicit_ids() {
+        let parsed = parse_mermaid(
+            r#"kanban
+  Queue
+    [Review]
+    [Review]
+    kanban-card-Review[Named]
+  Queue
+    [Review]
+    stable[stable] @{ priority: High }
+    stable[Updated] @{ priority: Low, assigned: Team }
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(ir.nodes.len(), 5, "each anonymous card is a distinct task");
+        assert_eq!(ir.clusters.len(), 2, "anonymous column runs remain distinct");
+        assert_eq!(ir.clusters[0].members.len(), 3);
+        assert_eq!(ir.clusters[1].members.len(), 2);
+        let ids: std::collections::BTreeSet<_> =
+            ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids.len(), 5);
+        assert!(ids.contains("stable"), "explicit id equal to its label stays explicit");
+        let named = ir.find_node("kanban-card-Review").expect("reserved authored id");
+        assert_eq!(ir.node_display_text(named), "Named");
+        let stable = ir.find_node("stable").expect("reused explicit id");
+        assert!(
+            stable.classes.iter().any(|class| class == "kanban-priority-low")
+        );
+        assert!(
+            !stable.classes.iter().any(|class| class == "kanban-priority-high")
+        );
+        let meta = ir.kanban_meta.as_ref().expect("Kanban metadata");
+        assert_eq!(meta.cards.len(), 5, "one metadata row per retained node");
+        assert_eq!(meta.cards[4].priority.as_deref(), Some("Low"));
+        assert_eq!(meta.cards[4].assigned.as_deref(), Some("Team"));
+    }
+
+    #[test]
+    fn kanban_metadata_recovery_keeps_the_card_and_reports_invalid_fields() {
+        for metadata in [
+            "@{ assigned: 'unclosed }",
+            "@{ tags: ['one', 'two' }",
+            "@{ priority High }",
+            "@{ assigned: [1, 2] }",
+            "@{ priority: High assigned: Alice }",
+            "@{ assigned: Alice } trailing",
+            "@{ assigned: Alice",
+        ] {
+            let parsed =
+                parse_mermaid(&format!("kanban\n  todo[Work]\n    task[Keep me] {metadata}\n"));
+            assert_eq!(parsed.ir.nodes.len(), 1, "{metadata}");
+            assert_eq!(parsed.ir.node_display_text(&parsed.ir.nodes[0]), "Keep me");
+            assert_eq!(parsed.ir.clusters[0].members, [fm_core::IrNodeId(0)]);
+            assert!(!parsed.warnings.is_empty(), "{metadata}: malformed metadata must warn");
+        }
+        for value in ["-1", "1.5", "null", "'many'", "{nested: 1}"] {
+            let parsed = parse_mermaid(&format!("kanban\n  todo[Work] @{{ wip: {value} }}\n"));
+            let meta = parsed.ir.kanban_meta.as_ref().expect("column retained");
+            assert_eq!(meta.columns[0].wip_limit, None, "{value}");
+            assert!(
+                parsed.warnings.iter().any(|warning| warning.contains("wip")),
+                "{value}: invalid limit must warn"
+            );
+        }
+    }
+
+    #[test]
+    fn kanban_metadata_does_not_consume_label_examples_or_create_phantom_cards() {
+        let parsed = parse_mermaid(
+            r#"kanban
+  todo[Work]
+    task[Explain @{ assigned: example } syntax] @{ assigned: "Normal" }
+    @{ assigned: nobody }
+"#,
+        );
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "Explain @{ assigned: example } syntax"
+        );
+        let meta = parsed.ir.kanban_meta.as_ref().expect("Kanban metadata");
+        assert_eq!(meta.cards[0].assigned.as_deref(), Some("Normal"));
+        assert!(
+            parsed.warnings.iter().any(|warning| warning.contains("no card")),
+            "metadata without a card must be diagnosed"
+        );
+    }
+
+    #[test]
+    fn kanban_global_directives_do_not_become_board_content() {
+        let parsed = parse_mermaid(
+            r#"kanban
+  title Sprint board
+  accTitle: Accessible board
+  accDescr {
+Tasks awaiting review.
+}
+  todo[Work]
+    task[Review]
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Sprint board"));
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Accessible board"));
+        assert_eq!(parsed.ir.meta.acc_descr.as_deref(), Some("Tasks awaiting review."));
     }
 
     #[test]

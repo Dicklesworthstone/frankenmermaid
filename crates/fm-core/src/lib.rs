@@ -9305,6 +9305,39 @@ pub struct IrPacketMeta {
     pub fields: Vec<IrPacketField>,
 }
 
+/// A Kanban column's work-in-progress limit. Zero is meaningful and distinct from an
+/// unlimited column; a limit must not be encoded as a grid span.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrKanbanColumn {
+    pub cluster: IrClusterId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_limit: Option<usize>,
+}
+
+/// Authored card details, separate from CSS classes so punctuation, Unicode, and casing
+/// survive parsing and can be measured and drawn by every renderer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrKanbanCard {
+    pub node: IrNodeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Kanban columns and cards in declaration order, linked to the shared graph identities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrKanbanMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<IrKanbanColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<IrKanbanCard>,
+}
+
 // ── Main IR container ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -9361,6 +9394,8 @@ pub struct MermaidDiagramIr {
     pub quadrant_meta: Option<IrQuadrantMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packet_meta: Option<IrPacketMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kanban_meta: Option<IrKanbanMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_graph_meta: Option<IrGitGraphMeta>,
     /// Notes attached to state diagram nodes.
@@ -9518,6 +9553,7 @@ impl MermaidDiagramIr {
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,
+            kanban_meta: None,
             git_graph_meta: None,
             state_notes: Vec::new(),
             diagnostics: Vec::new(),

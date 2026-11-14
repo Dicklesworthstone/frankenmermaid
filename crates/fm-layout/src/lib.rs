@@ -2132,6 +2132,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         sequence_meta,
         gantt_meta,
         xy_chart_meta,
+        kanban_meta,
         treemap_meta,
         radar_meta,
         venn_meta,
@@ -2162,6 +2163,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *sequence_meta == current.sequence_meta
         && *gantt_meta == current.gantt_meta
         && *xy_chart_meta == current.xy_chart_meta
+        && *kanban_meta == current.kanban_meta
         && *treemap_meta == current.treemap_meta
         && *radar_meta == current.radar_meta
         && *venn_meta == current.venn_meta
