@@ -152,3 +152,118 @@ fn a_click_tooltip_is_not_drawn_into_the_terminal_body() {
         "a click URL was printed into the terminal body: {output}"
     );
 }
+
+const KANBAN_CONTENT: &str = r#"kanban
+  work[Work] @{ wip: 0 }
+    [Review] @{ assigned: 'Zoë  团队', priority: 'High', ticket: 'ENG-42', tags: ['release train', 'UI, polish'] }
+    [Review]
+  empty[Empty] @{ wip: 0 }
+"#;
+
+#[test]
+fn kanban_metadata_and_wip_survive_every_terminal_raster_mode() {
+    use fm_core::{MermaidFidelity, MermaidRenderMode};
+    use fm_render_term::{TermRenderConfig, render_term_with_config};
+    use unicode_width::UnicodeWidthStr;
+    let parsed = fm_parser::parse(KANBAN_CONTENT);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    assert_eq!(parsed.ir.nodes.len(), 2);
+    for mode in [
+        MermaidRenderMode::CellOnly,
+        MermaidRenderMode::Braille,
+        MermaidRenderMode::Block,
+        MermaidRenderMode::HalfBlock,
+    ] {
+        let config = TermRenderConfig {
+            render_mode: mode,
+            fidelity_override: Some(MermaidFidelity::Rich),
+            max_width: 240,
+            max_height: 100,
+            ..TermRenderConfig::rich()
+        };
+        let output = render_term_with_config(&parsed.ir, &config, 240, 100).output;
+        for expected in [
+            "Assigned: Zoë  团队",
+            "Priority: High",
+            "Tag: release train",
+            "Tag: UI, polish",
+            "Ticket: ENG-42",
+            "WIP: 2 / 0 (over limit)",
+            "WIP: 0 / 0",
+        ] {
+            assert_eq!(
+                output.matches(expected).count(),
+                1,
+                "{mode:?} lost or repeated {expected:?}:\n{output}"
+            );
+        }
+        assert_eq!(output.matches("Review").count(), 2, "{mode:?}:\n{output}");
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.lines().all(|line| line.width() <= 240));
+        assert!(output.lines().count() <= 100);
+        assert_eq!(
+            output,
+            render_term_with_config(&parsed.ir, &config, 240, 100).output
+        );
+    }
+}
+
+#[test]
+fn kanban_metadata_obeys_outline_and_viewport_limits() {
+    use fm_core::{MermaidFidelity, MermaidRenderMode};
+    use fm_render_term::{TermRenderConfig, render_term_with_config};
+    use unicode_width::UnicodeWidthStr;
+    let parsed = ir(KANBAN_CONTENT);
+    for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+        for fidelity in [MermaidFidelity::Outline, MermaidFidelity::Rich] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                fidelity_override: Some(fidelity),
+                max_width: 32,
+                max_height: 12,
+                ..TermRenderConfig::rich()
+            };
+            let output = render_term_with_config(&parsed, &config, 32, 12).output;
+            assert!(
+                output.lines().count() <= 12,
+                "{mode:?} {fidelity:?}:\n{output}"
+            );
+            assert!(
+                output.lines().all(|line| line.width() <= 32),
+                "{mode:?} {fidelity:?}:\n{output}"
+            );
+            if fidelity == MermaidFidelity::Outline {
+                for text in [
+                    "Review", "Assigned", "Priority", "Ticket", "Tag:", "WIP", "Work", "Empty",
+                ] {
+                    assert!(!output.contains(text), "Outline exposed {text}:\n{output}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn kanban_metadata_controls_are_sanitized_before_cell_output() {
+    use fm_render_term::{TermRenderConfig, render_term_with_config};
+    let parsed = fm_parser::parse(
+        r#"kanban
+  work[Work]
+    task[Review] @{ assigned: 'Safe\u001b[31mName', ticket: 'REF\u0007-42' }
+"#,
+    );
+    let config = TermRenderConfig {
+        max_width: 160,
+        max_height: 80,
+        ..TermRenderConfig::rich()
+    };
+    let output = render_term_with_config(&parsed.ir, &config, 160, 80).output;
+    assert!(
+        output.contains("Assigned: Safe") && output.contains("Ticket: REF"),
+        "{output}"
+    );
+    assert!(
+        !output.contains('\u{1b}') && !output.contains('\u{7}'),
+        "{output}"
+    );
+}

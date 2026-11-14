@@ -935,10 +935,17 @@ impl TermRenderer {
         } else {
             // Render nodes (foreground).
             for node_box in &layout.nodes {
-                self.render_node_cell(&mut buffer, ir, node_box, scale_x, scale_y);
+                self.render_node_cell(
+                    &mut buffer,
+                    ir,
+                    node_box,
+                    scale_x,
+                    scale_y,
+                    ir.diagram_type == fm_core::DiagramType::Kanban,
+                );
             }
             for node_box in &layout.extensions.sequence_mirror_headers {
-                self.render_node_cell(&mut buffer, ir, node_box, scale_x, scale_y);
+                self.render_node_cell(&mut buffer, ir, node_box, scale_x, scale_y, false);
             }
             for continuation in &layout.extensions.packet_field_continuations {
                 let (x, y, w, h) = self.bounds_to_cells(&continuation.bounds, scale_x, scale_y);
@@ -1008,12 +1015,13 @@ impl TermRenderer {
             .map(<[char]>::to_vec)
             .collect();
         self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
-        let (edge_labels, occluded_edge_label_count) =
+        let (mut edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
                 self.overlay_sequence_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
             } else {
                 self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
             };
+        edge_labels.extend(self.kanban_cell_labels(&grid, ir, layout, scale_x, scale_y));
         let mut output = serialize_cell_labels(&grid, &edge_labels, true);
         let debug_metrics = self
             .config
@@ -1605,6 +1613,11 @@ impl TermRenderer {
         }
         buffer.set(x + w - 1, y + h - 1, glyphs.corner_br);
 
+        if ir.diagram_type == fm_core::DiagramType::Kanban {
+            // Kanban titles and WIP status share the measured, width-aware overlay below.
+            return;
+        }
+
         // Cluster title if available.
         let title_text = cluster_box.title.as_deref().or_else(|| {
             ir.clusters
@@ -1828,6 +1841,7 @@ impl TermRenderer {
         node_box: &LayoutNodeBox,
         scale_x: f32,
         scale_y: f32,
+        measured_kanban_card: bool,
     ) {
         let ir_node = ir.nodes.get(node_box.node_index);
         if ir_node.is_some_and(is_block_beta_space_node) {
@@ -1870,6 +1884,11 @@ impl TermRenderer {
             buffer.set(x + w - 1, y, tr);
             buffer.set(x, y + h - 1, bl);
             buffer.set(x + w - 1, y + h - 1, br);
+        }
+
+        if measured_kanban_card {
+            // Full card content is placed once, after both cell and subcell geometry passes.
+            return;
         }
 
         // Get label.
@@ -2814,7 +2833,7 @@ impl TermRenderer {
         // entirely unless every target cell is blank, so a title can never displace a card label or
         // a nested cluster's border — a name that overwrote the content it names is a worse outcome
         // than the missing name this fixes.
-        if self.config.show_clusters {
+        if self.config.show_clusters && ir.diagram_type != fm_core::DiagramType::Kanban {
             // The same ancestor reservation the canvas pass applied, so a nested boundary's caption
             // is written at the row its box was actually drawn at (bd-c23yq). Without it the inner
             // `Core` and `[SYSTEM]` were written at the un-pushed row, where the blank-cell guard
@@ -2964,6 +2983,10 @@ impl TermRenderer {
             let ir_node = ir.nodes.get(node_box.node_index);
 
             if ir_node.is_some_and(is_block_beta_space_node) {
+                continue;
+            }
+
+            if ir.diagram_type == fm_core::DiagramType::Kanban {
                 continue;
             }
 
@@ -3520,7 +3543,7 @@ impl TermRenderer {
         }
 
         self.overlay_packet_bit_labels(&mut lines, ir, layout, scale_x, scale_y);
-        let (labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
+        let (mut labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
             self.overlay_sequence_labels(
                 &mut lines,
                 ir,
@@ -3539,7 +3562,143 @@ impl TermRenderer {
                 &edge_label_rects,
             )
         };
+        labels.extend(self.kanban_cell_labels(&lines, ir, layout, scale_x, scale_y));
         (serialize_cell_labels(&lines, &labels, false), occluded)
+    }
+
+    /// Keep measured Kanban content on distinct terminal rows. Unicode text is emitted by
+    /// the width-aware serializer, and constrained viewports never paint over frame borders.
+    fn kanban_cell_labels(
+        &self,
+        grid: &[Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Vec<CellLabel> {
+        let mut labels: Vec<CellLabel> = Vec::new();
+        if !self.config.show_labels || ir.diagram_type != fm_core::DiagramType::Kanban {
+            return labels;
+        }
+        let mut append = |text: &str, x: usize, y: usize, width: usize, exact: bool| {
+            let Some(row) = grid.get(y) else { return };
+            let width = width.min(row.len().saturating_sub(x));
+            if width == 0 {
+                return;
+            }
+            let mut text: String = text
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect();
+            if text.width() > width {
+                if exact {
+                    // A shortened WIP count would report a different quantity.
+                    return;
+                }
+                while text.width() >= width {
+                    text.pop();
+                }
+                text.push('…');
+            }
+            let end = x + text.width();
+            if text.is_empty()
+                || !row[x..end].iter().copied().all(blank_terminal_cell)
+                || labels
+                    .iter()
+                    .any(|label| label.y == y && label.x < end && x < label.x + label.width)
+            {
+                return;
+            }
+            let mut label = CellLabel::new(usize::MAX, false, vec![text]);
+            label.x = x;
+            label.y = y;
+            labels.push(label);
+        };
+        if self.config.show_clusters {
+            let metrics = fm_core::FontMetrics::default_metrics();
+            for cluster in &layout.clusters {
+                let (x, y, w, h) = self.bounds_to_cells(&cluster.bounds, scale_x, scale_y);
+                let caption = fm_layout::cluster_caption::ClusterCaptionLayout::new(
+                    ir,
+                    cluster.cluster_index,
+                    cluster.title.as_deref(),
+                    &metrics,
+                );
+                let mut next_y = y + 1;
+                for row in &caption.rows {
+                    let (_, baseline) = self.point_to_cells(
+                        &fm_layout::LayoutPoint {
+                            x: cluster.bounds.x,
+                            y: cluster.bounds.y + row.baseline,
+                        },
+                        scale_x,
+                        scale_y,
+                    );
+                    let target_y = baseline.max(next_y);
+                    if target_y >= y + h.saturating_sub(1) {
+                        break;
+                    }
+                    append(
+                        &row.text,
+                        x + 1,
+                        target_y,
+                        w.saturating_sub(2),
+                        matches!(
+                            row.kind,
+                            fm_layout::cluster_caption::ClusterCaptionRowKind::Wip
+                        ),
+                    );
+                    next_y = target_y + 1;
+                }
+            }
+        }
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for node in &layout.nodes {
+            let Some(ir_node) = ir.nodes.get(node.node_index) else {
+                continue;
+            };
+            let declared = ir.resolved_node_style(node.node_index);
+            let card_metrics = declared.get("font-family").map(|family| {
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(family),
+                    ..metrics.config().clone()
+                })
+            });
+            let card = fm_core::KanbanCardLayout::new(
+                ir.kanban_card(node.node_index),
+                ir.node_display_text(ir_node),
+                card_metrics.as_ref().unwrap_or(&metrics),
+                Some(node.bounds.width),
+                declared.get("font-size").map(String::as_str),
+            );
+            let top = node.bounds.y + ((node.bounds.height - card.height) * 0.5).max(0.0);
+            let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+            let mut next_y = y + 1;
+            for row in &card.rows {
+                let (left, center_y) = self.point_to_cells(
+                    &fm_layout::LayoutPoint {
+                        x: node.bounds.x + card.padding,
+                        y: top + row.center_y,
+                    },
+                    scale_x,
+                    scale_y,
+                );
+                let target_y = center_y.max(next_y);
+                if target_y >= y + h.saturating_sub(1) {
+                    break;
+                }
+                let left = left.max(x + 1);
+                append(
+                    &row.text,
+                    left,
+                    target_y,
+                    (x + w.saturating_sub(1)).saturating_sub(left),
+                    false,
+                );
+                next_y = target_y + 1;
+            }
+        }
+        labels
     }
 
     /// Keep the packet scale on a complete cell row above each field segment. Numbers are

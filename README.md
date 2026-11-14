@@ -1660,17 +1660,20 @@ The gantt layout dispatcher emits a time-axis bar layout where each task's `x` i
 
 ### Kanban — metadata
 
-The kanban parser accepts metadata blocks on cards:
+Kanban columns accept WIP limits, and cards accept assignees, priorities, tickets, and tags:
 
 ```
 kanban
-  Todo
-    Task 1@{wip: 3, priority: high, assigned: alice}
-  Doing
-    Task 2@{assigned: bob}
+  todo[Todo] @{ wip: 3 }
+    design[Review design] @{ assigned: Alice, priority: High, ticket: "UI-42", tags: ["UX", "release"] }
+  doing[Doing] @{ wip: 1 }
+    build[Build preview] @{ assigned: Bob, priority: Medium }
+  done[Done]
 ```
 
-`wip` triggers warning styling on the column when exceeded, `priority` maps to color, and `assigned` becomes a badge on the card.
+Column headings show occupancy, including `WIP: 2 / 1 (over limit)` when a limit is exceeded. An explicit `wip: 0` marks any card in that lane as over limit; omitting `wip` leaves it unlimited. Limits belong on columns, not cards.
+
+Cards display each authored metadata field across SVG, Canvas, GPU, and terminal output. Priorities also supply a default card color on graphical surfaces. Long titles and metadata wrap into measured rows, and repeated card captions keep their own identities and metadata.
 
 Column widths and card positions follow their measured contents. Cards align within each lane, lane frames share a common height, and named empty lanes remain visible. Long headings and multiline cards reserve space instead of overlapping neighboring content.
 
