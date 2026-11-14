@@ -9338,6 +9338,188 @@ pub struct IrKanbanMeta {
     pub cards: Vec<IrKanbanCard>,
 }
 
+/// The semantic role of a complete, measured Kanban card row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KanbanCardRowKind {
+    Title,
+    Assigned,
+    Priority,
+    Ticket,
+    Tag,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KanbanCardRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: KanbanCardRowKind,
+}
+
+/// Complete card content shared by measurement and every renderer. Long metadata wraps
+/// without losing authored spaces, Unicode, or fields; it grows the card vertically.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KanbanCardLayout {
+    pub rows: Vec<KanbanCardRow>,
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+}
+
+impl KanbanCardLayout {
+    #[must_use]
+    pub fn new(
+        meta: Option<&IrKanbanCard>,
+        name: &str,
+        metrics: &FontMetrics,
+        width: Option<f32>,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(metrics.font_size());
+        let detail_size = declared_font_size.unwrap_or((font_size * 0.85).max(8.0));
+        let padding = font_size;
+        let mut sections = vec![(name.to_owned(), font_size, KanbanCardRowKind::Title)];
+        if let Some(meta) = meta {
+            for (prefix, value, kind) in [
+                (
+                    "Assigned: ",
+                    meta.assigned.as_deref(),
+                    KanbanCardRowKind::Assigned,
+                ),
+                (
+                    "Priority: ",
+                    meta.priority.as_deref(),
+                    KanbanCardRowKind::Priority,
+                ),
+                ("Ticket: ", meta.ticket.as_deref(), KanbanCardRowKind::Ticket),
+            ] {
+                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                    sections.push((format!("{prefix}{value}"), detail_size, kind));
+                }
+            }
+            for tag in &meta.tags {
+                if !tag.is_empty() {
+                    sections.push((format!("Tag: {tag}"), detail_size, KanbanCardRowKind::Tag));
+                }
+            }
+        }
+        let natural_width = sections
+            .iter()
+            .map(|(text, size, _)| {
+                metrics.estimate_preserved_width(text, *size, metrics.avg_char_width()) * 1.12
+                    + 2.0 * padding
+            })
+            .fold((font_size * 10.0).max(144.0), f32::max)
+            .min((font_size * 24.0).max(144.0));
+        let width = width
+            .filter(|width| width.is_finite() && *width > 2.0 * padding)
+            .unwrap_or(natural_width);
+        let available = ((width - 2.0 * padding) / 1.12).max(font_size);
+        let mut rows = Vec::new();
+        let mut cursor = padding;
+        let mut in_details = false;
+        for (text, size, kind) in sections {
+            if kind != KanbanCardRowKind::Title && !in_details {
+                cursor += padding * 0.5;
+                in_details = true;
+            }
+            let row_metrics = FontMetrics::new(FontMetricsConfig {
+                font_size: size,
+                ..metrics.config().clone()
+            });
+            // A common pitch prevents differing surface defaults from overflowing a measured
+            // card. Authored font sizes still apply to every row in the style cascade.
+            let pitch = size * 1.4;
+            for text in row_metrics.wrap_preserved_to_width(&text, available) {
+                rows.push(KanbanCardRow {
+                    text,
+                    center_y: cursor + pitch * 0.5,
+                    font_size: size,
+                    kind,
+                });
+                cursor += pitch;
+            }
+        }
+        Self {
+            rows,
+            width,
+            height: (cursor + padding).max(42.0),
+            padding,
+        }
+    }
+}
+
+/// Occupancy of a rendered Kanban lane. An explicit zero limit is still a limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KanbanColumnStatus {
+    pub card_count: usize,
+    pub wip_limit: Option<usize>,
+}
+
+impl KanbanColumnStatus {
+    #[must_use]
+    pub fn is_over_limit(self) -> bool {
+        self.wip_limit.is_some_and(|limit| self.card_count > limit)
+    }
+
+    #[must_use]
+    pub fn label(self) -> String {
+        self.wip_limit.map_or_else(
+            || {
+                format!(
+                    "{} card{}",
+                    self.card_count,
+                    if self.card_count == 1 { "" } else { "s" },
+                )
+            },
+            |limit| {
+                format!(
+                    "WIP: {} / {limit}{}",
+                    self.card_count,
+                    if self.is_over_limit() { " (over limit)" } else { "" },
+                )
+            },
+        )
+    }
+}
+
+/// Priority supplies a semantic fill only when an author has not supplied one.
+#[must_use]
+pub fn kanban_priority_fill(ir: &MermaidDiagramIr, node_index: usize) -> Option<&'static str> {
+    if ir.diagram_type != DiagramType::Kanban {
+        return None;
+    }
+    let priority = ir
+        .kanban_card(node_index)
+        .and_then(|card| card.priority.as_deref());
+    if let Some(priority) = priority {
+        return match priority.trim().to_ascii_lowercase().as_str() {
+            "high" | "critical" => Some("#fca5a5"),
+            "medium" => Some("#fde68a"),
+            "low" => Some("#bbf7d0"),
+            _ => None,
+        };
+    }
+    ir.nodes
+        .get(node_index)?
+        .classes
+        .iter()
+        .find_map(|class| match class.as_str() {
+            "kanban-priority-high" | "kanban-priority-critical" => Some("#fca5a5"),
+            "kanban-priority-medium" => Some("#fde68a"),
+            "kanban-priority-low" => Some("#bbf7d0"),
+            _ => None,
+        })
+}
+
 // ── Main IR container ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -9643,6 +9825,49 @@ impl MermaidDiagramIr {
     #[must_use]
     pub fn node(&self, node_id: IrNodeId) -> Option<&IrNode> {
         self.nodes.get(node_id.0)
+    }
+
+    /// Typed metadata for this card occurrence, independent of authored display text.
+    #[must_use]
+    pub fn kanban_card(&self, node_index: usize) -> Option<&IrKanbanCard> {
+        if self.diagram_type != DiagramType::Kanban {
+            return None;
+        }
+        let cards = &self.kanban_meta.as_ref()?.cards;
+        cards
+            .get(node_index)
+            .filter(|card| card.node.0 == node_index)
+            .or_else(|| cards.iter().find(|card| card.node.0 == node_index))
+    }
+
+    /// Count cards using the layout's first-owning-lane rule. Invalid or repeated member
+    /// references cannot inflate WIP, and a card claimed by two lanes is counted only once.
+    #[must_use]
+    pub fn kanban_column_status(&self, cluster_index: usize) -> Option<KanbanColumnStatus> {
+        if self.diagram_type != DiagramType::Kanban {
+            return None;
+        }
+        let cluster = self.clusters.get(cluster_index)?;
+        let earlier_members: std::collections::BTreeSet<_> = self.clusters[..cluster_index]
+            .iter()
+            .flat_map(|cluster| cluster.members.iter().map(|member| member.0))
+            .collect();
+        let members: std::collections::BTreeSet<_> = cluster
+            .members
+            .iter()
+            .map(|member| member.0)
+            .filter(|index| *index < self.nodes.len() && !earlier_members.contains(index))
+            .collect();
+        let wip_limit = self.kanban_meta.as_ref().and_then(|meta| {
+            meta.columns
+                .iter()
+                .find(|column| column.cluster.0 == cluster_index)
+                .and_then(|column| column.wip_limit)
+        });
+        Some(KanbanColumnStatus {
+            card_count: members.len(),
+            wip_limit,
+        })
     }
 
     /// The text a node actually DRAWS: its explicit label, else its id, else nothing (bd-3cj8v).
@@ -11395,6 +11620,140 @@ mod tests {
             "monospace must be resolved before any geometry is measured"
         );
         assert_eq!(ir.labels[0].text, "alpha beta gamma\nsecond row");
+    }
+
+    #[test]
+    fn kanban_cards_measure_every_authored_field_without_losing_text() {
+        let metrics = FontMetrics::default_metrics();
+        let title = "Review  Unicode 👩‍💻 changes and coordinate the complete release";
+        let meta = IrKanbanCard {
+            assigned: Some("Alice  & Bob / 李".to_owned()),
+            priority: Some("Critical".to_owned()),
+            ticket: Some("APP-42/β".to_owned()),
+            tags: vec!["Needs review".to_owned(), "Release/β".to_owned()],
+            ..Default::default()
+        };
+        let card = KanbanCardLayout::new(Some(&meta), title, &metrics, Some(190.0), None);
+        for (kind, expected) in [
+            (KanbanCardRowKind::Title, title),
+            (KanbanCardRowKind::Assigned, "Assigned: Alice  & Bob / 李"),
+            (KanbanCardRowKind::Priority, "Priority: Critical"),
+            (KanbanCardRowKind::Ticket, "Ticket: APP-42/β"),
+            (KanbanCardRowKind::Tag, "Tag: Needs reviewTag: Release/β"),
+        ] {
+            let actual: String = card
+                .rows
+                .iter()
+                .filter(|row| row.kind == kind)
+                .map(|row| row.text.as_str())
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        for row in &card.rows {
+            assert!(row.center_y - row.font_size * 0.5 >= card.padding);
+            assert!(row.center_y + row.font_size * 0.5 <= card.height - card.padding);
+            assert!(
+                metrics.estimate_preserved_width(
+                    &row.text,
+                    row.font_size,
+                    metrics.avg_char_width(),
+                ) <= card.width - 2.0 * card.padding + 0.01,
+                "row escaped its measured card: {:?}",
+                row.text,
+            );
+        }
+        let plain = KanbanCardLayout::new(None, title, &metrics, Some(190.0), None);
+        assert!(card.height > plain.height);
+    }
+
+    #[test]
+    fn kanban_cards_preserve_authored_rows_and_resolve_font_overrides() {
+        let metrics = FontMetrics::monospace(15.0);
+        let meta = IrKanbanCard {
+            assigned: Some("Mina".to_owned()),
+            ..Default::default()
+        };
+        let card = KanbanCardLayout::new(
+            Some(&meta),
+            "First\n\nLast\n",
+            &metrics,
+            Some(320.0),
+            Some("24px"),
+        );
+        let titles: Vec<_> = card
+            .rows
+            .iter()
+            .filter(|row| row.kind == KanbanCardRowKind::Title)
+            .map(|row| row.text.as_str())
+            .collect();
+        assert_eq!(titles, ["First", "", "Last", ""]);
+        assert!(card.rows.iter().all(|row| row.font_size == 24.0));
+        let normal = KanbanCardLayout::new(Some(&meta), "First", &metrics, None, None);
+        for invalid in ["NaN", "-10", "0", "513px", "very large"] {
+            let fallback =
+                KanbanCardLayout::new(Some(&meta), "First", &metrics, None, Some(invalid));
+            assert_eq!(fallback, normal);
+        }
+    }
+
+    #[test]
+    fn kanban_wip_counts_rendered_occurrences_and_preserves_zero_limits() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        ir.nodes = vec![IrNode::default(); 3];
+        ir.clusters = vec![
+            IrCluster {
+                members: vec![IrNodeId(0), IrNodeId(0), IrNodeId(99)],
+                ..Default::default()
+            },
+            IrCluster {
+                members: vec![IrNodeId(0), IrNodeId(1)],
+                ..Default::default()
+            },
+            IrCluster {
+                members: vec![IrNodeId(2)],
+                ..Default::default()
+            },
+            IrCluster::default(),
+        ];
+        ir.kanban_meta = Some(IrKanbanMeta {
+            columns: vec![
+                IrKanbanColumn { cluster: IrClusterId(0), wip_limit: Some(0) },
+                IrKanbanColumn { cluster: IrClusterId(1), wip_limit: Some(1) },
+                IrKanbanColumn { cluster: IrClusterId(3), wip_limit: Some(0) },
+            ],
+            ..Default::default()
+        });
+        assert_eq!(ir.kanban_column_status(0).unwrap().label(), "WIP: 1 / 0 (over limit)");
+        assert_eq!(ir.kanban_column_status(1).unwrap().label(), "WIP: 1 / 1");
+        assert_eq!(ir.kanban_column_status(2).unwrap().label(), "1 card");
+        assert_eq!(ir.kanban_column_status(3).unwrap().label(), "WIP: 0 / 0");
+        assert_eq!(ir.kanban_column_status(4), None);
+        ir.diagram_type = DiagramType::Journey;
+        assert_eq!(ir.kanban_column_status(0), None);
+    }
+
+    #[test]
+    fn kanban_typed_priority_is_authoritative_over_generated_classes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        ir.nodes.push(IrNode {
+            classes: vec!["kanban-priority-low".to_owned()],
+            ..Default::default()
+        });
+        assert_eq!(kanban_priority_fill(&ir, 0), Some("#bbf7d0"));
+        ir.kanban_meta = Some(IrKanbanMeta {
+            cards: vec![IrKanbanCard {
+                node: IrNodeId(0),
+                priority: Some(" CRITICAL ".to_owned()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(kanban_priority_fill(&ir, 0), Some("#fca5a5"));
+        ir.kanban_meta.as_mut().unwrap().cards[0].priority = Some("custom".to_owned());
+        assert_eq!(kanban_priority_fill(&ir, 0), None);
+        ir.diagram_type = DiagramType::Journey;
+        assert_eq!(ir.kanban_card(0), None);
+        assert_eq!(kanban_priority_fill(&ir, 0), None);
     }
 
     #[test]

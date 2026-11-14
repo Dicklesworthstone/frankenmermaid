@@ -18,6 +18,8 @@ pub enum ClusterCaptionRowKind {
     Title,
     /// A line of the bracketed C4 boundary type, following the complete title.
     BoundaryType,
+    /// Kanban occupancy and the authored work-in-progress limit, when present.
+    Wip,
 }
 
 /// A single displayed row, positioned relative to the cluster's top edge.
@@ -187,6 +189,17 @@ impl ClusterCaptionLayout {
                 baseline += font_size * 1.4;
             }
         }
+        if let Some(status) = ir.kanban_column_status(cluster_index) {
+            if let Some(last) = caption.rows.last() {
+                baseline = last.baseline + font_size * 1.4;
+            }
+            caption.push_row(
+                &status.label(),
+                baseline,
+                ClusterCaptionRowKind::Wip,
+                caption_metrics,
+            );
+        }
         caption
     }
 
@@ -229,7 +242,7 @@ impl ClusterCaptionLayout {
     pub fn row_weight(&self, row: &ClusterCaptionRow) -> &'static str {
         self.font_weight.unwrap_or(match row.kind {
             ClusterCaptionRowKind::Title => "600",
-            ClusterCaptionRowKind::BoundaryType => "400",
+            ClusterCaptionRowKind::BoundaryType | ClusterCaptionRowKind::Wip => "400",
         })
     }
 
@@ -308,6 +321,26 @@ mod tests {
                 .count(),
             3,
         );
+    }
+
+    #[test]
+    fn kanban_wip_rows_follow_multiline_titles_and_reserve_header_space() {
+        let parsed = fm_parser::parse(
+            "kanban\n  work[In<br/>progress] @{ wip: 0 }\n    card[Task]\n  empty[Empty]\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let metrics = FontMetrics::default_metrics();
+        let full = ClusterCaptionLayout::new(&parsed.ir, 0, None, &metrics);
+        assert_eq!(
+            full.rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["In", "progress", "WIP: 1 / 0 (over limit)"],
+        );
+        assert_eq!(full.rows[2].kind, ClusterCaptionRowKind::Wip);
+        assert_eq!(full.row_weight(&full.rows[2]), "400");
+        assert!(full.rows[2].baseline > full.rows[1].baseline + full.font_size);
+        assert!(full.extra_header(28.0) >= full.height);
+        let empty = ClusterCaptionLayout::new(&parsed.ir, 1, None, &metrics);
+        assert_eq!(empty.rows.last().unwrap().text, "0 cards");
     }
 
     #[test]

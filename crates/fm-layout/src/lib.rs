@@ -6015,6 +6015,7 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         let declared = ir.resolved_node_style(node_box.node_index);
         let body_fill = requirement
             .and_then(fm_core::requirement_risk_fill)
+            .or_else(|| fm_core::kanban_priority_fill(ir, node_box.node_index))
             .or_else(|| journey_score_fill(ir, node_box.node_index))
             .or_else(|| {
                 (ir.diagram_type == DiagramType::State
@@ -6430,6 +6431,66 @@ fn build_label_layer(
                     y: top + row.center_y,
                     font_size: row.font_size,
                     align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity,
+                    },
+                }));
+                layer.children.push(RenderItem::Group(group));
+            }
+            continue;
+        }
+        if ir.diagram_type == DiagramType::Kanban {
+            let card_metrics = declared.get("font-family").map(|family| {
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(family),
+                    ..metrics.config().clone()
+                })
+            });
+            let card = fm_core::KanbanCardLayout::new(
+                ir.kanban_card(node_box.node_index),
+                display_node_label_ref(ir, node),
+                card_metrics.as_ref().unwrap_or(metrics),
+                Some(node_box.bounds.width),
+                declared.get("font-size").map(String::as_str),
+            );
+            let fill = declared
+                .get("fill")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| {
+                    fm_core::kanban_priority_fill(ir, node_box.node_index)
+                        .unwrap_or("#ffffff")
+                        .to_owned()
+                });
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| {
+                    fm_core::readable_label_color(&fill, "#1e293b", "#ffffff").to_owned()
+                });
+            let top = node_box.bounds.y + ((node_box.bounds.height - card.height) * 0.5).max(0.0);
+            for (index, row) in card.rows.into_iter().enumerate() {
+                let role = match row.kind {
+                    fm_core::KanbanCardRowKind::Title => "title",
+                    fm_core::KanbanCardRowKind::Assigned => "assigned",
+                    fm_core::KanbanCardRowKind::Priority => "priority",
+                    fm_core::KanbanCardRowKind::Ticket => "ticket",
+                    fm_core::KanbanCardRowKind::Tag => "tag",
+                };
+                let source = RenderSource::Node(node_box.node_index);
+                let mut group = RenderGroup::new(Some(format!(
+                    "fm-kanban-{role}-{}-{index}",
+                    node_box.node_index,
+                )))
+                .with_source(source);
+                group.children.push(RenderItem::Text(RenderText {
+                    source,
+                    text: row.text,
+                    x: node_box.bounds.x + card.padding,
+                    y: top + row.center_y,
+                    font_size: row.font_size,
+                    align: TextAlign::Start,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
                         color: color.clone(),
@@ -19077,6 +19138,24 @@ fn compute_node_size(
 ) -> (f32, f32) {
     let text = display_node_label_ref(ir, node);
 
+    if ir.diagram_type == DiagramType::Kanban {
+        let style = ir.resolved_node_style(node_index);
+        let card_metrics = style.get("font-family").map(|family| {
+            fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                preset: fm_core::FontPreset::from_family(family),
+                ..metrics.config().clone()
+            })
+        });
+        let card = fm_core::KanbanCardLayout::new(
+            ir.kanban_card(node_index),
+            text,
+            card_metrics.as_ref().unwrap_or(metrics),
+            None,
+            style.get("font-size").map(String::as_str),
+        );
+        return (card.width, card.height);
+    }
+
     if let Some(meta) = node.c4_meta.as_deref() {
         let style = ir.resolved_node_style(node_index);
         let card_metrics = style.get("font-family").map(|family| {
@@ -19396,6 +19475,19 @@ fn node_size_cache_key(
 ) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_str(&mut hash, &node.id);
+    hash_u64(&mut hash, u64::from(ir.diagram_type == DiagramType::Kanban));
+    if let Some(card) = ir.kanban_card(node_index) {
+        for field in [&card.assigned, &card.priority, &card.ticket] {
+            let value = field.as_deref().unwrap_or_default();
+            hash_u64(&mut hash, value.len() as u64);
+            hash_str(&mut hash, value);
+        }
+        hash_u64(&mut hash, card.tags.len() as u64);
+        for tag in &card.tags {
+            hash_u64(&mut hash, tag.len() as u64);
+            hash_str(&mut hash, tag);
+        }
+    }
     hash_u64(&mut hash, node.shape as u64);
     hash_str(&mut hash, display_node_label_ref(ir, node));
     hash_str(&mut hash, node.icon().unwrap_or_default());
@@ -35280,6 +35372,104 @@ mod tests {
             (boxes["orphan"].x - boxes["in_lane"].x).abs() > 0.001,
             "the lane-less card must not land in lane 0's column: {boxes:?}"
         );
+    }
+
+    #[test]
+    fn kanban_metadata_and_wip_are_measured_and_projected_into_the_scene() {
+        let parsed = parse(
+            r#"kanban
+  work[Delivery] @{ wip: 1 }
+    first[Design] @{ assigned: 'Alice & Bob', priority: High, ticket: APP-42, tags: ['review', 'v2'] }
+    second[Ship]
+  empty[Waiting] @{ wip: 0 }
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 2);
+        assert_eq!(layout.clusters.len(), 2);
+        let first = &layout.nodes[0];
+        let second = &layout.nodes[1];
+        assert!(first.bounds.height > second.bounds.height);
+        assert!(second.bounds.y > first.bounds.y + first.bounds.height);
+        assert_eq!(first.bounds.width, second.bounds.width);
+        for cluster in &layout.clusters {
+            let caption = ClusterCaptionLayout::new(
+                &ir,
+                cluster.cluster_index,
+                cluster.title.as_deref(),
+                &metrics,
+            );
+            assert!(caption.width <= cluster.bounds.width + 0.01);
+            assert!(caption.height < cluster.bounds.height);
+            if cluster.cluster_index == 0 {
+                assert!(cluster.bounds.y + caption.height < first.bounds.y);
+            }
+        }
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let texts = scene_texts(&scene.root);
+        for expected in [
+            "Assigned: Alice & Bob",
+            "Priority: High",
+            "Ticket: APP-42",
+            "Tag: review",
+            "Tag: v2",
+            "WIP: 2 / 1 (over limit)",
+            "WIP: 0 / 0",
+        ] {
+            assert!(
+                texts.iter().any(|text| text.text == expected),
+                "missing painted content: {expected}",
+            );
+        }
+        for text in texts {
+            if text.source == RenderSource::Node(first.node_index) {
+                assert!(text.x > first.bounds.x);
+                assert!(text.y - text.font_size * 0.5 >= first.bounds.y);
+                assert!(
+                    text.y + text.font_size * 0.5 <= first.bounds.y + first.bounds.height,
+                    "card content escaped its measured height: {:?}",
+                    text.text,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kanban_metadata_edits_invalidate_cached_card_sizes() {
+        let ir = parse("kanban\n  work[Work]\n    task[Task]\n").ir;
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let old_key = node_size_cache_key(&ir, &ir.nodes[0], &metrics, 0);
+        let old_height = compute_node_size(&ir, &ir.nodes[0], &metrics, 0).1;
+        for field in ["assigned", "priority", "ticket", "tags"] {
+            let mut changed = ir.clone();
+            let meta = changed.kanban_meta.get_or_insert_with(Default::default);
+            let index = meta.cards.iter().position(|card| card.node.0 == 0);
+            let index = index.unwrap_or_else(|| {
+                meta.cards.push(fm_core::IrKanbanCard {
+                    node: IrNodeId(0),
+                    ..Default::default()
+                });
+                meta.cards.len() - 1
+            });
+            let card = &mut meta.cards[index];
+            let value = "Long authored metadata that must reserve its own complete card rows";
+            match field {
+                "assigned" => card.assigned = Some(value.to_owned()),
+                "priority" => card.priority = Some(value.to_owned()),
+                "ticket" => card.ticket = Some(value.to_owned()),
+                _ => card.tags = vec![value.to_owned(), "Second tag".to_owned()],
+            }
+            assert_ne!(
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics, 0),
+                old_key,
+                "stale size key after editing {field}",
+            );
+            assert!(compute_node_size(&changed, &changed.nodes[0], &metrics, 0).1 > old_height);
+        }
     }
 
     #[test]
