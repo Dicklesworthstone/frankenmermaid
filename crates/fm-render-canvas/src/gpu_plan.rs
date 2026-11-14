@@ -1782,6 +1782,8 @@ pub enum GpuTextSource {
     ///
     /// `node_index` is the packet field node index carried by the continuation extension.
     PacketFieldContinuation,
+    /// A packet row segment's first or last bit, attributed to its original field node.
+    PacketBit,
     /// One of the four labels that annotate a quadrant chart's axes.
     ///
     /// `node_index` is the fixed axis-label position: left x, right x, top y, then bottom y.
@@ -2032,6 +2034,7 @@ impl GpuRenderPlan {
         };
         let config = effective_config.as_ref();
         let metrics = config.font_metrics();
+        let packet_bits = fm_layout::packet_bit_labels(ir, layout, &metrics);
         let font_px = metrics.font_size();
         let font_scale = font_px / DEFAULT_FONT_SIZE_PX;
         let edge_stroke_width = config.edge_stroke_width as f32;
@@ -3608,6 +3611,7 @@ impl GpuRenderPlan {
                     .map(|caption| caption.text.as_str()),
             )
             .chain(sequence_numbers.iter().map(|number| number.text.as_str()))
+            .chain(packet_bits.iter().map(|label| label.text.as_str()))
             // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
             // feeding that same iterator prevents a future line filter from starving a
             // run that still looks structurally present.
@@ -4171,6 +4175,26 @@ impl GpuRenderPlan {
             );
         }
 
+        let packet_bit_color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+        for label in &packet_bits {
+            sink.push_line(
+                &label.text,
+                (
+                    label.x,
+                    label.y - (GLYPH_BASELINE_RATIO - 0.5) * label.font_size,
+                ),
+                label.font_size,
+                packet_bit_color,
+                GpuTextSource::PacketBit,
+                label.node_index,
+                match label.align {
+                    fm_layout::TextAlign::Start => crate::TextAlign::Left,
+                    fm_layout::TextAlign::Middle => crate::TextAlign::Center,
+                    fm_layout::TextAlign::End => crate::TextAlign::Right,
+                },
+            );
+        }
+
         let pie_text_color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
         for (block, source, index) in pie_text_blocks {
             let align = match block.align {
@@ -4295,6 +4319,18 @@ impl GpuRenderPlan {
         // Text can extend beyond the graph's geometry, especially with authored large faces
         // or chart annotations. The camera must fit the actual label quads as well as nodes.
         include_text_quad_bounds(&mut bounds, &text_quads);
+        for label in &packet_bits {
+            let left = bounds.x.min(label.bounds.x);
+            let top = bounds.y.min(label.bounds.y);
+            let right = (bounds.x + bounds.width).max(label.bounds.x + label.bounds.width);
+            let bottom = (bounds.y + bounds.height).max(label.bounds.y + label.bounds.height);
+            bounds = LayoutRect {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            };
+        }
         for number in &sequence_numbers {
             let left = bounds.x.min(number.bounds.x);
             let top = bounds.y.min(number.bounds.y);
@@ -9813,6 +9849,85 @@ mod tests {
         assert_eq!(run.quad_count, 13, "Wrapped field is thirteen glyphs");
     }
 
+    #[test]
+    fn packet_bit_scale_reaches_gpu_glyphs_with_exact_segment_ranges() {
+        let config = crate::CanvasRenderConfig {
+            font_size: 24.0,
+            font_family: "monospace".to_owned(),
+            label_color: "#123456".to_owned(),
+            ..Default::default()
+        };
+        for (source, expected) in [
+            (
+                "packet-beta\n28-70: \"Payload\"\n71: \"Flag\"\n",
+                vec!["28", "31", "32", "63", "64", "70", "71"],
+            ),
+            ("packet-beta\n31-32: \"Boundary\"\n", vec!["31", "32"]),
+            ("packet-beta\n4294967295: \"Last\"\n", vec!["4294967295"]),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let labels = fm_layout::packet_bit_labels(&ir, &layout, &config.font_metrics());
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == super::GpuTextSource::PacketBit)
+                .collect();
+            assert_eq!(runs.len(), expected.len());
+            let mut drawn = Vec::new();
+            for (run, label) in runs.iter().zip(&labels) {
+                assert_eq!(run.node_index as usize, label.node_index);
+                let first = run.first_quad as usize;
+                let quads = &plan.text_quads[first..first + run.quad_count as usize];
+                let text: String = quads
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| {
+                                cell.face_index == run.face_index
+                                    && cell.uv_min == quad.uv_min
+                                    && cell.uv_max == quad.uv_max
+                            })
+                            .expect("every emitted quad samples the intended glyph")
+                            .glyph
+                    })
+                    .collect();
+                drawn.push(text);
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| quad.color == super::parse_paint_rgba("#123456").unwrap())
+                );
+                for quad in quads {
+                    let baseline = quad.center[1] - quad.half_extent[1]
+                        + label.font_size * super::GLYPH_BASELINE_RATIO;
+                    assert!((baseline - label.y).abs() < 0.001);
+                }
+                assert!(plan.bounds.x <= label.bounds.x);
+                assert!(plan.bounds.y <= label.bounds.y);
+                assert!(plan.bounds.x + plan.bounds.width >= label.bounds.x + label.bounds.width);
+                assert!(plan.bounds.y + plan.bounds.height >= label.bounds.y + label.bounds.height);
+            }
+            assert_eq!(drawn, expected);
+            assert_eq!(
+                plan,
+                super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+        }
+        let ir = fm_parser::parse("flowchart LR\nA-->B\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert!(
+            !plan
+                .text_runs
+                .iter()
+                .any(|run| run.source == super::GpuTextSource::PacketBit)
+        );
+    }
+
     /// Quadrant labels are a real Canvas2D draw source, and the plan must keep all of the same
     /// fixture's IR-backed text products that SVG emits (bd-adabx).
     #[test]
@@ -10567,6 +10682,7 @@ mod tests {
             "draw_radar",
             "draw_axis_ticks",
             "draw_packet_field_continuations",
+            "draw_packet_bits",
             "draw_quadrant_chart",
             "draw_pie_wedges",
             // PieChartLayout rows feed pie_text_blocks, the glyph atlas, and TextSink;

@@ -476,6 +476,52 @@ impl TermRenderer {
     /// Render a pre-computed layout to terminal output.
     #[must_use]
     pub fn render_layout(&self, ir: &MermaidDiagramIr, layout: &DiagramLayout) -> TermRenderResult {
+        // Packet scales may use several lanes above the first field. Reserve that measured
+        // space before fitting to cells, and translate a private copy so callers keep their
+        // original geometry. Other diagram families retain their existing coordinate system.
+        let packet_layout = if self.config.show_labels
+            && ir.diagram_type == fm_core::DiagramType::PacketBeta
+        {
+            let labels =
+                fm_layout::packet_bit_labels(ir, layout, &fm_core::FontMetrics::default_metrics());
+            (!labels.is_empty()).then(|| {
+                let mut min_x = layout.bounds.x.min(0.0);
+                let mut min_y = layout.bounds.y.min(0.0);
+                let mut right = layout.bounds.x + layout.bounds.width;
+                let mut bottom = layout.bounds.y + layout.bounds.height;
+                for label in &labels {
+                    min_x = min_x.min(label.bounds.x);
+                    min_y = min_y.min(label.bounds.y);
+                    right = right.max(label.bounds.x + label.bounds.width);
+                    bottom = bottom.max(label.bounds.y + label.bounds.height);
+                }
+                let mut shifted = layout.clone();
+                for node in &mut shifted.nodes {
+                    node.bounds.x -= min_x;
+                    node.bounds.y -= min_y;
+                }
+                for continuation in &mut shifted.extensions.packet_field_continuations {
+                    continuation.bounds.x -= min_x;
+                    continuation.bounds.y -= min_y;
+                }
+                for edge in &mut shifted.edges {
+                    for point in &mut edge.points {
+                        point.x -= min_x;
+                        point.y -= min_y;
+                    }
+                }
+                shifted.bounds = fm_layout::LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: right - min_x,
+                    height: bottom - min_y,
+                };
+                shifted
+            })
+        } else {
+            None
+        };
+        let layout = packet_layout.as_ref().unwrap_or(layout);
         let (cell_width, cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
@@ -961,6 +1007,7 @@ impl TermRenderer {
             .chunks(cell_width)
             .map(<[char]>::to_vec)
             .collect();
+        self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
         let (edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
                 self.overlay_sequence_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
@@ -3472,6 +3519,7 @@ impl TermRenderer {
             }
         }
 
+        self.overlay_packet_bit_labels(&mut lines, ir, layout, scale_x, scale_y);
         let (labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
             self.overlay_sequence_labels(
                 &mut lines,
@@ -3492,6 +3540,112 @@ impl TermRenderer {
             )
         };
         (serialize_cell_labels(&lines, &labels, false), occluded)
+    }
+
+    /// Keep the packet scale on a complete cell row above each field segment. Numbers are
+    /// indivisible data: a tight viewport may omit a range, but must never shorten its digits,
+    /// join neighbouring values, or paint over the field name. Both raster paths use this pass.
+    fn overlay_packet_bit_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+    ) {
+        if !self.config.show_labels
+            || ir.diagram_type != fm_core::DiagramType::PacketBeta
+            || !scale_x.is_finite()
+            || !scale_y.is_finite()
+            || scale_x <= 0.0
+            || scale_y <= 0.0
+        {
+            return;
+        }
+        let labels =
+            fm_layout::packet_bit_labels(ir, layout, &fm_core::FontMetrics::default_metrics());
+        let mut segments: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| ((node.node_index, 0), node.bounds))
+            .collect();
+        for continuation in &layout.extensions.packet_field_continuations {
+            if continuation.segment > 0 {
+                segments
+                    .entry((continuation.node_index, continuation.segment))
+                    .or_insert(continuation.bounds);
+            }
+        }
+
+        for range in labels.chunk_by(|left, right| {
+            left.node_index == right.node_index && left.segment == right.segment
+        }) {
+            let first = &range[0];
+            let Some(bounds) = segments.get(&(first.node_index, first.segment)) else {
+                continue;
+            };
+            let (left, top) = self.layout_point_to_cells(bounds.x, bounds.y, scale_x, scale_y);
+            let Some(top) = top.checked_add(self.config.padding) else {
+                continue;
+            };
+            let Some(base_row) = top.checked_sub(1).filter(|_| top < grid.len()) else {
+                continue;
+            };
+            let width = grid[base_row].len();
+            if left
+                .checked_add(self.config.padding)
+                .is_none_or(|left| left >= width)
+            {
+                continue;
+            }
+
+            let runs: Option<Vec<_>> = range
+                .iter()
+                .map(|label| {
+                    // Shared lanes are one font height plus four layout units apart. Preserve
+                    // their order with at least one whole terminal row between baselines.
+                    let lane_distance = (bounds.y - 4.0 - label.y).max(0.0);
+                    let lane = (lane_distance / (label.font_size + 4.0)).round() as usize;
+                    let row_offset = ((lane_distance * scale_y).ceil() as usize).max(lane);
+                    let row = base_row.checked_sub(row_offset)?;
+                    let (anchor, _) =
+                        self.layout_point_to_cells(label.x, label.y, scale_x, scale_y);
+                    let anchor = anchor.checked_add(self.config.padding)?;
+                    let length = label.text.len(); // Shared bit labels contain ASCII digits only.
+                    let col = match label.align {
+                        fm_layout::TextAlign::Start => anchor,
+                        fm_layout::TextAlign::Middle => anchor.checked_sub(length / 2)?,
+                        fm_layout::TextAlign::End => anchor.checked_sub(length)?,
+                    };
+                    let end = col.checked_add(length)?;
+                    (length > 0 && end <= width).then_some((row, col, label.text.as_str()))
+                })
+                .collect();
+            let Some(mut runs) = runs else {
+                continue;
+            };
+            runs.sort_by_key(|(row, col, _)| (*row, *col));
+            if runs
+                .windows(2)
+                .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 + pair[0].2.len() >= pair[1].1)
+                || runs.iter().any(|(row, col, text)| {
+                    let left = col.saturating_sub(1);
+                    let right = (col + text.len()).saturating_add(1).min(width);
+                    !grid[*row][left..right]
+                        .iter()
+                        .copied()
+                        .all(blank_terminal_cell)
+                })
+            {
+                continue;
+            }
+            // Check the whole range before writing either end, including one separating cell.
+            for (row, col, text) in runs {
+                for (offset, digit) in text.chars().enumerate() {
+                    grid[row][col + offset] = digit;
+                }
+            }
+        }
     }
 
     /// Sequence messages carry the same captions and directive-scoped counters in every
@@ -7731,6 +7885,272 @@ mod tests {
             ..Default::default()
         });
         ir
+    }
+
+    fn packet_numeric_tokens(output: &str) -> Vec<&str> {
+        output
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|text| !text.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn packet_bit_offsets_reach_every_terminal_mode() {
+        for (source, label, expected_rows) in [
+            (
+                "packet-beta\n28-70: \"Payload\"\n",
+                "Payload",
+                vec![vec!["28", "31"], vec!["32", "63"], vec!["64", "70"]],
+            ),
+            (
+                "packet-beta\n31-32: \"F\"\n",
+                "F",
+                vec![vec!["31"], vec!["32"]],
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = layout_diagram(&ir);
+            assert_eq!(ir.nodes.len(), 1);
+            assert_eq!(
+                layout.extensions.packet_field_continuations.len() + 1,
+                expected_rows.len()
+            );
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                    max_width: 180,
+                    max_height: 80,
+                    ..TermRenderConfig::rich()
+                };
+                let result =
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, 180, 80);
+                let number_rows: Vec<_> = result
+                    .output
+                    .lines()
+                    .map(packet_numeric_tokens)
+                    .filter(|numbers| !numbers.is_empty())
+                    .collect();
+                assert_eq!(number_rows, expected_rows, "{mode:?}:\n{}", result.output);
+                assert_eq!(
+                    result.output.matches(label).count(),
+                    expected_rows.len(),
+                    "{mode:?} lost a field caption:\n{}",
+                    result.output
+                );
+                let scale_rows: Vec<_> = result
+                    .output
+                    .lines()
+                    .enumerate()
+                    .filter_map(|(row, text)| {
+                        text.chars().any(|ch| ch.is_ascii_digit()).then_some(row)
+                    })
+                    .collect();
+                let caption_rows: Vec<_> = result
+                    .output
+                    .lines()
+                    .enumerate()
+                    .filter_map(|(row, text)| text.contains(label).then_some(row))
+                    .collect();
+                for (scale_row, caption_row) in scale_rows.iter().zip(&caption_rows) {
+                    assert!(scale_row < caption_row, "{mode:?}:\n{}", result.output);
+                }
+                assert_eq!(
+                    result.output,
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, 180, 80)
+                        .output,
+                    "{mode:?} changed the scale across identical renders"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packet_bit_offsets_preserve_dense_numeric_lanes_above_the_first_row() {
+        let ir = fm_parser::parse(
+            "packet-beta\n4294967290: \"a\"\n4294967291: \"b\"\n4294967292: \"c\"\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(ir.nodes.len(), 3);
+        let original_bounds = layout.bounds;
+        let original_node_bounds: Vec<_> = layout.nodes.iter().map(|node| node.bounds).collect();
+        let shared =
+            fm_layout::packet_bit_labels(&ir, &layout, &fm_core::FontMetrics::default_metrics());
+        assert_eq!(shared.len(), 3);
+        assert!(shared.iter().all(|label| label.bounds.y < 0.0));
+        assert!(shared.windows(2).any(|pair| pair[0].y != pair[1].y));
+
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                max_width: 220,
+                max_height: 80,
+                ..TermRenderConfig::rich()
+            };
+            let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 220, 80);
+            let mut numbers = packet_numeric_tokens(&result.output);
+            numbers.sort_unstable();
+            assert_eq!(
+                numbers,
+                ["4294967290", "4294967291", "4294967292"],
+                "{mode:?} lost a full numeric lane:\n{}",
+                result.output
+            );
+            for label in ["a", "b", "c"] {
+                assert_eq!(result.output.matches(label).count(), 1, "{}", result.output);
+            }
+            let last_scale_row = result
+                .output
+                .lines()
+                .enumerate()
+                .filter_map(|(row, text)| text.chars().any(|ch| ch.is_ascii_digit()).then_some(row))
+                .last()
+                .expect("numeric scale");
+            let field_row = result
+                .output
+                .lines()
+                .position(|text| text.contains('a'))
+                .expect("field caption");
+            assert!(last_scale_row < field_row, "{mode:?}:\n{}", result.output);
+        }
+        assert_eq!(layout.bounds, original_bounds);
+        assert_eq!(
+            layout
+                .nodes
+                .iter()
+                .map(|node| node.bounds)
+                .collect::<Vec<_>>(),
+            original_node_bounds,
+            "rendering must not move the caller's layout"
+        );
+    }
+
+    #[test]
+    fn packet_bit_offsets_ignore_caption_limits_and_honor_hidden_labels() {
+        let ir = fm_parser::parse("packet-beta\n28-70: \"P\"\n").ir;
+        let layout = layout_diagram(&ir);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                max_width: 180,
+                max_height: 80,
+                max_label_chars: 1,
+                max_label_lines: 1,
+                ..TermRenderConfig::rich()
+            };
+            let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 180, 80);
+            assert_eq!(
+                packet_numeric_tokens(&result.output),
+                ["28", "31", "32", "63", "64", "70"],
+                "{mode:?}:\n{}",
+                result.output
+            );
+            assert_eq!(result.output.matches('P').count(), 3);
+
+            for hidden in [
+                TermRenderConfig {
+                    show_labels: false,
+                    ..config.clone()
+                },
+                TermRenderConfig {
+                    fidelity_override: Some(fm_core::MermaidFidelity::Outline),
+                    ..config.clone()
+                },
+            ] {
+                let result =
+                    crate::render_term_with_layout_and_config(&ir, &layout, &hidden, 180, 80);
+                assert!(
+                    packet_numeric_tokens(&result.output).is_empty(),
+                    "{mode:?} exposed bit offsets with labels hidden:\n{}",
+                    result.output
+                );
+                assert!(!result.output.contains('P'), "{}", result.output);
+            }
+        }
+    }
+
+    #[test]
+    fn packet_bit_offsets_remain_whole_and_separate_in_tiny_viewports() {
+        let ir = fm_parser::parse(
+            "packet-beta\n10: \"A\"\n11: \"B\"\n12: \"C\"\n13: \"D\"\n14: \"E\"\n15: \"F\"\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 6);
+        let layout = layout_diagram(&ir);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            for (cols, rows) in [(8, 5), (12, 6), (16, 8)] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                    max_width: cols,
+                    max_height: rows,
+                    ..TermRenderConfig::rich()
+                };
+                let result =
+                    crate::render_term_with_layout_and_config(&ir, &layout, &config, cols, rows);
+                assert!(result.width <= cols && result.height <= rows);
+                let numbers = packet_numeric_tokens(&result.output);
+                assert!(
+                    numbers
+                        .iter()
+                        .all(|number| ["10", "11", "12", "13", "14", "15"].contains(number)),
+                    "{mode:?} clipped or joined a bit offset at {cols}x{rows}:\n{}",
+                    result.output
+                );
+                let distinct: std::collections::BTreeSet<_> = numbers.iter().collect();
+                assert_eq!(distinct.len(), numbers.len(), "{}", result.output);
+            }
+        }
+    }
+
+    #[test]
+    fn packet_bit_offsets_never_clip_long_values_into_different_numbers() {
+        let ir = fm_parser::parse("packet-beta\n4294967290: \"P\"\n").ir;
+        let layout = layout_diagram(&ir);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                max_width: 8,
+                max_height: 5,
+                ..TermRenderConfig::rich()
+            };
+            let result = crate::render_term_with_layout_and_config(&ir, &layout, &config, 8, 5);
+            assert!(
+                packet_numeric_tokens(&result.output).is_empty(),
+                "{mode:?} truncated a ten-digit bit offset to fit eight columns:\n{}",
+                result.output
+            );
+            assert!(result.width <= 8 && result.height <= 5);
+        }
     }
 
     #[test]

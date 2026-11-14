@@ -2526,6 +2526,223 @@ pub struct LayoutPacketFieldContinuation {
     pub bounds: LayoutRect,
 }
 
+/// One measured bit-offset label above a packet field's row segment.
+///
+/// A field can cross word boundaries without becoming several semantic nodes. The annotation
+/// keeps the original node identity while naming only the bits represented by this segment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutPacketBitLabel {
+    pub node_index: usize,
+    /// Zero for the primary box, one for the first continuation, and so on.
+    pub segment: usize,
+    pub text: String,
+    pub x: f32,
+    /// Alphabetic baseline in layout coordinates.
+    pub y: f32,
+    pub font_size: f32,
+    pub align: TextAlign,
+    /// Measured ink allowance, including a small margin for font variation.
+    pub bounds: LayoutRect,
+}
+
+impl LayoutPacketBitLabel {
+    #[must_use]
+    pub fn to_render_text(&self, color: &str) -> RenderText {
+        RenderText {
+            source: RenderSource::Node(self.node_index),
+            text: self.text.clone(),
+            x: self.x,
+            y: self.y,
+            font_size: self.font_size,
+            align: self.align,
+            baseline: TextBaseline::Alphabetic,
+            fill: FillStyle::Solid {
+                color: color.to_owned(),
+                opacity: 1.0,
+            },
+        }
+    }
+}
+
+/// Resolve a packet's numeric scale from its actual row segments, without moving field geometry.
+///
+/// A field spanning bits 28–70 has three pairs: 28–31, 32–63 and 64–70. A single-bit
+/// segment gets one label, including the single-bit pieces of a field crossing a word boundary.
+/// All renderers consume this same composition so a wrapped field cannot acquire a misleading
+/// whole-field range on its first box or lose the scale on its continuation rows.
+#[must_use]
+pub fn packet_bit_labels(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutPacketBitLabel> {
+    let mut labels = packet_bit_labels_unpacked(ir, layout, metrics);
+    pack_packet_bit_labels(&mut labels);
+    labels
+}
+
+fn packet_bit_labels_unpacked(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutPacketBitLabel> {
+    let Some(meta) = ir
+        .packet_meta
+        .as_ref()
+        .filter(|_| ir.diagram_type == DiagramType::PacketBeta)
+    else {
+        return Vec::new();
+    };
+    let primary: BTreeMap<_, _> = layout
+        .nodes
+        .iter()
+        .map(|node| (node.node_index, node.bounds))
+        .collect();
+    let mut continuations: BTreeMap<usize, Vec<_>> = BTreeMap::new();
+    for continuation in &layout.extensions.packet_field_continuations {
+        if continuation.segment > 0 {
+            continuations
+                .entry(continuation.node_index)
+                .or_default()
+                .push(continuation);
+        }
+    }
+    let label_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: (metrics.font_size() - 4.0).max(1.0),
+        ..metrics.config().clone()
+    });
+    let font_size = label_metrics.font_size();
+    let bits_per_row = u64::from(PACKET_BITS_PER_ROW);
+    let mut seen = BTreeSet::new();
+    let mut labels = Vec::new();
+    for field in &meta.fields {
+        if field.node.0 >= ir.nodes.len()
+            || field.start_bit > field.end_bit
+            || !seen.insert(field.node.0)
+        {
+            continue;
+        }
+        let Some(first) = primary.get(&field.node.0) else {
+            continue;
+        };
+        let mut segments = vec![(0, *first)];
+        if let Some(continued) = continuations.get(&field.node.0) {
+            segments.extend(continued.iter().map(|part| (part.segment, part.bounds)));
+        }
+        segments.sort_by_key(|(segment, _)| *segment);
+        segments.dedup_by_key(|(segment, _)| *segment);
+        segments.retain(|(_, rect)| {
+            rect.x.is_finite()
+                && rect.y.is_finite()
+                && rect.width.is_finite()
+                && rect.height.is_finite()
+                && rect.width > 0.0
+                && rect.height > 0.0
+        });
+        let expected_segments =
+            u64::from(field.end_bit) / bits_per_row - u64::from(field.start_bit) / bits_per_row + 1;
+        let complete = u64::try_from(segments.len()) == Ok(expected_segments)
+            && segments
+                .iter()
+                .enumerate()
+                .all(|(index, (segment, _))| index == *segment);
+        if !complete {
+            // A generic fallback can represent the entire field with one box. Preserve its
+            // full range rather than pretending it ends at the first word boundary. Work is
+            // bounded by supplied geometry, never by a potentially enormous declared range.
+            segments.retain(|(segment, _)| *segment == 0);
+        }
+        for (segment, rect) in segments {
+            let Some(row) = u64::try_from(segment).ok().and_then(|segment| {
+                (u64::from(field.start_bit) / bits_per_row).checked_add(segment)
+            }) else {
+                continue;
+            };
+            let Some(row_start) = row.checked_mul(bits_per_row) else {
+                continue;
+            };
+            let start = row_start.max(u64::from(field.start_bit));
+            if start > u64::from(field.end_bit) {
+                continue;
+            }
+            let end = if complete {
+                (row_start + bits_per_row - 1).min(u64::from(field.end_bit))
+            } else {
+                u64::from(field.end_bit)
+            };
+            // A small inset separates neighboring fields' scale labels at their shared edge.
+            // It changes only text anchors; field widths still encode the exact bit count.
+            let inset = 2.0_f32.min(rect.width / 2.0);
+            let ends = [
+                (start, rect.x + inset, TextAlign::Start),
+                (end, rect.x + rect.width - inset, TextAlign::End),
+            ];
+            for (bit, x, align) in ends.into_iter().take(if start == end { 1 } else { 2 }) {
+                let text = bit.to_string();
+                let width = label_metrics.estimate_width(&text) * 1.15;
+                let y = rect.y - 4.0;
+                labels.push(LayoutPacketBitLabel {
+                    node_index: field.node.0,
+                    segment,
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    align,
+                    bounds: LayoutRect {
+                        x: x - if align == TextAlign::End { width } else { 0.0 } - 2.0,
+                        y: y - font_size,
+                        width: width + 4.0,
+                        // Decimal digits have no descenders. Keep full-font ascent and two
+                        // pixels below the baseline, entirely above the field's top edge.
+                        height: font_size + 2.0,
+                    },
+                });
+            }
+        }
+    }
+    labels
+}
+
+/// Pack the scale above each actual row and return the vertical clearance it needs. Labels from
+/// different fields share lanes, so adjacent one-bit flags at large absolute offsets stay legible.
+/// Sorting indices preserves the public composition's authored field/segment order.
+fn pack_packet_bit_labels(labels: &mut [LayoutPacketBitLabel]) -> f32 {
+    let mut order: Vec<_> = (0..labels.len()).collect();
+    order.sort_by(|&left, &right| {
+        labels[left]
+            .y
+            .total_cmp(&labels[right].y)
+            .then_with(|| labels[left].bounds.x.total_cmp(&labels[right].bounds.x))
+            .then(left.cmp(&right))
+    });
+    let mut row_y = None;
+    let mut lane_ends = Vec::<f32>::new();
+    let mut clearance = 0.0_f32;
+    for index in order {
+        let label = &mut labels[index];
+        if row_y != Some(label.y) {
+            row_y = Some(label.y);
+            lane_ends.clear();
+        }
+        let lane = lane_ends
+            .iter()
+            .position(|&right| right <= label.bounds.x + 0.001)
+            .unwrap_or(lane_ends.len());
+        let right = label.bounds.x + label.bounds.width;
+        if lane == lane_ends.len() {
+            lane_ends.push(right);
+        } else {
+            lane_ends[lane] = right;
+        }
+        let offset = lane as f32 * (label.bounds.height + 2.0);
+        label.y -= offset;
+        label.bounds.y -= offset;
+        clearance = clearance.max(label.font_size + 4.0 + offset);
+    }
+    clearance
+}
+
 /// A sequence diagram note positioned near a participant's lifeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutSequenceNote {
@@ -3875,6 +4092,10 @@ pub fn build_render_scene_with_metrics(
             metrics,
         );
     }
+    let packet_bits = packet_bit_labels(ir, layout, metrics);
+    for label in &packet_bits {
+        include_packing_bounds(&mut content_bounds, label.bounds);
+    }
     if ir.diagram_type == DiagramType::Sequence {
         for number in layout
             .edges
@@ -3915,6 +4136,16 @@ pub fn build_render_scene_with_metrics(
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
     root.children.push(RenderItem::Group(node_layer));
     root.children.push(RenderItem::Group(label_layer));
+    if !packet_bits.is_empty() {
+        let mut bits = RenderGroup::new(Some(String::from("packet-bit-labels")))
+            .with_source(RenderSource::Diagram);
+        bits.children.extend(
+            packet_bits
+                .iter()
+                .map(|label| RenderItem::Text(label.to_render_text("#0f172a"))),
+        );
+        root.children.push(RenderItem::Group(bits));
+    }
     if !band_labels.children.is_empty() {
         root.children.push(RenderItem::Group(band_labels));
     }
@@ -6817,7 +7048,13 @@ fn compute_traced_layout_with_config_and_guardrails(
             config.spacing,
         ),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
-        LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
+        LayoutAlgorithm::Packet => layout_diagram_packet_traced(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+        ),
         LayoutAlgorithm::Sequence => layout_diagram_sequence_traced_with_metrics(
             ir,
             config
@@ -14933,11 +15170,8 @@ const PACKET_BIT_WIDTH: f32 = 32.0;
 /// Bits per row before wrapping, matching the pinned incumbent's `bitsPerRow`.
 const PACKET_BITS_PER_ROW: u32 = 32;
 
-/// Minimum row height, matching the pinned incumbent's `rowHeight`. The actual row height is the
-/// larger of this and what a two-line field label needs — our field labels carry the bit range on
-/// a second line (`"Source Port\n[0-15]"`), which mermaid draws as separate `packetByte` text
-/// above the block instead. Two lines is a constant of the diagram type, not of any label's text,
-/// so row height stays independent of what the fields are called.
+/// Minimum row height, matching the pinned incumbent's `rowHeight`. The actual row height leaves
+/// room for at least two label rows and expands for authored multiline text or larger fonts.
 const PACKET_ROW_HEIGHT_MIN: f32 = 32.0;
 
 /// Vertical gap between rows: the incumbent's `paddingY` (5) plus the 10 its `getConfig` adds when
@@ -14946,7 +15180,7 @@ const PACKET_ROW_GAP: f32 = 15.0;
 
 /// Lay out a `packet-beta` diagram as a bit ruler.
 ///
-/// Every geometric quantity comes from the declared bit range and nothing else:
+/// Horizontal geometry comes from the declared bit range and nothing else:
 ///
 /// * `width  = bit_count * PACKET_BIT_WIDTH` — so equal bit counts are equal widths, and a 32-bit
 ///   field is exactly twice a 16-bit one;
@@ -14954,16 +15188,17 @@ const PACKET_ROW_GAP: f32 = 15.0;
 ///   bit's offset within its row;
 /// * `row    = start_bit / PACKET_BITS_PER_ROW` — rows wrap every 32 bits.
 ///
-/// Label text is read for nothing, so renaming a field cannot move anything (bd-51tz). Before
-/// this existed, packet-beta fell through to `layout_diagram_grid_traced`, which sizes boxes from
+/// Renaming a field cannot change its horizontal position or width (bd-51tz). Before this
+/// existed, packet-beta fell through to `layout_diagram_grid_traced`, which sizes boxes from
 /// their labels: the fixture's three 16-bit fields rendered 148.72 / 176.77 / 154.50 wide and its
 /// 4-bit field rendered WIDER than its 6-bit one.
 ///
-/// KNOWN DIVERGENCE (bd-8vr0): a field that straddles a row boundary is drawn as one box at its
-/// start bit and overflows its row to the right. mermaid splits such a block into one box per row
-/// (`getNextFittingBlock`), which needs a second box for one IR node and therefore a layout
-/// extension the renderer draws; that is filed separately rather than approximated here.
-fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+/// Row heights accommodate the configured label metrics, and the inter-row gap keeps the bit
+/// scale above its own row without colliding with the preceding field at larger font sizes.
+fn layout_diagram_packet_traced(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let Some(packet) = ir.packet_meta.as_ref().filter(|m| !m.fields.is_empty()) else {
         // Nothing declared a bit range (e.g. the `A -> B` connection form), so there is no ruler
         // to lay out and the generic grid remains the honest answer.
@@ -14971,13 +15206,19 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     let mut trace = LayoutTrace::default();
-    let metrics = fm_core::FontMetrics::default_metrics();
     let node_count = ir.nodes.len();
-    let row_height = metrics
-        .line_height_px()
-        .mul_add(2.0, 10.0)
-        .max(PACKET_ROW_HEIGHT_MIN);
-    let row_pitch = row_height + PACKET_ROW_GAP;
+    let row_height = ir.nodes.iter().enumerate().fold(
+        metrics
+            .line_height_px()
+            .mul_add(2.0, 10.0)
+            .max(PACKET_ROW_HEIGHT_MIN),
+        |height, (index, node)| {
+            let metrics = ir.effective_node_font_metrics(index, metrics);
+            let rows = ir.node_layout_text(node, &metrics).lines().count().max(2);
+            height.max(metrics.line_height_px().mul_add(rows as f32, 10.0))
+        },
+    );
+    let row_pitch = row_height + PACKET_ROW_GAP.max(metrics.font_size());
 
     // Bit-derived box per declared field, indexed by node so a node interned twice (or a node the
     // fallback parse produced) is handled exactly once below.
@@ -15072,35 +15313,57 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
+    let mut layout = DiagramLayout {
+        nodes,
+        clusters: Vec::new(),
+        cycle_clusters: Vec::new(),
+        // The parser chains fields with sequential edges so the generic grid could order them.
+        // A bit ruler already carries that order in its geometry, and the incumbent draws no
+        // connectors between packet fields, so none are routed here.
+        edges: Vec::new(),
+        bounds: LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        },
+        stats: LayoutStats {
+            node_count,
+            ..LayoutStats::default()
+        },
+        extensions: LayoutExtensions {
+            packet_field_continuations: continuations,
+            ..LayoutExtensions::default()
+        },
+        dirty_regions: Vec::new(),
+    };
+    // Narrow fields can have much wider numeric offsets than boxes, especially at large
+    // absolute bit positions. Reserve the measured lanes before committing the final row pitch,
+    // otherwise a legible scale above one row would overwrite the preceding row's field bodies.
+    let mut bit_labels = packet_bit_labels_unpacked(ir, &layout, metrics);
+    let clearance = pack_packet_bit_labels(&mut bit_labels);
+    let measured_pitch = row_height + PACKET_ROW_GAP.max(metrics.font_size()).max(clearance);
+    if measured_pitch > row_pitch {
+        let scale = measured_pitch / row_pitch;
+        for node in &mut layout.nodes {
+            node.bounds.y *= scale;
+        }
+        for continuation in &mut layout.extensions.packet_field_continuations {
+            continuation.bounds.y *= scale;
+        }
+    }
+
     // Bounds must contain the continuations too, or a split field's second half is clipped.
-    let mut bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
-    for continuation in &continuations {
+    layout.bounds = compute_bounds(&layout.nodes, &[], &[], LayoutSpacing::default());
+    for continuation in &layout.extensions.packet_field_continuations {
         let right = continuation.bounds.x + continuation.bounds.width;
         let bottom = continuation.bounds.y + continuation.bounds.height;
-        bounds.width = bounds.width.max(right - bounds.x);
-        bounds.height = bounds.height.max(bottom - bounds.y);
+        layout.bounds.width = layout.bounds.width.max(right - layout.bounds.x);
+        layout.bounds.height = layout.bounds.height.max(bottom - layout.bounds.y);
     }
 
     TracedLayout {
-        layout: Arc::new(DiagramLayout {
-            nodes,
-            clusters: Vec::new(),
-            cycle_clusters: Vec::new(),
-            // The parser chains fields with sequential edges so the generic grid could order them.
-            // A bit ruler already carries that order in its geometry, and the incumbent draws no
-            // connectors between packet fields, so none are routed here.
-            edges: Vec::new(),
-            bounds,
-            stats: LayoutStats {
-                node_count,
-                ..LayoutStats::default()
-            },
-            extensions: LayoutExtensions {
-                packet_field_continuations: continuations,
-                ..LayoutExtensions::default()
-            },
-            dirty_regions: Vec::new(),
-        }),
+        layout: Arc::new(layout),
         trace,
     }
 }
@@ -34375,6 +34638,213 @@ mod tests {
         }
         ir.packet_meta = Some(meta);
         ir
+    }
+
+    #[test]
+    fn packet_bit_labels_name_each_actual_segment_and_keep_singletons_once() {
+        for (range, expected) in [
+            ("0-63", vec!["0", "31", "32", "63"]),
+            ("28-70", vec!["28", "31", "32", "63", "64", "70"]),
+            ("31-32", vec!["31", "32"]),
+            ("0", vec!["0"]),
+            ("4294967294-4294967295", vec!["4294967294", "4294967295"]),
+            ("4294967295", vec!["4294967295"]),
+        ] {
+            let ir = parse(&format!("packet-beta\n{range}: \"Payload\"\n")).ir;
+            let layout = layout_diagram(&ir);
+            let metrics = fm_core::FontMetrics::default_metrics();
+            let labels = super::packet_bit_labels(&ir, &layout, &metrics);
+            assert_eq!(
+                labels
+                    .iter()
+                    .map(|label| label.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "incorrect scale for {range}"
+            );
+            assert!(labels.iter().all(|label| label.node_index == 0));
+            let scene = build_render_scene(&ir, &layout);
+            let bits = scene
+                .root
+                .children
+                .iter()
+                .find_map(|item| match item {
+                    RenderItem::Group(group)
+                        if group.id.as_deref() == Some("packet-bit-labels") =>
+                    {
+                        Some(group)
+                    }
+                    _ => None,
+                })
+                .expect("packet scale group");
+            assert_eq!(bits.children.len(), expected.len());
+            for label in &labels {
+                assert!(scene.bounds.x <= label.bounds.x);
+                assert!(scene.bounds.y <= label.bounds.y);
+                assert!(scene.bounds.x + scene.bounds.width >= label.bounds.x + label.bounds.width);
+                assert!(
+                    scene.bounds.y + scene.bounds.height >= label.bounds.y + label.bounds.height
+                );
+                assert!(label.bounds.width.is_finite() && label.bounds.height.is_finite());
+            }
+            assert_eq!(labels, super::packet_bit_labels(&ir, &layout, &metrics));
+        }
+    }
+
+    #[test]
+    fn packet_bit_labels_preserve_full_ranges_in_bounded_fallback_geometry() {
+        let narrow = packet_ir(&[("field", 0, 1)]);
+        let mut layout = layout_diagram(&narrow);
+        let wide = packet_ir(&[("field", 0, u32::MAX)]);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        // Do not expand a four-billion-bit range to discover that the supplied generic
+        // layout has only one box. Keep the complete authored scale on that box instead.
+        let labels = super::packet_bit_labels(&wide, &layout, &metrics);
+        assert_eq!(
+            labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "4294967295"]
+        );
+        assert!(
+            labels[0].bounds.y + labels[0].bounds.height <= labels[1].bounds.y
+                || labels[1].bounds.y + labels[1].bounds.height <= labels[0].bounds.y,
+            "the full fallback range must remain readable on its narrow box"
+        );
+        layout
+            .extensions
+            .packet_field_continuations
+            .push(super::LayoutPacketFieldContinuation {
+                node_index: 0,
+                segment: usize::MAX,
+                bounds: layout.nodes[0].bounds,
+            });
+        assert_eq!(labels, super::packet_bit_labels(&wide, &layout, &metrics));
+        layout.nodes[0].bounds.width = f32::NAN;
+        assert!(super::packet_bit_labels(&wide, &layout, &metrics).is_empty());
+
+        let mut flowchart = parse("flowchart LR\nA-->B\n").ir;
+        flowchart.packet_meta = wide.packet_meta;
+        assert!(super::packet_bit_labels(&flowchart, &layout, &metrics).is_empty());
+    }
+
+    #[test]
+    fn packet_layout_reserves_configured_text_height_without_changing_bit_widths() {
+        let ir = parse("packet-beta\n28-70: \"Payload\"\n").ir;
+        let ordinary = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::monospace(36.0);
+        let configured = super::layout_diagram_traced_with_config(
+            &ir,
+            LayoutAlgorithm::Packet,
+            super::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        )
+        .layout;
+        assert_eq!(configured.nodes[0].bounds.x, ordinary.nodes[0].bounds.x);
+        assert_eq!(
+            configured.nodes[0].bounds.width,
+            ordinary.nodes[0].bounds.width
+        );
+        assert!(configured.nodes[0].bounds.height > ordinary.nodes[0].bounds.height);
+        let labels = super::packet_bit_labels(&ir, &configured, &metrics);
+        assert!(labels.iter().all(|label| label.font_size == 32.0));
+        let mut previous = configured.nodes[0].bounds;
+        for continuation in &configured.extensions.packet_field_continuations {
+            let ordinary_part =
+                &ordinary.extensions.packet_field_continuations[continuation.segment - 1];
+            assert_eq!(continuation.bounds.x, ordinary_part.bounds.x);
+            assert_eq!(continuation.bounds.width, ordinary_part.bounds.width);
+            for label in labels
+                .iter()
+                .filter(|label| label.segment == continuation.segment)
+            {
+                assert!(label.y - label.font_size + 0.001 >= previous.y + previous.height);
+                assert!(label.y < continuation.bounds.y);
+            }
+            previous = continuation.bounds;
+        }
+        let small =
+            super::packet_bit_labels(&ir, &configured, &fm_core::FontMetrics::monospace(2.0));
+        assert!(small.iter().all(|label| label.font_size == 1.0));
+    }
+
+    #[test]
+    fn packet_bit_labels_pack_dense_large_offsets_without_covering_fields() {
+        let mut source = "packet-beta\n4294967232-4294967263: \"Previous word\"\n".to_owned();
+        for bit in 4_294_967_264_u32..4_294_967_294_u32 {
+            source.push_str(&format!("{bit}: \"Flag\"\n"));
+        }
+        source.push_str("4294967294-4294967295: \"Last pair\"\n");
+        let ir = parse(&source).ir;
+        for font_size in [15.0, 36.0] {
+            let metrics = fm_core::FontMetrics::monospace(font_size);
+            let layout = super::layout_diagram_traced_with_config(
+                &ir,
+                LayoutAlgorithm::Packet,
+                super::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            )
+            .layout;
+            let labels = super::packet_bit_labels(&ir, &layout, &metrics);
+            assert_eq!(
+                labels.len(),
+                34,
+                "all endpoints and singleton flags survive"
+            );
+            assert!(
+                labels.iter().skip(3).any(|label| label.y != labels[2].y),
+                "wide offsets require more than one lane"
+            );
+            for (index, label) in labels.iter().enumerate() {
+                let owner = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == label.node_index)
+                    .expect("field owns its numeric scale")
+                    .bounds;
+                assert!(label.bounds.y + label.bounds.height <= owner.y + 0.001);
+                for other in &labels[index + 1..] {
+                    let overlap_x = (label.bounds.x + label.bounds.width)
+                        .min(other.bounds.x + other.bounds.width)
+                        - label.bounds.x.max(other.bounds.x);
+                    let overlap_y = (label.bounds.y + label.bounds.height)
+                        .min(other.bounds.y + other.bounds.height)
+                        - label.bounds.y.max(other.bounds.y);
+                    assert!(
+                        overlap_x <= 0.001 || overlap_y <= 0.001,
+                        "{} and {} overlap at font size {font_size}",
+                        label.text,
+                        other.text
+                    );
+                }
+                for previous in layout.nodes.iter().filter(|node| node.bounds.y < owner.y) {
+                    assert!(
+                        label.bounds.y + 0.001 >= previous.bounds.y + previous.bounds.height,
+                        "{} covers the preceding field at font size {font_size}",
+                        label.text
+                    );
+                }
+            }
+            assert_eq!(layout.nodes[1].bounds.width, super::PACKET_BIT_WIDTH);
+            assert_eq!(
+                layout.nodes.last().expect("last pair").bounds.width,
+                super::PACKET_BIT_WIDTH * 2.0
+            );
+            assert_eq!(labels, super::packet_bit_labels(&ir, &layout, &metrics));
+        }
+
+        let ordinary = packet_ir(&[("a", 0, 15), ("b", 16, 31), ("c", 32, 47)]);
+        let layout = layout_diagram(&ordinary);
+        assert_eq!(
+            layout.nodes[2].bounds.y - layout.nodes[0].bounds.height,
+            super::PACKET_ROW_GAP,
+            "ordinary readable rows keep the original pitch"
+        );
     }
 
     /// Width is `bits * bit_width` and x is the start bit's offset in its row — nothing else

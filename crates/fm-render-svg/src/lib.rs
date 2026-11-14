@@ -2647,12 +2647,30 @@ fn render_scene_group(
     .then(|| resolve_theme(ir, config));
     let sequence_number_theme =
         (group.id.as_deref() == Some("sequence-numbers")).then(|| resolve_theme(ir, config));
+    let packet_bit_theme =
+        (group.id.as_deref() == Some("packet-bit-labels")).then(|| resolve_theme(ir, config));
     let packet_layer = ir.is_some_and(|ir| ir.diagram_type == DiagramType::PacketBeta)
         && matches!(group.id.as_deref(), Some("nodes" | "labels"));
     let mut announced_packet_nodes = std::collections::BTreeSet::new();
     for (index, child) in group.children.iter().enumerate() {
         let mut rendered =
             render_scene_item(child, config, ir, clip_defs, clip_id_counter, interactions);
+        if let Some(theme) = &packet_bit_theme
+            && let RenderItem::Text(text) = child
+        {
+            // Numeric scale annotations keep their measured font and page contrast. A field's
+            // caption styling must not resize or recolor its bit offsets.
+            rendered = apply_source_metadata(
+                render_scene_text(text, config, None, false, true),
+                text.source,
+                config.include_source_spans,
+                ir,
+                false,
+            )
+            .fill(&theme.colors.text)
+            .class("fm-packet-bit")
+            .attr("aria-hidden", "true");
+        }
         if let Some(theme) = &sequence_number_theme {
             rendered = match child {
                 RenderItem::Path(_) => rendered
@@ -2773,6 +2791,8 @@ fn render_scene_group(
         // Group-specific paint and typography belong on the actual geometry. Finish interaction
         // wrappers afterwards so explicit leaf attributes cannot override a themed wrapper.
         let rendered = match child {
+            // Numeric scale annotations share the field's source span, not its click target.
+            RenderItem::Text(_) if packet_bit_theme.is_some() => rendered,
             // Lifelines carry a node source for traceability, but actor headers own actions.
             // A zero-width vertical line would also make an unusable canonical menu anchor.
             RenderItem::Path(_) if group.id.as_deref() == Some("sequence-lifelines") => rendered,
@@ -5347,6 +5367,16 @@ fn svg_geometry(
             bounds.height = bottom - bounds.y;
         }
     }
+    if ir.diagram_type == DiagramType::PacketBeta {
+        for label in fm_layout::packet_bit_labels(ir, layout, &config.font_metrics()) {
+            let right = (bounds.x + bounds.width).max(label.bounds.x + label.bounds.width);
+            let bottom = (bounds.y + bounds.height).max(label.bounds.y + label.bounds.height);
+            bounds.x = bounds.x.min(label.bounds.x);
+            bounds.y = bounds.y.min(label.bounds.y);
+            bounds.width = right - bounds.x;
+            bounds.height = bottom - bounds.y;
+        }
+    }
 
     let mut frame = SvgFrame {
         viewbox_width: (bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
@@ -5851,52 +5881,33 @@ fn render_layout_to_svg(
         );
     }
 
-    // PACKET BIT MARKINGS. mermaid labels each field with its name and, separately, the first and
-    // last bit of its range — `0-3: "A"` draws ["A","0","3"] — so the numbers read as a scale beside
-    // the field rather than as text inside it.
-    //
-    // ⚠️ A SINGLE-BIT FIELD GETS ONE NUMBER, NOT TWO. `0: "Flag"` draws ["Flag","0"], measured on the
-    // pinned bundle. Emitting both ends unconditionally would print `0` twice on every one-bit flag,
-    // which every multi-bit fixture agrees with and no single-bit one does.
-    if let Some(packet_meta) = ir.packet_meta.as_ref() {
-        for field in &packet_meta.fields {
-            let Some(node_box) = layout
-                .nodes
-                .iter()
-                .find(|candidate| candidate.node_index == field.node.0)
-            else {
-                continue;
-            };
-            let bit_y = node_box.bounds.y + offset_y - 4.0;
-            let mut marks: Vec<(f32, TextAnchor, u32)> = vec![(
-                node_box.bounds.x + offset_x,
-                TextAnchor::Start,
-                field.start_bit,
-            )];
-            if field.end_bit != field.start_bit {
-                marks.push((
-                    node_box.bounds.x + offset_x + node_box.bounds.width,
-                    TextAnchor::End,
-                    field.end_bit,
-                ));
-            }
-            for (x, anchor, bit) in marks {
-                doc = doc.child(
-                    TextBuilder::new(&bit.to_string())
-                        .x(x)
-                        .y(bit_y)
-                        .anchor(anchor)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .font_size(config.font_size - 4.0)
-                        .fill(&theme.colors.text)
-                        .class("fm-packet-bit")
-                        .build(),
-                );
-            }
-        }
+    // A wrapped field has a separate range on each row. Use the same measured labels as the
+    // scene and canvas renderers so a 28–70 field reads 28–31, 32–63, then 64–70.
+    for bit in fm_layout::packet_bit_labels(ir, layout, &config.font_metrics()) {
+        let anchor = match bit.align {
+            fm_layout::TextAlign::Start => TextAnchor::Start,
+            fm_layout::TextAlign::Middle => TextAnchor::Middle,
+            fm_layout::TextAlign::End => TextAnchor::End,
+        };
+        let label = TextBuilder::new(&bit.text)
+            .x(bit.x + offset_x)
+            .y(bit.y + offset_y)
+            .anchor(anchor)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(bit.font_size)
+            .fill(&theme.colors.text)
+            .class("fm-packet-bit")
+            .build();
+        doc = doc.child(
+            apply_source_metadata(
+                label,
+                RenderSource::Node(bit.node_index),
+                config.include_source_spans,
+                Some(ir),
+                false,
+            )
+            .attr("aria-hidden", "true"),
+        );
     }
 
     if let Some(journey) = &layout.extensions.journey {

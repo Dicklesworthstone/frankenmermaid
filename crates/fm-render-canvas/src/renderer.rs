@@ -614,6 +614,18 @@ impl Canvas2dRenderer {
                 )
             });
 
+        let packet_bits = fm_layout::packet_bit_labels(ir, layout, &self.config.font_metrics());
+        for label in &packet_bits {
+            let right =
+                (render_bounds.x + render_bounds.width).max(label.bounds.x + label.bounds.width);
+            let bottom =
+                (render_bounds.y + render_bounds.height).max(label.bounds.y + label.bounds.height);
+            render_bounds.x = render_bounds.x.min(label.bounds.x);
+            render_bounds.y = render_bounds.y.min(label.bounds.y);
+            render_bounds.width = right - render_bounds.x;
+            render_bounds.height = bottom - render_bounds.y;
+        }
+
         if ir.diagram_type == DiagramType::Sequence {
             let metrics = self.config.font_metrics();
             for number in layout
@@ -817,6 +829,9 @@ impl Canvas2dRenderer {
 
         // Draw nodes
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
+
+        self.draw_packet_bits(&packet_bits, ctx, offset_x, offset_y);
+        labels_drawn += packet_bits.len();
 
         labels_drawn += self.draw_sequence_numbers(layout, ir, ctx, offset_x, offset_y);
 
@@ -2387,6 +2402,41 @@ impl Canvas2dRenderer {
             ctx.fill_text(label, x + w / 2.0, y + h / 2.0);
             self.draw_calls += 1;
         }
+    }
+
+    /// Bit labels describe the packet scale and therefore use the configured annotation face,
+    /// independently of the field name's authored typography or paint.
+    fn draw_packet_bits<C: Canvas2dContext>(
+        &mut self,
+        labels: &[fm_layout::LayoutPacketBitLabel],
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        let Some(first) = labels.first() else {
+            return;
+        };
+        ctx.save();
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&format!(
+            "{}px {}",
+            first.font_size, self.config.font_family
+        ));
+        ctx.set_text_baseline(TextBaseline::Alphabetic);
+        for label in labels {
+            ctx.set_text_align(match label.align {
+                IrTextAlign::Start => TextAlign::Left,
+                IrTextAlign::Middle => TextAlign::Center,
+                IrTextAlign::End => TextAlign::Right,
+            });
+            ctx.fill_text(
+                &label.text,
+                f64::from(label.x) + offset_x,
+                f64::from(label.y) + offset_y,
+            );
+            self.draw_calls += 1;
+        }
+        ctx.restore();
     }
 
     fn draw_axis_ticks<C: Canvas2dContext>(
@@ -12705,6 +12755,78 @@ mod tests {
                 result.nodes_drawn, 2,
                 "segments retain one semantic field identity"
             );
+        }
+    }
+
+    #[test]
+    fn canvas_packet_scale_preserves_segment_ranges_and_configured_annotations() {
+        let config = CanvasRenderConfig {
+            font_size: 24.0,
+            font_family: "monospace".to_owned(),
+            label_color: "#123456".to_owned(),
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        for (source, expected) in [
+            (
+                "packet-beta\n28-70: \"Payload\"\n71: \"Flag\"\n",
+                vec!["28", "31", "32", "63", "64", "70", "71"],
+            ),
+            ("packet-beta\n31-32: \"Boundary\"\n", vec!["31", "32"]),
+            ("packet-beta\n4294967295: \"Last\"\n", vec!["4294967295"]),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = layout_diagram(&ir);
+            let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+            let result = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            let mut font = String::new();
+            let mut fill = String::new();
+            let mut drawn = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetFont(value) => font.clone_from(value),
+                    DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                    DrawOperation::FillText(text, x, y)
+                        if text.chars().all(|c| c.is_ascii_digit()) =>
+                    {
+                        assert_eq!(font, "20px monospace");
+                        assert_eq!(fill, "#123456");
+                        drawn.push((text.as_str(), *x, *y));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                drawn.iter().map(|(text, _, _)| *text).collect::<Vec<_>>(),
+                expected
+            );
+            for ((_, x, y), label) in drawn.iter().zip(fm_layout::packet_bit_labels(
+                &ir,
+                &layout,
+                &config.font_metrics(),
+            )) {
+                assert!((x - f64::from(label.x) - result.viewport.offset_x).abs() < 0.001);
+                assert!((y - f64::from(label.y) - result.viewport.offset_y).abs() < 0.001);
+            }
+
+            let scene =
+                fm_layout::build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+            let mut scene_ctx = MockCanvas2dContext::new(1400.0, 700.0);
+            let _ = crate::render_scene_to_canvas(&scene, &mut scene_ctx, &config);
+            let scene_bits: Vec<_> = scene_ctx
+                .operations()
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::FillText(text, _, _)
+                        if text.chars().all(|c| c.is_ascii_digit()) =>
+                    {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(scene_bits, expected);
         }
     }
 

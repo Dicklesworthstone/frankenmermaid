@@ -47,6 +47,109 @@ fn runs(source: &str) -> Vec<String> {
     out
 }
 
+fn bit_marks(svg: &str) -> Vec<(&str, &str)> {
+    svg.split("<text")
+        .skip(1)
+        .filter_map(|part| part.split_once('>'))
+        .filter(|(tag, _)| tag.contains("fm-packet-bit"))
+        .map(|(tag, body)| (tag, body.split_once("</text>").expect("closed bit label").0))
+        .collect()
+}
+
+fn numeric_attribute(tag: &str, name: &str) -> f32 {
+    tag.split_once(&format!(" {name}=\""))
+        .unwrap_or_else(|| panic!("missing {name} in {tag}"))
+        .1
+        .split('"')
+        .next()
+        .expect("attribute value")
+        .parse()
+        .expect("finite numeric attribute")
+}
+
+#[test]
+fn every_packet_row_marks_only_the_bits_that_it_contains() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    for (range, expected) in [
+        ("28-70", vec!["28", "31", "32", "63", "64", "70"]),
+        ("31-32", vec!["31", "32"]),
+        ("0-31", vec!["0", "31"]),
+        ("4294967294-4294967295", vec!["4294967294", "4294967295"]),
+    ] {
+        let ir = fm_parser::parse(&format!("packet-beta\n{range}: \"Payload\"\n")).ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [true, false] {
+                let config = SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    include_source_spans: true,
+                    ..Default::default()
+                };
+                let svg = render_svg_with_config(&ir, &config);
+                let marks = bit_marks(&svg);
+                assert_eq!(
+                    marks.iter().map(|(_, bit)| *bit).collect::<Vec<_>>(),
+                    expected,
+                    "{backend:?}, {range}"
+                );
+                for (tag, _) in &marks {
+                    assert!(tag.contains("data-fm-source-kind=\"node\""));
+                    assert!(tag.contains("data-fm-source-index=\"0\""));
+                    assert!(tag.contains("data-fm-source-span="));
+                    assert!(tag.contains("aria-hidden=\"true\""));
+                }
+                if range == "28-70" {
+                    let rows: Vec<_> = marks
+                        .iter()
+                        .map(|(tag, _)| numeric_attribute(tag, "y"))
+                        .collect();
+                    assert_eq!(rows[0], rows[1]);
+                    assert_eq!(rows[2], rows[3]);
+                    assert_eq!(rows[4], rows[5]);
+                    assert!(rows[0] < rows[2] && rows[2] < rows[4]);
+                }
+                assert_eq!(svg, render_svg_with_config(&ir, &config));
+            }
+        }
+    }
+}
+
+#[test]
+fn packet_scale_keeps_configured_typography_and_contrast() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset, render_svg_with_config};
+
+    let mut ir = fm_parser::parse("packet-beta\n28-70: \"Payload\"\n").ir;
+    ir.style_refs.push(fm_core::IrStyleRef {
+        target: fm_core::IrStyleTarget::Node(fm_core::IrNodeId(0)),
+        style: "font-size:40px,font-family:serif,color:#ff0000,opacity:0.2".to_owned(),
+        span: fm_core::Span::default(),
+    });
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        for font_size in [8.0, 15.0, 32.0] {
+            let config = SvgRenderConfig {
+                backend,
+                font_size,
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            let marks = bit_marks(&svg);
+            assert_eq!(marks.len(), 6);
+            let color = fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).text;
+            for (tag, _) in marks {
+                assert_eq!(
+                    numeric_attribute(tag, "font-size"),
+                    (font_size - 4.0).max(1.0)
+                );
+                assert!(tag.contains(&format!("fill=\"{color}\"")));
+                assert!(!tag.contains("font-size:40") && !tag.contains("font-family:serif"));
+                assert!(!tag.contains("#ff0000") && !tag.contains("opacity:0.2"));
+            }
+        }
+    }
+}
+
 #[test]
 fn a_field_draws_its_name_and_both_bit_ends() {
     let drawn = runs("packet-beta\n0-3: \"A\"\n4-7: \"B\"\n");
@@ -208,7 +311,7 @@ fn scene_backend_announces_each_packet_field_once_with_all_segments_visible() {
         assert_eq!(
             elements
                 .iter()
-                .filter(|tag| tag.starts_with("text "))
+                .filter(|tag| tag.starts_with("text ") && !tag.contains("fm-packet-bit"))
                 .count(),
             segments * label_rows,
             "every segment keeps all label rows and source metadata"
