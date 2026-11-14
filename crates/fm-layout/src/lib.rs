@@ -6769,7 +6769,10 @@ fn build_label_layer(
                     opacity,
                 },
             });
-            if row.kind == ClusterCaptionRowKind::BoundaryType {
+            if matches!(
+                row.kind,
+                ClusterCaptionRowKind::BoundaryType | ClusterCaptionRowKind::Wip
+            ) {
                 type_group.children.push(text);
             } else {
                 title_group.children.push(text);

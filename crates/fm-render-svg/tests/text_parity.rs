@@ -189,3 +189,297 @@ fn declared_text_reaches_the_svg_for_every_diagram_type() {
         failures.join("\n  ")
     );
 }
+
+
+mod kanban {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig};
+
+    #[derive(Debug)]
+    struct PaintedRow<'a> {
+        attributes: &'a str,
+        text: String,
+    }
+
+    // Read painted text only. Metadata in an aria-label, CSS class or source attribute cannot
+    // satisfy these checks: that was the original parsed-but-invisible Kanban failure.
+    fn painted_rows(svg: &str) -> Vec<PaintedRow<'_>> {
+        svg.split("<text")
+            .skip(1)
+            .filter_map(|rest| {
+                let (attributes, body) = rest.split_once('>')?;
+                let (body, _) = body.split_once("</text>")?;
+                let mut text = String::new();
+                let mut in_tag = false;
+                for ch in body.chars() {
+                    match ch {
+                        '<' => in_tag = true,
+                        '>' if in_tag => in_tag = false,
+                        _ if !in_tag => text.push(ch),
+                        _ => {}
+                    }
+                }
+                Some(PaintedRow {
+                    attributes,
+                    text: text
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&quot;", "\"")
+                        .replace("&apos;", "'")
+                        .replace("&amp;", "&"),
+                })
+            })
+            .collect()
+    }
+
+    fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+        let prefix = format!(" {name}=\"");
+        attributes
+            .split_once(prefix.as_str())?
+            .1
+            .split_once('"')
+            .map(|pair| pair.0)
+    }
+
+    fn css_value<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+        attribute(attributes, "style")?
+            .split(';')
+            .filter_map(|declaration| declaration.split_once(':'))
+            .filter(|(key, _)| key.trim() == name)
+            .map(|(_, value)| value.trim())
+            .next_back()
+    }
+
+    fn opacity(attributes: &str, property: &str) -> f32 {
+        css_value(attributes, property)
+            .or_else(|| attribute(attributes, property))
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(1.0)
+    }
+
+    #[test]
+    fn kanban_metadata_and_wip_are_painted_in_both_svg_backends() {
+        let source = r#"kanban
+  todo[To do] @{ wip: 1 }
+    a[Ship release] @{ assigned: "A & B", priority: High, ticket: "APP-42", tags: ["UI", "x<y"] }
+    b[Second card]
+  done[Done]
+  empty[Empty] @{ wip: 0 }
+"#;
+        let parsed = fm_parser::parse(source);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.clusters.len(), 3);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                let svg = fm_render_svg::render_svg_with_config(&parsed.ir, &config);
+                let rows = painted_rows(&svg);
+                let text = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>().join(" ");
+                for expected in [
+                    "Ship release",
+                    "Second card",
+                    "Assigned: A & B",
+                    "Priority: High",
+                    "Ticket: APP-42",
+                    "Tag: UI",
+                    "Tag: x<y",
+                    "WIP: 2 / 1 (over limit)",
+                    "WIP: 0 / 0",
+                    "0 cards",
+                ] {
+                    assert_eq!(
+                        text.matches(expected).count(),
+                        1,
+                        "{backend:?}, embedded CSS {embed_theme_css}: {expected:?} must be painted once; {rows:?}"
+                    );
+                }
+                assert!(!svg.contains("<y"), "authored metadata must be XML text");
+                assert!(svg.contains("x&lt;y"), "metadata text must be escaped");
+                assert_eq!(
+                    svg,
+                    fm_render_svg::render_svg_with_config(&parsed.ir, &config),
+                    "Kanban rendering must remain deterministic"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kanban_empty_columns_retain_names_and_zero_wip() {
+        let source = "kanban\n  todo[Todo] @{ wip: 0 }\n  done[Done]\n";
+        let ir = fm_parser::parse(source).ir;
+        assert!(ir.nodes.is_empty());
+        assert_eq!(ir.clusters.len(), 2);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = fm_render_svg::render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            let rows = painted_rows(&svg);
+            for expected in ["Todo", "Done", "WIP: 0 / 0", "0 cards"] {
+                assert_eq!(
+                    rows.iter().filter(|row| row.text == expected).count(),
+                    1,
+                    "{backend:?}: empty column content {expected:?} was lost; {rows:?}"
+                );
+            }
+            assert!(!svg.contains("over limit"), "an empty zero-limit lane is at its limit");
+        }
+    }
+
+    #[test]
+    fn kanban_card_rows_preserve_author_styles_and_interactions() {
+        let source = r#"kanban
+  todo[Todo]
+    a[Release] @{ assigned: Ada, priority: High, ticket: "R-7", tags: ["UX"] }
+style a fill:#ffffff,color:#123456,font-size:24px,font-family:monospace,font-weight:700,font-style:italic,opacity:0.5
+click a "https://example.com/task" "Open task" _self
+"#;
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.nodes.len(), 1, "style and click directives are not extra cards");
+        let description = fm_render_svg::describe_node(&ir.nodes[0], &ir);
+        for expected in ["assigned: Ada", "priority: High", "ticket: R-7", "tags: UX"] {
+            assert!(description.contains(expected), "missing accessible metadata: {description}");
+        }
+        let node_id = fm_core::mermaid_node_element_id(&ir.nodes[0].id, 0);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let svg = fm_render_svg::render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend,
+                        embed_theme_css,
+                        include_source_spans: true,
+                        ..Default::default()
+                    },
+                );
+                let rows = painted_rows(&svg);
+                let card_rows: Vec<_> = rows
+                    .iter()
+                    .filter(|row| {
+                        attribute(row.attributes, "class").is_some_and(|classes| {
+                            classes
+                                .split_whitespace()
+                                .any(|class| class == "fm-kanban-row")
+                        })
+                    })
+                    .collect();
+                assert!(card_rows.len() >= 5, "{backend:?}: complete card content is required");
+                for row in card_rows {
+                    assert_eq!(attribute(row.attributes, "font-size"), Some("24"));
+                    assert_eq!(
+                        css_value(row.attributes, "fill")
+                            .or_else(|| attribute(row.attributes, "fill")),
+                        Some("#123456"),
+                        "{row:?}",
+                    );
+                    assert_eq!(
+                        css_value(row.attributes, "font-family"),
+                        Some("monospace"),
+                        "{row:?}"
+                    );
+                    assert_eq!(css_value(row.attributes, "font-weight"), Some("700"), "{row:?}");
+                    assert_eq!(css_value(row.attributes, "font-style"), Some("italic"), "{row:?}");
+                    let alpha =
+                        opacity(row.attributes, "opacity") * opacity(row.attributes, "fill-opacity");
+                    assert!((alpha - 0.5).abs() < 0.001, "author opacity must apply once: {row:?}");
+                    assert_eq!(attribute(row.attributes, "xml:space"), Some("preserve"));
+                }
+                assert!(svg.contains("href=\"https://example.com/task\""));
+                assert!(svg.contains("target=\"_self\""));
+                assert!(svg.contains("title=\"Open task\""));
+                assert!(svg.contains("data-fm-source-span="));
+                let identity = format!("id=\"{node_id}\"");
+                assert_eq!(svg.matches(identity.as_str()).count(), 1);
+                assert!(
+                    svg.contains("assigned: Ada"),
+                    "accessible names must retain card metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kanban_priority_edits_override_stale_generated_classes() {
+        let mut ir = fm_parser::parse(
+            "kanban\n  todo[Todo]\n    a[Task] @{ priority: High }\n",
+        )
+        .ir;
+        assert!(ir.nodes[0].classes.iter().any(|class| class == "kanban-priority-high"));
+        ir.kanban_meta.as_mut().unwrap().cards[0].priority = Some("Custom".to_owned());
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = fm_render_svg::render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            assert!(painted_rows(&svg).iter().any(|row| row.text == "Priority: Custom"));
+            assert!(!svg.contains("fill=\"#fca5a5\""));
+            assert!(!svg.contains("fill:#fca5a5"));
+        }
+    }
+
+    #[test]
+    fn kanban_scene_keeps_text_readable_on_its_actual_card_fill() {
+        for (style, expected) in [("", "#1e293b"), ("style a fill:#111827\n", "#ffffff")] {
+            let ir = fm_parser::parse(&format!(
+                "kanban\n  todo[Todo]\n    a[Plain card]\n{style}"
+            ))
+            .ir;
+            for embed_theme_css in [false, true] {
+                let svg = fm_render_svg::render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend: SvgBackend::Scene,
+                        theme: fm_render_svg::ThemePreset::Dark,
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                let rows = painted_rows(&svg);
+                let title = rows.iter().find(|row| row.text == "Plain card").unwrap();
+                assert_eq!(
+                    css_value(title.attributes, "fill")
+                        .or_else(|| attribute(title.attributes, "fill")),
+                    Some(expected),
+                    "a theme must not replace contrast resolved against the painted card",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kanban_repeated_card_titles_keep_their_own_metadata() {
+        let source = r#"kanban
+  todo[Todo] @{ wip: 1 }
+    [Review] @{ assigned: Ada, ticket: A1 }
+    [Review] @{ assigned: Grace, ticket: B2 }
+"#;
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.nodes.len(), 2);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = fm_render_svg::render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            let rows = painted_rows(&svg);
+            assert_eq!(rows.iter().filter(|row| row.text == "Review").count(), 2);
+            let text = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>().join(" ");
+            for expected in ["Assigned: Ada", "Assigned: Grace", "Ticket: A1", "Ticket: B2"] {
+                assert_eq!(text.matches(expected).count(), 1, "{backend:?}: {rows:?}");
+            }
+            assert!(text.contains("WIP: 2 / 1 (over limit)"));
+        }
+    }
+}

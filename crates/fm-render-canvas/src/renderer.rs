@@ -1135,6 +1135,7 @@ impl Canvas2dRenderer {
                         Some("layout-band-labels") => "600 ",
                         Some(id) if id.starts_with("fm-cluster-caption-") => "600 ",
                         Some(id) if id.starts_with("fm-cluster-type-caption-") => "400 ",
+                        Some(id) if id.starts_with("fm-kanban-title-") => "600 ",
                         Some(id)
                             if id == "quadrant-title" || id.starts_with("quadrant-heading-") =>
                         {
@@ -3605,7 +3606,7 @@ impl Canvas2dRenderer {
                 .as_deref()
                 .and_then(sanitize_canvas_paint);
             let label_fill = text_color.as_deref().unwrap_or_else(|| {
-                if ir.diagram_type == DiagramType::Journey
+                if matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Kanban)
                     || ir_node.is_some_and(|node| node.requirement_meta.is_some())
                     || (gantt_task.is_some()
                         && gantt_label.is_none_or(|entry| {
@@ -3776,6 +3777,46 @@ impl Canvas2dRenderer {
                         &row.text,
                         f64::from(center.x) + offset_x,
                         f64::from(center.y) + offset_y,
+                    );
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                }
+            } else if ir.diagram_type == DiagramType::Kanban
+                && let Some(node) = ir_node
+            {
+                // Card metadata is content: use the same complete, measured rows as layout
+                // instead of painting the title and silently discarding its assignee/ticket.
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(
+                        declared_parts
+                            .family
+                            .as_deref()
+                            .unwrap_or(&self.config.font_family),
+                    ),
+                    ..label_metrics.config().clone()
+                });
+                let card = fm_core::KanbanCardLayout::new(
+                    ir.kanban_card(node_box.node_index),
+                    ir.node_display_text(node),
+                    &metrics,
+                    Some(node_box.bounds.width),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let top = y + ((h - f64::from(card.height)) * 0.5).max(0.0);
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.set_text_align(TextAlign::Left);
+                for row in card.rows {
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::KanbanCardRowKind::Title).then_some("600"),
+                        &self.config.font_family,
+                    ));
+                    ctx.fill_text(
+                        &row.text,
+                        x + f64::from(card.padding),
+                        top + f64::from(row.center_y),
                     );
                     self.draw_calls += 1;
                     *labels_drawn += 1;
@@ -4870,6 +4911,12 @@ pub(crate) fn resolve_node_colors_with_defaults(
     if ir.diagram_type == DiagramType::Journey {
         return (
             fill.or_else(|| fm_layout::journey_score_fill(ir, node_index).map(str::to_owned)),
+            stroke,
+        );
+    }
+    if ir.diagram_type == DiagramType::Kanban {
+        return (
+            fill.or_else(|| fm_core::kanban_priority_fill(ir, node_index).map(str::to_owned)),
             stroke,
         );
     }
@@ -9645,6 +9692,265 @@ mod tests {
                     fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn kanban_metadata_rows_share_canvas_scene_and_gpu_geometry() {
+        let source = concat!(
+            "kanban\n",
+            "  work[Doing] @{ wip: 1 }\n",
+            "    task[Ship release] @{ assigned: 'Zoë 团队', priority: high, ",
+            "ticket: 'FM<7>', tags: ['release train', 'UI, polish'] }\n",
+            "    plain[Write notes]\n",
+            "  empty[Ready] @{ wip: 0 }\n",
+            "  done[Done]\n",
+        );
+        for authored_style in [false, true] {
+            let source = if authored_style {
+                format!(
+                    "{source}style task font-size:24px,font-family:monospace,\
+                     font-weight:700,font-style:italic,color:#123456,fill:#112233,opacity:0.6\n"
+                )
+            } else {
+                source.to_owned()
+            };
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.nodes.len(), 2);
+            assert_eq!(ir.clusters.len(), 3);
+            let node_index = ir.nodes.iter().position(|node| node.id == "task").unwrap();
+            let node = &ir.nodes[node_index];
+            let meta = ir.kanban_card(node_index).expect("typed card metadata");
+            assert_eq!(meta.assigned.as_deref(), Some("Zoë 团队"));
+            assert_eq!(meta.ticket.as_deref(), Some("FM<7>"));
+            assert_eq!(meta.tags, ["release train", "UI, polish"]);
+            let config = CanvasRenderConfig {
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let bounds = layout
+                .nodes
+                .iter()
+                .find(|entry| entry.node_index == node_index)
+                .unwrap()
+                .bounds;
+            let declared = ir.resolved_node_style(node_index);
+            let card_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                preset: fm_core::FontPreset::from_family(
+                    declared
+                        .get("font-family")
+                        .map_or(config.font_family.as_str(), String::as_str),
+                ),
+                ..metrics.config().clone()
+            });
+            let card = fm_core::KanbanCardLayout::new(
+                Some(meta),
+                ir.node_display_text(node),
+                &card_metrics,
+                Some(bounds.width),
+                declared.get("font-size").map(String::as_str),
+            );
+            assert!(card.rows.len() >= 6, "every metadata field must become content");
+            let text = card
+                .rows
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for authored in [
+                "Ship release",
+                "Zoë 团队",
+                "high",
+                "FM<7>",
+                "release train",
+                "UI, polish",
+            ] {
+                assert!(text.contains(authored), "card lost authored value: {authored}");
+            }
+            let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                let (offset_x, offset_y) = if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                    (-scene.bounds.x, -scene.bounds.y)
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                    (-layout.bounds.x, -layout.bounds.y)
+                };
+                let mut paint = (String::new(), String::new(), 1.0_f64);
+                let mut stack = Vec::new();
+                let drawn: Vec<_> = ctx
+                    .operations()
+                    .iter()
+                    .filter_map(|op| match op {
+                        DrawOperation::Save => {
+                            stack.push(paint.clone());
+                            None
+                        }
+                        DrawOperation::Restore => {
+                            paint = stack.pop().expect("balanced Canvas state");
+                            None
+                        }
+                        DrawOperation::SetFont(value) => {
+                            paint.0.clone_from(value);
+                            None
+                        }
+                        DrawOperation::SetFillStyle(value) => {
+                            paint.1.clone_from(value);
+                            None
+                        }
+                        DrawOperation::SetGlobalAlpha(value) => {
+                            paint.2 = *value;
+                            None
+                        }
+                        DrawOperation::FillText(text, x, y) => {
+                            Some((text.as_str(), *x, *y, paint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(stack.is_empty());
+                for row in &card.rows {
+                    let rendered: Vec<_> = drawn
+                        .iter()
+                        .filter(|entry| entry.0 == row.text)
+                        .collect();
+                    assert_eq!(
+                        rendered.len(),
+                        1,
+                        "scene={use_scene}: missing or repeated {}",
+                        row.text
+                    );
+                    let (_, x, y, (font, color, opacity)) = rendered[0];
+                    assert!((*x - f64::from(bounds.x + card.padding + offset_x)).abs() < 0.01);
+                    assert!((*y - f64::from(top + row.center_y + offset_y)).abs() < 0.01);
+                    let font_size = font
+                        .split_whitespace()
+                        .find_map(|part| part.strip_suffix("px")?.parse::<f32>().ok())
+                        .expect("row font size");
+                    assert!((font_size - row.font_size).abs() < 0.01);
+                    assert!(top + row.center_y - row.font_size * 0.5 >= bounds.y);
+                    assert!(top + row.center_y + row.font_size * 0.5 <= bounds.y + bounds.height);
+                    if authored_style {
+                        // RenderScene stores text geometry and paint, but not authored faces.
+                        if !use_scene {
+                            assert!(
+                                font.contains("monospace")
+                                    && font.contains("700")
+                                    && font.contains("italic")
+                            );
+                        }
+                        assert_eq!(color, "#123456");
+                        assert!((*opacity - 0.6).abs() < 0.001);
+                    } else if row.kind == fm_core::KanbanCardRowKind::Title {
+                        assert!(font.contains("600"), "card titles retain semantic emphasis");
+                    }
+                }
+                for expected in [
+                    "WIP: 2 / 1 (over limit)",
+                    "WIP: 0 / 0",
+                    "0 cards",
+                    "Write notes",
+                ] {
+                    assert!(
+                        drawn.iter().any(|entry| entry.0 == expected),
+                        "scene={use_scene}: missing board content {expected}"
+                    );
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| {
+                    run.source == crate::gpu_plan::GpuTextSource::Node
+                        && run.node_index as usize == node_index
+                })
+                .collect();
+            assert_eq!(runs.len(), card.rows.len(), "GPU must retain all card rows");
+            for (run, row) in runs.into_iter().zip(&card.rows) {
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                let glyphs: String = quads
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("metadata glyph is in the atlas")
+                            .glyph
+                    })
+                    .collect();
+                assert_eq!(glyphs, row.text);
+                assert!(quads.iter().all(|quad| {
+                    (quad.center[1] - top - row.center_y).abs() < 0.01
+                        && (quad.half_extent[1] * 2.0 - row.font_size).abs() < 0.01
+                }));
+                let face = &plan.glyph_atlas.faces[run.face_index as usize];
+                if authored_style {
+                    assert_eq!(face.family, "monospace");
+                    assert_eq!(face.weight, "700");
+                    assert_eq!(face.style, "italic");
+                    assert!(quads.iter().all(|quad| (quad.color[3] - 0.6).abs() < 0.001));
+                } else if row.kind == fm_core::KanbanCardRowKind::Title {
+                    assert_eq!(face.weight, "600");
+                }
+            }
+            let cluster_text: Vec<String> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Cluster)
+                .map(|run| {
+                    plan.text_quads[run.first_quad as usize..][..run.quad_count as usize]
+                        .iter()
+                        .map(|quad| {
+                            plan.glyph_atlas
+                                .cells
+                                .iter()
+                                .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                                .expect("WIP glyph is in the atlas")
+                                .glyph
+                        })
+                        .collect()
+                })
+                .collect();
+            for expected in ["WIP: 2 / 1 (over limit)", "WIP: 0 / 0", "0 cards"] {
+                assert!(
+                    cluster_text.iter().any(|text| text == expected),
+                    "GPU lost {expected}"
+                );
+            }
+            let instance = plan
+                .node_instances
+                .iter()
+                .find(|instance| instance.node_index as usize == node_index)
+                .unwrap();
+            let expected_fill = if authored_style {
+                [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 0.6]
+            } else {
+                [252.0 / 255.0, 165.0 / 255.0, 165.0 / 255.0, 1.0]
+            };
+            for (actual, expected) in instance.fill.iter().zip(expected_fill) {
+                assert!((*actual - expected).abs() < 0.001);
+            }
+            assert_eq!(
+                plan,
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                "Kanban output must be deterministic"
+            );
         }
     }
 

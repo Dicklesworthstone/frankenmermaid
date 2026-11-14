@@ -2776,6 +2776,26 @@ fn render_scene_group(
             }
         }
         if matches!(child, RenderItem::Text(_))
+            && ir.is_some_and(|ir| ir.diagram_type == DiagramType::Kanban)
+            && let Some(id) = group.id.as_deref()
+        {
+            let role = [
+                ("fm-kanban-title-", "fm-kanban-title"),
+                ("fm-kanban-assigned-", "fm-kanban-assigned"),
+                ("fm-kanban-priority-", "fm-kanban-priority"),
+                ("fm-kanban-ticket-", "fm-kanban-ticket"),
+                ("fm-kanban-tag-", "fm-kanban-tag"),
+            ]
+            .into_iter()
+            .find_map(|(prefix, role)| id.starts_with(prefix).then_some(role));
+            if let Some(role) = role {
+                rendered = rendered.class("fm-kanban-row").class(role);
+                if role == "fm-kanban-title" {
+                    rendered = rendered.attr("font-weight", "600");
+                }
+            }
+        }
+        if matches!(child, RenderItem::Text(_))
             && let Some(typography) = &treemap_typography
         {
             // Size, color and opacity already belong to the measured scene. Attach only
@@ -3389,13 +3409,21 @@ fn render_scene_text(
     if let Some(ir) = ir
         && matches!(
             ir.diagram_type,
-            DiagramType::Journey | DiagramType::Gantt | DiagramType::Requirement
+            DiagramType::Journey
+                | DiagramType::Gantt
+                | DiagramType::Requirement
+                | DiagramType::Kanban
         )
-        && (!paints_resolved || !scene_has_authored_paint(ir, text.source, "color"))
+        && (!paints_resolved
+            || (ir.diagram_type != DiagramType::Kanban
+                && !scene_has_authored_paint(ir, text.source, "color")))
     {
+        // Kanban scenes already resolve label contrast against their actual painted fill.
+        // Replacing that paint with a theme guess can put light text on a white card.
         let theme = resolve_theme(Some(ir), config);
         let color = if let RenderSource::Node(index) = text.source
-            && (ir.diagram_type == DiagramType::Journey || text.align == RenderTextAlign::Middle)
+            && (matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Kanban)
+                || text.align == RenderTextAlign::Middle)
         {
             let declared = ir.resolved_node_style(index);
             let semantic_fill = if ir.diagram_type == DiagramType::Requirement {
@@ -3413,6 +3441,8 @@ fn render_scene_text(
                         .unwrap_or_default();
                     fm_layout::gantt_task_fill(flags)
                 })
+            } else if ir.diagram_type == DiagramType::Kanban {
+                fm_core::kanban_priority_fill(ir, index)
             } else {
                 fm_layout::journey_score_fill(ir, index)
             };
@@ -3430,10 +3460,16 @@ fn render_scene_text(
     if let Some(ir) = ir
         && let RenderSource::Node(index) = text.source
     {
+        if ir.diagram_type == DiagramType::Kanban {
+            elem = elem.attr("xml:space", "preserve");
+        }
         let mut style = resolve_scene_node_inline_styles(ir, index, paints_resolved).1;
-        if ir.nodes.get(index).is_some_and(|node| {
-            node.c4_meta.is_some() || node.requirement_meta.is_some() || !node.members.is_empty()
-        }) && ir.resolved_node_style(index).contains_key("font-size")
+        if (ir.diagram_type == DiagramType::Kanban
+            || ir.nodes.get(index).is_some_and(|node| {
+                node.c4_meta.is_some()
+                    || node.requirement_meta.is_some()
+                    || !node.members.is_empty()
+            })) && ir.resolved_node_style(index).contains_key("font-size")
         {
             style = Some(measured_card_font_style(style.as_deref(), text.font_size));
         }
@@ -6587,6 +6623,7 @@ fn render_layout_to_svg(
                     fm_layout::cluster_caption::ClusterCaptionRowKind::BoundaryType => {
                         "fm-cluster-type-label"
                     }
+                    fm_layout::cluster_caption::ClusterCaptionRowKind::Wip => "fm-cluster-wip",
                 };
                 let mut text = TextBuilder::new(&row.text)
                     .x(cluster.bounds.x + offset_x + fm_layout::cluster_caption::CAPTION_INSET)
@@ -11567,7 +11604,7 @@ fn render_node_into(
 ) {
     use fm_core::NodeShape;
 
-    if ir.diagram_type == DiagramType::Journey {
+    if matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Kanban) {
         render_node(
             node_box,
             ir,
@@ -12185,7 +12222,8 @@ fn render_node(
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
     let styled_config = ir_node
         .filter(|node| {
-            node.class_meta.is_none()
+            ir.diagram_type != DiagramType::Kanban
+                && node.class_meta.is_none()
                 && node.c4_meta.is_none()
                 && node.requirement_meta.is_none()
                 && node.members.is_empty()
@@ -12206,8 +12244,10 @@ fn render_node(
         palette
     });
     let colors = flowchart_colors.as_ref().unwrap_or(colors);
-    let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey
-        || ir_node.is_some_and(|node| node.requirement_meta.is_some())
+    let (shape_style, text_style) = if matches!(
+        ir.diagram_type,
+        DiagramType::Journey | DiagramType::Kanban
+    ) || ir_node.is_some_and(|node| node.requirement_meta.is_some())
     {
         resolve_scene_node_inline_styles(ir, node_box.node_index, false)
     } else {
@@ -12216,7 +12256,8 @@ fn render_node(
     let semantic_fill = ir_node
         .and_then(|node| node.requirement_meta.as_deref())
         .and_then(fm_core::requirement_risk_fill)
-        .or_else(|| fm_layout::journey_score_fill(ir, node_box.node_index));
+        .or_else(|| fm_layout::journey_score_fill(ir, node_box.node_index))
+        .or_else(|| fm_core::kanban_priority_fill(ir, node_box.node_index));
     let shape_style = if let Some(fill) = semantic_fill {
         Some(format!(
             "fill: {fill};{}",
@@ -12310,7 +12351,7 @@ fn render_node(
     // `requirement_meta`/icon/centrality already gated below).
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
-        && ir.diagram_type != DiagramType::Journey
+        && !matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Kanban)
         && matches!(
             shape,
             NodeShape::Rect
@@ -12477,15 +12518,8 @@ fn render_node(
         group = group.class("fm-node-block-beta-space");
     }
 
-    // Kanban priority → border color styling.
-    let kanban_priority_fill: Option<&str> = ir_node.and_then(|n| {
-        n.classes.iter().find_map(|c| match c.as_str() {
-            "kanban-priority-high" | "kanban-priority-critical" => Some("#fca5a5"),
-            "kanban-priority-medium" => Some("#fde68a"),
-            "kanban-priority-low" => Some("#bbf7d0"),
-            _ => None,
-        })
-    });
+    // Typed priority remains authoritative after edits, even if an old generated class remains.
+    let kanban_priority_fill = fm_core::kanban_priority_fill(ir, node_box.node_index);
 
     // Journey score → color fill (1=red, 2=orange, 3=yellow, 4=light green, 5=green).
     let journey_score_fill: Option<&str> = ir_node.and_then(|n| {
@@ -12527,9 +12561,14 @@ fn render_node(
         }
     } else {
         if config.a11y.aria_labels {
+            let description = if ir.diagram_type == DiagramType::Kanban {
+                ir_node.map(|node| describe_node(node, ir))
+            } else {
+                None
+            };
             group = group
                 .attr("role", "graphics-symbol")
-                .attr("aria-label", raw_label_text);
+                .attr("aria-label", description.as_deref().unwrap_or(raw_label_text));
         }
 
         if config.a11y.keyboard_nav {
@@ -13824,6 +13863,25 @@ fn render_node(
                 text_style.as_deref(),
                 emit_classdef_classes,
             );
+        } else if let Some(node) = ir_node
+            && ir.diagram_type == DiagramType::Kanban
+        {
+            let mut fragment = String::new();
+            write_kanban_node_content_into(
+                &mut fragment,
+                node,
+                ir,
+                node_box.node_index,
+                x,
+                y,
+                w,
+                h,
+                config,
+                colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
+            );
+            group = group.child(Element::raw_svg(fragment));
         } else {
             let lines_count = label_text.lines().count().max(1) as f32;
             let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
@@ -14226,6 +14284,84 @@ fn write_c4_node_content_into(
         if declared.contains_key("font-size") {
             style = Some(measured_card_font_style(style.as_deref(), row.font_size));
         }
+        if let Some(style) = style {
+            text = text.attr("style", &style);
+        }
+        text.write_to_string(out);
+    }
+}
+
+/// Paint complete Kanban cards using the same measured rows as layout, Canvas and the GPU plan.
+/// The surrounding node group retains its source identity, links, callbacks and accessibility.
+#[allow(clippy::too_many_arguments)]
+fn write_kanban_node_content_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
+) {
+    let declared = ir.resolved_node_style(node_index);
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        preset: fm_core::FontPreset::from_family(
+            declared
+                .get("font-family")
+                .map_or(&config.font_family, String::as_str),
+        ),
+        ..config.font_metrics().config().clone()
+    });
+    let card = fm_core::KanbanCardLayout::new(
+        ir.kanban_card(node_index),
+        ir.node_display_text(node),
+        &metrics,
+        Some(width),
+        declared.get("font-size").map(String::as_str),
+    );
+    let top = y + ((height - card.height) * 0.5).max(0.0);
+    let left = x + card.padding;
+    let fill = declared
+        .get("fill")
+        .map(String::as_str)
+        .or_else(|| fm_core::kanban_priority_fill(ir, node_index))
+        .unwrap_or(&colors.node_fill);
+    let color = fm_core::readable_label_color(fill, &colors.text, &colors.background);
+    for row in card.rows {
+        let class = match row.kind {
+            fm_core::KanbanCardRowKind::Title => "fm-kanban-title",
+            fm_core::KanbanCardRowKind::Assigned => "fm-kanban-assigned",
+            fm_core::KanbanCardRowKind::Priority => "fm-kanban-priority",
+            fm_core::KanbanCardRowKind::Ticket => "fm-kanban-ticket",
+            fm_core::KanbanCardRowKind::Tag => "fm-kanban-tag",
+        };
+        let mut text = TextBuilder::new(&row.text)
+            .x(left)
+            .y(top + row.center_y)
+            .baseline(text::DominantBaseline::Central)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(row.font_size)
+            .anchor(TextAnchor::Start)
+            .fill(color)
+            .class("fm-kanban-row")
+            .class(class);
+        if row.kind == fm_core::KanbanCardRowKind::Title {
+            text = text.font_weight("600");
+        }
+        let mut text = text.build().attr("xml:space", "preserve");
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        let style = if declared.contains_key("font-size") {
+            Some(measured_card_font_style(label_style, row.font_size))
+        } else {
+            label_style.map(str::to_owned)
+        };
         if let Some(style) = style {
             text = text.attr("style", &style);
         }

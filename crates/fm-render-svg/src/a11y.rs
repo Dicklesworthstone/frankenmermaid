@@ -305,6 +305,30 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
     // bare `journey-actor` marker is skipped — it flags that a step HAS actors and names none.
     description.push_str(&journey_step_description_suffix(node));
 
+    if ir.diagram_type == fm_core::DiagramType::Kanban
+        && let Some(card) = ir.kanban_meta.as_ref().and_then(|meta| {
+            meta.cards.iter().find(|card| {
+                ir.nodes
+                    .get(card.node.0)
+                    .is_some_and(|candidate| candidate.id == node.id)
+            })
+        })
+    {
+        for (name, value) in [
+            ("assigned", card.assigned.as_deref()),
+            ("priority", card.priority.as_deref()),
+            ("ticket", card.ticket.as_deref()),
+        ] {
+            if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                let _ = write!(description, ", {name}: {value}");
+            }
+        }
+        if !card.tags.is_empty() {
+            description.push_str(", tags: ");
+            description.push_str(&card.tags.join(", "));
+        }
+    }
+
     description
 }
 

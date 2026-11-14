@@ -995,6 +995,21 @@ impl GlyphFace {
         )
     }
 
+    fn for_kanban_row(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        row: &fm_core::KanbanCardRow,
+    ) -> Self {
+        Self::for_node(
+            node_fonts,
+            index,
+            base,
+            (row.kind == fm_core::KanbanCardRowKind::Title).then_some("600"),
+            None,
+        )
+    }
+
     fn for_cluster_row(
         base: &Self,
         caption: &fm_layout::cluster_caption::ClusterCaptionLayout,
@@ -3071,8 +3086,46 @@ impl GpuRenderPlan {
         let mut er_cards = Vec::new();
         let mut c4_cards = Vec::new();
         let mut requirement_cards = Vec::new();
+        let mut kanban_cards = Vec::new();
         for (position, node) in graph_nodes.iter().enumerate() {
             if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
+            if ir.diagram_type == fm_core::DiagramType::Kanban
+                && let Some(ir_node) = ir.nodes.get(node.node_index)
+            {
+                let declared = ir.resolved_node_style(node.node_index);
+                let card_metrics = declared.get("font-family").map(|family| {
+                    fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                        preset: fm_core::FontPreset::from_family(family),
+                        ..metrics.config().clone()
+                    })
+                });
+                let card = fm_core::KanbanCardLayout::new(
+                    ir.kanban_card(node.node_index),
+                    ir.node_display_text(ir_node),
+                    card_metrics.as_ref().unwrap_or(&metrics),
+                    Some(node.bounds.width),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let (fill, _) = crate::renderer::resolve_node_colors_with_defaults(
+                    ir,
+                    node.node_index,
+                    config,
+                );
+                let readable = fm_core::readable_label_color(
+                    fill.as_deref().unwrap_or(&config.node_fill),
+                    &config.label_color,
+                    &config.node_fill,
+                );
+                let mut color = crate::renderer::resolve_node_text_color(ir, node.node_index)
+                    .as_deref()
+                    .and_then(parse_paint_rgba)
+                    .or_else(|| parse_paint_rgba(readable))
+                    .unwrap_or(DEFAULT_LABEL_RGBA);
+                color[3] *= crate::renderer::resolve_node_opacity(ir, node.node_index)
+                    .unwrap_or(1.0) as f32;
+                kanban_cards.push((node.node_index, node.bounds, card, color));
                 continue;
             }
             if let Some(ir_node) = ir.nodes.get(node.node_index)
@@ -3463,6 +3516,11 @@ impl GpuRenderPlan {
                     .iter()
                     .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
             )
+            .chain(
+                kanban_cards
+                    .iter()
+                    .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
+            )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
             .chain(
                 cluster_captions
@@ -3544,6 +3602,14 @@ impl GpuRenderPlan {
             for row in &card.rows {
                 styled_texts.push((
                     GlyphFace::for_requirement_row(&node_fonts, *index, &default_face, row),
+                    row.text.as_str(),
+                ));
+            }
+        }
+        for (index, _, card, _) in &kanban_cards {
+            for row in &card.rows {
+                styled_texts.push((
+                    GlyphFace::for_kanban_row(&node_fonts, *index, &default_face, row),
                     row.text.as_str(),
                 ));
             }
@@ -3809,6 +3875,22 @@ impl GpuRenderPlan {
                 sink.push_centred_with_font(
                     &row.text,
                     (bounds.x + bounds.width * 0.5, top + row.center_y),
+                    row.font_size,
+                    color,
+                    GpuTextSource::Node,
+                    node_index,
+                );
+            }
+        }
+
+        for (node_index, bounds, card, color) in kanban_cards {
+            let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
+            for row in card.rows {
+                let face = GlyphFace::for_kanban_row(&node_fonts, node_index, &default_face, &row);
+                let mut sink = sink.with_face(&face, &metrics);
+                sink.push_left(
+                    &row.text,
+                    (bounds.x + card.padding, top + row.center_y),
                     row.font_size,
                     color,
                     GpuTextSource::Node,
