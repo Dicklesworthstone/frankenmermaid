@@ -7004,12 +7004,24 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         }
 
         let depth = leading_indent_width(line);
-        let Some(node) = parse_mindmap_node_token(trimmed, builder.parser_config()) else {
+        let Some(mut node) = parse_mindmap_node_token(trimmed, builder.parser_config()) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported mindmap syntax: {trimmed}"
             ));
             continue;
         };
+
+        // A mindmap is a tree of occurrences: Mermaid creates a new node for every row,
+        // even when its caption or explicit id repeats. Reusing a graph node here merges
+        // branches and can turn an ancestor's repeated caption into a self-loop. Preserve
+        // the first authored key, then use a source-line suffix for later occurrences.
+        // Normalized keys cannot contain `@`, so they cannot alias these generated keys.
+        if builder.node_id_by_key(&node.id).is_some() {
+            if node.label.is_none() {
+                node.label = parse_label(Some(&node.id));
+            }
+            node.id = format!("{}@{line_number}", node.id);
+        }
 
         let span = span_for(line_number, line);
         let Some(node_id) = intern_node_token(builder, &node, span) else {
@@ -23393,6 +23405,159 @@ mod tests {
         assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
         assert_eq!(parsed.ir.nodes.len(), 4);
         assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn mindmap_repeated_captions_preserve_each_branch_and_ancestor() {
+        let source =
+            "mindmap\nRoot\n  Planning\n    Review\n  Delivery\n    Review\n      Review\n";
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| parsed.ir.node_display_text(node))
+                .collect::<Vec<_>>(),
+            ["Root", "Planning", "Review", "Delivery", "Review", "Review"]
+        );
+        let edges: Vec<_> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| match (edge.from, edge.to) {
+                (IrEndpoint::Node(from), IrEndpoint::Node(to)) => (from.0, to.0),
+                _ => panic!("mindmap edges must connect node occurrences"),
+            })
+            .collect();
+        assert_eq!(edges, [(0, 1), (1, 2), (0, 3), (3, 4), (4, 5)]);
+        assert!(
+            parsed.ir.nodes[2]
+                .classes
+                .iter()
+                .any(|c| c == "mindmap-branch-1")
+        );
+        for node in &parsed.ir.nodes[4..] {
+            assert!(node.classes.iter().any(|c| c == "mindmap-branch-2"));
+            assert!(!node.classes.iter().any(|c| c == "mindmap-branch-1"));
+        }
+        assert_eq!(parsed.ir, parse_mermaid(source).ir);
+    }
+
+    #[test]
+    fn mindmap_repeated_authored_ids_keep_shapes_classes_and_icons_local() {
+        let parsed = parse_mermaid(
+            "mindmap\n  root((Root))\n    task[First]:::first\n      ::icon(fa fa-book)\n    task((Second)):::second\n      ::icon(fa fa-check)\n      :::finished\nclassDef first fill:#ff0000\nclassDef second fill:#0000ff\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        let first = &parsed.ir.nodes[1];
+        let second = &parsed.ir.nodes[2];
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.id, "task", "retain a unique authored selector");
+        assert_eq!(first.shape, NodeShape::Rect);
+        assert_eq!(second.shape, NodeShape::Circle);
+        assert_eq!(parsed.ir.node_display_text(first), "First");
+        assert_eq!(parsed.ir.node_display_text(second), "Second");
+        assert_eq!(first.icon(), Some("fa fa-book"));
+        assert_eq!(second.icon(), Some("fa fa-check"));
+        assert!(first.classes.iter().any(|c| c == "first"));
+        assert!(
+            !first
+                .classes
+                .iter()
+                .any(|c| c == "second" || c == "finished")
+        );
+        assert!(second.classes.iter().any(|c| c == "second"));
+        assert!(second.classes.iter().any(|c| c == "finished"));
+        assert!(!second.classes.iter().any(|c| c == "first"));
+        assert_eq!(
+            parsed.ir.resolved_node_style(1).get("fill"),
+            Some("#ff0000")
+        );
+        assert_eq!(
+            parsed.ir.resolved_node_style(2).get("fill"),
+            Some("#0000ff")
+        );
+        assert_eq!(first.span_primary.start.line, 3);
+        assert_eq!(second.span_primary.start.line, 5);
+    }
+
+    #[test]
+    fn mindmap_normalization_collisions_preserve_full_caption_text() {
+        let captions = [
+            "Review",
+            "Review",
+            "Review@4",
+            "Review_4",
+            "Review: later",
+            "Review; again",
+            "東京",
+            "東京",
+            "A B",
+            "A_B",
+        ];
+        let source = format!("mindmap\nRoot\n  {}\n", captions.join("\n  "));
+        let parsed = parse_mermaid(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), captions.len() + 1);
+        assert_eq!(parsed.ir.edges.len(), captions.len());
+        let keys: std::collections::BTreeSet<_> =
+            parsed.ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(keys.len(), parsed.ir.nodes.len());
+        for (index, expected) in captions.iter().enumerate() {
+            let node = &parsed.ir.nodes[index + 1];
+            assert_eq!(parsed.ir.node_display_text(node), *expected);
+            assert_eq!(node.span_primary.start.line as usize, index + 3);
+            let edge = &parsed.ir.edges[index];
+            assert_eq!(edge.from, IrEndpoint::Node(fm_core::IrNodeId(0)));
+            assert_eq!(edge.to, IrEndpoint::Node(fm_core::IrNodeId(index + 1)));
+        }
+    }
+
+    #[test]
+    fn mindmap_repeated_nodes_have_independent_source_map_entries() {
+        let source = "mindmap\r\nRoot\r\n  task[First]\r\n  task[Second]\r\n";
+        let snapshot = crate::build_parse_lens(source);
+        let nodes: Vec<_> = snapshot
+            .source_map
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == fm_core::MermaidSourceMapKind::Node)
+            .collect();
+        assert_eq!(nodes.len(), 3);
+        assert_ne!(nodes[1].element_id, nodes[2].element_id);
+        assert_eq!(nodes[1].index, 1);
+        assert_eq!(nodes[2].index, 2);
+        assert_eq!(nodes[1].span.start.line, 3);
+        assert_eq!(nodes[2].span.start.line, 4);
+        for (entry, expected) in nodes
+            .iter()
+            .zip(["Root", "  task[First]", "  task[Second]"])
+        {
+            let range = crate::resolve_span_text_range(source, entry.span).expect("source range");
+            assert_eq!(&source[range.start_byte..range.end_byte], expected);
+        }
+        let edit = crate::apply_parse_lens_edit(
+            source,
+            &fm_core::MermaidLensEdit {
+                element_id: nodes[2].element_id.clone(),
+                replacement: "  task[Updated 東京]".to_string(),
+            },
+        )
+        .expect("a repeated occurrence remains editable by its source-map identity");
+        assert_eq!(edit.result.previous_snippet, "  task[Second]");
+        assert_eq!(
+            edit.result.updated_source,
+            source.replace("Second", "Updated 東京")
+        );
+        let updated = &edit.snapshot.parsed.ir;
+        assert_eq!(updated.nodes.len(), 3);
+        assert_eq!(updated.edges.len(), 2);
+        assert_eq!(updated.node_display_text(&updated.nodes[1]), "First");
+        assert_eq!(updated.node_display_text(&updated.nodes[2]), "Updated 東京");
+        assert_eq!(updated.nodes[2].id, snapshot.parsed.ir.nodes[2].id);
     }
 
     #[test]

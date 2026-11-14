@@ -18,6 +18,68 @@
 const BRANCH_FIXTURE: &str = include_str!("fixtures/mindmap_branches.mmd");
 
 #[test]
+fn repeated_mindmap_captions_render_as_independent_branches() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_layout};
+
+    let source =
+        "mindmap\n  root((Roadmap))\n    Planning\n      Review\n    Delivery\n      Review\n";
+    let ir = fm_parser::parse(source).ir;
+    assert_eq!(
+        ir.nodes.len(),
+        5,
+        "each authored row is a distinct occurrence"
+    );
+    assert_eq!(ir.edges.len(), 4);
+    let layout = fm_layout::layout_diagram(&ir);
+    assert_eq!(layout.nodes.len(), 5);
+    assert_eq!(layout.edges.len(), 4);
+    let reviews: Vec<_> = ir
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.label
+                .and_then(|label| ir.labels.get(label.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str())
+                == "Review"
+        })
+        .collect();
+    assert_eq!(reviews.len(), 2);
+    let positions: Vec<_> = reviews
+        .iter()
+        .map(|(index, _)| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == *index)
+                .expect("each review has its own geometry")
+                .bounds
+                .center()
+        })
+        .collect();
+    assert_ne!(
+        positions[0], positions[1],
+        "the branches must not share a leaf"
+    );
+
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        let config = SvgRenderConfig {
+            backend,
+            include_source_spans: true,
+            ..Default::default()
+        };
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+        assert_eq!(svg.matches(">Review</text>").count(), 2, "{backend:?}");
+        for (index, node) in &reviews {
+            let id = fm_core::mermaid_node_element_id(&node.id, *index);
+            assert_eq!(svg.matches(&format!("id=\"{id}\"")).count(), 1);
+        }
+        assert!(!svg.contains("NaN") && !svg.contains("Infinity"));
+    }
+}
+
+#[test]
 fn mindmap_branch_hierarchy_survives_themes_and_portable_exports() {
     let ir = fm_parser::parse(BRANCH_FIXTURE).ir;
     assert_eq!(ir.nodes.len(), 17);
