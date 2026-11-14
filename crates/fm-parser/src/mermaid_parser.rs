@@ -14896,34 +14896,34 @@ fn parse_sequence_participant_declaration(
         return None;
     }
 
-    let (before_alias, external_alias) = if let Some((left, right)) = trimmed.rsplit_once(" as ") {
-        if right.trim_start().starts_with('{') {
-            (trimmed, None)
-        } else {
-            (
-                left.trim_end(),
-                parse_label(Some(right)).map(|mut value| {
-                    value.text = normalize_sequence_display_text(&value.text);
-                    value.segments.clear();
-                    value
-                }),
-            )
+    let (raw_id, mut rest) = split_sequence_participant_head(trimmed);
+    let config = if rest.starts_with('{') {
+        // Let the JSON decoder delimit the object: braces and `as` inside strings or nested
+        // objects are data. Searching backwards for either delimiter corrupts participant IDs.
+        let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        let value = values.next()?.ok()?;
+        if !value.is_object() {
+            return None;
         }
+        rest = trim_fast(&rest[values.byte_offset()..]);
+        Some(value)
     } else {
-        (trimmed, None)
+        None
     };
 
-    let (without_config, config) =
-        if let Some((prefix, raw_json)) = split_trailing_json_object(before_alias) {
-            match serde_json::from_str::<Value>(raw_json) {
-                Ok(parsed) => (prefix, Some(parsed)),
-                Err(_) => (before_alias, None),
-            }
-        } else {
-            (before_alias, None)
-        };
-
-    let raw_id = trim_fast(without_config);
+    let external_alias = if rest.is_empty() {
+        None
+    } else {
+        let alias = strip_sequence_alias_keyword(rest)?;
+        if alias.is_empty() {
+            return None;
+        }
+        parse_label(Some(alias)).map(|mut value| {
+            value.text = normalize_sequence_display_text(&value.text);
+            value.segments.clear();
+            value
+        })
+    };
 
     let participant_id = normalize_identifier(raw_id);
     if participant_id.is_empty() {
@@ -14968,13 +14968,44 @@ fn parse_sequence_participant_declaration(
     })
 }
 
-fn split_trailing_json_object(input: &str) -> Option<(&str, &str)> {
-    let trimmed = input.trim();
-    if !trimmed.ends_with('}') {
-        return None;
+/// Separate the participant ID from its configuration or the first external `as` keyword.
+/// Quoted IDs may themselves contain `as` or braces, and apostrophes inside names are literal.
+fn split_sequence_participant_head(input: &str) -> (&str, &str) {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous: Option<char> = None;
+    for (index, ch) in input.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+        } else if matches!(ch, '"' | '\'' | '`')
+            && previous.is_none_or(char::is_whitespace)
+        {
+            quote = Some(ch);
+        } else if ch == '{' {
+            let head = trim_fast(&input[..index]);
+            // Mermaid spells configs `ID@{...}`; the already-supported `ID {...}` form uses
+            // the same object parser. Neither the marker nor the config is part of the label.
+            let id = head.strip_suffix('@').map_or(head, trim_fast);
+            return (id, &input[index..]);
+        } else if previous.is_some_and(char::is_whitespace)
+            && strip_sequence_alias_keyword(&input[index..]).is_some()
+        {
+            return (trim_fast(&input[..index]), &input[index..]);
+        }
+        previous = Some(ch);
     }
-    let start = trimmed.rfind('{')?;
-    Some((trimmed[..start].trim_end(), &trimmed[start..]))
+    (input, "")
+}
+
+fn strip_sequence_alias_keyword(input: &str) -> Option<&str> {
+    let rest = strip_prefix_ignore_ascii_case(input, "as")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| trim_fast(rest))
 }
 
 fn sequence_participant_visuals(
@@ -25965,6 +25996,171 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|class_name| class_name == "sequence-participant-database")
         );
+    }
+
+    #[test]
+    fn sequence_participant_alias_prose_keeps_message_identity() {
+        for (declaration, target, id, label) in [
+            (
+                "participant DB as Database as a Service",
+                "DB",
+                "DB",
+                "Database as a Service",
+            ),
+            (
+                r#"actor DB as "Database as a Service {west}""#,
+                "DB",
+                "DB",
+                "Database as a Service {west}",
+            ),
+            (
+                "participant DB\tAS\tDatabase as a Service",
+                "DB",
+                "DB",
+                "Database as a Service",
+            ),
+            (
+                r#"participant "DB as {Service}""#,
+                r#""DB as {Service}""#,
+                "DB_as__Service",
+                "DB as {Service}",
+            ),
+            ("participant as as Service", "as", "as", "Service"),
+        ] {
+            let input = format!("sequenceDiagram\n  {declaration}\n  Client->>{target}: Query");
+            let parsed = parse_mermaid(&input);
+            assert_eq!(parsed.ir.nodes.len(), 2, "{declaration}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{declaration}");
+            let node = &parsed.ir.nodes[0];
+            assert_eq!(node.id, id, "{declaration}");
+            let label_id = node.label.expect("participant label");
+            assert_eq!(parsed.ir.labels[label_id.0].text, label, "{declaration}");
+            assert_eq!(
+                parsed.ir.edges[0].to,
+                IrEndpoint::Node(fm_core::IrNodeId(0)),
+                "{declaration}"
+            );
+            assert_eq!(
+                parsed.ir.edges[0].from,
+                IrEndpoint::Node(fm_core::IrNodeId(1)),
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_participant_configs_preserve_quoted_and_nested_data() {
+        for (configuration, label) in [
+            (r#"{"type":"database"}"#, "DB"),
+            (
+                r#"{"type":"database","alias":"Data as a Service"}"#,
+                "Data as a Service",
+            ),
+            (
+                r#"{"type":"database","alias":"Shard {west}"}"#,
+                "Shard {west}",
+            ),
+            (
+                r#"{"type":"database","alias":"Store \"{west}\" as a Service","extra":{"alias":"ignored as data"}}"#,
+                "Store \"{west}\" as a Service",
+            ),
+        ] {
+            for separator in ["@", " "] {
+                let input = format!(
+                    "sequenceDiagram\n  participant DB{separator}{configuration}\n  Client->>DB: Query"
+                );
+                let parsed = parse_mermaid(&input);
+                assert_eq!(parsed.ir.nodes.len(), 2, "{input}");
+                assert_eq!(parsed.ir.edges.len(), 1, "{input}");
+                let node = &parsed.ir.nodes[0];
+                assert_eq!(node.id, "DB", "{input}");
+                assert_eq!(node.shape, NodeShape::Cylinder, "{input}");
+                let label_id = node.label.expect("configured participant label");
+                assert_eq!(parsed.ir.labels[label_id.0].text, label, "{input}");
+                assert_eq!(
+                    parsed.ir.edges[0].to,
+                    IrEndpoint::Node(fm_core::IrNodeId(0)),
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_config_aliases_preserve_groups_and_creation_targets() {
+        let input = r#"sequenceDiagram
+  box Services
+    actor DB@{"type":"database","alias":"Internal {store}"} as Public as a Service
+  end
+  participant Client
+  create actor Worker@{"type":"control","alias":"Worker {west} as a Service"}
+  Client->>Worker: Start
+  Worker->>DB: Query"#;
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        let db = &parsed.ir.nodes[0];
+        let worker = &parsed.ir.nodes[2];
+        assert_eq!(db.id, "DB");
+        assert_eq!(db.shape, NodeShape::Cylinder);
+        assert_eq!(
+            parsed.ir.labels[db.label.expect("database alias").0].text,
+            "Public as a Service"
+        );
+        assert_eq!(worker.id, "Worker");
+        assert_eq!(worker.shape, NodeShape::Circle);
+        assert_eq!(
+            parsed.ir.labels[worker.label.expect("worker alias").0].text,
+            "Worker {west} as a Service"
+        );
+        let meta = parsed.ir.sequence_meta.as_ref().expect("sequence metadata");
+        assert_eq!(meta.participant_groups.len(), 1);
+        assert_eq!(
+            meta.participant_groups[0].participants,
+            vec![fm_core::IrNodeId(0)]
+        );
+        assert_eq!(meta.lifecycle_events.len(), 1);
+        assert_eq!(meta.lifecycle_events[0].participant, fm_core::IrNodeId(2));
+        assert_eq!(parsed.ir.edges[0].to, IrEndpoint::Node(fm_core::IrNodeId(2)));
+        assert_eq!(parsed.ir.edges[1].to, IrEndpoint::Node(fm_core::IrNodeId(0)));
+    }
+
+    #[test]
+    fn sequence_malformed_participant_config_warns_and_preserves_later_messages() {
+        for declaration in [
+            r#"DB@{"type":"database""#,
+            r#"DB@{"type":}"#,
+            r#"DB@{"type":"database"} trailing"#,
+            r#"DB@{"type":"database"} as"#,
+            r#"DB@{"type":"database"} aservice"#,
+        ] {
+            let input = format!(
+                "sequenceDiagram\n  participant {declaration}\n  Client->>DB: Query\n  DB-->>Client: Result"
+            );
+            let parsed = parse_mermaid(&input);
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("unable to parse participant declaration")),
+                "{input}: {:?}",
+                parsed.warnings
+            );
+            assert_eq!(parsed.ir.nodes.len(), 2, "{input}");
+            assert_eq!(parsed.ir.edges.len(), 2, "{input}");
+            assert_eq!(parsed.ir.nodes[0].id, "Client", "{input}");
+            assert_eq!(parsed.ir.nodes[1].id, "DB", "{input}");
+            assert_eq!(
+                parsed.ir.edges[0].to,
+                IrEndpoint::Node(fm_core::IrNodeId(1)),
+                "{input}"
+            );
+            assert_eq!(
+                parsed.ir.edges[1].from,
+                IrEndpoint::Node(fm_core::IrNodeId(1)),
+                "{input}"
+            );
+        }
     }
 
     #[test]
