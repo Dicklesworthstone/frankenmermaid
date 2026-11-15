@@ -14490,19 +14490,32 @@ pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<Str
         return None;
     }
     let node = ir.nodes.get(node_index)?;
-    // Every accepted flow is finite f32, but their sum need not fit in f32. Keep the aggregate
-    // finite without changing which individual labels count as valid flow quantities.
+    // The parser accepts finite f64 quantities. Accumulate relative to the largest incident
+    // flow so both a subnormal quantity and a total beyond f64::MAX retain a meaningful label.
+    // A shared scale also lets us compare inflow and outflow without overflowing either sum.
+    let mut scale = 0.0_f64;
     let mut inflow = 0.0_f64;
     let mut outflow = 0.0_f64;
     for edge in &ir.edges {
+        let incoming = edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index));
+        let outgoing = edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index));
+        if !incoming && !outgoing {
+            continue;
+        }
         let Some(value) = sankey_flow_value(ir, edge) else {
             continue;
         };
-        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            inflow += f64::from(value);
+        if value > scale {
+            let ratio = scale / value;
+            inflow *= ratio;
+            outflow *= ratio;
+            scale = value;
         }
-        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            outflow += f64::from(value);
+        if incoming {
+            inflow += value / scale;
+        }
+        if outgoing {
+            outflow += value / scale;
         }
     }
     let total = inflow.max(outflow);
@@ -14512,44 +14525,59 @@ pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<Str
     Some(format!(
         "{}\n{}",
         ir.node_display_text(node),
-        if total <= f64::from(f32::MAX) {
-            format_sankey_total(total as f32)
-        } else {
-            // At this magnitude a fractional cent cannot be represented. Fixed notation
-            // keeps the full finite quantity instead of exposing `inf` or an exponent.
-            format!("{total:.0}")
-        }
+        format_sankey_total(scale, total)
     ))
 }
 
-/// At most two decimal places, with fractional trailing zeros trimmed.
+/// Round ordinary quantities to two decimal places without narrowing the source to f32.
 ///
-/// This preserves the SVG formatter's f32 rounding: 1234.5678 displays as
-/// 1234.57 rather than exposing float noise, and 1200 stays 1200. Half-cent
-/// values can still round differently from Mermaid's f64 representation.
-fn format_sankey_total(total: f32) -> String {
-    let rounded = format!("{total:.2}");
-    if rounded.contains('.') {
-        rounded
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    } else {
-        rounded
+/// Scientific notation preserves a positive quantity that would otherwise read as zero, and
+/// bounds the label width for extreme magnitudes. The separate scale keeps overflowed sums
+/// representable as a mantissa and decimal exponent rather than publishing `inf`.
+fn format_sankey_total(scale: f64, normalized: f64) -> String {
+    let total = scale * normalized;
+    if total.is_finite() && total < 1e15 {
+        let rounded = format!("{total:.2}");
+        if rounded != "0.00" {
+            return rounded
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string();
+        }
     }
+    let (mantissa, exponent_offset) = if total.is_finite() {
+        (total, 0)
+    } else {
+        // Only the overflowing branch needs this decomposition, so scale is large and the
+        // power of ten is normal and finite (unlike a power for a subnormal input).
+        let exponent = scale.log10().floor() as i32;
+        ((scale / 10.0_f64.powi(exponent)) * normalized, exponent)
+    };
+    let scientific = format!("{mantissa:.6e}");
+    let (digits, exponent) = scientific
+        .split_once('e')
+        .expect("finite scientific notation contains an exponent");
+    let exponent = exponent
+        .parse::<i32>()
+        .expect("a formatted f64 exponent fits in i32")
+        + exponent_offset;
+    format!(
+        "{}e{exponent}",
+        digits.trim_end_matches('0').trim_end_matches('.')
+    )
 }
 
 /// Sankey values are stored in edge labels, not in a separate weight field.
-fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
+fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f64> {
     let text = ir.labels.get(edge.label?.0)?.text.trim();
-    let value = text.parse::<f32>().ok()?;
+    let value = text.parse::<f64>().ok()?;
     (value.is_finite() && value > 0.0).then_some(value)
 }
 
 /// Largest positive, finite Sankey flow; compute once per render, not per edge.
 /// Returns `None` for every other diagram type and for diagrams without a usable value.
 #[must_use]
-pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
+pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f64> {
     if ir.diagram_type != DiagramType::Sankey {
         return None;
     }
@@ -14557,7 +14585,7 @@ pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
         .edges
         .iter()
         .filter_map(|edge| sankey_flow_value(ir, edge))
-        .fold(0.0_f32, f32::max);
+        .fold(0.0_f64, f64::max);
     (widest > 0.0).then_some(widest)
 }
 
@@ -14569,11 +14597,17 @@ pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
 pub fn sankey_flow_stroke_width(
     ir: &MermaidDiagramIr,
     edge: Option<&fm_core::IrEdge>,
-    widest: Option<f32>,
+    widest: Option<f64>,
 ) -> Option<f32> {
-    let widest = widest?;
+    let widest = widest.filter(|value| value.is_finite() && *value > 0.0)?;
     let value = sankey_flow_value(ir, edge?)?;
-    Some(((value / widest) * SANKEY_MAX_RIBBON_WIDTH).max(SANKEY_MIN_RIBBON_WIDTH))
+    Some(
+        ((value / widest) * f64::from(SANKEY_MAX_RIBBON_WIDTH))
+            .clamp(
+                f64::from(SANKEY_MIN_RIBBON_WIDTH),
+                f64::from(SANKEY_MAX_RIBBON_WIDTH),
+            ) as f32,
+    )
 }
 
 const SANKEY_MIN_RIBBON_WIDTH: f32 = 1.5;
@@ -14949,9 +14983,8 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         out_flow[source] += value;
         in_flow[target] += value;
     }
-    // Reserve the widths that the shared painter and port router will actually use. The
-    // f64 throughput normalization also accepts values outside the renderer's f32 range;
-    // letting those values set this scale would undersize ports for the remaining ribbons.
+    // Reserve the widths that the shared painter and port router will actually use. Quantities
+    // remain f64 until their normalized ratio becomes a bounded screen-space width.
     let widest_ribbon = sankey_widest_flow(ir);
     for edge in &ir.edges {
         let (Some(source), Some(target), Some(width)) = (
@@ -29701,7 +29734,8 @@ mod tests {
     #[cfg(feature = "highs")]
     use super::constraint_lp_iteration_limit;
     use super::{
-        CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ConstraintSolverMode, CycleStrategy,
+        CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ClusterCaptionLayout,
+        ConstraintSolverMode, CycleStrategy,
         DependencyGraph, DiagramLayout, DirtySet, EdgeRouting, GraphMetrics,
         IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
         LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox, LayoutPoint,
@@ -34628,6 +34662,79 @@ mod tests {
                     actual.bounds
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sankey_quantities_preserve_f64_precision_and_nonzero_extremes() {
+        for (quantity, expected) in [
+            ("16777217", "16777217"),
+            ("0.005", "0.01"),
+            ("0.0001", "1e-4"),
+            ("1e-100", "1e-100"),
+            ("1e300", "1e300"),
+            ("5e-324", "4.940656e-324"),
+        ] {
+            let ir = parse(&format!("sankey-beta\nA,B,{quantity}\n")).ir;
+            assert_eq!(ir.edges.len(), 1);
+            for (node, name) in [(0, "A"), (1, "B")] {
+                assert_eq!(
+                    super::sankey_node_label(&ir, node),
+                    Some(format!("{name}\n{expected}")),
+                    "quantity {quantity} must remain visible without f32 rounding"
+                );
+            }
+            let widest = super::sankey_widest_flow(&ir);
+            assert_eq!(widest, quantity.parse::<f64>().ok());
+            assert_eq!(
+                super::sankey_flow_stroke_width(&ir, ir.edges.first(), widest),
+                Some(24.0)
+            );
+        }
+    }
+
+    #[test]
+    fn sankey_overflowing_totals_preserve_the_larger_direction() {
+        for source in [
+            "sankey-beta\nA,M,1e308\nB,M,1e308\nM,Z,1e308\n",
+            "sankey-beta\nZ,M,1e308\nM,B,1e308\nM,A,1e308\n",
+        ] {
+            let ir = parse(source).ir;
+            let middle = ir.nodes.iter().position(|node| node.id == "M").unwrap();
+            assert_eq!(
+                super::sankey_node_label(&ir, middle).as_deref(),
+                Some("M\n2e308")
+            );
+            let layout = layout_diagram_sankey(&ir);
+            assert_eq!(layout, layout_diagram_sankey(&ir));
+            assert!(layout.nodes.iter().all(|node| {
+                node.bounds.width.is_finite() && node.bounds.height.is_finite()
+            }));
+        }
+    }
+
+    #[test]
+    fn sankey_ribbon_proportions_are_invariant_across_f64_units() {
+        for scale in [1e-300, 1.0, 1e300] {
+            let ir = parse(&format!(
+                "sankey-beta\nA,B,{}\nA,C,{}\nA,D,{}\n",
+                100.0 * scale,
+                50.0 * scale,
+                10.0 * scale,
+            ))
+            .ir;
+            let widest = super::sankey_widest_flow(&ir);
+            for (edge, expected) in ir.edges.iter().zip([24.0, 12.0, 2.4]) {
+                let width = super::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap();
+                assert!((width - expected).abs() < 0.001, "scale {scale}: {width}");
+            }
+            let layout = layout_diagram_sankey(&ir);
+            assert_eq!(layout.edges.len(), 3);
+            assert!(layout.edges.iter().all(|edge| {
+                edge.points
+                    .iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            }));
         }
     }
 

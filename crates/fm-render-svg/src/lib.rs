@@ -15836,7 +15836,7 @@ struct EdgeRenderContext<'a> {
     /// across the whole render. It used to be recomputed inside the per-edge width helper, which
     /// re-scanned `ir.edges` and re-parsed every flow value on every edge: O(E^2) float parses to
     /// produce E widths. Computing it once with the context makes the render O(E).
-    sankey_widest_flow: Option<f32>,
+    sankey_widest_flow: Option<f64>,
 }
 
 /// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to

@@ -1280,6 +1280,19 @@ mod sankey {
                 vec!["A", "1234.57", "B", "1234.57"],
             ),
             ("sankey-beta\n\nA,B,1200\n", vec!["A", "1200", "B", "1200"]),
+            (
+                "sankey-beta\nA,B,16777217\n",
+                vec!["A", "16777217", "B", "16777217"],
+            ),
+            ("sankey-beta\nA,B,0.005\n", vec!["A", "0.01", "B", "0.01"]),
+            (
+                "sankey-beta\nA,B,1e-100\n",
+                vec!["A", "1e-100", "B", "1e-100"],
+            ),
+            (
+                "sankey-beta\nA,M,1e308\nB,M,1e308\nM,Z,1e308\n",
+                vec!["A", "1e308", "M", "2e308", "B", "1e308", "Z", "1e308"],
+            ),
         ] {
             let ir = fm_parser::parse(source).ir;
             let layout = fm_layout::layout_diagram(&ir);
@@ -1301,6 +1314,27 @@ mod sankey {
         let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
         assert_ribbons(&context, &layout, &plan, &[24.0, 1.5]);
         assert_eq!(gpu_texts(&plan), ["A", "1001", "B", "1000", "C", "1"]);
+    }
+
+    #[test]
+    fn f64_quantity_units_preserve_canvas_and_gpu_ribbon_proportions() {
+        for scale in [1e-300, 1.0, 1e300] {
+            let ir = fm_parser::parse(&format!(
+                "sankey-beta\nA,B,{}\nA,C,{}\nA,D,{}\n",
+                100.0 * scale,
+                50.0 * scale,
+                10.0 * scale,
+            ))
+            .ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let context = canvas(&ir, &layout);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert_ribbons(&context, &layout, &plan, &[24.0, 12.0, 2.4]);
+            assert_eq!(
+                gpu_texts(&plan),
+                texts(&context).iter().map(|row| row.0).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

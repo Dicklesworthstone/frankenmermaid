@@ -159,6 +159,18 @@ fn shared_scene_exports_draw_the_same_names_and_throughputs_as_direct_svg() {
             "sankey-beta\nA,B,1.5\nA,C,2.25\n",
             vec!["A", "3.75", "B", "1.5", "C", "2.25"],
         ),
+        (
+            "sankey-beta\nA,B,16777217\n",
+            vec!["A", "16777217", "B", "16777217"],
+        ),
+        (
+            "sankey-beta\nA,B,1e-100\n",
+            vec!["A", "1e-100", "B", "1e-100"],
+        ),
+        (
+            "sankey-beta\nA,M,1e308\nB,M,1e308\nM,Z,1e308\n",
+            vec!["A", "1e308", "M", "2e308", "B", "1e308", "Z", "1e308"],
+        ),
     ] {
         let ir = fm_parser::parse(source).ir;
         let layout = fm_layout::layout_diagram(&ir);

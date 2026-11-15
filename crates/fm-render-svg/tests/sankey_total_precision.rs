@@ -1,5 +1,5 @@
-//! A sankey node's throughput is drawn to at most two decimals — and never with digits the author
-//! did not write.
+//! Ordinary Sankey throughputs are rounded to two decimals without narrowing authored f64 values.
+//! Tiny and extreme quantities use scientific notation so positive flow never reads as zero.
 //!
 //! THE DEFECT. `format_sankey_total` printed the raw stored value, so the picture showed whatever
 //! `f32` happened to hold. A flow written `1234.5678` drew **`1234.5677`** — a last digit that
@@ -36,12 +36,8 @@
 //! decision — removing published information — rather than a formatting one, so it is left for its
 //! own bead instead of being folded in here on the way past.
 //!
-//! ⚠️ ONE RESIDUAL DIVERGENCE, PINNED AS A FORMAT RATHER THAN A DIGIT. `A,B,0.005` draws `0.01`
-//! upstream. mermaid parses into `f64`, whose nearest value to 0.005 sits just above the exact half
-//! and rounds up; `sankey_flow_value` parses into `f32`, whose nearest value can fall on the other
-//! side. That is the IR's numeric width, not this formatter, and closing it means widening the
-//! stored flow — an IR change, not a print. The test below asserts the SHAPE for that input and
-//! deliberately does not assert a digit this code cannot promise.
+//! `A,B,0.005` draws `0.01` upstream. Keeping the edge label's parsed quantity as f64 until
+//! projection preserves that half-cent result; narrowing to f32 could round it to zero.
 
 /// The drawn text of an SVG, `<text>` bodies with nested tags stripped.
 ///
@@ -165,29 +161,11 @@ fn a_trailing_fractional_zero_is_trimmed() {
     );
 }
 
-/// The residual `f32` case: pinned as a SHAPE, not a digit.
-///
-/// `A,B,0.005` draws `0.01` upstream. We cannot promise that from an `f32` (see this file's header),
-/// so asserting `0.01` would fail and asserting our current output would bless whichever side of the
-/// half the float lands on. What IS promised is the format: at most two decimals, no raw
-/// `0.005` echoed through. That is what this asserts, so the day the flow value widens to `f64` the
-/// remaining gap is a one-line change here rather than a rediscovery.
+/// The half-cent case must keep the reference's digit, not merely its display format.
 #[test]
-fn an_exact_half_is_still_formatted_even_where_the_digit_diverges() {
+fn a_half_cent_keeps_f64_rounding() {
     let totals = totals_drawn("0.005");
-    assert!(!totals.is_empty(), "no total was drawn at all");
-    for total in &totals {
-        assert!(
-            !total.contains("0.005"),
-            "the raw value escaped the formatter: {totals:?}"
-        );
-        if let Some((_, fraction)) = total.split_once('.') {
-            assert!(
-                fraction.len() <= 2,
-                "more than two decimals were drawn: {totals:?}"
-            );
-        }
-    }
+    assert_eq!(totals, ["0.01", "0.01"]);
 }
 
 /// CONTROL: the node NAME still draws, on its own tspan line.
