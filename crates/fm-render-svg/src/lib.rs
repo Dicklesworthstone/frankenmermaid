@@ -9474,12 +9474,9 @@ fn render_xychart_svg(
     } else {
         // Nice tick values shared with the Canvas renderer, not quarter points.
         for tick_value in xychart_y_ticks(y_min, y_max) {
-            let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
-                (tick_value - y_min) / (y_max - y_min)
-            } else {
-                0.0
-            };
-            let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
+            // Use the same finite projection as the data marks. An f32 subtraction can
+            // overflow on a finite domain, and an epsilon guard flattens small scales.
+            let tick_y = xychart_value_to_y(tick_value, y_min, y_max, plot_bounds) + offset_y;
             doc = doc.child(
                 Element::line()
                     .x1(plot_x)
@@ -9662,12 +9659,7 @@ fn render_xychart_svg(
         // The SAME values the labels use — a tick mark beside a different set of labels is worse than
         // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
         for tick_value in xychart_y_ticks(y_min, y_max) {
-            let frac = if (y_max - y_min).abs() > f32::EPSILON {
-                (tick_value - y_min) / (y_max - y_min)
-            } else {
-                0.0
-            };
-            let y = plot_bottom - frac * plot_bounds.height;
+            let y = xychart_value_to_y(tick_value, y_min, y_max, plot_bounds) + offset_y;
             doc = doc.child(
                 Element::line()
                     .x1(plot_x - tick_len)
@@ -9996,6 +9988,7 @@ fn write_xychart_horizontal_axes(
 ) -> SvgDocument {
     let plot_bottom = plot_y + plot_height;
     let plot_right = plot_x + plot_width;
+    let plot_bounds = fm_layout::xychart_plot_bounds(xy_chart_meta, layout.bounds);
     let tick_len = 5.0_f32;
     let tick_font = clamp_font_size(config.font_size * 0.72, config.min_font_size);
     let label_font = clamp_font_size(config.font_size * 0.74, config.min_font_size);
@@ -10003,12 +9996,7 @@ fn write_xychart_horizontal_axes(
 
     // Value ticks: vertical gridlines, labels and tick marks along the TOP edge.
     for tick_value in xychart_y_ticks(y_min, y_max) {
-        let ratio = if (y_max - y_min).abs() > f32::EPSILON {
-            (tick_value - y_min) / (y_max - y_min)
-        } else {
-            0.0
-        };
-        let x = ratio.mul_add(plot_width, plot_x);
+        let x = fm_layout::xychart_value_to_x(tick_value, y_min, y_max, plot_bounds) + offset_x;
         doc = doc
             .child(
                 Element::line()
@@ -30259,6 +30247,119 @@ marker#arrow-open path {
         }
         assert!(attr(bars[1], "width") > attr(bars[0], "width"));
         assert!(attr(bars[1], "y") > attr(bars[0], "y"));
+    }
+
+    #[test]
+    fn xychart_axes_and_data_share_tiny_extreme_and_ordinary_scales() {
+        for (range, values) in [
+            ("0 --> 1e-9", "0, 5e-10, 1e-9"),
+            ("-2e-9 --> -1e-9", "-2e-9, -1.5e-9, -1e-9"),
+            ("-3e38 --> 3e38", "-3e38, 0, 3e38"),
+            ("-10 --> 30", "-10, 10, 30"),
+        ] {
+            for horizontal in [false, true] {
+                let source = format!(
+                    "xychart-beta{}\n x-axis [Low, Middle, High]\n\
+                     y-axis {range}\n line [{values}]",
+                    if horizontal { " horizontal" } else { "" },
+                );
+                let ir = fm_parser::parse(&source).ir;
+                for padding in [0.0, 37.0] {
+                    let svg = render_svg_with_config(
+                        &ir,
+                        &SvgRenderConfig {
+                            padding,
+                            ..Default::default()
+                        },
+                    );
+                    let elements = |class: &str| -> Vec<&str> {
+                        svg.split('<')
+                            .filter_map(|element| element.split_once('>'))
+                            .map(|(tag, _)| tag)
+                            .filter(|tag| scene_attribute(tag, "class") == Some(class))
+                            .collect()
+                    };
+                    let number = |tag: &str, name: &str| -> f32 {
+                        let value = scene_attribute(tag, name)
+                            .unwrap_or_else(|| panic!("missing {name}: {tag}"))
+                            .parse::<f32>()
+                            .expect("numeric SVG coordinate");
+                        assert!(value.is_finite(), "{source}: {name} in {tag}");
+                        value
+                    };
+                    let plots = elements("fm-xychart-plot");
+                    assert_eq!(plots.len(), 1, "{source}");
+                    let plot = plots[0];
+                    let x = number(plot, "x");
+                    let y = number(plot, "y");
+                    let width = number(plot, "width");
+                    let height = number(plot, "height");
+                    let (origin, extent, coordinate, point_coordinate) = if horizontal {
+                        (x, width, "x1", "cx")
+                    } else {
+                        (y + height, -height, "y1", "cy")
+                    };
+
+                    // Source samples at the two endpoints and midpoint must occupy those
+                    // positions in the drawn plot, independently of the magnitude of the data.
+                    let points = elements("fm-xychart-point");
+                    assert_eq!(points.len(), 3, "{source}");
+                    for (index, point) in points.iter().enumerate() {
+                        let expected = origin + extent * index as f32 / 2.0;
+                        let actual = number(point, point_coordinate);
+                        assert!(
+                            (actual - expected).abs() < 0.01,
+                            "{source}: sample {index} is at {actual}, expected {expected}"
+                        );
+                    }
+
+                    let grid = elements("fm-xychart-gridline");
+                    let labels = elements("fm-xychart-y-tick");
+                    let ticks: Vec<_> = elements("fm-xychart-tick")
+                        .into_iter()
+                        .filter(|tag| {
+                            if horizontal {
+                                (number(tag, "y2") - y).abs() < 0.01
+                                    && number(tag, "y1") < y
+                            } else {
+                                (number(tag, "x2") - x).abs() < 0.01
+                                    && number(tag, "x1") < x
+                            }
+                        })
+                        .collect();
+                    assert!(grid.len() >= 3, "{source}: missing value scale");
+                    assert_eq!(grid.len(), labels.len(), "{source}");
+                    assert_eq!(grid.len(), ticks.len(), "{source}");
+                    let mut previous_fraction = -1.0;
+                    for (index, ((line, label), tick)) in
+                        grid.iter().zip(&labels).zip(&ticks).enumerate()
+                    {
+                        let position = number(line, coordinate);
+                        let fraction = (position - origin) / extent;
+                        assert!(
+                            (-0.001..=1.001).contains(&fraction)
+                                && fraction > previous_fraction,
+                            "{source}: value scale collapsed or left the plot at {position}"
+                        );
+                        if index == 0 {
+                            assert!(fraction < 0.15, "{source}: minimum is missing");
+                        }
+                        previous_fraction = fraction;
+                        let label_position = if horizontal {
+                            number(label, "x")
+                        } else {
+                            number(label, "y") - 4.0
+                        };
+                        assert!(
+                            (label_position - position).abs() < 0.01
+                                && (number(tick, coordinate) - position).abs() < 0.01,
+                            "{source}: grid, label and tick disagree at {position}"
+                        );
+                    }
+                    assert!(previous_fraction > 0.85, "{source}: maximum is missing");
+                }
+            }
+        }
     }
 
     #[test]
