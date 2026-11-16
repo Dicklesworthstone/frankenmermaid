@@ -331,6 +331,383 @@ fn deck_html_preserves_authored_template_markers_and_embeds_runtime() {
     );
 }
 
+fn run_deck_cli(source: &str, args: &[&str]) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args(["deck", "-"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run deck CLI");
+    let written = child
+        .stdin
+        .take()
+        .expect("source stdin")
+        .write_all(source.as_bytes());
+    let output = child.wait_with_output().expect("deck CLI result");
+    if let Err(error) = written {
+        // Invalid options can be rejected before stdin is consumed.
+        assert!(
+            !output.status.success() && error.kind() == std::io::ErrorKind::BrokenPipe,
+            "write deck source: {error}"
+        );
+    }
+    output
+}
+
+fn successful_deck_svg(source: &str, args: &[&str]) -> String {
+    let output = run_deck_cli(source, args);
+    assert!(
+        output.status.success(),
+        "deck {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("SVG UTF-8")
+}
+
+fn slide_svg_attribute<'a>(svg: &'a str, name: &str) -> &'a str {
+    let root = svg.split_once('>').expect("SVG root").0;
+    assert!(root.starts_with("<svg "));
+    root.split_once(&format!(" {name}=\""))
+        .unwrap_or_else(|| panic!("missing root attribute {name}"))
+        .1
+        .split_once('"')
+        .expect("closed root attribute")
+        .0
+}
+
+fn slide_export_css(svg: &str) -> &str {
+    svg.split_once("<style")
+        .expect("slide selection stylesheet")
+        .1
+        .split_once('>')
+        .expect("stylesheet contents")
+        .1
+        .split_once("</style>")
+        .expect("closed stylesheet")
+        .0
+}
+
+#[test]
+fn deck_cli_svg_exports_the_selected_slide_and_reveal_step() {
+    let (source, manifest, _) = manifest_for_case("flowchart_subgraphs");
+    let slide = manifest
+        .slides
+        .iter()
+        .find(|slide| slide.id == "core")
+        .unwrap();
+    assert_eq!(slide.max_step, 2);
+    let early = successful_deck_svg(
+        &source,
+        &[
+            "--format", "svg", "--slide", "core", "--step", "0", "--width", "640", "--height",
+            "360",
+        ],
+    );
+    let complete = successful_deck_svg(
+        &source,
+        &["--format", "svg", "--slide", "core", "--width", "720"],
+    );
+
+    assert_eq!(slide_svg_attribute(&early, "width"), "640");
+    assert_eq!(slide_svg_attribute(&early, "height"), "360");
+    assert_eq!(slide_svg_attribute(&complete, "width"), "720");
+    for (svg, step) in [(&early, 0), (&complete, slide.max_step)] {
+        assert_eq!(slide_svg_attribute(svg, "data-deck-slide"), "core");
+        assert_eq!(slide_svg_attribute(svg, "data-deck-step"), step.to_string());
+        assert!(
+            !svg.contains("<script"),
+            "slide images need no player runtime"
+        );
+        assert!(!svg.contains("var("), "static SVG paints must be portable");
+        let css = slide_export_css(svg);
+        assert!(css.contains("visibility:hidden"));
+        let visible_selectors = css
+            .split('}')
+            .filter_map(|rule| rule.split_once('{'))
+            .filter(|(_, declarations)| declarations.trim() == "visibility:visible")
+            .map(|(selectors, _)| selectors)
+            .collect::<Vec<_>>()
+            .join(",");
+        for node in &slide.nodes {
+            assert_eq!(
+                visible_selectors.contains(&format!("#{}", node.element_id)),
+                node.step <= step,
+                "{} at reveal step {step}",
+                node.element_id
+            );
+        }
+        for edge in &slide.edges {
+            assert_eq!(
+                visible_selectors.contains(&format!("#{}", edge.element_id)),
+                edge.step <= step,
+                "{} at reveal step {step}",
+                edge.element_id
+            );
+        }
+        let intro = manifest
+            .slides
+            .iter()
+            .find(|slide| slide.id == "intro")
+            .unwrap();
+        for node in &intro.nodes {
+            assert!(
+                !visible_selectors.contains(&format!("#{}", node.element_id)),
+                "off-slide node {} must stay hidden",
+                node.element_id
+            );
+        }
+
+        let crop: Vec<f32> = slide_svg_attribute(svg, "viewBox")
+            .split_ascii_whitespace()
+            .map(|value| value.parse().expect("numeric crop coordinate"))
+            .collect();
+        assert_eq!(crop.len(), 4);
+        let expected_x = (slide.bounds.x - slide.fit_margin).max(manifest.view_box.x);
+        let expected_y = (slide.bounds.y - slide.fit_margin).max(manifest.view_box.y);
+        let expected_right = (slide.bounds.x + slide.bounds.width + slide.fit_margin)
+            .min(manifest.view_box.x + manifest.view_box.width);
+        let expected_bottom = (slide.bounds.y + slide.bounds.height + slide.fit_margin)
+            .min(manifest.view_box.y + manifest.view_box.height);
+        for (actual, expected) in crop.iter().zip([
+            expected_x,
+            expected_y,
+            expected_right - expected_x,
+            expected_bottom - expected_y,
+        ]) {
+            assert!((actual - expected).abs() < 0.03, "selected slide crop");
+        }
+        if step == slide.max_step {
+            let height: u32 = slide_svg_attribute(svg, "height").parse().unwrap();
+            let scaled_height = 720.0 * f64::from(crop[3]) / f64::from(crop[2]);
+            assert!(
+                (f64::from(height) - scaled_height).abs() <= 1.0,
+                "a width-only export preserves the slide aspect ratio"
+            );
+        }
+    }
+}
+
+#[test]
+fn deck_cli_slide_images_reject_invalid_selections_before_writing() {
+    let source = fs::read_to_string(deck_golden_dir().join("flowchart_subgraphs.mmd"))
+        .expect("deck fixture");
+    for (args, expected) in [
+        (vec!["--format", "svg"], "requires --slide"),
+        (
+            vec!["--format", "svg", "--slide", "missing"],
+            "no deck slide has id",
+        ),
+        (
+            vec!["--format", "svg", "--slide", "core", "--step", "99"],
+            "reveal step 99",
+        ),
+        (
+            vec!["--format", "html", "--slide", "core"],
+            "require --format svg or png",
+        ),
+        (
+            vec!["--format", "json", "--width", "320"],
+            "require --format svg or png",
+        ),
+        (
+            vec!["--format", "svg", "--slide", "core", "--width", "0"],
+            "invalid value",
+        ),
+    ] {
+        let output = run_deck_cli(&source, &args);
+        assert!(!output.status.success(), "deck {args:?} should fail");
+        assert!(
+            output.stdout.is_empty(),
+            "errors must not emit a partial image"
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(expected), "deck {args:?}: {error}");
+    }
+
+    let temp = tempfile::tempdir().expect("output directory");
+    let path = temp.path().join("slide.svg");
+    fs::write(&path, "existing image").expect("existing output");
+    let output = run_deck_cli(
+        &source,
+        &[
+            "--format",
+            "svg",
+            "--slide",
+            "missing",
+            "--output",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "existing image");
+}
+
+#[test]
+fn deck_cli_static_export_reports_unsupported_diagram_families() {
+    let source = "sequenceDiagram\n\
+        %%{deck: {slides: [{id:'actors',nodes:['A','B']}]}}%%\n\
+        participant A\nparticipant B\nA->>B: Request\nNote over A,B: Processing\n";
+    let manifest = run_deck_cli(source, &["--format", "json"]);
+    assert!(
+        manifest.status.success(),
+        "the family still supports deck manifests: {}",
+        String::from_utf8_lossy(&manifest.stderr)
+    );
+    let image = run_deck_cli(source, &["--format", "svg", "--slide", "actors"]);
+    assert!(!image.status.success());
+    assert!(image.stdout.is_empty());
+    let error = String::from_utf8_lossy(&image.stderr);
+    assert!(error.contains("does not support"), "{error}");
+}
+
+#[cfg(not(feature = "png"))]
+#[test]
+fn deck_cli_png_reports_the_required_feature() {
+    let source = fs::read_to_string(deck_golden_dir().join("flowchart_subgraphs.mmd"))
+        .expect("deck fixture");
+    let output = run_deck_cli(&source, &["--format", "png", "--slide", "core"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("PNG output requires the 'png' feature"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "png")]
+#[test]
+fn deck_cli_png_paints_reveal_steps_at_the_requested_dimensions() {
+    use resvg::tiny_skia::Pixmap;
+
+    let source = "flowchart LR\n\
+        %%{deck: {slides: [\n\
+          {id:'focus',nodes:['A','B'],reveal:[['B']],fitMargin:10000},\n\
+          {id:'all',nodes:['*'],fitMargin:10000}\n\
+        ]}}%%\n\
+        A[Visible blue] -->|selected magenta edge| B[Revealed orange]\n\
+        A --> H[Off-slide green]\nH --> B\n\
+        style A fill:#1749d9,stroke:#1749d9,color:#ffffff\n\
+        style B fill:#f4b112,stroke:#f4b112,color:#000000\n\
+        style H fill:#16cd94,stroke:#16cd94,color:#000000\n\
+        linkStyle 0 stroke:#d11857,stroke-width:6,color:#111111\n";
+    let before = run_deck_cli(
+        source,
+        &[
+            "--format", "png", "--slide", "focus", "--step", "0", "--width", "640", "--height",
+            "360",
+        ],
+    );
+    assert!(
+        before.status.success(),
+        "{}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+
+    let temp = tempfile::tempdir().expect("output directory");
+    let path = temp.path().join("slide.png");
+    let complete = run_deck_cli(
+        source,
+        &[
+            "--format",
+            "png",
+            "--slide",
+            "focus",
+            "--width",
+            "640",
+            "--height",
+            "360",
+            "--output",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        complete.status.success(),
+        "{}",
+        String::from_utf8_lossy(&complete.stderr)
+    );
+    assert!(
+        complete.stdout.is_empty(),
+        "file export leaves stdout empty"
+    );
+    let complete = fs::read(path).expect("PNG file");
+    for bytes in [&before.stdout, &complete] {
+        assert!(bytes.len() > 33, "PNG includes image data after its header");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&bytes[12..16], b"IHDR");
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 640);
+        assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 360);
+    }
+    let all = run_deck_cli(
+        source,
+        &[
+            "--format", "png", "--slide", "all", "--width", "640", "--height", "360",
+        ],
+    );
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let before = Pixmap::decode_png(&before.stdout).expect("decode initial slide pixels");
+    let complete = Pixmap::decode_png(&complete).expect("decode complete slide pixels");
+    let all = Pixmap::decode_png(&all.stdout).expect("decode all-members control pixels");
+    let painted_pixels = |pixmap: &Pixmap, expected: [u8; 3]| {
+        pixmap
+            .data()
+            .chunks_exact(4)
+            .filter(|pixel| {
+                pixel[3] == 255
+                    && pixel[..3]
+                        .iter()
+                        .zip(expected)
+                        .all(|(actual, expected)| actual.abs_diff(expected) <= 2)
+            })
+            .count()
+    };
+    let (blue, orange, green, magenta) =
+        ([23, 73, 217], [244, 177, 18], [22, 205, 148], [209, 24, 87]);
+    for pixmap in [&before, &complete] {
+        assert_eq!((pixmap.width(), pixmap.height()), (640, 360));
+        assert!(
+            painted_pixels(pixmap, blue) > 20,
+            "selected node remains painted"
+        );
+        assert_eq!(
+            painted_pixels(pixmap, green),
+            0,
+            "off-slide node stays hidden"
+        );
+    }
+    assert!(
+        painted_pixels(&all, green) > 20,
+        "the off-slide color is renderable inside this full-diagram crop"
+    );
+    assert_eq!(
+        painted_pixels(&before, orange),
+        0,
+        "later node is unrevealed"
+    );
+    assert!(
+        painted_pixels(&complete, orange) > 20,
+        "revealed node is painted"
+    );
+    assert_eq!(
+        painted_pixels(&before, magenta),
+        0,
+        "later edge is unrevealed"
+    );
+    assert!(
+        painted_pixels(&complete, magenta) > 20,
+        "a selected labeled edge must paint its child path, not only its neutral text label"
+    );
+}
+
 /// A generated diagram + deck for the property suites: always a SUPPORTED family
 /// (flowchart), sometimes with a subgraph, with authored/auto/no reveals and each edge
 /// policy — plus arbitrary junk selectors to exercise degradation.

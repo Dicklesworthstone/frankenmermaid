@@ -16,17 +16,20 @@
 //! that vary by build feature.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write};
 
 use fm_core::{
     DECK_MANIFEST_SCHEMA_VERSION, DeckEdgeEndpoints, DeckManifest, DeckManifestCluster,
     DeckManifestEdge, DeckManifestNode, DeckManifestOptions, DeckManifestOverview,
-    DeckManifestSlide, DeckManifestStep, DeckRect, IrDeck, IrDeckEdgePolicy, IrDeckReveal,
-    MermaidDiagramIr, deck_manifest_supported, mermaid_cluster_element_id, mermaid_edge_element_id,
-    mermaid_node_element_id,
+    DeckManifestSlide, DeckManifestStep, DeckRect, DiagramType, IrDeck, IrDeckEdgePolicy,
+    IrDeckReveal, MermaidDiagramIr, deck_manifest_supported, mermaid_cluster_element_id,
+    mermaid_edge_element_id, mermaid_node_element_id,
 };
 use fm_layout::{DiagramLayout, LayoutRect};
 
-use crate::{SvgBackend, SvgFrame, SvgRenderConfig, render_svg_with_layout, svg_frame};
+use crate::{
+    Element, SvgBackend, SvgDocument, SvgFrame, SvgRenderConfig, render_svg_with_layout, svg_frame,
+};
 
 /// One member node of a resolved scene, in layout space.
 #[derive(Debug, Clone, PartialEq)]
@@ -208,6 +211,11 @@ pub(crate) fn resolve_scenes(
                 let Some(edge) = ir.edges.get(edge_path.edge_index) else {
                     continue;
                 };
+                // Layout-only links and absorbed bundle members have no addressable SVG root.
+                // Keep the manifest aligned with the rendered artifact, including slide bounds.
+                if edge.arrow == fm_core::ArrowType::Invisible || edge_path.bundled {
+                    continue;
+                }
                 let from = ir.resolve_endpoint_node(edge.from).map(|id| id.0);
                 let to = ir.resolve_endpoint_node(edge.to).map(|id| id.0);
                 let from_member = from.is_some_and(|index| members.contains(&index));
@@ -587,6 +595,409 @@ pub fn render_svg_with_deck(
     (svg, manifest)
 }
 
+/// Selection and pixel dimensions for a portable graph-deck slide image.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeckSlideExportOptions {
+    /// Last visible reveal step. `None` exports the fully revealed slide.
+    pub step: Option<usize>,
+    /// Output width in pixels; a single supplied dimension preserves the aspect ratio.
+    pub width: Option<u32>,
+    /// Output height in pixels; a single supplied dimension preserves the aspect ratio.
+    pub height: Option<u32>,
+}
+
+/// An invalid slide selection or a mismatched SVG/manifest pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeckSlideExportError {
+    MissingManifest,
+    UnsupportedDiagram(DiagramType),
+    UnknownSlide(String),
+    InvalidStep { requested: usize, maximum: usize },
+    InvalidBounds,
+    InvalidDimensions,
+    NonPortableSvg,
+    InvalidElement(String),
+}
+
+impl fmt::Display for DeckSlideExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingManifest => f.write_str("the diagram produced no usable deck manifest"),
+            Self::UnsupportedDiagram(diagram_type) => write!(f, "slide image export does not support {} diagrams yet; use HTML or JSON deck output", diagram_type.as_str()),
+            Self::UnknownSlide(id) => write!(f, "no deck slide has id {id:?}"),
+            Self::InvalidStep { requested, maximum } => {
+                write!(f, "reveal step {requested} exceeds this slide's last step {maximum}")
+            }
+            Self::InvalidBounds => f.write_str("deck slide bounds must be finite, positive, and inside the diagram"),
+            Self::InvalidDimensions => f.write_str("slide image dimensions must be positive and fit in u32 pixels"),
+            Self::NonPortableSvg => f.write_str("slide export requires the paired SVG rendered with SvgRenderConfig::make_portable()"),
+            Self::InvalidElement(id) => write!(f, "deck element {id:?} is invalid or absent from the paired SVG"),
+        }
+    }
+}
+
+impl std::error::Error for DeckSlideExportError {}
+
+/// Render one slide as a standalone SVG image from an existing layout.
+///
+/// The portable profile resolves paints and disables animations. The diagram is rendered once;
+/// the manifest and the exported image use that exact layout and coordinate frame.
+pub fn render_deck_slide_svg(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    slide_id: &str,
+    options: DeckSlideExportOptions,
+) -> Result<String, DeckSlideExportError> {
+    let mut config = config.clone();
+    config.make_portable();
+    config.preserve_labels = true;
+    let (svg, manifest) = render_svg_with_deck(ir, layout, &config);
+    let manifest = manifest.ok_or(DeckSlideExportError::MissingManifest)?;
+    export_deck_slide_svg(&svg, &manifest, slide_id, options)
+}
+
+/// Export a slide from the portable SVG and manifest produced by [`render_svg_with_deck`].
+///
+/// No source is reparsed and no coordinates are recomputed. The original SVG is retained intact
+/// inside a cropped document, preserving definitions, links, authored text and paint. Ordinary
+/// SVG visibility rules select the slide's nodes, edges and fully contained clusters, including
+/// their labels and node variants. Off-slide content and later reveal steps are
+/// hidden; touching edges remain visible but never enlarge the crop. No JavaScript is needed.
+///
+/// Supported families are flowchart, class, ER, requirement, mindmap, architecture, block and C4.
+/// Other families have additional graphics that cannot yet be selected by manifest membership.
+/// Whole-diagram titles, backgrounds and the C4 legend remain as reference context.
+///
+/// The crop uses the slide's fit margin, bounded by the original document. Its title and caption
+/// become accessible document metadata. The input must be this renderer's **portable** SVG, not
+/// arbitrary SVG or an artifact from a different render; this function is not an SVG sanitizer.
+pub fn export_deck_slide_svg(
+    svg: &str,
+    manifest: &DeckManifest,
+    slide_id: &str,
+    options: DeckSlideExportOptions,
+) -> Result<String, DeckSlideExportError> {
+    if !matches!(
+        manifest.diagram_type,
+        DiagramType::Flowchart
+            | DiagramType::Class
+            | DiagramType::Er
+            | DiagramType::Requirement
+            | DiagramType::Mindmap
+            | DiagramType::ArchitectureBeta
+            | DiagramType::BlockBeta
+            | DiagramType::C4Context
+            | DiagramType::C4Container
+            | DiagramType::C4Component
+            | DiagramType::C4Dynamic
+            | DiagramType::C4Deployment
+    ) {
+        return Err(DeckSlideExportError::UnsupportedDiagram(
+            manifest.diagram_type,
+        ));
+    }
+    let slide = manifest
+        .slides
+        .iter()
+        .find(|slide| slide.id == slide_id)
+        .ok_or_else(|| DeckSlideExportError::UnknownSlide(slide_id.to_owned()))?;
+    let step = options.step.unwrap_or(slide.max_step);
+    if step > slide.max_step {
+        return Err(DeckSlideExportError::InvalidStep {
+            requested: step,
+            maximum: slide.max_step,
+        });
+    }
+    let crop = slide_export_bounds(manifest.view_box, slide.bounds, slide.fit_margin)?;
+    let (width, height) = slide_export_dimensions(crop, options)?;
+    validate_portable_deck_svg(svg, manifest.view_box)?;
+    let element_ids = svg_element_ids(svg);
+    let primary_node_ids = manifest.node_geometry.keys().map(String::as_str).collect();
+    let variants = node_variant_ids(&element_ids, &primary_node_ids);
+
+    // Visibility (rather than paint opacity) leaves the author's alpha untouched. A selected
+    // node can remain visible inside a hidden partial cluster. Definitions are never selected:
+    // masks and markers can also have fm-edge-* ids, but do not have these element classes.
+    let mut css = String::from(
+        "#fm-deck-export-content .fm-node[id],#fm-deck-export-content .fm-edge[id],\
+         #fm-deck-export-content .fm-edge-labeled[id],#fm-deck-export-content .fm-cluster[id],\
+         #fm-deck-export-content [data-fm-deck-owner]",
+    );
+    for id in variants.values().flatten() {
+        validate_slide_element(&element_ids, id)?;
+        let _ = write!(css, ",#fm-deck-export-content #{id}");
+    }
+    css.push_str("{visibility:hidden}");
+    for node in &slide.nodes {
+        append_slide_visibility(
+            &mut css,
+            &element_ids,
+            &node.element_id,
+            node.step <= step,
+            variants
+                .get(node.element_id.as_str())
+                .map_or(&[], Vec::as_slice),
+        )?;
+    }
+    for edge in &slide.edges {
+        append_slide_visibility(
+            &mut css,
+            &element_ids,
+            &edge.element_id,
+            edge.step <= step,
+            &[],
+        )?;
+    }
+    for cluster in &slide.clusters {
+        append_slide_visibility(
+            &mut css,
+            &element_ids,
+            &cluster.element_id,
+            cluster.camera_contained && cluster.step <= step,
+            &[],
+        )?;
+    }
+
+    Ok(SvgDocument::new()
+        .viewbox(crop.x, crop.y, crop.width, crop.height)
+        .width(&width.to_string())
+        .height(&height.to_string())
+        .preserve_aspect_ratio("xMidYMid meet")
+        .accessible(
+            &slide.title,
+            &slide.caption,
+            manifest.diagram_type.aria_roledescription(),
+        )
+        .data("deck-slide", &slide.id)
+        .data("deck-step", &step.to_string())
+        .style(css)
+        .child(
+            Element::group()
+                .id("fm-deck-export-content")
+                .child(Element::raw_svg(svg.to_owned())),
+        )
+        .to_string())
+}
+
+fn append_slide_visibility(
+    css: &mut String,
+    element_ids: &BTreeSet<&str>,
+    id: &str,
+    visible: bool,
+    variants: &[&str],
+) -> Result<(), DeckSlideExportError> {
+    validate_slide_element(element_ids, id)?;
+    if visible {
+        let _ = write!(
+            css,
+            "#fm-deck-export-content #{id},#fm-deck-export-content [data-fm-deck-owner=\"{id}\"]"
+        );
+        for variant in variants {
+            let _ = write!(css, ",#fm-deck-export-content #{variant}");
+        }
+        css.push_str("{visibility:visible}");
+    }
+    Ok(())
+}
+
+fn validate_slide_element(
+    element_ids: &BTreeSet<&str>,
+    id: &str,
+) -> Result<(), DeckSlideExportError> {
+    // Element ids emitted by fm-core contain only ASCII alphanumerics and hyphens. Validate
+    // before using a deserialized manifest in a selector, even for a currently hidden step.
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !element_ids.contains(id)
+    {
+        return Err(DeckSlideExportError::InvalidElement(id.to_owned()));
+    }
+    Ok(())
+}
+
+/// Read only generated opening tags: attribute-looking text inside a label is not an element.
+fn svg_element_ids(svg: &str) -> BTreeSet<&str> {
+    let mut ids = BTreeSet::new();
+    let mut rest = svg;
+    while let Some(start) = rest.find('<') {
+        let tag = &rest[start..];
+        let Some(end) = svg_tag_end(tag) else { break };
+        if let Some((_, value)) = tag[..end].split_once(" id=\"") {
+            if let Some((id, _)) = value.split_once('"') {
+                ids.insert(id);
+            }
+        }
+        rest = &tag[end + 1..];
+    }
+    ids
+}
+
+/// A primary id can itself start with another primary's id. Resolve suffixes against the
+/// complete primary set instead of broad CSS prefix selectors, which would leak hidden nodes.
+fn node_variant_ids<'a>(
+    element_ids: &BTreeSet<&'a str>,
+    primary_ids: &BTreeSet<&str>,
+) -> BTreeMap<&'a str, Vec<&'a str>> {
+    let mut variants: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for &id in element_ids {
+        if !id.starts_with("fm-node-") || primary_ids.contains(id) {
+            continue;
+        }
+        let mut prefix = id;
+        while let Some((head, _)) = prefix.rsplit_once('-') {
+            if primary_ids.contains(head) {
+                variants.entry(head).or_default().push(id);
+                break;
+            }
+            prefix = head;
+        }
+    }
+    variants
+}
+
+fn svg_tag_end(svg: &str) -> Option<usize> {
+    let mut quote = None;
+    svg.bytes().position(|byte| {
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+            false
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+            false
+        } else {
+            byte == b'>'
+        }
+    })
+}
+
+fn slide_export_bounds(
+    document: DeckRect,
+    slide: DeckRect,
+    margin: f32,
+) -> Result<DeckRect, DeckSlideExportError> {
+    let valid_rect = |rect: DeckRect| {
+        rect.x.is_finite()
+            && rect.y.is_finite()
+            && rect.width.is_finite()
+            && rect.height.is_finite()
+            && rect.width > 0.0
+            && rect.height > 0.0
+    };
+    if !valid_rect(document) || !valid_rect(slide) || !margin.is_finite() || margin < 0.0 {
+        return Err(DeckSlideExportError::InvalidBounds);
+    }
+    // Widen before adding extents: each f32 can be finite while their sum overflows f32.
+    let doc_right = f64::from(document.x) + f64::from(document.width);
+    let doc_bottom = f64::from(document.y) + f64::from(document.height);
+    let right = f64::from(slide.x) + f64::from(slide.width);
+    let bottom = f64::from(slide.y) + f64::from(slide.height);
+    if f64::from(slide.x)
+        < f64::from(document.x)
+            - deck_coordinate_tolerance(f64::from(slide.x), f64::from(document.x))
+        || f64::from(slide.y)
+            < f64::from(document.y)
+                - deck_coordinate_tolerance(f64::from(slide.y), f64::from(document.y))
+        || right > doc_right + deck_coordinate_tolerance(right, doc_right)
+        || bottom > doc_bottom + deck_coordinate_tolerance(bottom, doc_bottom)
+    {
+        return Err(DeckSlideExportError::InvalidBounds);
+    }
+    let x = (f64::from(slide.x) - f64::from(margin)).max(f64::from(document.x));
+    let y = (f64::from(slide.y) - f64::from(margin)).max(f64::from(document.y));
+    let width = (right + f64::from(margin)).min(doc_right) - x;
+    let height = (bottom + f64::from(margin)).min(doc_bottom) - y;
+    let crop = DeckRect {
+        x: x as f32,
+        y: y as f32,
+        width: width as f32,
+        height: height as f32,
+    };
+    if !valid_rect(crop) {
+        return Err(DeckSlideExportError::InvalidBounds);
+    }
+    Ok(crop)
+}
+
+fn slide_export_dimensions(
+    bounds: DeckRect,
+    options: DeckSlideExportOptions,
+) -> Result<(u32, u32), DeckSlideExportError> {
+    if options.width == Some(0) || options.height == Some(0) {
+        return Err(DeckSlideExportError::InvalidDimensions);
+    }
+    let aspect = f64::from(bounds.width) / f64::from(bounds.height);
+    let (width, height) = match (options.width, options.height) {
+        (Some(width), Some(height)) => (f64::from(width), f64::from(height)),
+        (Some(width), None) => (f64::from(width), f64::from(width) / aspect),
+        (None, Some(height)) => (f64::from(height) * aspect, f64::from(height)),
+        (None, None) => (f64::from(bounds.width), f64::from(bounds.height)),
+    };
+    let pixel_size = |value: f64| {
+        let value = value.ceil().max(1.0);
+        if value.is_finite() && value <= f64::from(u32::MAX) {
+            Ok(value as u32)
+        } else {
+            Err(DeckSlideExportError::InvalidDimensions)
+        }
+    };
+    Ok((pixel_size(width)?, pixel_size(height)?))
+}
+
+fn validate_portable_deck_svg(svg: &str, view_box: DeckRect) -> Result<(), DeckSlideExportError> {
+    // Only inspect the generated root, never replace text in the document body. A title/label
+    // containing an attribute-like string must remain byte-for-byte intact.
+    if !svg.starts_with("<svg ") || !svg.trim_end().ends_with("</svg>") {
+        return Err(DeckSlideExportError::NonPortableSvg);
+    }
+    let end = svg_tag_end(svg).ok_or(DeckSlideExportError::NonPortableSvg)?;
+    let root = &svg[..end];
+    let attribute = |name: &str| {
+        root.split_once(&format!(" {name}=\""))
+            .and_then(|(_, tail)| tail.split_once('\"').map(|(value, _)| value))
+    };
+    let scalar = |name: &str| attribute(name).and_then(|value| value.parse::<f32>().ok());
+    let matches_size = |value: Option<f32>, expected: f32| {
+        value.is_some_and(|actual| {
+            actual.is_finite()
+                && (f64::from(actual) - f64::from(expected)).abs()
+                    <= deck_coordinate_tolerance(f64::from(actual), f64::from(expected))
+        })
+    };
+    let actual_view_box = attribute("viewBox").map(|value| {
+        value
+            .split_ascii_whitespace()
+            .map(str::parse::<f32>)
+            .collect::<Result<Vec<_>, _>>()
+    });
+    let expected = [view_box.x, view_box.y, view_box.width, view_box.height];
+    if !matches_size(scalar("width"), view_box.width)
+        || !matches_size(scalar("height"), view_box.height)
+        || !actual_view_box.is_some_and(|parsed| {
+            parsed.is_ok_and(|actual| {
+                actual.len() == 4
+                    && actual
+                        .into_iter()
+                        .zip(expected)
+                        .all(|(actual, expected)| matches_size(Some(actual), expected))
+            })
+        })
+    {
+        return Err(DeckSlideExportError::NonPortableSvg);
+    }
+    Ok(())
+}
+
+fn deck_coordinate_tolerance(left: f64, right: f64) -> f64 {
+    // Manifest coordinates are rounded to hundredths in f32. At large magnitudes, multiplying
+    // by 100 and dividing back can move by an additional representable float rather than .01.
+    0.02_f64.max(2.0 * f64::from(f32::EPSILON) * left.abs().max(right.abs()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +1011,307 @@ mod tests {
 
     fn decked_flowchart() -> &'static str {
         "flowchart LR\n%%{deck: {\n  title: 'Tour',\n  tips: { a: 'the start' },\n  slides: [\n    { id: 's1', title: 'Start', nodes: ['a', 'b'], reveal: [['b']] },\n    { id: 's2', nodes: ['subgraph:core'], edges: 'touching' },\n  ],\n}}%%\n  a --> b\n  subgraph core\n    b --> c\n    c --> d\n  end\n"
+    }
+
+    fn portable_pair(source: &str) -> (String, DeckManifest) {
+        let parsed = fm_parser::parse(source);
+        let layout = layout_diagram(&parsed.ir);
+        let mut config = SvgRenderConfig::default();
+        config.make_portable();
+        let (svg, manifest) = render_svg_with_deck(&parsed.ir, &layout, &config);
+        (svg, manifest.expect("deck manifest"))
+    }
+
+    #[test]
+    fn slide_images_preserve_source_artifact_and_select_reveal_members() {
+        let (svg, manifest) = portable_pair(decked_flowchart());
+        let first = &manifest.slides[0];
+        let before = export_deck_slide_svg(
+            &svg,
+            &manifest,
+            "s1",
+            DeckSlideExportOptions {
+                step: Some(0),
+                width: Some(640),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let complete =
+            export_deck_slide_svg(&svg, &manifest, "s1", DeckSlideExportOptions::default())
+                .unwrap();
+        // The document/defs/labels are preserved verbatim, rather than reconstructed by replacing
+        // attribute-shaped strings that might also occur inside an authored label.
+        assert!(before.contains(&svg));
+        assert!(before.contains("width=\"640\""));
+        assert!(before.contains("data-deck-slide=\"s1\""));
+        assert!(before.contains("data-deck-step=\"0\""));
+        let selection_css = |image: &str| {
+            image
+                .split_once("<style")
+                .unwrap()
+                .1
+                .split_once('>')
+                .unwrap()
+                .1
+                .split_once("</style>")
+                .unwrap()
+                .0
+                .to_owned()
+        };
+        let before_css = selection_css(&before);
+        let complete_css = selection_css(&complete);
+        assert!(before_css.contains(&format!("#{}", first.nodes[0].element_id)));
+        assert!(!before_css.contains(&format!("#{}", first.nodes[1].element_id)));
+        assert!(!before_css.contains(&format!("#{}", first.edges[0].element_id)));
+        assert!(complete_css.contains(&format!("#{}", first.nodes[1].element_id)));
+        assert!(complete_css.contains(&format!("#{}", first.edges[0].element_id)));
+        assert!(!complete.contains("<script"));
+        assert_eq!(
+            complete,
+            export_deck_slide_svg(&svg, &manifest, "s1", DeckSlideExportOptions::default())
+                .unwrap()
+        );
+        // No partial cluster around hidden members is made visible by the export selection.
+        for cluster in &first.clusters {
+            assert!(!cluster.camera_contained);
+            assert!(
+                !complete.contains(&format!("#fm-deck-export-content #{},", cluster.element_id))
+            );
+        }
+    }
+
+    #[test]
+    fn slide_images_keep_touching_edges_and_owned_cluster_captions() {
+        let (svg, manifest) = portable_pair(decked_flowchart());
+        let second = &manifest.slides[1];
+        let image = export_deck_slide_svg(&svg, &manifest, "s2", DeckSlideExportOptions::default())
+            .unwrap();
+        let touching = second
+            .edges
+            .iter()
+            .find(|edge| edge.touching)
+            .expect("touching edge");
+        assert!(image.contains(&format!(
+            "#fm-deck-export-content #{},",
+            touching.element_id
+        )));
+        for cluster in second
+            .clusters
+            .iter()
+            .filter(|cluster| cluster.camera_contained)
+        {
+            assert!(svg.contains(&format!("data-fm-deck-owner=\"{}\"", cluster.element_id)));
+            assert!(image.contains(&format!(
+                "[data-fm-deck-owner=\"{}\"]{{visibility:visible}}",
+                cluster.element_id
+            )));
+        }
+        // Only addressable roots are hidden: selecting a labeled edge must also reveal its
+        // child paths, which share .fm-edge but intentionally have no id.
+        assert!(image.contains(".fm-edge[id]"));
+        assert!(!image.contains(".fm-edge,"));
+    }
+
+    #[test]
+    fn slide_images_reject_families_with_unowned_furniture() {
+        let source = "sequenceDiagram\n%%{deck: {slides:[{id:'actors',nodes:['A','B']}]}}%%\nparticipant A\nparticipant B\nA->>B: Hello\n";
+        let (svg, manifest) = portable_pair(source);
+        assert_eq!(
+            export_deck_slide_svg(&svg, &manifest, "actors", Default::default()),
+            Err(DeckSlideExportError::UnsupportedDiagram(
+                DiagramType::Sequence
+            ))
+        );
+    }
+
+    #[test]
+    fn slide_node_variants_do_not_capture_other_primary_ids_or_label_text() {
+        let svg = r#"<svg width="10" height="10"><text>literal id="fm-node-a-0-fake"</text><g id="fm-node-a-0"></g><g id="fm-node-a-0-mirror"></g><g id="fm-node-a-0-1"></g><g id="fm-node-a-0-1-mirror"></g></svg>"#;
+        let ids = svg_element_ids(svg);
+        assert!(!ids.contains("fm-node-a-0-fake"));
+        let variants = node_variant_ids(&ids, &BTreeSet::from(["fm-node-a-0", "fm-node-a-0-1"]));
+        assert_eq!(variants["fm-node-a-0"], ["fm-node-a-0-mirror"]);
+        assert_eq!(variants["fm-node-a-0-1"], ["fm-node-a-0-1-mirror"]);
+        let mut css = String::new();
+        append_slide_visibility(
+            &mut css,
+            &ids,
+            "fm-node-a-0",
+            true,
+            &variants["fm-node-a-0"],
+        )
+        .unwrap();
+        assert!(css.contains("#fm-node-a-0-mirror"));
+        assert!(!css.contains("fm-node-a-0-1"));
+        assert!(!css.contains("[id^="));
+    }
+
+    #[test]
+    fn slide_manifests_omit_unpainted_edges() {
+        let source = "flowchart LR\n%%{deck: {slides:[{id:'all',nodes:['*']}]}}%%\nA ~~~ B\nB --> C\nA --> C\n";
+        let parsed = fm_parser::parse(source);
+        let mut layout = layout_diagram(&parsed.ir);
+        // A member absorbed by bundling has no independent SVG root, just like a layout-only link.
+        let bundled = layout
+            .edges
+            .iter_mut()
+            .find(|path| parsed.ir.edges[path.edge_index].arrow != fm_core::ArrowType::Invisible)
+            .unwrap();
+        bundled.bundled = true;
+        let bundled_index = bundled.edge_index;
+        let mut config = SvgRenderConfig::default();
+        config.make_portable();
+        let (svg, manifest) = render_svg_with_deck(&parsed.ir, &layout, &config);
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest.slides[0].edges.len(), 1);
+        assert_ne!(manifest.slides[0].edges[0].index, bundled_index);
+        assert!(export_deck_slide_svg(&svg, &manifest, "all", Default::default()).is_ok());
+    }
+
+    #[test]
+    fn slide_images_validate_selection_dimensions_and_artifact_pairing() {
+        let (svg, manifest) = portable_pair(decked_flowchart());
+        assert!(matches!(
+            export_deck_slide_svg(&svg, &manifest, "missing", Default::default()),
+            Err(DeckSlideExportError::UnknownSlide(_))
+        ));
+        assert!(matches!(
+            export_deck_slide_svg(
+                &svg,
+                &manifest,
+                "s1",
+                DeckSlideExportOptions {
+                    step: Some(2),
+                    ..Default::default()
+                }
+            ),
+            Err(DeckSlideExportError::InvalidStep {
+                requested: 2,
+                maximum: 1
+            })
+        ));
+        assert_eq!(
+            export_deck_slide_svg(
+                &svg,
+                &manifest,
+                "s1",
+                DeckSlideExportOptions {
+                    width: Some(0),
+                    ..Default::default()
+                }
+            ),
+            Err(DeckSlideExportError::InvalidDimensions)
+        );
+        let mut changed = manifest.clone();
+        changed.slides[0].bounds.width = f32::NAN;
+        assert_eq!(
+            export_deck_slide_svg(&svg, &changed, "s1", Default::default()),
+            Err(DeckSlideExportError::InvalidBounds)
+        );
+        let mut changed = manifest.clone();
+        changed.slides[0].nodes[0].element_id = "fm-node-x</style>".to_owned();
+        assert!(matches!(
+            export_deck_slide_svg(&svg, &changed, "s1", Default::default()),
+            Err(DeckSlideExportError::InvalidElement(_))
+        ));
+        let mut changed = manifest.clone();
+        changed.slides[0].nodes[0].element_id = "fm-node-absent-99".to_owned();
+        assert!(matches!(
+            export_deck_slide_svg(&svg, &changed, "s1", Default::default()),
+            Err(DeckSlideExportError::InvalidElement(_))
+        ));
+        let mut changed = manifest.clone();
+        changed.view_box.width += 1.0;
+        assert_eq!(
+            export_deck_slide_svg(&svg, &changed, "s1", Default::default()),
+            Err(DeckSlideExportError::NonPortableSvg)
+        );
+        let parsed = fm_parser::parse(decked_flowchart());
+        let layout = layout_diagram(&parsed.ir);
+        let (responsive, _) =
+            render_svg_with_deck(&parsed.ir, &layout, &SvgRenderConfig::default());
+        assert_eq!(
+            export_deck_slide_svg(&responsive, &manifest, "s1", Default::default()),
+            Err(DeckSlideExportError::NonPortableSvg)
+        );
+        assert!(
+            render_deck_slide_svg(
+                &parsed.ir,
+                &layout,
+                &SvgRenderConfig::default(),
+                "s1",
+                Default::default()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn slide_image_crop_and_pixel_aspect_are_bounded() {
+        let document = DeckRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let slide = DeckRect {
+            x: 10.0,
+            y: 20.0,
+            width: 50.0,
+            height: 20.0,
+        };
+        let crop = slide_export_bounds(document, slide, 15.0).unwrap();
+        assert_eq!(
+            crop,
+            DeckRect {
+                x: 0.0,
+                y: 5.0,
+                width: 75.0,
+                height: 50.0
+            }
+        );
+        assert_eq!(
+            slide_export_dimensions(
+                crop,
+                DeckSlideExportOptions {
+                    width: Some(600),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            (600, 400)
+        );
+        assert_eq!(
+            slide_export_dimensions(
+                crop,
+                DeckSlideExportOptions {
+                    height: Some(200),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            (300, 200)
+        );
+        assert_eq!(
+            slide_export_bounds(document, slide, f32::MAX).unwrap(),
+            document
+        );
+        assert_eq!(
+            slide_export_bounds(document, slide, -1.0),
+            Err(DeckSlideExportError::InvalidBounds)
+        );
+        let large = DeckRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1_000_000.187_5,
+            height: 100.0,
+        };
+        let svg = r#"<svg width="1000000.125" height="100" viewBox="0 0 1000000.125 100"></svg>"#;
+        assert!(
+            validate_portable_deck_svg(svg, large).is_ok(),
+            "allow f32 manifest rounding at large coordinates"
+        );
     }
 
     /// Schema 1.1.0 morphing joins: every laid-out node has home geometry inside the SVG

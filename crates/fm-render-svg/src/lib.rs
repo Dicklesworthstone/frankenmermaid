@@ -30,7 +30,10 @@ pub use attributes::{Attribute, AttributeValue, Attributes, escape_xml_text};
 pub use cga_transform::{
     CgaTransformStack, render_transform_to_svg_matrix, try_render_transform_to_cga,
 };
-pub use deck::{deck_manifest, render_svg_with_deck};
+pub use deck::{
+    DeckSlideExportError, DeckSlideExportOptions, deck_manifest, export_deck_slide_svg,
+    render_deck_slide_svg, render_svg_with_deck,
+};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
 pub use element::{Element, ElementKind};
@@ -203,6 +206,9 @@ pub struct SvgRenderConfig {
     pub a11y: A11yConfig,
     /// Whether to emit source-span metadata attributes in the SVG output.
     pub include_source_spans: bool,
+    /// Identify auxiliary graphics by their addressable owner for static deck selection.
+    /// Portable rendering enables this without changing the appearance of ordinary SVG output.
+    pub include_deck_owners: bool,
     /// How (or if) to emit node links.
     pub link_mode: MermaidLinkMode,
     /// Today's date as `YYYY-MM-DD`, for the gantt `todayMarker` line (bd-j0va).
@@ -237,6 +243,7 @@ impl SvgRenderConfig {
         self.shadows = false;
         self.glow_enabled = false;
         self.a11y.accessibility_css = false;
+        self.include_deck_owners = true;
     }
 
     /// Apply a degradation plan to this config, disabling visual effects as directed.
@@ -338,6 +345,7 @@ impl Default for SvgRenderConfig {
             print_optimized: true,
             a11y: A11yConfig::full(),
             include_source_spans: false,
+            include_deck_owners: false,
             link_mode: MermaidLinkMode::Off,
         }
     }
@@ -3469,7 +3477,8 @@ fn render_scene_text(
                 node.c4_meta.is_some()
                     || node.requirement_meta.is_some()
                     || !node.members.is_empty()
-            })) && ir.resolved_node_style(index).contains_key("font-size")
+            }))
+            && ir.resolved_node_style(index).contains_key("font-size")
         {
             style = Some(measured_card_font_style(style.as_deref(), text.font_size));
         }
@@ -6654,6 +6663,12 @@ fn render_layout_to_svg(
                 if config.include_source_spans {
                     text = apply_span_metadata(text, cluster.span);
                 }
+                if config.include_deck_owners {
+                    text = text.attr(
+                        "data-fm-deck-owner",
+                        &mermaid_cluster_element_id(cluster.cluster_index),
+                    );
+                }
                 doc = doc.child(text);
             }
         }
@@ -6683,6 +6698,12 @@ fn render_layout_to_svg(
 
         if config.include_source_spans {
             line = apply_span_metadata(line, cluster_span);
+        }
+        if config.include_deck_owners {
+            line = line.attr(
+                "data-fm-deck-owner",
+                &mermaid_cluster_element_id(divider.cluster_index),
+            );
         }
 
         doc = doc.child(line);
@@ -6974,19 +6995,24 @@ fn render_layout_to_svg(
             let mid_idx = edge_path.points.len() / 2;
             let mid_pt = &edge_path.points[mid_idx];
             let label = format!("\u{00d7}{}", edge_path.bundle_count);
-            doc = doc.child(
-                Element::text()
-                    .x(mid_pt.x + offset_x + 6.0)
-                    .y(mid_pt.y + offset_y - 12.0)
-                    .content(&label)
-                    .attr("text-anchor", "start")
-                    .attr("dominant-baseline", "auto")
-                    .attr_num("font-size", config.font_size * 0.65)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .fill(&theme.colors.edge)
-                    .attr("fill-opacity", "0.7")
-                    .class("fm-bundle-count"),
-            );
+            let mut text = Element::text()
+                .x(mid_pt.x + offset_x + 6.0)
+                .y(mid_pt.y + offset_y - 12.0)
+                .content(&label)
+                .attr("text-anchor", "start")
+                .attr("dominant-baseline", "auto")
+                .attr_num("font-size", config.font_size * 0.65)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .fill(&theme.colors.edge)
+                .attr("fill-opacity", "0.7")
+                .class("fm-bundle-count");
+            if config.include_deck_owners {
+                text = text.attr(
+                    "data-fm-deck-owner",
+                    &mermaid_edge_element_id(edge_path.edge_index),
+                );
+            }
+            doc = doc.child(text);
         }
     }
 
@@ -7930,6 +7956,9 @@ fn write_class_cardinality_labels_into(
             let font_size = config.font_size * 0.7;
             let points = &edge_path.points;
             let last = points.len() - 1;
+            let deck_owner = config
+                .include_deck_owners
+                .then(|| mermaid_edge_element_id(edge_path.edge_index));
             for (card, end, next) in [
                 (ir_edge.source_cardinality(), &points[0], &points[1]),
                 (
@@ -7951,6 +7980,7 @@ fn write_class_cardinality_labels_into(
                     config.embed_theme_css,
                     "fm-class-cardinality",
                     card,
+                    deck_owner.as_deref(),
                 );
             }
         }
@@ -7989,7 +8019,8 @@ fn cardinality_anchor(
 
 /// Stream one cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the slow
 /// path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
-/// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
+/// [font-family when NOT embedded], fill, class, [data-fm-deck-owner when enabled]`, with the label as
+/// escaped text content. Numbers use the
 /// shared 2-decimal `AttributeValue::Number` serializer; the label/fill escape identically to the element.
 /// `class_name` is `fm-class-cardinality` (class relations); the ER caller was removed with the
 /// ER text emission (bd-b1sy2).
@@ -8005,6 +8036,7 @@ fn write_cardinality_text_into(
     embed_css: bool,
     class_name: &str,
     label: &str,
+    deck_owner: Option<&str>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
     out.push_str("<text x=\"");
@@ -8025,7 +8057,13 @@ fn write_cardinality_text_into(
     let _ = write_escaped_attr(out, fill);
     out.push_str("\" class=\"");
     out.push_str(class_name);
-    out.push_str("\">");
+    out.push('"');
+    if let Some(owner) = deck_owner {
+        out.push_str(" data-fm-deck-owner=\"");
+        let _ = write_escaped_attr(out, owner);
+        out.push('"');
+    }
+    out.push('>');
     let _ = write_escaped_text(out, label);
     out.push_str("</text>");
 }
@@ -12232,15 +12270,14 @@ fn render_node(
         palette
     });
     let colors = flowchart_colors.as_ref().unwrap_or(colors);
-    let (shape_style, text_style) = if matches!(
-        ir.diagram_type,
-        DiagramType::Journey | DiagramType::Kanban
-    ) || ir_node.is_some_and(|node| node.requirement_meta.is_some())
-    {
-        resolve_scene_node_inline_styles(ir, node_box.node_index, false)
-    } else {
-        resolve_node_inline_styles(ir, node_box.node_index)
-    };
+    let (shape_style, text_style) =
+        if matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Kanban)
+            || ir_node.is_some_and(|node| node.requirement_meta.is_some())
+        {
+            resolve_scene_node_inline_styles(ir, node_box.node_index, false)
+        } else {
+            resolve_node_inline_styles(ir, node_box.node_index)
+        };
     let semantic_fill = ir_node
         .and_then(|node| node.requirement_meta.as_deref())
         .and_then(fm_core::requirement_risk_fill)
@@ -12554,9 +12591,10 @@ fn render_node(
             } else {
                 None
             };
-            group = group
-                .attr("role", "graphics-symbol")
-                .attr("aria-label", description.as_deref().unwrap_or(raw_label_text));
+            group = group.attr("role", "graphics-symbol").attr(
+                "aria-label",
+                description.as_deref().unwrap_or(raw_label_text),
+            );
         }
 
         if config.a11y.keyboard_nav {
@@ -30319,11 +30357,9 @@ marker#arrow-open path {
                         .into_iter()
                         .filter(|tag| {
                             if horizontal {
-                                (number(tag, "y2") - y).abs() < 0.01
-                                    && number(tag, "y1") < y
+                                (number(tag, "y2") - y).abs() < 0.01 && number(tag, "y1") < y
                             } else {
-                                (number(tag, "x2") - x).abs() < 0.01
-                                    && number(tag, "x1") < x
+                                (number(tag, "x2") - x).abs() < 0.01 && number(tag, "x1") < x
                             }
                         })
                         .collect();
@@ -30337,8 +30373,7 @@ marker#arrow-open path {
                         let position = number(line, coordinate);
                         let fraction = (position - origin) / extent;
                         assert!(
-                            (-0.001..=1.001).contains(&fraction)
-                                && fraction > previous_fraction,
+                            (-0.001..=1.001).contains(&fraction) && fraction > previous_fraction,
                             "{source}: value scale collapsed or left the plot at {position}"
                         );
                         if index == 0 {

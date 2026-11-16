@@ -507,16 +507,31 @@ enum Command {
         fnx_fallback: FnxFallbackArg,
     },
 
-    /// Turn a diagram with a %%{deck: …}%% directive into a presentation: a self-contained
-    /// HTML deck (default) or the raw deck manifest JSON.
+    /// Turn a diagram with a %%{deck: …}%% directive into a presentation or slide image.
     Deck {
         /// Input file path or "-" for stdin.
         #[arg(default_value = "-")]
         input: String,
 
-        /// Output artifact kind: a self-contained presentation HTML, or the manifest JSON.
+        /// Output artifact kind: HTML presentation, JSON manifest, or a selected SVG/PNG slide.
         #[arg(long, value_enum, default_value = "html")]
         format: DeckFormatArg,
+
+        /// Slide ID to export (required with --format svg or png).
+        #[arg(long)]
+        slide: Option<String>,
+
+        /// Last visible reveal step; omitted exports the complete slide.
+        #[arg(long, requires = "slide")]
+        step: Option<usize>,
+
+        /// Slide image width in pixels (SVG/PNG only).
+        #[arg(short = 'W', long, value_parser = clap::value_parser!(u32).range(1..))]
+        width: Option<u32>,
+
+        /// Slide image height in pixels (SVG/PNG only).
+        #[arg(short = 'H', long, value_parser = clap::value_parser!(u32).range(1..))]
+        height: Option<u32>,
 
         /// Output path ("-" or omitted writes to stdout).
         #[arg(short, long)]
@@ -742,15 +757,17 @@ enum ValidateOutputFormat {
     Pretty,
 }
 
-/// `deck` output kinds. A DEDICATED enum rather than an extension of the render
-/// `OutputFormat`: deck's formats share nothing with svg/png/term, and cross-contaminating
-/// the enums would put `html` on `render`'s surface (bd-ey2nh).
+/// Deck-specific output kinds keep presentation HTML/JSON separate from render's formats.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum DeckFormatArg {
     /// Self-contained presentation HTML (SVG + manifest + runtime inline).
     Html,
     /// The deck manifest JSON only.
     Json,
+    /// A portable SVG image of the selected slide.
+    Svg,
+    /// A PNG image of the selected slide (requires the `png` feature).
+    Png,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -3101,6 +3118,8 @@ struct ValidateCommandOptions<'a> {
 #[derive(Debug, Clone)]
 struct DeckCommandOptions<'a> {
     format: DeckFormatArg,
+    slide: Option<&'a str>,
+    image_options: fm_render_svg::DeckSlideExportOptions,
     output: Option<&'a str>,
     manifest_out: Option<&'a str>,
     theme: &'a str,
@@ -3707,6 +3726,10 @@ fn run() -> Result<()> {
         Command::Deck {
             input,
             format,
+            slide,
+            step,
+            width,
+            height,
             output,
             manifest_out,
             theme,
@@ -3720,6 +3743,12 @@ fn run() -> Result<()> {
                 &input,
                 DeckCommandOptions {
                     format,
+                    slide: slide.as_deref(),
+                    image_options: fm_render_svg::DeckSlideExportOptions {
+                        step,
+                        width,
+                        height,
+                    },
                     output: output.as_deref(),
                     manifest_out: manifest_out.as_deref(),
                     theme: &theme,
@@ -9086,6 +9115,8 @@ fn fill_deck_template(replacements: &[(&str, &str)]) -> String {
 fn cmd_deck(input: &str, options: DeckCommandOptions<'_>) -> Result<()> {
     let DeckCommandOptions {
         format,
+        slide,
+        image_options,
         output,
         manifest_out,
         theme,
@@ -9095,11 +9126,39 @@ fn cmd_deck(input: &str, options: DeckCommandOptions<'_>) -> Result<()> {
         layout_config,
         font_size,
         max_input_bytes,
-        svg_base_config,
+        mut svg_base_config,
         term_base_config,
         show_back_edges,
         pretty,
     } = options;
+
+    let image_export = matches!(format, DeckFormatArg::Svg | DeckFormatArg::Png);
+    if image_export {
+        if slide.is_none() {
+            anyhow::bail!(
+                "--format svg/png requires --slide <ID>; use --format json to list slide IDs"
+            );
+        }
+        if manifest_out.is_some() {
+            anyhow::bail!(
+                "--manifest-out accompanies HTML/JSON decks; a slide image has its own cropped viewBox"
+            );
+        }
+        #[cfg(not(feature = "png"))]
+        if format == DeckFormatArg::Png {
+            anyhow::bail!(
+                "PNG output requires the 'png' feature. Rebuild with: cargo build --features png"
+            );
+        }
+        svg_base_config.make_portable();
+        svg_base_config.preserve_labels = true;
+    } else if slide.is_some()
+        || image_options.step.is_some()
+        || image_options.width.is_some()
+        || image_options.height.is_some()
+    {
+        anyhow::bail!("--slide, --step, --width and --height require --format svg or png");
+    }
 
     let source = load_input(input, max_input_bytes)?;
     // The user explicitly asked for a deck; a slideless page would violate least surprise.
@@ -9157,6 +9216,29 @@ fn cmd_deck(input: &str, options: DeckCommandOptions<'_>) -> Result<()> {
 
     match format {
         DeckFormatArg::Json => write_output(output, &manifest_json),
+        DeckFormatArg::Svg | DeckFormatArg::Png => {
+            let svg =
+                String::from_utf8(outcome.rendered).context("rendered SVG was not valid UTF-8")?;
+            let image = fm_render_svg::export_deck_slide_svg(
+                &svg,
+                &manifest,
+                slide.expect("image export requires a slide"),
+                image_options,
+            )?;
+            if format == DeckFormatArg::Svg {
+                write_output(output, &image)
+            } else {
+                #[cfg(feature = "png")]
+                {
+                    // Dimensions are already resolved on the SVG root, so PNG and SVG share
+                    // the exact crop/aspect-ratio contract and use the same rasterizer as render.
+                    let (png, _, _) = svg_to_png(&image, None, None)?;
+                    write_output_bytes(output, &png)
+                }
+                #[cfg(not(feature = "png"))]
+                unreachable!("PNG availability was checked before rendering")
+            }
+        }
         DeckFormatArg::Html => {
             let svg =
                 String::from_utf8(outcome.rendered).context("rendered SVG was not valid UTF-8")?;

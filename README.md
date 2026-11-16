@@ -484,12 +484,30 @@ fm-cli deck talk.mmd -o talk.html            # self-contained presentation HTML 
 fm-cli deck talk.mmd --format json --pretty  # the deck manifest JSON only
 fm-cli deck talk.mmd -o talk.html --manifest-out talk.deck.json   # both artifacts
 fm-cli deck talk.mmd --theme dark -o talk.html                    # themed diagram + chrome
+fm-cli deck talk.mmd --format svg --slide intro -o intro.svg      # one fully revealed slide
+fm-cli deck talk.mmd --format svg --slide intro --step 0 -W 1280 -o intro-start.svg
+fm-cli deck talk.mmd --format png --slide intro -W 1920 -H 1080 -o intro.png
 ```
 
 Shares `--theme`, `--parse-mode`, `--layout-algorithm`, `--font-size`, and `--config` with
 `render`. Deckless input is a hard error (the flag expresses deck intent); `render` also
 accepts `--deck-manifest-out <path>` to emit the same byte-identical manifest artifact
 alongside a normal SVG render.
+
+SVG and PNG slide images require `--slide <ID>`; use the JSON manifest to see the available
+IDs and reveal steps. Omit `--step` to include all reveals, or select a step from `0` through
+the slide's `max_step`. The image uses the existing layout, crops to the slide's camera and
+fit margin, and hides off-slide members and later reveals while preserving authored styling.
+Touching edges stay visible without enlarging the crop. Fully contained cluster frames and
+their captions follow their reveal step. The slide title and caption become accessible SVG
+metadata; whole-diagram titles, backgrounds and C4 legends remain as reference context.
+
+`-W`/`--width` and `-H`/`--height` set image dimensions in pixels. One dimension preserves the
+crop's aspect ratio; supplying both fits the diagram into that canvas without stretching.
+PNG export requires a build with `--features png`. Static slide images currently support
+flowchart, class, ER, requirement, mindmap, architecture, block and C4 diagrams. Other deck
+families retain HTML and JSON output and report an explicit error for slide image export.
+`--manifest-out` accompanies HTML/JSON decks; images have their own cropped coordinate frame.
 
 ### `fm-cli interactive`
 
