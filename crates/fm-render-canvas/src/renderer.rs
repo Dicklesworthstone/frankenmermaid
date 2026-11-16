@@ -3188,12 +3188,8 @@ impl Canvas2dRenderer {
             if let Some(alpha) = edge_opacity {
                 ctx.set_global_alpha(alpha);
             }
-            let stroke_opacity = parse_opacity(
-                merged_edge_style(ir, edge_path.edge_index)
-                    .get("stroke-opacity")
-                    .map(String::as_str),
-            )
-            .unwrap_or(1.0);
+            let stroke_opacity =
+                resolve_edge_stroke_opacity(ir, edge_path.edge_index).unwrap_or(1.0);
 
             if !labels_only {
                 if stroke_opacity != 1.0 {
@@ -5139,6 +5135,18 @@ pub(crate) fn resolve_edge_opacity(ir: &MermaidDiagramIr, edge_index: usize) -> 
     parse_opacity(
         merged_edge_style(ir, edge_index)
             .get("opacity")
+            .map(String::as_str),
+    )
+}
+
+/// The edge's stroke-channel opacity, separate from its overall element opacity.
+///
+/// Canvas and GPU apply this factor to connectors and endpoint markers, while labels retain
+/// only the overall opacity. Intrinsic color alpha is multiplied by each factor exactly once.
+pub(crate) fn resolve_edge_stroke_opacity(ir: &MermaidDiagramIr, edge_index: usize) -> Option<f64> {
+    parse_opacity(
+        merged_edge_style(ir, edge_index)
+            .get("stroke-opacity")
             .map(String::as_str),
     )
 }

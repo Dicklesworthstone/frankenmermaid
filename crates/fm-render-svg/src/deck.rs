@@ -661,7 +661,7 @@ pub fn render_deck_slide_svg(
 ///
 /// No source is reparsed and no coordinates are recomputed. The original SVG is retained intact
 /// inside a cropped document, preserving definitions, links, authored text and paint. Ordinary
-/// SVG visibility rules select the slide's nodes, edges and fully contained clusters, including
+/// SVG display rules select the slide's nodes, edges and fully contained clusters, including
 /// their labels and node variants. Off-slide content and later reveal steps are
 /// hidden; touching edges remain visible but never enlarge the crop. No JavaScript is needed.
 ///
@@ -716,19 +716,30 @@ pub fn export_deck_slide_svg(
     let primary_node_ids = manifest.node_geometry.keys().map(String::as_str).collect();
     let variants = node_variant_ids(&element_ids, &primary_node_ids);
 
-    // Visibility (rather than paint opacity) leaves the author's alpha untouched. A selected
-    // node can remain visible inside a hidden partial cluster. Definitions are never selected:
-    // masks and markers can also have fm-edge-* ids, but do not have these element classes.
-    let mut css = String::from(
-        "#fm-deck-export-content .fm-node[id],#fm-deck-export-content .fm-edge[id],\
-         #fm-deck-export-content .fm-edge-labeled[id],#fm-deck-export-content .fm-cluster[id],\
-         #fm-deck-export-content [data-fm-deck-owner]",
-    );
-    for id in variants.values().flatten() {
+    // Select exact graph roots, never classes: editors may assign new IDs to child paths, and
+    // some rasterizers give [id] unexpected specificity. Display is portable across image
+    // consumers that ignore inherited visibility on groups. Supported legacy families emit
+    // cluster frames and member nodes as siblings, so hiding a frame cannot hide its members.
+    // Known node geometry and numeric edge/cluster IDs keep gradients and masks out of this set.
+    let mut roots: BTreeSet<&str> = primary_node_ids
+        .iter()
+        .copied()
+        .filter(|id| element_ids.contains(id))
+        .collect();
+    roots.extend(variants.values().flatten().copied());
+    roots.extend(element_ids.iter().copied().filter(|id| {
+        id.strip_prefix("fm-edge-")
+            .or_else(|| id.strip_prefix("fm-cluster-"))
+            .is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }));
+    let mut css = String::from("#fm-deck-export-content [data-fm-deck-owner]");
+    for id in roots {
         validate_slide_element(&element_ids, id)?;
         let _ = write!(css, ",#fm-deck-export-content #{id}");
     }
-    css.push_str("{visibility:hidden}");
+    css.push_str("{display:none}");
     for node in &slide.nodes {
         append_slide_visibility(
             &mut css,
@@ -796,7 +807,7 @@ fn append_slide_visibility(
         for variant in variants {
             let _ = write!(css, ",#fm-deck-export-content #{variant}");
         }
-        css.push_str("{visibility:visible}");
+        css.push_str("{display:inline}");
     }
     Ok(())
 }
@@ -1057,7 +1068,12 @@ mod tests {
                 .split_once("</style>")
                 .unwrap()
                 .0
-                .to_owned()
+                .split('}')
+                .filter_map(|rule| rule.split_once('{'))
+                .filter(|(_, declarations)| *declarations == "display:inline")
+                .map(|(selectors, _)| selectors)
+                .collect::<Vec<_>>()
+                .join(",")
         };
         let before_css = selection_css(&before);
         let complete_css = selection_css(&complete);
@@ -1075,9 +1091,7 @@ mod tests {
         // No partial cluster around hidden members is made visible by the export selection.
         for cluster in &first.clusters {
             assert!(!cluster.camera_contained);
-            assert!(
-                !complete.contains(&format!("#fm-deck-export-content #{},", cluster.element_id))
-            );
+            assert!(!complete_css.contains(&format!("#{}", cluster.element_id)));
         }
     }
 
@@ -1093,8 +1107,8 @@ mod tests {
             .find(|edge| edge.touching)
             .expect("touching edge");
         assert!(image.contains(&format!(
-            "#fm-deck-export-content #{},",
-            touching.element_id
+            "#fm-deck-export-content #{},#fm-deck-export-content [data-fm-deck-owner=\"{}\"]{{display:inline}}",
+            touching.element_id, touching.element_id
         )));
         for cluster in second
             .clusters
@@ -1103,14 +1117,14 @@ mod tests {
         {
             assert!(svg.contains(&format!("data-fm-deck-owner=\"{}\"", cluster.element_id)));
             assert!(image.contains(&format!(
-                "[data-fm-deck-owner=\"{}\"]{{visibility:visible}}",
+                "[data-fm-deck-owner=\"{}\"]{{display:inline}}",
                 cluster.element_id
             )));
         }
-        // Only addressable roots are hidden: selecting a labeled edge must also reveal its
-        // child paths, which share .fm-edge but intentionally have no id.
-        assert!(image.contains(".fm-edge[id]"));
-        assert!(!image.contains(".fm-edge,"));
+        // Only addressable roots are hidden, even if an SVG editor later adds IDs to their
+        // child paths. Paint servers must not be selected as nodes by their fm-node-* prefix.
+        assert!(!image.contains("#fm-deck-export-content .fm-edge"));
+        assert!(!image.contains("#fm-deck-export-content #fm-node-gradient"));
     }
 
     #[test]

@@ -425,11 +425,11 @@ fn deck_cli_svg_exports_the_selected_slide_and_reveal_step() {
         );
         assert!(!svg.contains("var("), "static SVG paints must be portable");
         let css = slide_export_css(svg);
-        assert!(css.contains("visibility:hidden"));
+        assert!(css.contains("display:none"));
         let visible_selectors = css
             .split('}')
             .filter_map(|rule| rule.split_once('{'))
-            .filter(|(_, declarations)| declarations.trim() == "visibility:visible")
+            .filter(|(_, declarations)| declarations.trim() == "display:inline")
             .map(|(selectors, _)| selectors)
             .collect::<Vec<_>>()
             .join(",");

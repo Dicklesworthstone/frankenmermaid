@@ -11726,6 +11726,10 @@ mod schema_version_semver {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        FontMetrics, IrKanbanCard, IrKanbanColumn, IrKanbanMeta, KanbanCardLayout,
+        KanbanCardRowKind, kanban_priority_fill,
+    };
     use serde_json::json;
 
     #[test]

@@ -23739,11 +23739,19 @@ mod tests {
         assert!(second.classes.iter().any(|c| c == "finished"));
         assert!(!second.classes.iter().any(|c| c == "first"));
         assert_eq!(
-            parsed.ir.resolved_node_style(1).get("fill"),
+            parsed
+                .ir
+                .resolved_node_style(1)
+                .get("fill")
+                .map(String::as_str),
             Some("#ff0000")
         );
         assert_eq!(
-            parsed.ir.resolved_node_style(2).get("fill"),
+            parsed
+                .ir
+                .resolved_node_style(2)
+                .get("fill")
+                .map(String::as_str),
             Some("#0000ff")
         );
         assert_eq!(first.span_primary.start.line, 3);

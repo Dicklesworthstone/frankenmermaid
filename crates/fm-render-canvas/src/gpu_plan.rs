@@ -624,6 +624,7 @@ fn resolved_edge_color(
         .or_else(|| parse_paint_rgba(&config.edge_stroke))
         .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
     color[3] *= crate::renderer::resolve_edge_opacity(ir, edge_index).unwrap_or(1.0) as f32;
+    color[3] *= crate::renderer::resolve_edge_stroke_opacity(ir, edge_index).unwrap_or(1.0) as f32;
     color
 }
 
@@ -640,6 +641,8 @@ fn apply_edge_marker_paint(
     {
         let mut fill = parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
         fill[3] *= crate::renderer::resolve_edge_opacity(ir, edge_index).unwrap_or(1.0) as f32;
+        fill[3] *=
+            crate::renderer::resolve_edge_stroke_opacity(ir, edge_index).unwrap_or(1.0) as f32;
         fill
     } else {
         marker.color
@@ -8182,6 +8185,11 @@ mod tests {
         for segment in &plan.edge_segments {
             assert_paint_rgba_eq(segment.color, [0.4, 0.2, 0.6, 0.2]);
         }
+        assert!(!plan.arrowheads.is_empty());
+        for marker in &plan.arrowheads {
+            assert_paint_rgba_eq(marker.color, [0.4, 0.2, 0.6, 0.2]);
+            assert_paint_rgba_eq(marker.fill, [0.4, 0.2, 0.6, 0.2]);
+        }
         for (source, index, expected) in [
             (GpuTextSource::Node, first, [0.4, 0.2, 0.6, 0.5]),
             (GpuTextSource::Node, second, [0.4, 0.2, 0.6, 1.0]),
@@ -8887,8 +8895,8 @@ mod tests {
              classDef muted color:#ff000080,opacity:0.5\n class a muted\n\
              style faded color:#00ff0080,opacity:0.25\n\
              linkStyle default stroke:#11223380,color:#44556680\n\
-             linkStyle 0 opacity:0.5\n\
-             linkStyle 1 opacity:0.25\n\
+             linkStyle 0 opacity:0.5,stroke-opacity:40%\n\
+             linkStyle 1 opacity:0.25,stroke-opacity:0.5\n\
              linkStyle 2 opacity:0\n",
         )
         .ir;
@@ -8925,9 +8933,13 @@ mod tests {
                 paint_alpha * 0.25,
             );
             assert_text_alpha(&plan, GpuTextSource::Cluster, cluster("plain"), paint_alpha);
-            for (index, opacity) in [0.5, 0.25, 0.0, 1.0].into_iter().enumerate() {
-                let expected = paint_alpha * opacity;
-                assert_text_alpha(&plan, GpuTextSource::Edge, index, expected);
+            for (index, (opacity, stroke_opacity)) in
+                [(0.5, 0.4), (0.25, 0.5), (0.0, 1.0), (1.0, 1.0)]
+                    .into_iter()
+                    .enumerate()
+            {
+                assert_text_alpha(&plan, GpuTextSource::Edge, index, paint_alpha * opacity);
+                let expected = paint_alpha * opacity * stroke_opacity;
                 let segments: Vec<_> = plan
                     .edge_segments
                     .iter()
@@ -8990,7 +9002,7 @@ mod tests {
             "erDiagram\n CUSTOMER ||--o{ ORDER : places\n",
         ] {
             let ir = fm_parser::parse(&format!(
-                "{source}linkStyle 0 stroke:#ff000080,color:#0000ff80,opacity:0.25\n"
+                "{source}linkStyle 0 stroke:#ff000080,color:#0000ff80,opacity:0.25,stroke-opacity:50%\n"
             ))
             .ir;
             assert_eq!(ir.edges.len(), 1);
@@ -9000,11 +9012,18 @@ mod tests {
             assert_text_alpha(&plan, GpuTextSource::Edge, 0, alpha);
             assert_text_alpha(&plan, GpuTextSource::EdgeSourceCardinality, 0, alpha);
             assert_text_alpha(&plan, GpuTextSource::EdgeTargetCardinality, 0, alpha);
+            let stroke_alpha = alpha * 0.5;
+            assert!(!plan.edge_segments.is_empty());
+            assert!(
+                plan.edge_segments
+                    .iter()
+                    .all(|segment| segment.color == [1.0, 0.0, 0.0, stroke_alpha])
+            );
             if ir.diagram_type == fm_core::DiagramType::Er {
                 assert!(!plan.er_marker_segments.is_empty());
                 assert!(plan.er_marker_segments.iter().all(|segment| {
                     segment.edge_index == 0
-                        && segment.color == [1.0, 0.0, 0.0, alpha]
+                        && segment.color == [1.0, 0.0, 0.0, stroke_alpha]
                         && segment.dash == [0.0, 0.0]
                 }));
             }
