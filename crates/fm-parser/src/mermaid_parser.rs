@@ -12610,7 +12610,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         let value = if raw_value.is_empty() {
             0.0
         } else {
-            match raw_value.parse::<f32>() {
+            match raw_value.parse::<f64>() {
                 Ok(value) if value.is_finite() => value,
                 _ => {
                     builder.add_warning(format!(
@@ -31318,11 +31318,41 @@ Rel_Back(db, app, "Responds")"#,
         let pie = parsed.ir.pie_meta.expect("pie_meta should be set");
         assert_eq!(pie.slices.len(), 3);
         assert_eq!(pie.slices[0].label, "Dogs");
-        assert!((pie.slices[0].value - 386.0).abs() < f32::EPSILON);
+        assert!((pie.slices[0].value - 386.0).abs() < f64::EPSILON);
         assert_eq!(pie.slices[1].label, "Cats");
-        assert!((pie.slices[1].value - 85.0).abs() < f32::EPSILON);
+        assert!((pie.slices[1].value - 85.0).abs() < f64::EPSILON);
         assert_eq!(pie.slices[2].label, "Rats");
-        assert!((pie.slices[2].value - 15.0).abs() < f32::EPSILON);
+        assert!((pie.slices[2].value - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pie_values_preserve_f64_precision_range_and_finite_signs() {
+        let parsed = parse_mermaid(
+            "pie showData\n\"Large integer\": 16777217\n\"Precise decimal\": 0.12345678901234568\n\"Tiny\": 1e-100\n\"Huge\": 1e100\n\"Large finite\": 1e308\n\"Subnormal\": 5e-324\n\"Negative\": -2.5\n\"Negative zero\": -0\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.pie_meta.as_ref().expect("pie metadata");
+        let expected = [
+            16_777_217.0_f64,
+            0.123_456_789_012_345_68,
+            1e-100,
+            1e100,
+            1e308,
+            f64::from_bits(1),
+            -2.5,
+            -0.0,
+        ];
+        assert_eq!(meta.slices.len(), expected.len());
+        assert_eq!(parsed.ir.nodes.len(), expected.len());
+        assert!(meta.show_data);
+        for (slice, expected) in meta.slices.iter().zip(expected) {
+            assert_eq!(
+                slice.value.to_bits(),
+                expected.to_bits(),
+                "{} must retain its parsed value before layout normalizes the quantities",
+                slice.label
+            );
+        }
     }
 
     #[test]
@@ -31381,7 +31411,7 @@ Rel_Back(db, app, "Responds")"#,
             let node = &parsed.ir.nodes[index];
             assert_eq!(slice.label, *label);
             assert_eq!(parsed.ir.node_display_text(node), *label);
-            assert!((slice.value - (index + 2) as f32).abs() < f32::EPSILON);
+            assert!((slice.value - (index + 2) as f64).abs() < f64::EPSILON);
             assert_eq!(node.span_primary.start.line as usize, index + 2);
         }
     }
@@ -31407,7 +31437,7 @@ Rel_Back(db, app, "Responds")"#,
             let node = &parsed.ir.nodes[index];
             assert_eq!(parsed.ir.node_display_text(node), *label);
             assert_eq!(meta.slices[index].label, *label);
-            assert!((meta.slices[index].value - (index + 1) as f32).abs() < f32::EPSILON);
+            assert!((meta.slices[index].value - (index + 1) as f64).abs() < f64::EPSILON);
             assert_eq!(node.span_primary.start.line as usize, index + 2);
             assert_eq!(parsed.ir.graph.nodes[index].node_id.0, index);
         }
@@ -31416,7 +31446,7 @@ Rel_Back(db, app, "Responds")"#,
     #[test]
     fn pie_malformed_labels_and_nonfinite_values_recover_by_source_row() {
         let parsed = parse_mermaid(
-            "pie\n\"Unclosed: 3\n\"Closed\" extra: 4\nGood: 2\n\"NaN\": NaN\n\"Inf\": inf\n\"Good: again\": 6\n",
+            "pie\n\"Unclosed: 3\n\"Closed\" extra: 4\nGood: 2\n\"NaN\": NaN\n\"Inf\": inf\n\"Overflow\": 1e309\n\"Negative overflow\": -1e309\n\"Incomplete exponent\": 1e\n\"Negative infinity\": -inf\n\"Good: again\": 6\n",
         );
         let meta = parsed.ir.pie_meta.as_ref().expect("pie metadata");
         let labels: Vec<_> = meta
@@ -31424,13 +31454,29 @@ Rel_Back(db, app, "Responds")"#,
             .iter()
             .map(|slice| slice.label.as_str())
             .collect();
-        assert_eq!(labels, ["Good", "NaN", "Inf", "Good: again"]);
+        assert_eq!(
+            labels,
+            [
+                "Good",
+                "NaN",
+                "Inf",
+                "Overflow",
+                "Negative overflow",
+                "Incomplete exponent",
+                "Negative infinity",
+                "Good: again"
+            ]
+        );
         assert_eq!(parsed.ir.nodes.len(), labels.len());
-        for (slice, value) in meta.slices.iter().zip([2.0, 0.0, 0.0, 6.0]) {
+        for (slice, value) in meta
+            .slices
+            .iter()
+            .zip([2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0])
+        {
             assert!(slice.value.is_finite());
-            assert!((slice.value - value).abs() < f32::EPSILON);
+            assert!((slice.value - value).abs() < f64::EPSILON);
         }
-        for line in [2, 3, 5, 6] {
+        for line in [2, 3, 5, 6, 7, 8, 9, 10] {
             assert!(
                 parsed
                     .warnings

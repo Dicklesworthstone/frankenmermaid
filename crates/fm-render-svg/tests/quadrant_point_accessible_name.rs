@@ -357,3 +357,57 @@ fn scene_quadrants_keep_complete_chart_content_and_authored_marker_styles() {
         }
     }
 }
+
+#[test]
+fn colliding_quadrant_captions_keep_each_points_position_style_and_accessible_name() {
+    let parsed = fm_parser::parse(concat!(
+        "quadrantChart\n",
+        "\"A B\": [0.1, 0.9] color: #ff0000\n",
+        "\"A_B\": [0.9, 0.1] color: #0000ff\n",
+        "\"Latency: p95\": [0.2, 0.8] color: #00ff00\n",
+        "\"A B\": [0.8, 0.2] color: #ff00ff\n",
+    ));
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let ir = &parsed.ir;
+    let layout = fm_layout::layout_diagram(ir);
+    assert_eq!(layout.nodes.len(), 4);
+    let expected_positions = [(0.1, 0.9), (0.9, 0.1), (0.2, 0.8), (0.8, 0.2)];
+    // Four points produce a 360px plotting square with the default 50px/60px margins.
+    for (index, (x, y)) in expected_positions.into_iter().enumerate() {
+        let node = &layout.nodes[index];
+        let center = node.bounds.center();
+        assert!((center.x - (50.0 + x * 360.0)).abs() < 0.001);
+        assert!((center.y - (60.0 + (1.0 - y) * 360.0)).abs() < 0.001);
+        assert_eq!(node.node_index, index);
+        assert_eq!(node.node_id, ir.nodes[index].id);
+        assert_eq!(node.span.start.line as usize, index + 2);
+    }
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                backend,
+                embed_theme_css,
+                a11y: A11yConfig::full(),
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(ir, &config);
+            assert_eq!(
+                point_names(&svg),
+                [
+                    "A B: x 0.10, y 0.90",
+                    "A_B: x 0.90, y 0.10",
+                    "Latency: p95: x 0.20, y 0.80",
+                    "A B: x 0.80, y 0.20",
+                ],
+                "{backend:?}, embedded={embed_theme_css}"
+            );
+            for color in ["#ff0000", "#0000ff", "#00ff00", "#ff00ff"] {
+                assert!(
+                    svg.contains(&format!("fill=\"{color}\"")),
+                    "{backend:?}: {color}"
+                );
+            }
+            assert_eq!(svg, render_svg_with_config(ir, &config));
+        }
+    }
+}

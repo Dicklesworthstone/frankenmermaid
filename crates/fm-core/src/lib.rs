@@ -8930,7 +8930,42 @@ impl IrSequenceMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrPieSlice {
     pub label: String,
-    pub value: f32,
+    /// Authored quantity, retained at the precision used by Mermaid/JavaScript numbers.
+    pub value: f64,
+}
+
+impl IrPieSlice {
+    /// Finite, nonnegative quantity used for both painted area and displayed values.
+    #[must_use]
+    pub fn nonnegative_value(&self) -> f64 {
+        if self.value.is_finite() && self.value > 0.0 {
+            self.value
+        } else {
+            0.0
+        }
+    }
+
+    /// Shortest round-trip value, using scientific notation for extreme magnitudes so a
+    /// valid tiny or large quantity cannot create a hundreds-of-characters-wide legend.
+    #[must_use]
+    pub fn value_label(&self) -> String {
+        let value = self.nonnegative_value();
+        if value != 0.0 && !(1e-6..1e21).contains(&value) {
+            format!("{value:e}")
+        } else {
+            value.to_string()
+        }
+    }
+
+    /// The same label is measured, painted and used as the slice's accessible name.
+    #[must_use]
+    pub fn legend_label(&self, show_data: bool) -> String {
+        if show_data {
+            format!("{} [{}]", self.label, self.value_label())
+        } else {
+            self.label.clone()
+        }
+    }
 }
 
 /// Pie-chart-specific metadata that extends the generic IR.
@@ -8942,6 +8977,41 @@ pub struct IrPieMeta {
     pub show_data: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slices: Vec<IrPieSlice>,
+}
+
+impl IrPieMeta {
+    /// Source-order shares for every backend. Ordinary totals use direct f64 arithmetic;
+    /// overflowing totals are accumulated relative to their largest finite value. No epsilon
+    /// floor is used, so subnormal positive quantities keep their actual proportions.
+    pub fn slice_fractions(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        let total = self
+            .slices
+            .iter()
+            .map(IrPieSlice::nonnegative_value)
+            .sum::<f64>();
+        let (scale, total) = if total.is_finite() {
+            (1.0, total)
+        } else {
+            let scale = self
+                .slices
+                .iter()
+                .map(IrPieSlice::nonnegative_value)
+                .fold(0.0_f64, f64::max);
+            let total = self
+                .slices
+                .iter()
+                .map(|slice| slice.nonnegative_value() / scale)
+                .sum::<f64>();
+            (scale, total)
+        };
+        self.slices.iter().map(move |slice| {
+            if total > 0.0 {
+                (slice.nonnegative_value() / scale) / total
+            } else {
+                0.0
+            }
+        })
+    }
 }
 
 /// Serde adapters that render integer-like map keys as STRING keys.
@@ -9560,7 +9630,11 @@ impl KanbanCardLayout {
                     meta.priority.as_deref(),
                     KanbanCardRowKind::Priority,
                 ),
-                ("Ticket: ", meta.ticket.as_deref(), KanbanCardRowKind::Ticket),
+                (
+                    "Ticket: ",
+                    meta.ticket.as_deref(),
+                    KanbanCardRowKind::Ticket,
+                ),
             ] {
                 if let Some(value) = value.filter(|value| !value.is_empty()) {
                     sections.push((format!("{prefix}{value}"), detail_size, kind));
@@ -9645,7 +9719,11 @@ impl KanbanColumnStatus {
                 format!(
                     "WIP: {} / {limit}{}",
                     self.card_count,
-                    if self.is_over_limit() { " (over limit)" } else { "" },
+                    if self.is_over_limit() {
+                        " (over limit)"
+                    } else {
+                        ""
+                    },
                 )
             },
         )
@@ -11733,6 +11811,82 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn pie_fractions_keep_proportions_across_finite_units_and_overflowed_totals() {
+        use super::{IrPieMeta, IrPieSlice};
+
+        let cases = [
+            (vec![1e-300, 3e-300], vec![0.25, 0.75]),
+            (vec![1.0, 3.0], vec![0.25, 0.75]),
+            (vec![1e300, 3e300], vec![0.25, 0.75]),
+            (vec![f64::MAX, f64::MAX], vec![0.5, 0.5]),
+            (vec![f64::from_bits(1), f64::from_bits(3)], vec![0.25, 0.75]),
+            (
+                vec![f64::NAN, f64::INFINITY, -1.0, 0.0, 2.0],
+                vec![0.0, 0.0, 0.0, 0.0, 1.0],
+            ),
+            (vec![-1.0, f64::NEG_INFINITY, -0.0], vec![0.0, 0.0, 0.0]),
+            (vec![], vec![]),
+        ];
+        for (values, expected) in cases {
+            let meta = IrPieMeta {
+                slices: values
+                    .into_iter()
+                    .map(|value| IrPieSlice {
+                        label: String::new(),
+                        value,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let actual: Vec<_> = meta.slice_fractions().collect();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(actual.is_finite());
+                assert!((actual - expected).abs() < 1e-15, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn pie_value_labels_are_bounded_and_round_trip_without_narrowing() {
+        use super::IrPieSlice;
+
+        for value in [
+            0.0,
+            0.25,
+            30.0,
+            16_777_217.0,
+            0.123_456_789_012_345_68,
+            1e-6,
+            1e-100,
+            1e100,
+            1e308,
+            f64::MAX,
+            f64::from_bits(1),
+        ] {
+            let slice = IrPieSlice {
+                label: "Authored: value".into(),
+                value,
+            };
+            let label = slice.value_label();
+            assert!(label.len() <= 24, "unbounded numeric label: {label}");
+            assert_eq!(label.parse::<f64>().unwrap().to_bits(), value.to_bits());
+            assert_eq!(
+                slice.legend_label(true),
+                format!("Authored: value [{label}]")
+            );
+            assert_eq!(slice.legend_label(false), "Authored: value");
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, -0.0] {
+            let slice = IrPieSlice {
+                label: String::new(),
+                value,
+            };
+            assert_eq!(slice.value_label(), "0");
+        }
+    }
+
+    #[test]
     fn ir_font_metric_helpers_share_authored_labels_and_node_style_resolution() {
         use super::*;
 
@@ -11882,13 +12036,25 @@ mod tests {
         ];
         ir.kanban_meta = Some(IrKanbanMeta {
             columns: vec![
-                IrKanbanColumn { cluster: IrClusterId(0), wip_limit: Some(0) },
-                IrKanbanColumn { cluster: IrClusterId(1), wip_limit: Some(1) },
-                IrKanbanColumn { cluster: IrClusterId(3), wip_limit: Some(0) },
+                IrKanbanColumn {
+                    cluster: IrClusterId(0),
+                    wip_limit: Some(0),
+                },
+                IrKanbanColumn {
+                    cluster: IrClusterId(1),
+                    wip_limit: Some(1),
+                },
+                IrKanbanColumn {
+                    cluster: IrClusterId(3),
+                    wip_limit: Some(0),
+                },
             ],
             ..Default::default()
         });
-        assert_eq!(ir.kanban_column_status(0).unwrap().label(), "WIP: 1 / 0 (over limit)");
+        assert_eq!(
+            ir.kanban_column_status(0).unwrap().label(),
+            "WIP: 1 / 0 (over limit)"
+        );
         assert_eq!(ir.kanban_column_status(1).unwrap().label(), "WIP: 1 / 1");
         assert_eq!(ir.kanban_column_status(2).unwrap().label(), "1 card");
         assert_eq!(ir.kanban_column_status(3).unwrap().label(), "WIP: 0 / 0");

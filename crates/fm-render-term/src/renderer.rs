@@ -5986,25 +5986,25 @@ fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
 
 const PIE_SLICE_CHARS: [char; 8] = ['#', '*', '@', '+', '=', '~', '%', '&'];
 
-/// Cumulative fractions in source order. f64 accumulation keeps finite f32 values from
-/// overflowing their total, and tiny positive values retain their actual proportions.
+/// Cumulative fractions in source order, using the same overflow-safe quantity rules as the
+/// graphical composition. The final positive slice closes the circle despite rounding error.
 fn pie_slice_boundaries(meta: &fm_core::IrPieMeta) -> Vec<f64> {
-    let value = |slice: &fm_core::IrPieSlice| {
-        if slice.value.is_finite() && slice.value > 0.0 {
-            f64::from(slice.value)
-        } else {
-            0.0
-        }
-    };
-    let total = meta.slices.iter().map(value).sum::<f64>();
     let mut cumulative = 0.0;
-    meta.slices
-        .iter()
-        .map(|slice| {
-            cumulative += value(slice);
-            if total > 0.0 { cumulative / total } else { 0.0 }
+    let mut boundaries: Vec<_> = meta
+        .slice_fractions()
+        .map(|fraction| {
+            cumulative += fraction;
+            cumulative.min(1.0)
         })
-        .collect()
+        .collect();
+    if let Some(last_positive) = meta
+        .slices
+        .iter()
+        .rposition(|slice| slice.nonnegative_value() > 0.0)
+    {
+        boundaries[last_positive..].fill(1.0);
+    }
+    boundaries
 }
 
 /// Screen coordinates grow downwards: start at noon and advance clockwise through [0, 1).
@@ -6191,17 +6191,15 @@ impl TermRenderer {
             .config
             .selected_node
             .filter(|&index| self.config.show_selection && index < meta.slices.len());
-        let mut previous = 0.0;
         let legends: Vec<_> = meta
             .slices
             .iter()
-            .zip(&boundaries)
+            .zip(meta.slice_fractions())
             .enumerate()
-            .map(|(index, (slice, &end))| {
-                let percentage = (end - previous) * 100.0;
-                previous = end;
+            .map(|(index, (slice, fraction))| {
+                let percentage = (fraction * 100.0).round();
                 let value = if meta.show_data {
-                    format!(" [{}]", slice.value)
+                    format!(" [{}]", slice.value_label())
                 } else {
                     String::new()
                 };
@@ -8033,6 +8031,52 @@ mod tests {
     }
 
     #[test]
+    fn pie_precise_values_and_percentage_rounding_match_graphical_output() {
+        for (source, expected) in [
+            (
+                "pie showData\n\"A\": 16777217\n\"B\": 16777217\n",
+                vec!["50% [16777217] A", "50% [16777217] B"],
+            ),
+            (
+                "pie showData\n\"A\": 1e308\n\"B\": 1e308\n",
+                vec!["50% [1e308] A", "50% [1e308] B"],
+            ),
+            (
+                "pie showData\n\"A\": 5e-324\n\"B\": 5e-324\n",
+                vec!["50% [5e-324] A", "50% [5e-324] B"],
+            ),
+            (
+                "pie showData\n\"A\": 18\n\"B\": 1\n\"C\": 21\n",
+                vec!["45% [18] A", "3% [1] B", "53% [21] C"],
+            ),
+            (
+                "pie showData\n\"A\": 0.49999999999999994\n\"B\": 99.5\n",
+                vec!["0% [0.49999999999999994] A", "100% [99.5] B"],
+            ),
+        ] {
+            let parsed = fm_parser::parse(source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            for render_mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+                let config = TermRenderConfig {
+                    render_mode,
+                    max_width: 200,
+                    max_height: 60,
+                    ..TermRenderConfig::rich()
+                };
+                let result = crate::render_term_with_config(&parsed.ir, &config, 200, 60);
+                for label in &expected {
+                    assert!(
+                        result.output.contains(label),
+                        "{render_mode:?}: {label}\n{}",
+                        result.output
+                    );
+                }
+                assert_eq!(result.occluded_node_count, 0);
+            }
+        }
+    }
+
+    #[test]
     fn pie_zero_invalid_and_extreme_values_do_not_invent_or_lose_area() {
         let mut ir = fm_parser::parse("pie\n\"A\":1\n\"B\":1\n\"C\":1\n\"D\":1").ir;
         let layout = layout_diagram(&ir);
@@ -8044,9 +8088,11 @@ mod tests {
         let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
         for values in [
             [0.0, 1.0, 0.0, 0.0],
-            [f32::NAN, f32::INFINITY, -2.0, 0.0],
-            [f32::MAX, f32::MAX, f32::MAX, f32::MAX],
+            [f64::NAN, f64::INFINITY, -2.0, 0.0],
+            [f64::MAX, f64::MAX, f64::MAX, f64::MAX],
             [1.0e-30, 1.0e-30, 1.0e-30, 1.0e-30],
+            [1.0e-300, 1.0e-300, 1.0e-300, 1.0e-300],
+            [f64::from_bits(1); 4],
         ] {
             let meta = ir.pie_meta.as_mut().unwrap();
             for (slice, value) in meta.slices.iter_mut().zip(values) {

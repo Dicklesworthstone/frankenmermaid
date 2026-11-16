@@ -9247,7 +9247,6 @@ fn render_pie_svg(
     let mut prev_end_point = String::new();
     let mut have_prev_end = false;
     for (i, slice) in pie_meta.slices.iter().enumerate() {
-        let value = slice.value.max(0.0);
         let placed = &pie.slices[i];
         let angle = placed.start_angle;
         let sweep = placed.sweep_angle;
@@ -9274,8 +9273,7 @@ fn render_pie_svg(
                 &mut pie_svg,
                 config.a11y.text_alternatives,
                 pie_meta.show_data,
-                &slice.label,
-                value,
+                slice,
                 "circle",
             );
             have_prev_end = false;
@@ -9312,8 +9310,7 @@ fn render_pie_svg(
                 &mut pie_svg,
                 config.a11y.text_alternatives,
                 pie_meta.show_data,
-                &slice.label,
-                value,
+                slice,
                 "path",
             );
         }
@@ -9386,10 +9383,9 @@ fn render_pie_svg(
         // ⚠️ THE `{:.0}` WAS DATA LOSS, NOT A FORMATTING QUIRK. It rounded the author's own number
         // to an integer, so `"A" : 0.25` published `A: 0` — a legend asserting the value is ZERO
         // when the author wrote a quarter. Measured against the reference: 0.25 draws `[0.25]`,
-        // 1.5 draws `[1.5]`, 1.23456 draws `[1.23456]`, and 30.0 draws `[30]`. Rust's `f32`
-        // `Display` is the shortest round-trip form and agrees with JavaScript's on every one of
-        // those, so the value is written as the author wrote it and a whole number keeps no
-        // trailing `.0`.
+        // 1.5 draws `[1.5]`, 1.23456 draws `[1.23456]`, and 30.0 draws `[30]`. The shared
+        // IrPieSlice value label preserves f64 precision and uses bounded scientific notation
+        // for extreme quantities, while a whole number keeps no trailing `.0`.
         pie_svg.push_str("<rect x=\"");
         let _ = crate::attributes::write_number_into(&mut pie_svg, entry.swatch.x + origin.0);
         pie_svg.push_str("\" y=\"");
@@ -9428,7 +9424,7 @@ fn render_pie_svg(
 /// sankey, journey, timeline, packet and kanban) all did. A screen reader got the document `<desc>`
 /// and nothing per wedge.
 ///
-/// MIRRORS THE LEGEND, `showData` behaviour included: `Label: 50 (50.0%)` when the author asked for
+/// MIRRORS THE LEGEND, `showData` behaviour included: `Label [50]` when the author asked for
 /// data, the bare label when they did not.
 ///
 /// I first made the share UNCONDITIONAL, reasoning that a wedge's angle conveys its proportion to a
@@ -9446,8 +9442,7 @@ fn write_pie_slice_accessible_name(
     out: &mut String,
     text_alternatives: bool,
     show_data: bool,
-    label: &str,
-    value: f32,
+    slice: &fm_core::IrPieSlice,
     tag: &str,
 ) {
     use crate::attributes::write_escaped_text;
@@ -9455,27 +9450,9 @@ fn write_pie_slice_accessible_name(
         out.push_str("/>");
         return;
     }
-    use std::fmt::Write as _;
-
     out.push_str("><title>");
-    let _ = write_escaped_text(out, label);
-    if show_data {
-        // EXACTLY THE LEGEND'S `entry_label`, so the spoken name and the printed one are the SAME
-        // STRING — which `the_accessible_name_matches_the_printed_legend` asserts by looking the
-        // name up among the drawn legend `<text>` bodies. Its purpose is that a screen reader never
-        // reads different numbers than the chart displays, and that matters more after this change,
-        // not less: `{:.0}` used to round `0.25` to `0` in BOTH places, so the two agreed on a
-        // number the author never wrote.
-        //
-        // ⚠️ I FIRST KEPT THE PERCENTAGE HERE AFTER THE LEGEND DROPPED IT, reasoning that this
-        // `<title>` is the only per-wedge place a screen reader gets the proportion. That broke the
-        // mirror contract above, and the contract is right: a name that disagrees with the visible
-        // legend is the exact drift it exists to catch, and the share is NOT lost from the document
-        // — it is the wedge's own drawn `60%` slice label. Whether an accessible name should carry
-        // more than the legend is the product question bd-uf3p1 already raises; it is not settled
-        // here by widening this string until a test goes green.
-        let _ = write!(out, " [{value}]");
-    }
+    // One formatter owns the visible legend and the spoken name, including extreme quantities.
+    let _ = write_escaped_text(out, &slice.legend_label(show_data));
     out.push_str("</title></");
     out.push_str(tag);
     out.push('>');
@@ -26694,8 +26671,9 @@ marker#arrow-open path {
                     SvgBackend::Scene => (0.0, 0.0),
                 };
                 let drawn: Vec<_> = svg
-                    .split("<text ")
+                    .split("<text")
                     .skip(1)
+                    .filter(|chunk| chunk.starts_with(' '))
                     .map(|chunk| {
                         let (attributes, tail) = chunk.split_once('>').unwrap();
                         (attributes, tail.split_once("</text>").unwrap().0)
@@ -26709,7 +26687,9 @@ marker#arrow-open path {
                         let attributes = matches[0].0;
                         let number = |name| {
                             scene_attribute(attributes, name)
-                                .unwrap()
+                                .unwrap_or_else(|| {
+                                    panic!("{backend:?} missing {name} on <text{attributes}>")
+                                })
                                 .parse::<f32>()
                                 .unwrap()
                         };

@@ -148,6 +148,47 @@ fn a_whole_value_keeps_no_trailing_decimal() {
     }
 }
 
+#[test]
+fn double_precision_values_reach_both_svg_legends_without_expanding_extreme_labels() {
+    use fm_render_svg::{A11yConfig, SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    for (value, expected_value) in [
+        ("16777217", "16777217"),
+        ("0.12345678901234568", "0.12345678901234568"),
+        ("1e-300", "1e-300"),
+        ("1e308", "1e308"),
+        ("5e-324", "5e-324"),
+    ] {
+        let source = format!("pie showData\n\"A\": {value}\n\"B\": {value}\n");
+        let parsed = fm_parser::parse(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    a11y: A11yConfig::full(),
+                    ..Default::default()
+                };
+                let svg = render_svg_with_config(&parsed.ir, &config);
+                let texts = drawn_text(&svg);
+                for label in ["A", "B"] {
+                    let expected = format!("{label} [{expected_value}]");
+                    assert!(texts.contains(&expected), "{backend:?}, {value}: {texts:?}");
+                    if backend == SvgBackend::LegacyLayout {
+                        assert!(svg.contains(&format!("<title>{expected}</title>")));
+                    }
+                }
+                assert_eq!(
+                    texts.iter().filter(|text| text.as_str() == "50%").count(),
+                    2
+                );
+                assert!(!svg.contains("NaN") && !svg.contains("=\"inf"));
+            }
+        }
+    }
+}
+
 /// CONTROL: without `showData` no value is published at all.
 ///
 /// The fix touches the branch that builds the row, so the other branch must be shown untouched —

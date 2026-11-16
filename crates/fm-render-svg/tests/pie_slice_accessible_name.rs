@@ -18,7 +18,7 @@
 //! Only pie is addressed here. gantt, quadrant and xychart have the same gap and are NOT covered by
 //! this bead — stated rather than left for someone to assume from the file's existence.
 
-use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_config};
+use fm_render_svg::{A11yConfig, SvgBackend, SvgRenderConfig, render_svg_with_config};
 
 const WITH_DATA: &str = "pie showData\n  title P\n  \"Alpha\" : 10\n  \"Beta\" : 5\n";
 const WITHOUT_DATA: &str = "pie title P\n  \"Alpha\" : 10\n  \"Beta\" : 5\n";
@@ -134,5 +134,62 @@ fn no_accessible_name_is_emitted_when_text_alternatives_are_off() {
     assert!(
         svg.contains("fm-pie-slice\"/>"),
         "the slice should stay self-closing when it carries no title"
+    );
+}
+
+#[test]
+fn quoted_and_colliding_pie_captions_keep_their_values_and_semantic_hit_targets() {
+    let parsed = fm_parser::parse(concat!(
+        "pie showData\n",
+        "\"A B\": 2\n\"A_B\": 3\n\"Errors: retry\": 5\n\"A B\": 7\n",
+    ));
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let ir = &parsed.ir;
+    let layout = fm_layout::layout_diagram(ir);
+    let expected = ["A B [2]", "A_B [3]", "Errors: retry [5]", "A B [7]"];
+    assert_eq!(layout.nodes.len(), expected.len());
+    let scene = fm_layout::build_render_scene(ir, &layout);
+    for (index, name) in expected.iter().enumerate() {
+        let node = &layout.nodes[index];
+        assert_eq!(node.node_index, index);
+        assert_eq!(node.node_id, ir.nodes[index].id);
+        assert_eq!(node.span.start.line as usize, index + 2);
+        assert!(node.bounds.width > 0.0 && node.bounds.height > 0.0);
+        assert!(
+            scene.root.children.iter().any(|item| matches!(
+                item,
+                fm_layout::RenderItem::Text(text)
+                    if text.source == fm_layout::RenderSource::Node(index) && text.text == *name
+            )),
+            "legend {name:?} lost its own semantic source"
+        );
+    }
+    for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                backend,
+                embed_theme_css,
+                a11y: A11yConfig::full(),
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(ir, &config);
+            for name in expected {
+                assert!(
+                    svg.contains(&format!(">{name}</text>")),
+                    "{backend:?}: {name}"
+                );
+            }
+            assert_eq!(svg, render_svg_with_config(ir, &config));
+        }
+    }
+    assert_eq!(
+        slice_names(&render_svg_with_config(
+            ir,
+            &SvgRenderConfig {
+                a11y: A11yConfig::full(),
+                ..Default::default()
+            }
+        )),
+        expected,
     );
 }

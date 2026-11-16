@@ -150,12 +150,7 @@ impl PieChartLayout {
             .slices
             .iter()
             .map(|slice| {
-                // Preserve Mermaid's showData format and the author's fractional value.
-                let text = if meta.show_data {
-                    format!("{} [{}]", slice.label, slice.value.max(0.0))
-                } else {
-                    slice.label.clone()
-                };
+                let text = slice.legend_label(meta.show_data);
                 PieLegendEntry {
                     swatch: LayoutRect {
                         x: 0.0,
@@ -185,45 +180,16 @@ impl PieChartLayout {
             + entries.len().saturating_sub(1) as f32 * row_gap
             + 2.0 * padding;
 
-        // Keep the existing f32 percentage-rounding contract for ordinary inputs. Normalize
-        // only if that sum overflows, otherwise a valid very large chart becomes NaN geometry.
-        let total = meta
-            .slices
-            .iter()
-            .map(|slice| slice.value.max(0.0))
-            .sum::<f32>();
-        let widest = meta
-            .slices
-            .iter()
-            .map(|slice| slice.value.max(0.0))
-            .filter(|value| value.is_finite())
-            .fold(0.0_f32, f32::max);
-        let normalized_total = meta
-            .slices
-            .iter()
-            .filter(|slice| slice.value.is_finite())
-            .map(|slice| f64::from(slice.value.max(0.0)) / f64::from(widest.max(f32::EPSILON)))
-            .sum::<f64>();
         let mut angle = -std::f32::consts::FRAC_PI_2;
         let mut sides = [Vec::new(), Vec::new()];
         let mut slices = Vec::with_capacity(meta.slices.len());
-        for (index, slice) in meta.slices.iter().enumerate() {
-            let value = slice.value.max(0.0);
-            let ratio = if !value.is_finite() {
-                0.0
-            } else if total.is_finite() && total > 0.0 {
-                value / total
-            } else if normalized_total > 0.0 {
-                ((f64::from(value) / f64::from(widest)) / normalized_total) as f32
-            } else {
-                0.0
-            };
-            let sweep = ratio * std::f32::consts::TAU;
+        for (index, ratio) in meta.slice_fractions().enumerate() {
+            let sweep = (ratio * std::f64::consts::TAU) as f32;
             let mid = angle + sweep * 0.5;
             let mut label = measured_block(
-                // Math.round's half-up behavior, including the existing f32 percent before
-                // promotion: 1/8 must read 13%, where formatting 12.5 directly gives 12%.
-                &format!("{}%", (f64::from(ratio * 100.0) + 0.5).floor() as i64),
+                // Match Math.round on the actual f64 share: 1/8 reads 13%, while formatting
+                // 12.5 directly would use round-half-to-even and publish 12%.
+                &format!("{}%", (ratio * 100.0).round() as i64),
                 label_font,
                 96.0 * scale,
                 metrics,
@@ -741,13 +707,21 @@ mod tests {
     #[test]
     fn pie_angles_are_proportional_and_remain_finite_for_zero_and_extreme_values() {
         let metrics = FontMetrics::default_metrics();
-        for values in [
-            vec![0.0],
-            vec![1.0],
-            vec![1e-30],
-            vec![1.0, 3.0, 0.0],
-            vec![1e-30, 3e-30],
-            vec![1e38, 3e38],
+        for (values, expected_fractions) in [
+            (vec![0.0], vec![0.0]),
+            (vec![1.0], vec![1.0]),
+            (vec![1e-30], vec![1.0]),
+            (vec![1.0, 3.0, 0.0], vec![0.25, 0.75, 0.0]),
+            (vec![1e-30, 3e-30], vec![0.25, 0.75]),
+            (vec![1e38, 3e38], vec![0.25, 0.75]),
+            (vec![1e-300, 3e-300], vec![0.25, 0.75]),
+            (vec![1e300, 3e300], vec![0.25, 0.75]),
+            (vec![f64::MAX, f64::MAX], vec![0.5, 0.5]),
+            (vec![f64::from_bits(1), f64::from_bits(3)], vec![0.25, 0.75]),
+            (
+                vec![f64::NAN, f64::INFINITY, -2.0, 1.0],
+                vec![0.0, 0.0, 0.0, 1.0],
+            ),
         ] {
             let meta = IrPieMeta {
                 slices: values
@@ -762,18 +736,12 @@ mod tests {
             };
             let pie = PieChartLayout::new(&meta, None, &metrics, 8.0, metrics.avg_char_width());
             assert!(pie.bounds.width.is_finite() && pie.bounds.height.is_finite());
-            let sum = values.iter().map(|&value| f64::from(value)).sum::<f64>();
-            for (slice, &value) in pie.slices.iter().zip(&values) {
+            for ((slice, &value), ratio) in pie.slices.iter().zip(&values).zip(expected_fractions) {
                 assert!(slice.start_angle.is_finite() && slice.sweep_angle.is_finite());
-                let ratio = if sum > 0.0 {
-                    f64::from(value) / sum
-                } else {
-                    0.0
-                };
                 assert!(
                     (f64::from(slice.sweep_angle) / std::f64::consts::TAU - ratio).abs() < 1e-6
                 );
-                assert_eq!(slice.leader.is_some(), value > 0.0);
+                assert_eq!(slice.leader.is_some(), value.is_finite() && value > 0.0);
             }
         }
     }

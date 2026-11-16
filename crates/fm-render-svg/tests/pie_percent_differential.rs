@@ -170,3 +170,15 @@ fn the_slice_names_are_still_drawn_somewhere() {
         );
     }
 }
+
+#[test]
+fn f64_percentages_round_actual_shares_without_cumulative_or_half_boundary_error() {
+    for (values, expected) in [
+        (vec![18.0, 1.0, 21.0], vec!["45%", "3%", "53%"]),
+        (vec![0.499_999_999_999_999_94, 99.5], vec!["0%", "100%"]),
+        (vec![1e-300, 3e-300], vec!["25%", "75%"]),
+        (vec![f64::MAX, f64::MAX], vec!["50%", "50%"]),
+    ] {
+        assert_eq!(drawn_percents(&source_for(&values)), expected, "{values:?}");
+    }
+}

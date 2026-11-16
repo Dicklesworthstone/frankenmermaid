@@ -258,6 +258,79 @@ fn pie_sectors_and_percentage_labels_are_not_overpainted_by_parser_nodes() {
 }
 
 #[test]
+fn pie_f64_quantities_keep_matching_canvas_and_gpu_labels_and_sector_areas() {
+    use fm_render_canvas::{DrawOperation, GpuRenderPlan};
+
+    for value in [
+        "16777217",
+        "0.12345678901234568",
+        "1e-300",
+        "1e308",
+        "5e-324",
+    ] {
+        let parsed = fm_parser::parse(&format!("pie showData\n\"A\": {value}\n\"B\": {value}\n",));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let layout = fm_layout::layout_diagram(ir);
+        let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+        let result = render_to_canvas(ir, &mut context, &CanvasRenderConfig::default());
+        let expected = vec![
+            "50%".to_owned(),
+            format!("A [{value}]"),
+            "50%".to_owned(),
+            format!("B [{value}]"),
+        ];
+        let texts: Vec<_> = context
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, _, _) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, expected, "Canvas values for {value}");
+        let arcs: Vec<_> = context
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::Arc(_, _, _, start, end) => Some(end - start),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arcs.len(), 2);
+        assert!(
+            arcs.iter()
+                .all(|sweep| (sweep - std::f64::consts::PI).abs() < 1e-6)
+        );
+        assert_eq!(result.nodes_drawn, 2);
+
+        let plan = GpuRenderPlan::from_layout(ir, &layout, 1.5);
+        assert_eq!(plan.pie_wedges.len(), 2);
+        for wedge in &plan.pie_wedges {
+            assert!((f64::from(wedge.sweep_angle) - std::f64::consts::PI).abs() < 1e-6);
+        }
+        let texts: Vec<String> = plan
+            .text_runs
+            .iter()
+            .map(|run| {
+                plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("painted glyph is present in the atlas")
+                            .glyph
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(texts, expected, "GPU values for {value}");
+    }
+}
+
+#[test]
 fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
     use fm_render_canvas::{Canvas2dRenderer, DrawOperation};
 

@@ -190,7 +190,6 @@ fn declared_text_reaches_the_svg_for_every_diagram_type() {
     );
 }
 
-
 mod kanban {
     use fm_render_svg::{SvgBackend, SvgRenderConfig};
 
@@ -277,7 +276,11 @@ mod kanban {
                 };
                 let svg = fm_render_svg::render_svg_with_config(&parsed.ir, &config);
                 let rows = painted_rows(&svg);
-                let text = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>().join(" ");
+                let text = rows
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 for expected in [
                     "Ship release",
                     "Second card",
@@ -329,7 +332,10 @@ mod kanban {
                     "{backend:?}: empty column content {expected:?} was lost; {rows:?}"
                 );
             }
-            assert!(!svg.contains("over limit"), "an empty zero-limit lane is at its limit");
+            assert!(
+                !svg.contains("over limit"),
+                "an empty zero-limit lane is at its limit"
+            );
         }
     }
 
@@ -342,10 +348,17 @@ style a fill:#ffffff,color:#123456,font-size:24px,font-family:monospace,font-wei
 click a "https://example.com/task" "Open task" _self
 "#;
         let ir = fm_parser::parse(source).ir;
-        assert_eq!(ir.nodes.len(), 1, "style and click directives are not extra cards");
+        assert_eq!(
+            ir.nodes.len(),
+            1,
+            "style and click directives are not extra cards"
+        );
         let description = fm_render_svg::describe_node(&ir.nodes[0], &ir);
         for expected in ["assigned: Ada", "priority: High", "ticket: R-7", "tags: UX"] {
-            assert!(description.contains(expected), "missing accessible metadata: {description}");
+            assert!(
+                description.contains(expected),
+                "missing accessible metadata: {description}"
+            );
         }
         let node_id = fm_core::mermaid_node_element_id(&ir.nodes[0].id, 0);
         for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
@@ -370,7 +383,10 @@ click a "https://example.com/task" "Open task" _self
                         })
                     })
                     .collect();
-                assert!(card_rows.len() >= 5, "{backend:?}: complete card content is required");
+                assert!(
+                    card_rows.len() >= 5,
+                    "{backend:?}: complete card content is required"
+                );
                 for row in card_rows {
                     assert_eq!(attribute(row.attributes, "font-size"), Some("24"));
                     assert_eq!(
@@ -384,11 +400,22 @@ click a "https://example.com/task" "Open task" _self
                         Some("monospace"),
                         "{row:?}"
                     );
-                    assert_eq!(css_value(row.attributes, "font-weight"), Some("700"), "{row:?}");
-                    assert_eq!(css_value(row.attributes, "font-style"), Some("italic"), "{row:?}");
-                    let alpha =
-                        opacity(row.attributes, "opacity") * opacity(row.attributes, "fill-opacity");
-                    assert!((alpha - 0.5).abs() < 0.001, "author opacity must apply once: {row:?}");
+                    assert_eq!(
+                        css_value(row.attributes, "font-weight"),
+                        Some("700"),
+                        "{row:?}"
+                    );
+                    assert_eq!(
+                        css_value(row.attributes, "font-style"),
+                        Some("italic"),
+                        "{row:?}"
+                    );
+                    let alpha = opacity(row.attributes, "opacity")
+                        * opacity(row.attributes, "fill-opacity");
+                    assert!(
+                        (alpha - 0.5).abs() < 0.001,
+                        "author opacity must apply once: {row:?}"
+                    );
                     assert_eq!(attribute(row.attributes, "xml:space"), Some("preserve"));
                 }
                 assert!(svg.contains("href=\"https://example.com/task\""));
@@ -407,11 +434,13 @@ click a "https://example.com/task" "Open task" _self
 
     #[test]
     fn kanban_priority_edits_override_stale_generated_classes() {
-        let mut ir = fm_parser::parse(
-            "kanban\n  todo[Todo]\n    a[Task] @{ priority: High }\n",
-        )
-        .ir;
-        assert!(ir.nodes[0].classes.iter().any(|class| class == "kanban-priority-high"));
+        let mut ir = fm_parser::parse("kanban\n  todo[Todo]\n    a[Task] @{ priority: High }\n").ir;
+        assert!(
+            ir.nodes[0]
+                .classes
+                .iter()
+                .any(|class| class == "kanban-priority-high")
+        );
         ir.kanban_meta.as_mut().unwrap().cards[0].priority = Some("Custom".to_owned());
         for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
             let svg = fm_render_svg::render_svg_with_config(
@@ -421,7 +450,11 @@ click a "https://example.com/task" "Open task" _self
                     ..Default::default()
                 },
             );
-            assert!(painted_rows(&svg).iter().any(|row| row.text == "Priority: Custom"));
+            assert!(
+                painted_rows(&svg)
+                    .iter()
+                    .any(|row| row.text == "Priority: Custom")
+            );
             assert!(!svg.contains("fill=\"#fca5a5\""));
             assert!(!svg.contains("fill:#fca5a5"));
         }
@@ -430,10 +463,8 @@ click a "https://example.com/task" "Open task" _self
     #[test]
     fn kanban_scene_keeps_text_readable_on_its_actual_card_fill() {
         for (style, expected) in [("", "#1e293b"), ("style a fill:#111827\n", "#ffffff")] {
-            let ir = fm_parser::parse(&format!(
-                "kanban\n  todo[Todo]\n    a[Plain card]\n{style}"
-            ))
-            .ir;
+            let ir =
+                fm_parser::parse(&format!("kanban\n  todo[Todo]\n    a[Plain card]\n{style}")).ir;
             for embed_theme_css in [false, true] {
                 let svg = fm_render_svg::render_svg_with_config(
                     &ir,
@@ -475,8 +506,17 @@ click a "https://example.com/task" "Open task" _self
             );
             let rows = painted_rows(&svg);
             assert_eq!(rows.iter().filter(|row| row.text == "Review").count(), 2);
-            let text = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>().join(" ");
-            for expected in ["Assigned: Ada", "Assigned: Grace", "Ticket: A1", "Ticket: B2"] {
+            let text = rows
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for expected in [
+                "Assigned: Ada",
+                "Assigned: Grace",
+                "Ticket: A1",
+                "Ticket: B2",
+            ] {
                 assert_eq!(text.matches(expected).count(), 1, "{backend:?}: {rows:?}");
             }
             assert!(text.contains("WIP: 2 / 1 (over limit)"));

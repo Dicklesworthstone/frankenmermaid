@@ -836,10 +836,10 @@ fn svg_element_ids(svg: &str) -> BTreeSet<&str> {
     while let Some(start) = rest.find('<') {
         let tag = &rest[start..];
         let Some(end) = svg_tag_end(tag) else { break };
-        if let Some((_, value)) = tag[..end].split_once(" id=\"") {
-            if let Some((id, _)) = value.split_once('"') {
-                ids.insert(id);
-            }
+        if let Some((_, value)) = tag[..end].split_once(" id=\"")
+            && let Some((id, _)) = value.split_once('"')
+        {
+            ids.insert(id);
         }
         rest = &tag[end + 1..];
     }
@@ -1318,7 +1318,7 @@ mod tests {
         let large = DeckRect {
             x: 0.0,
             y: 0.0,
-            width: 1_000_000.187_5,
+            width: 1_000_000.0 + 0.1875,
             height: 100.0,
         };
         let svg = r#"<svg width="1000000.125" height="100" viewBox="0 0 1000000.125 100"></svg>"#;
