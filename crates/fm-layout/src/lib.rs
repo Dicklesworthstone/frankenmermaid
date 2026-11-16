@@ -11984,16 +11984,38 @@ fn layout_diagram_sequence_traced_with_metrics(
                 .filter_map(|activation| {
                     let participant_index = activation.participant.0;
                     let cx = participant_x_centers.get(participant_index).copied()?;
-                    let start_y = message_y_positions
-                        .get(activation.start_edge)
-                        .copied()
-                        .unwrap_or(first_message_y);
-                    let end_y = message_y_positions
-                        .get(activation.end_edge)
-                        .copied()
-                        .unwrap_or(lifeline_bottom);
+                    let timeline_span = activation
+                        .timeline_range
+                        .as_ref()
+                        .filter(|range| range.start <= range.end)
+                        .and_then(|range| {
+                            let rows = timeline_rows.as_ref()?;
+                            Some((
+                                *rows.boundary_y.get(range.start)?,
+                                *rows.boundary_y.get(range.end)?,
+                            ))
+                        });
+                    let (start_y, end_y) = timeline_span.unwrap_or_else(|| {
+                        (
+                            message_y_positions
+                                .get(activation.start_edge)
+                                .copied()
+                                .unwrap_or(first_message_y),
+                            message_y_positions
+                                .get(activation.end_edge)
+                                .copied()
+                                .unwrap_or(lifeline_bottom),
+                        )
+                    });
                     let bar_width = spacing.sequence_activation_width;
                     let depth_offset = activation.depth as f32 * 4.0;
+                    // A short authored span still ends at its closing directive. Keep the
+                    // legacy visible minimum only when there is no positive timeline span.
+                    let height = if timeline_span.is_some() && end_y > start_y {
+                        end_y - start_y
+                    } else {
+                        (end_y - start_y).max(message_gap * 0.3)
+                    };
                     Some(LayoutActivationBar {
                         participant_index,
                         depth: activation.depth,
@@ -12001,7 +12023,7 @@ fn layout_diagram_sequence_traced_with_metrics(
                             x: cx - bar_width / 2.0 + depth_offset,
                             y: start_y,
                             width: bar_width,
-                            height: (end_y - start_y).max(message_gap * 0.3),
+                            height,
                         },
                     })
                 })
@@ -12097,6 +12119,7 @@ fn layout_diagram_sequence_traced_with_metrics(
         .chain(sequence_notes.iter().map(|note| note.bounds))
         .chain(sequence_messages.iter().map(|message| message.bounds))
         .chain(sequence_fragments.iter().map(|fragment| fragment.bounds))
+        .chain(activation_bars.iter().map(|activation| activation.bounds))
         .chain(edges.iter().filter_map(|edge| {
             LayoutSequenceNumber::for_edge(ir, edge, metrics).map(|number| number.bounds)
         }))
@@ -12440,6 +12463,8 @@ fn measure_sequence_messages(
 struct SequenceTimelineRows {
     message_y: Vec<f32>,
     note_top: Vec<f32>,
+    /// Activation anchors between steps, including before the first and after the last step.
+    boundary_y: Vec<f32>,
     /// Per fragment (in `meta.fragments` order): top, bottom, and the y of each branch divider.
     fragments: Vec<(f32, f32, Vec<f32>)>,
     /// Where the lifelines end.
@@ -12497,12 +12522,14 @@ fn sequence_timeline_rows(
     let mut rows = SequenceTimelineRows {
         message_y: Vec::with_capacity(ir.edges.len()),
         note_top: Vec::with_capacity(meta.notes.len()),
+        boundary_y: Vec::with_capacity(timeline.len() + 1),
         fragments: vec![(0.0, 0.0, Vec::new()); meta.fragments.len()],
         end: 0.0,
     };
     let mut open: Vec<(usize, f32, Vec<f32>)> = Vec::new();
     let (mut floor, mut after_message) = (header_bottom, true);
     let (mut opens, mut closes) = (0, 0);
+    rows.boundary_y.push(header_bottom);
     for step in timeline {
         match step {
             Step::Message => {
@@ -12524,6 +12551,9 @@ fn sequence_timeline_rows(
                 } else {
                     y
                 };
+                // A message opens/closes activations at its arrow, even when its self-loop
+                // reserves additional space underneath it for subsequent content.
+                rows.boundary_y.push(y);
                 after_message = true;
                 continue;
             }
@@ -12567,6 +12597,7 @@ fn sequence_timeline_rows(
                 floor = bottom;
             }
         }
+        rows.boundary_y.push(floor);
         after_message = false;
     }
     rows.end = message_gap.mul_add(0.75, floor);
@@ -14602,11 +14633,10 @@ pub fn sankey_flow_stroke_width(
     let widest = widest.filter(|value| value.is_finite() && *value > 0.0)?;
     let value = sankey_flow_value(ir, edge?)?;
     Some(
-        ((value / widest) * f64::from(SANKEY_MAX_RIBBON_WIDTH))
-            .clamp(
-                f64::from(SANKEY_MIN_RIBBON_WIDTH),
-                f64::from(SANKEY_MAX_RIBBON_WIDTH),
-            ) as f32,
+        ((value / widest) * f64::from(SANKEY_MAX_RIBBON_WIDTH)).clamp(
+            f64::from(SANKEY_MIN_RIBBON_WIDTH),
+            f64::from(SANKEY_MAX_RIBBON_WIDTH),
+        ) as f32,
     )
 }
 
@@ -29735,22 +29765,21 @@ mod tests {
     use super::constraint_lp_iteration_limit;
     use super::{
         CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ClusterCaptionLayout,
-        ConstraintSolverMode, CycleStrategy,
-        DependencyGraph, DiagramLayout, DirtySet, EdgeRouting, GraphMetrics,
-        IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
-        LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox, LayoutPoint,
-        LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing, ObstacleSpatialIndex,
-        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, StateNoteSide,
-        SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
-        build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
-        build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
-        compute_node_size, constraint_solution_is_usable, coordinate_assignment,
-        dispatch_layout_algorithm, er_compartment_dimensions, estimate_layout_cost,
-        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
-        force_barnes_hut_repulsion, force_direct_repulsion, incremental_overlap_alignment,
-        is_directed_path, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
-        layout_diagram_incremental_traced_with_config_and_guardrails,
+        ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout, DirtySet, EdgeRouting,
+        GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm,
+        LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
+        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
+        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
+        RenderSource, StateNoteSide, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
+        TracedLayout, build_directed_path_edge_paths, build_edge_paths,
+        build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
+        certify_directed_path_layout_prefix, compute_node_size, constraint_solution_is_usable,
+        coordinate_assignment, dispatch_layout_algorithm, er_compartment_dimensions,
+        estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
+        find_obstacle_nudge_y, force_barnes_hut_repulsion, force_direct_repulsion,
+        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_mindmap_traced, layout_diagram_radial, layout_diagram_sankey,
         layout_diagram_sequence, layout_diagram_sequence_traced, layout_diagram_timeline,
         layout_diagram_traced, layout_diagram_traced_with_algorithm,
@@ -34707,9 +34736,11 @@ mod tests {
             );
             let layout = layout_diagram_sankey(&ir);
             assert_eq!(layout, layout_diagram_sankey(&ir));
-            assert!(layout.nodes.iter().all(|node| {
-                node.bounds.width.is_finite() && node.bounds.height.is_finite()
-            }));
+            assert!(
+                layout.nodes.iter().all(|node| {
+                    node.bounds.width.is_finite() && node.bounds.height.is_finite()
+                })
+            );
         }
     }
 
@@ -44121,6 +44152,13 @@ mod tests {
                     .iter()
                     .map(|fragment| fragment.bounds),
             )
+            .chain(
+                layout
+                    .extensions
+                    .activation_bars
+                    .iter()
+                    .map(|activation| activation.bounds),
+            )
         {
             assert!(
                 content.x >= bounds.x - 0.01
@@ -44201,6 +44239,141 @@ mod tests {
         let (one, two) = (layout.edges[0].points[0].y, layout.edges[1].points[0].y);
         assert!(note.y > one, "the note starts below `one`");
         assert!(note.y + note.height < two, "and ends above `two`");
+    }
+
+    #[test]
+    fn sequence_activations_span_notes_without_borrowing_a_message_row() {
+        for (before, after) in [
+            ("", ""),
+            ("", "A->>B: Later\n"),
+            ("A->>B: Earlier\n", ""),
+            ("A->>B: Earlier\n", "B->>A: Later\n"),
+        ] {
+            let source = format!(
+                "sequenceDiagram\nparticipant A\nparticipant B\n{before}\
+                 activate A\nNote right of A: Working\ndeactivate A\n{after}"
+            );
+            let layout = sequence_layout_of(&source);
+            let note = layout.extensions.sequence_notes[0].bounds;
+            let bar = layout.extensions.activation_bars[0].bounds;
+            assert!(bar.y < note.y, "activation opens before its note: {source}");
+            assert!((bar.y + bar.height - note.y - note.height).abs() < 0.01);
+            if !before.is_empty() {
+                assert_eq!(bar.y, layout.edges[0].points[0].y);
+            }
+            if !after.is_empty() {
+                let next_message = layout.edges.last().unwrap().points[0].y;
+                assert!(bar.y + bar.height < next_message);
+            }
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    #[test]
+    fn sequence_activation_closes_at_its_note_with_large_message_spacing() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nNote right of A: Before\nactivate A\n\
+             Note right of A: Working\ndeactivate A\nNote right of A: After\n",
+        )
+        .ir;
+        let mut config = super::LayoutConfig::default();
+        config.spacing.sequence_min_message_gap = 1000.0;
+        let layout = super::layout_diagram_with_config(&ir, config);
+        let bar = layout.extensions.activation_bars[0].bounds;
+        let notes = &layout.extensions.sequence_notes;
+        assert!((bar.y - notes[0].bounds.y - notes[0].bounds.height).abs() < 0.01);
+        assert!((bar.y + bar.height - notes[1].bounds.y - notes[1].bounds.height).abs() < 0.01);
+        assert!(bar.y + bar.height < notes[2].bounds.y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_nested_activations_follow_note_fragment_and_branch_boundaries() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: Begin\n\
+             Note right of A: Before\nactivate A\nalt Ready\nNote right of A: First\n\
+             else Retry\nactivate A\nNote right of A: Second\ndeactivate A\nend\n\
+             Note right of A: Last\ndeactivate A\nB->>A: Complete\n",
+        );
+        let notes = &layout.extensions.sequence_notes;
+        let frame = &layout.extensions.sequence_fragments[0];
+        let inner = &layout.extensions.activation_bars[0];
+        let outer = &layout.extensions.activation_bars[1];
+        assert_eq!(inner.depth, 1);
+        assert_eq!(outer.depth, 0);
+        assert!((outer.bounds.y - notes[0].bounds.y - notes[0].bounds.height).abs() < 0.01);
+        assert_eq!(inner.bounds.y, frame.branch_tops[0]);
+        assert!(inner.bounds.y > notes[1].bounds.y + notes[1].bounds.height);
+        assert!(
+            (inner.bounds.y + inner.bounds.height - notes[2].bounds.y - notes[2].bounds.height)
+                .abs()
+                < 0.01
+        );
+        assert!(inner.bounds.y + inner.bounds.height < frame.bounds.y + frame.bounds.height);
+        assert!(outer.bounds.y < frame.bounds.y);
+        assert!(outer.bounds.y + outer.bounds.height > frame.bounds.y + frame.bounds.height);
+        assert!(outer.bounds.y + outer.bounds.height < layout.edges[1].points[0].y);
+        assert_eq!(inner.bounds.x, outer.bounds.x + 4.0);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_shorthand_activation_keeps_created_and_destroyed_message_anchors() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>+B: Start\n\
+             Note right of B: Working\ndestroy B\nB-->>-A: Complete\n",
+        );
+        let bar = layout.extensions.activation_bars[0].bounds;
+        assert_eq!(bar.y, layout.edges[0].points[0].y);
+        assert!((bar.y + bar.height - layout.edges[1].points[0].y).abs() < 0.01);
+        assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        assert_eq!(
+            layout.extensions.sequence_lifecycle_markers[0].center.y,
+            layout.edges[1].points[0].y
+        );
+        assert!(layout.nodes[1].bounds.y > layout.nodes[0].bounds.y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_activation_invalid_or_absent_ranges_fall_back_to_message_anchors() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\nA->>+B: Start\nNote right of B: Working\nB-->>-A: Complete\n",
+        )
+        .ir;
+        for range in [
+            None,
+            Some(99..100),
+            Some(std::ops::Range { start: 3, end: 1 }),
+        ] {
+            ir.sequence_meta.as_mut().unwrap().activations[0].timeline_range = range;
+            let layout = layout_diagram_sequence(&ir);
+            let bar = layout.extensions.activation_bars[0].bounds;
+            assert_eq!(bar.y, layout.edges[0].points[0].y);
+            assert!((bar.y + bar.height - layout.edges[1].points[0].y).abs() < 0.01);
+        }
+        let meta = ir.sequence_meta.as_mut().unwrap();
+        meta.activations[0].timeline_range = Some(0..1);
+        meta.timeline.clear();
+        let layout = layout_diagram_sequence(&ir);
+        let bar = layout.extensions.activation_bars[0].bounds;
+        assert_eq!(bar.y, layout.edges[0].points[0].y);
+        assert!((bar.y + bar.height - layout.edges[1].points[0].y).abs() < 0.01);
+    }
+
+    #[test]
+    fn sequence_deep_activations_expand_bounds_to_cover_every_bar() {
+        let source = format!(
+            "sequenceDiagram\nparticipant A\n{}Note over A: Working\n{}",
+            "activate A\n".repeat(40),
+            "deactivate A\n".repeat(40)
+        );
+        let layout = sequence_layout_of(&source);
+        assert_eq!(layout.extensions.activation_bars.len(), 40);
+        let deepest = layout.extensions.activation_bars[0].bounds;
+        let actor = layout.nodes[0].bounds;
+        assert!(deepest.x + deepest.width > actor.x + actor.width);
+        assert_sequence_content_within_bounds(&layout);
     }
 
     #[test]

@@ -8085,6 +8085,13 @@ pub struct IrActivation {
     pub start_edge: usize,
     pub end_edge: usize,
     pub depth: usize,
+    /// Positions between steps in [`IrSequenceMeta::timeline`] at which the activation opens
+    /// and closes. These retain boundaries before the first message and around notes or fragment
+    /// headers. Either boundary may equal `timeline.len()`.
+    ///
+    /// Absent for message-only sequences and programmatic IR that uses the edge anchors above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_range: Option<std::ops::Range<usize>>,
 }
 
 /// A note attached to one or more participant lifelines.
@@ -17942,6 +17949,7 @@ mod tests {
                 start_edge: 1,
                 end_edge: 3,
                 depth: 0,
+                timeline_range: Some(0..3),
             }],
             notes: vec![IrSequenceNote {
                 position: NotePosition::RightOf,
@@ -17987,6 +17995,19 @@ mod tests {
         assert!(json.contains("hide_footbox"));
         let deser: IrSequenceMeta = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(meta, deser);
+    }
+
+    #[test]
+    fn sequence_activation_without_timeline_range_preserves_legacy_json() {
+        let legacy = r#"{"participant":0,"start_edge":1,"end_edge":3,"depth":0}"#;
+        let activation: IrActivation = serde_json::from_str(legacy).expect("legacy activation");
+        assert_eq!(activation.timeline_range, None);
+        assert_eq!(activation.participant, IrNodeId(0));
+        assert_eq!((activation.start_edge, activation.end_edge), (1, 3));
+        assert_eq!(
+            serde_json::to_value(activation).expect("serialize activation"),
+            serde_json::from_str::<serde_json::Value>(legacy).expect("legacy JSON")
+        );
     }
 
     #[test]

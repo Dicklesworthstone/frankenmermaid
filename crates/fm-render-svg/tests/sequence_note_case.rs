@@ -222,3 +222,124 @@ fn participant_boxes_enclose_members_in_any_declaration_order() {
         }
     }
 }
+
+fn sequence_svg_attribute<'a>(tag: &'a str, name: &str) -> &'a str {
+    tag.split_once(&format!(" {name}=\""))
+        .unwrap_or_else(|| panic!("missing {name} in {tag}"))
+        .1
+        .split_once('"')
+        .expect("closed attribute")
+        .0
+}
+
+/// Verify the painted geometry, not the accessibility description or stylesheet. Both backends
+/// must keep exactly the layout's activation extent around source-ordered notes and fragments.
+#[test]
+fn activation_timeline_geometry_reaches_both_svg_backends() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_layout};
+
+    for body in [
+        "activate A\nNote right of A: Working\ndeactivate A\n",
+        "activate A\nNote right of A: Working\ndeactivate A\nA->>B: Complete\n",
+        "A->>B: Begin\nactivate A\nNote right of A: Working\ndeactivate A\n",
+        "A->>B: Begin\nNote right of A: Before\nactivate A\n\
+         Note right of A: Working\ndeactivate A\nB->>A: Complete\n",
+        "activate A\nNote right of A: Before\nactivate A\nloop Retry\n\
+         Note right of A: Working\nend\ndeactivate A\n\
+         Note right of A: After\ndeactivate A\n",
+        "A->>+A: Begin\nNote right of A: Working\nA-->>-A: Complete\n",
+    ] {
+        let source = format!("sequenceDiagram\nparticipant A\nparticipant B\n{body}");
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let bars = &layout.extensions.activation_bars;
+        assert!(!bars.is_empty());
+        let note = layout
+            .extensions
+            .sequence_notes
+            .iter()
+            .find(|note| note.text == "Working")
+            .expect("working note");
+        assert!(bars.iter().all(|bar| {
+            bar.bounds.y < note.bounds.y
+                && bar.bounds.y + bar.bounds.height >= note.bounds.y + note.bounds.height
+        }));
+
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                padding: 0.0,
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            assert!(drawn(&svg).iter().any(|text| text == "Working"));
+            let actual: Vec<[f32; 4]> = match backend {
+                SvgBackend::LegacyLayout => svg
+                    .split("<rect")
+                    .filter_map(|tail| tail.split_once('>').map(|(tag, _)| tag))
+                    .filter(|tag| tag.contains("class=\"fm-activation-bar"))
+                    .map(|tag| {
+                        let number = |name| {
+                            sequence_svg_attribute(tag, name)
+                                .parse::<f32>()
+                                .expect("numeric rectangle attribute")
+                        };
+                        [
+                            number("x") + layout.bounds.x,
+                            number("y") + layout.bounds.y,
+                            number("width"),
+                            number("height"),
+                        ]
+                    })
+                    .collect(),
+                SvgBackend::Scene => {
+                    let group = svg
+                        .split_once("id=\"sequence-activations\"")
+                        .expect("activation scene group")
+                        .1
+                        .split_once("</g>")
+                        .expect("closed activation group")
+                        .0;
+                    group
+                        .split("<path")
+                        .skip(1)
+                        .map(|tail| {
+                            let tag = tail.split_once('>').expect("path element").0;
+                            let coordinates: Vec<f32> = sequence_svg_attribute(tag, "d")
+                                .split(|ch: char| {
+                                    ch.is_ascii_whitespace() || matches!(ch, 'M' | 'L' | 'Z' | ',')
+                                })
+                                .filter(|value| !value.is_empty())
+                                .map(|value| value.parse().expect("numeric path coordinate"))
+                                .collect();
+                            assert_eq!(coordinates.len(), 8, "activation rectangle: {tag}");
+                            assert_eq!(coordinates[1], coordinates[3]);
+                            assert_eq!(coordinates[2], coordinates[4]);
+                            assert_eq!(coordinates[5], coordinates[7]);
+                            assert_eq!(coordinates[6], coordinates[0]);
+                            [
+                                coordinates[0],
+                                coordinates[1],
+                                coordinates[2] - coordinates[0],
+                                coordinates[5] - coordinates[1],
+                            ]
+                        })
+                        .collect()
+                }
+            };
+            assert_eq!(actual.len(), bars.len(), "{backend:?}: {source}");
+            for (actual, bar) in actual.iter().zip(bars) {
+                let expected = [
+                    bar.bounds.x,
+                    bar.bounds.y,
+                    bar.bounds.width,
+                    bar.bounds.height,
+                ];
+                for (actual, expected) in actual.iter().zip(expected) {
+                    assert!((actual - expected).abs() < 0.03, "{backend:?}: {source}");
+                }
+            }
+            assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+        }
+    }
+}

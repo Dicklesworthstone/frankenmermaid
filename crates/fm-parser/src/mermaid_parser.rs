@@ -10681,8 +10681,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
         let is_column_header = current_column_indent.is_none_or(|indent| indent_width <= indent);
 
         if is_column_header {
-            let mut column_key =
-                format!("kanban-col-{}", normalize_compound_identifier(&item.id));
+            let mut column_key = format!("kanban-col-{}", normalize_compound_identifier(&item.id));
             if column_key == "kanban-col-" {
                 builder.add_warning(format!(
                     "Line {line_number}: kanban column name is empty: {trimmed}"
@@ -10690,16 +10689,13 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
             if !item.explicit_id {
-                column_key = unique_kanban_key(
-                    column_key,
-                    line_number,
-                    &declared_column_keys,
-                    |key| builder.cluster_index_by_key(key).is_some(),
-                );
+                column_key =
+                    unique_kanban_key(column_key, line_number, &declared_column_keys, |key| {
+                        builder.cluster_index_by_key(key).is_some()
+                    });
             }
 
-            let Some(cluster_index) =
-                builder.ensure_cluster(&column_key, Some(&item.label), span)
+            let Some(cluster_index) = builder.ensure_cluster(&column_key, Some(&item.label), span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid kanban column identifier: {trimmed}"
@@ -10909,14 +10905,18 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
         let fields = match split_kanban_metadata_fields(&raw[1..close]) {
             Ok(fields) => fields,
             Err(reason) => {
-                meta.warnings.push(format!("invalid kanban metadata: {reason}; metadata ignored"));
+                meta.warnings.push(format!(
+                    "invalid kanban metadata: {reason}; metadata ignored"
+                ));
                 return (clean_text, meta);
             }
         };
         let mut object = serde_json::Map::new();
         for field in fields {
             let Some((key, value)) = field.split_once(':') else {
-                meta.warnings.push(format!("kanban metadata field {field:?} has no colon; ignored"));
+                meta.warnings.push(format!(
+                    "kanban metadata field {field:?} has no colon; ignored"
+                ));
                 continue;
             };
             let key = key.trim();
@@ -10924,7 +10924,8 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
                 match json5::from_str::<String>(key) {
                     Ok(key) => key,
                     Err(_) => {
-                        meta.warnings.push(format!("invalid kanban metadata key {key:?}; ignored"));
+                        meta.warnings
+                            .push(format!("invalid kanban metadata key {key:?}; ignored"));
                         continue;
                     }
                 }
@@ -10934,14 +10935,17 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
             let value = value.trim();
             let value = match json5::from_str::<Value>(value) {
                 Ok(value) => value,
-                Err(_) if !value.is_empty()
-                    && !value.starts_with(['"', '\'', '[', '{'])
-                    && !value.contains(['"', '[', ']', '{', '}', ':', ',']) =>
+                Err(_)
+                    if !value.is_empty()
+                        && !value.starts_with(['"', '\'', '[', '{'])
+                        && !value.contains(['"', '[', ']', '{', '}', ':', ',']) =>
                 {
                     Value::String(value.to_string())
                 }
                 Err(_) => {
-                    meta.warnings.push(format!("invalid kanban metadata value for {key:?}; ignored"));
+                    meta.warnings.push(format!(
+                        "invalid kanban metadata value for {key:?}; ignored"
+                    ));
                     continue;
                 }
             };
@@ -10962,7 +10966,9 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
                     _ => None,
                 };
                 let Some(text) = text else {
-                    meta.warnings.push(format!("kanban metadata {key:?} must be text or a number; ignored"));
+                    meta.warnings.push(format!(
+                        "kanban metadata {key:?} must be text or a number; ignored"
+                    ));
                     continue;
                 };
                 match normalized_key.as_str() {
@@ -10978,7 +10984,8 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
                     _ => None,
                 };
                 if meta.wip.is_none() {
-                    meta.warnings.push("kanban wip must be a non-negative integer; ignored".to_string());
+                    meta.warnings
+                        .push("kanban wip must be a non-negative integer; ignored".to_string());
                 }
             }
             "tag" | "tags" => match value {
@@ -10988,13 +10995,20 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
                         if let Value::String(tag) = tag {
                             meta.tags.push(tag);
                         } else {
-                            meta.warnings.push("kanban tag array entries must be strings; entry ignored".to_string());
+                            meta.warnings.push(
+                                "kanban tag array entries must be strings; entry ignored"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
-                _ => meta.warnings.push("kanban tags must be text or an array of strings; ignored".to_string()),
+                _ => meta
+                    .warnings
+                    .push("kanban tags must be text or an array of strings; ignored".to_string()),
             },
-            _ => meta.warnings.push(format!("unsupported kanban metadata key {key:?}; ignored")),
+            _ => meta
+                .warnings
+                .push(format!("unsupported kanban metadata key {key:?}; ignored")),
         }
     }
     (clean_text, meta)
@@ -15249,9 +15263,7 @@ fn split_sequence_participant_head(input: &str) -> (&str, &str) {
             } else if ch == delimiter {
                 quote = None;
             }
-        } else if matches!(ch, '"' | '\'' | '`')
-            && previous.is_none_or(char::is_whitespace)
-        {
+        } else if matches!(ch, '"' | '\'' | '`') && previous.is_none_or(char::is_whitespace) {
             quote = Some(ch);
         } else if ch == '{' {
             let head = trim_fast(&input[..index]);
@@ -26157,6 +26169,7 @@ Rel_Back(db, app, "Responds")"#,
                 start_edge: 0,
                 end_edge: 1,
                 depth: 0,
+                timeline_range: None,
             }],
             "the response closes Bob before the later message"
         );
@@ -26178,12 +26191,14 @@ Rel_Back(db, app, "Responds")"#,
                     start_edge: 1,
                     end_edge: 2,
                     depth: 1,
+                    timeline_range: None,
                 },
                 fm_core::IrActivation {
                     participant: fm_core::IrNodeId(1),
                     start_edge: 0,
                     end_edge: 3,
                     depth: 0,
+                    timeline_range: None,
                 },
             ],
             "nested activations close at their own responses in stack order"
@@ -26206,12 +26221,14 @@ Rel_Back(db, app, "Responds")"#,
                     start_edge: 1,
                     end_edge: 2,
                     depth: 0,
+                    timeline_range: None,
                 },
                 fm_core::IrActivation {
                     participant: fm_core::IrNodeId(0),
                     start_edge: 0,
                     end_edge: 4,
                     depth: 0,
+                    timeline_range: None,
                 },
             ],
             "Bob's response must not close Alice's still-active invocation"
@@ -26234,12 +26251,14 @@ Rel_Back(db, app, "Responds")"#,
                     start_edge: 1,
                     end_edge: 2,
                     depth: 1,
+                    timeline_range: None,
                 },
                 fm_core::IrActivation {
                     participant: fm_core::IrNodeId(0),
                     start_edge: 0,
                     end_edge: 3,
                     depth: 0,
+                    timeline_range: None,
                 },
             ]
         );
@@ -26262,6 +26281,7 @@ Rel_Back(db, app, "Responds")"#,
                 start_edge: 0,
                 end_edge: 1,
                 depth: 0,
+                timeline_range: None,
             }]
         );
     }
@@ -26278,6 +26298,60 @@ Rel_Back(db, app, "Responds")"#,
         assert!(
             act_warnings.is_empty(),
             "activate/deactivate should not produce warnings, got: {act_warnings:?}"
+        );
+    }
+
+    #[test]
+    fn sequence_activations_preserve_nested_note_and_fragment_boundaries() {
+        use fm_core::IrSequenceStep::{Close, Note, Open};
+
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nparticipant A\nactivate A\nNote right of A: First\n\
+             activate A\nloop Retry\nNote right of A: Second\nend\ndeactivate A\n\
+             Note right of A: Third\ndeactivate A\n",
+        );
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert!(parsed.ir.edges.is_empty());
+        assert_eq!(meta.timeline, vec![Note, Open, Note, Close, Note]);
+        assert_eq!(meta.activations.len(), 2);
+        assert_eq!(meta.activations[0].timeline_range, Some(1..4));
+        assert_eq!(meta.activations[0].depth, 1);
+        assert_eq!(meta.activations[1].timeline_range, Some(0..5));
+        assert_eq!(meta.activations[1].depth, 0);
+    }
+
+    #[test]
+    fn sequence_unclosed_activations_include_the_implicit_fragment_end() {
+        use fm_core::IrSequenceStep::{Close, Note, Open};
+
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nparticipant A\nactivate A\nloop Work\nNote right of A: Running\n",
+        );
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert_eq!(meta.timeline, vec![Open, Note, Close]);
+        assert_eq!(meta.activations.len(), 1);
+        assert_eq!(meta.activations[0].timeline_range, Some(0..3));
+    }
+
+    #[test]
+    fn sequence_shorthand_activations_keep_message_anchors_with_notes() {
+        use fm_core::IrSequenceStep::{Message, Note};
+
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nparticipant A\nparticipant B\nA->>+B: Request\n\
+             Note right of B: Processing\nB-->>-A: Reply\nNote right of B: After\n",
+        );
+        let meta = parsed.ir.sequence_meta.expect("sequence metadata");
+        assert_eq!(meta.timeline, vec![Message, Note, Message, Note]);
+        assert_eq!(
+            meta.activations,
+            vec![fm_core::IrActivation {
+                participant: fm_core::IrNodeId(1),
+                start_edge: 0,
+                end_edge: 1,
+                depth: 0,
+                timeline_range: Some(1..3),
+            }]
         );
     }
 
@@ -26540,8 +26614,14 @@ Rel_Back(db, app, "Responds")"#,
         );
         assert_eq!(meta.lifecycle_events.len(), 1);
         assert_eq!(meta.lifecycle_events[0].participant, fm_core::IrNodeId(2));
-        assert_eq!(parsed.ir.edges[0].to, IrEndpoint::Node(fm_core::IrNodeId(2)));
-        assert_eq!(parsed.ir.edges[1].to, IrEndpoint::Node(fm_core::IrNodeId(0)));
+        assert_eq!(
+            parsed.ir.edges[0].to,
+            IrEndpoint::Node(fm_core::IrNodeId(2))
+        );
+        assert_eq!(
+            parsed.ir.edges[1].to,
+            IrEndpoint::Node(fm_core::IrNodeId(0))
+        );
     }
 
     #[test]
@@ -34599,7 +34679,10 @@ Rel_Back(db, app, "Responds")"#,
         let encoded = serde_json::to_string(&parsed.ir).expect("serialize Kanban IR");
         let decoded: fm_core::MermaidDiagramIr =
             serde_json::from_str(&encoded).expect("deserialize Kanban IR");
-        assert_eq!(decoded, parsed.ir, "typed metadata must survive public IR transport");
+        assert_eq!(
+            decoded, parsed.ir,
+            "typed metadata must survive public IR transport"
+        );
     }
 
     #[test]
@@ -34612,7 +34695,12 @@ Rel_Back(db, app, "Responds")"#,
 "#,
         );
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
-        let cards = &parsed.ir.kanban_meta.as_ref().expect("Kanban metadata").cards;
+        let cards = &parsed
+            .ir
+            .kanban_meta
+            .as_ref()
+            .expect("Kanban metadata")
+            .cards;
         assert_eq!(cards[0].assigned.as_deref(), Some("42"));
         assert_eq!(cards[0].ticket.as_deref(), Some("2038"));
         assert_eq!(cards[0].priority.as_deref(), Some("Very Low"));
@@ -34639,21 +34727,36 @@ Rel_Back(db, app, "Responds")"#,
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         let ir = &parsed.ir;
         assert_eq!(ir.nodes.len(), 5, "each anonymous card is a distinct task");
-        assert_eq!(ir.clusters.len(), 2, "anonymous column runs remain distinct");
+        assert_eq!(
+            ir.clusters.len(),
+            2,
+            "anonymous column runs remain distinct"
+        );
         assert_eq!(ir.clusters[0].members.len(), 3);
         assert_eq!(ir.clusters[1].members.len(), 2);
         let ids: std::collections::BTreeSet<_> =
             ir.nodes.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids.len(), 5);
-        assert!(ids.contains("stable"), "explicit id equal to its label stays explicit");
-        let named = ir.find_node("kanban-card-Review").expect("reserved authored id");
+        assert!(
+            ids.contains("stable"),
+            "explicit id equal to its label stays explicit"
+        );
+        let named = ir
+            .find_node("kanban-card-Review")
+            .expect("reserved authored id");
         assert_eq!(ir.node_display_text(named), "Named");
         let stable = ir.find_node("stable").expect("reused explicit id");
         assert!(
-            stable.classes.iter().any(|class| class == "kanban-priority-low")
+            stable
+                .classes
+                .iter()
+                .any(|class| class == "kanban-priority-low")
         );
         assert!(
-            !stable.classes.iter().any(|class| class == "kanban-priority-high")
+            !stable
+                .classes
+                .iter()
+                .any(|class| class == "kanban-priority-high")
         );
         let meta = ir.kanban_meta.as_ref().expect("Kanban metadata");
         assert_eq!(meta.cards.len(), 5, "one metadata row per retained node");
@@ -34672,19 +34775,26 @@ Rel_Back(db, app, "Responds")"#,
             "@{ assigned: Alice } trailing",
             "@{ assigned: Alice",
         ] {
-            let parsed =
-                parse_mermaid(&format!("kanban\n  todo[Work]\n    task[Keep me] {metadata}\n"));
+            let parsed = parse_mermaid(&format!(
+                "kanban\n  todo[Work]\n    task[Keep me] {metadata}\n"
+            ));
             assert_eq!(parsed.ir.nodes.len(), 1, "{metadata}");
             assert_eq!(parsed.ir.node_display_text(&parsed.ir.nodes[0]), "Keep me");
             assert_eq!(parsed.ir.clusters[0].members, [fm_core::IrNodeId(0)]);
-            assert!(!parsed.warnings.is_empty(), "{metadata}: malformed metadata must warn");
+            assert!(
+                !parsed.warnings.is_empty(),
+                "{metadata}: malformed metadata must warn"
+            );
         }
         for value in ["-1", "1.5", "null", "'many'", "{nested: 1}"] {
             let parsed = parse_mermaid(&format!("kanban\n  todo[Work] @{{ wip: {value} }}\n"));
             let meta = parsed.ir.kanban_meta.as_ref().expect("column retained");
             assert_eq!(meta.columns[0].wip_limit, None, "{value}");
             assert!(
-                parsed.warnings.iter().any(|warning| warning.contains("wip")),
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("wip")),
                 "{value}: invalid limit must warn"
             );
         }
@@ -34707,7 +34817,10 @@ Rel_Back(db, app, "Responds")"#,
         let meta = parsed.ir.kanban_meta.as_ref().expect("Kanban metadata");
         assert_eq!(meta.cards[0].assigned.as_deref(), Some("Normal"));
         assert!(
-            parsed.warnings.iter().any(|warning| warning.contains("no card")),
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no card")),
             "metadata without a card must be diagnosed"
         );
     }
@@ -34729,8 +34842,14 @@ Tasks awaiting review.
         assert_eq!(parsed.ir.nodes.len(), 1);
         assert_eq!(parsed.ir.clusters.len(), 1);
         assert_eq!(parsed.ir.meta.title.as_deref(), Some("Sprint board"));
-        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Accessible board"));
-        assert_eq!(parsed.ir.meta.acc_descr.as_deref(), Some("Tasks awaiting review."));
+        assert_eq!(
+            parsed.ir.meta.acc_title.as_deref(),
+            Some("Accessible board")
+        );
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("Tasks awaiting review.")
+        );
     }
 
     #[test]

@@ -236,8 +236,8 @@ pub struct IrBuilder {
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
     auto_created_nodes: Vec<IrNodeId>,
-    /// Stack of open activations per participant name: (`node_id`, `start_edge_index`, depth)
-    activation_stacks: BTreeMap<String, Vec<(IrNodeId, usize)>>,
+    /// Stack of open activations per participant name: (`node_id`, `start_edge`, `start_step`).
+    activation_stacks: BTreeMap<String, Vec<(IrNodeId, usize, usize)>>,
     /// Currently open participant group (label, color, collected participant names)
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
@@ -1016,6 +1016,20 @@ impl IrBuilder {
         self.sequence_timeline_edges = edges;
     }
 
+    /// Messages are appended lazily by `push_sequence_step`; include pending messages when an
+    /// activation records its position between timeline steps.
+    fn sequence_timeline_cursor(&self) -> usize {
+        self.ir
+            .sequence_meta
+            .as_ref()
+            .map_or(0, |meta| meta.timeline.len())
+            + self
+                .ir
+                .edges
+                .len()
+                .saturating_sub(self.sequence_timeline_edges)
+    }
+
     /// Close the sequence timeline at the end of a parse: record the trailing messages, or drop a
     /// timeline that holds nothing but messages (the per-message rows need no order).
     pub(crate) fn finish_sequence_timeline(&mut self) {
@@ -1030,6 +1044,9 @@ impl IrBuilder {
                 .all(|step| *step == fm_core::IrSequenceStep::Message)
             {
                 meta.timeline.clear();
+                for activation in &mut meta.activations {
+                    activation.timeline_range = None;
+                }
             }
         }
         self.sequence_timeline_edges = edges;
@@ -1079,20 +1096,22 @@ impl IrBuilder {
             return;
         };
         let edge_index = self.ir.edges.len().saturating_sub(1);
+        let start_step = self.sequence_timeline_cursor();
         self.activation_stacks
             .entry(normalized)
             .or_default()
-            .push((node_id, edge_index));
+            .push((node_id, edge_index, start_step));
     }
 
     pub(crate) fn deactivate_participant(&mut self, name: &str) {
         // Lookup only. `.as_ref()` is required here, not merely tidy: HashMap::get_mut's
         // Borrow bound does not accept `&Cow<str>`.
         let normalized = normalize_identifier_cow(name);
+        let end_step = self.sequence_timeline_cursor();
         let Some(stack) = self.activation_stacks.get_mut(normalized.as_ref()) else {
             return;
         };
-        let Some((node_id, start_edge)) = stack.pop() else {
+        let Some((node_id, start_edge, start_step)) = stack.pop() else {
             return;
         };
         let end_edge = self.ir.edges.len().saturating_sub(1);
@@ -1107,6 +1126,7 @@ impl IrBuilder {
                 start_edge,
                 end_edge,
                 depth,
+                timeline_range: Some(start_step..end_step),
             });
     }
 
@@ -1754,9 +1774,15 @@ impl IrBuilder {
     /// Close any remaining open activations (auto-close at end of diagram).
     fn flush_open_activations(&mut self) {
         let end_edge = self.ir.edges.len().saturating_sub(1);
+        let end_step = self.sequence_timeline_cursor();
+        let has_timeline = self
+            .ir
+            .sequence_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.timeline.is_empty());
         let stacks = std::mem::take(&mut self.activation_stacks);
         for (_name, stack) in stacks {
-            for (idx, (node_id, start_edge)) in stack.into_iter().enumerate() {
+            for (idx, (node_id, start_edge, start_step)) in stack.into_iter().enumerate() {
                 self.ir
                     .sequence_meta
                     .get_or_insert_with(IrSequenceMeta::default)
@@ -1766,6 +1792,7 @@ impl IrBuilder {
                         start_edge,
                         end_edge,
                         depth: idx,
+                        timeline_range: has_timeline.then_some(start_step..end_step),
                     });
             }
         }
