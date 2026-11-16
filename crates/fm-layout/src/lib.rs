@@ -2862,6 +2862,46 @@ pub struct LayoutSequenceFragment {
     /// fragment's `alternatives`. Empty when the layout did not place them, in which case a
     /// renderer derives them from the branches' first messages.
     pub branch_tops: Vec<f32>,
+    /// Measured condition and alternative captions. Renderers use these rows rather than
+    /// measuring the authored labels independently. Empty for externally supplied geometry.
+    pub captions: Vec<LayoutSequenceFragmentCaption>,
+}
+
+/// A wrapped sequence condition, including its enclosing brackets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutSequenceFragmentCaption {
+    /// `None` is the opening condition; `Some(n)` is alternative `n` in the source fragment.
+    pub alternative: Option<usize>,
+    pub text: String,
+    pub bounds: LayoutRect,
+    pub font_size: f32,
+    pub line_height: f32,
+}
+
+impl LayoutSequenceFragmentCaption {
+    pub const FONT_SCALE: f32 = 0.75;
+    pub const PADDING_X: f32 = 12.0;
+    pub const PADDING_Y: f32 = 6.0;
+    pub const DIVIDER_GAP: f32 = 3.0;
+
+    /// Vertical glyph centers shared by SVG, Canvas, and GPU text.
+    pub fn lines(&self) -> impl Iterator<Item = (&str, f32)> {
+        self.text.split('\n').enumerate().map(|(row, text)| {
+            (
+                text,
+                self.bounds.y + row as f32 * self.line_height + self.font_size * 0.5,
+            )
+        })
+    }
+}
+
+impl LayoutSequenceFragment {
+    #[must_use]
+    pub fn caption(&self, alternative: Option<usize>) -> Option<&LayoutSequenceFragmentCaption> {
+        self.captions
+            .iter()
+            .find(|caption| caption.alternative == alternative)
+    }
 }
 
 /// Original fragment indices in stable parent-before-child paint order.
@@ -5314,7 +5354,18 @@ fn build_sequence_fragment_layer(
             TextAlign::Start,
             TextBaseline::Middle,
         ));
-        if !fragment.label.is_empty() {
+        if let Some(caption) = fragment.caption(None) {
+            for (text, y) in caption.lines() {
+                layer.children.push(sequence_scene_text(
+                    text.to_owned(),
+                    caption.bounds.center().x,
+                    y,
+                    caption.font_size,
+                    TextAlign::Middle,
+                    TextBaseline::Middle,
+                ));
+            }
+        } else if !fragment.label.is_empty() {
             layer.children.push(sequence_scene_text(
                 format!("[{}]", fragment.label),
                 bounds.center().x,
@@ -5363,7 +5414,18 @@ fn build_sequence_fragment_layer(
                 None,
                 Some(stroke.clone()),
             ));
-            if !alternative.label.is_empty() {
+            if let Some(caption) = fragment.caption(Some(branch_index)) {
+                for (text, y) in caption.lines() {
+                    layer.children.push(sequence_scene_text(
+                        text.to_owned(),
+                        caption.bounds.x,
+                        y,
+                        caption.font_size,
+                        TextAlign::Start,
+                        TextBaseline::Middle,
+                    ));
+                }
+            } else if !alternative.label.is_empty() {
                 layer.children.push(sequence_scene_text(
                     format!("[{}]", alternative.label),
                     bounds.x + 6.0,
@@ -11676,6 +11738,28 @@ fn layout_diagram_sequence_traced_with_metrics(
     // height of the lines that both renderers will actually draw.
     let mut sequence_notes =
         build_sequence_note_geometry(ir, &participant_x_centers, &node_sizes, metrics);
+    let total_width = participant_x_centers[node_count - 1] + node_sizes[node_count - 1].0 * 0.5;
+    let total_width = ir
+        .edges
+        .iter()
+        .filter(|edge| is_self_message(ir, edge))
+        .filter_map(|edge| endpoint_node_index(ir, edge.from))
+        .filter_map(|index| {
+            Some(*participant_x_centers.get(index)? + *self_loop_widths.get(index)?)
+        })
+        .fold(total_width, f32::max);
+    let fragment_order = ir
+        .sequence_meta
+        .as_ref()
+        .and_then(|meta| sequence_fragment_open_order(ir, meta));
+    let mut sequence_fragments = measure_sequence_fragments(
+        ir,
+        total_width,
+        message_gap,
+        &sequence_notes,
+        metrics,
+        fragment_order.as_deref(),
+    );
 
     // With notes or fragments, the source-order timeline gives each its own rows; without them
     // (or for a hand-built IR) every message gets one row, as it always has.
@@ -11688,6 +11772,8 @@ fn layout_diagram_sequence_traced_with_metrics(
             &sequence_notes,
             metrics.font_size(),
             &sequence_messages,
+            &sequence_fragments,
+            fragment_order.as_deref()?,
         )
     });
     let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
@@ -11830,21 +11916,6 @@ fn layout_diagram_sequence_traced_with_metrics(
     }
 
     // ── Phase 5: compute bounds and extensions ─────────────────────────
-    let total_width = if node_count > 0 {
-        let last_cx = participant_x_centers[node_count - 1];
-        let last_half_w = node_sizes[node_count - 1].0 / 2.0;
-        last_cx + last_half_w
-    } else {
-        0.0
-    }
-    .max(
-        edges
-            .iter()
-            .flat_map(|edge| &edge.points)
-            .map(|point| point.x)
-            .fold(0.0, f32::max),
-    );
-
     push_snapshot(
         &mut trace,
         "sequence_post_processing",
@@ -12098,16 +12169,15 @@ fn layout_diagram_sequence_traced_with_metrics(
                 });
         }
     }
-    let sequence_fragments = build_sequence_fragment_geometry(
+    place_sequence_fragments(
         ir,
-        &participant_x_centers,
-        &node_sizes,
+        &mut sequence_fragments,
         &message_y_positions,
         first_message_y,
         diagram_bottom,
         message_gap,
         timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
-        total_width,
+        metrics.font_size(),
     );
 
     // Notes beside the outermost actors and fragment borders can extend beyond the
@@ -12471,6 +12541,45 @@ struct SequenceTimelineRows {
     end: f32,
 }
 
+/// Resolve the close-order fragment storage once, before measuring or positioning any rows.
+/// Invalid external timelines retain the edge-anchor fallback instead of indexing partial data.
+fn sequence_fragment_open_order(
+    ir: &MermaidDiagramIr,
+    meta: &fm_core::IrSequenceMeta,
+) -> Option<Vec<usize>> {
+    use fm_core::IrSequenceStep as Step;
+    if meta.timeline.is_empty() {
+        return None;
+    }
+    let mut order = Vec::new();
+    let mut stack = Vec::new();
+    let (mut messages, mut notes, mut closes) = (0, 0, 0);
+    for step in &meta.timeline {
+        match step {
+            Step::Message => messages += 1,
+            Step::Note => notes += 1,
+            Step::Open => {
+                stack.push((order.len(), 0));
+                order.push(usize::MAX);
+            }
+            Step::Close => {
+                let (opening, alternatives) = stack.pop()?;
+                if meta.fragments.get(closes)?.alternatives.len() != alternatives {
+                    return None;
+                }
+                order[opening] = closes;
+                closes += 1;
+            }
+            Step::Else => stack.last_mut()?.1 += 1,
+        }
+    }
+    (stack.is_empty()
+        && messages == ir.edges.len()
+        && notes == meta.notes.len()
+        && closes == meta.fragments.len())
+    .then_some(order)
+}
+
 /// Walk the source-order timeline, giving notes, fragment headers, branch rows and fragment ends
 /// their own vertical space.
 ///
@@ -12478,6 +12587,7 @@ struct SequenceTimelineRows {
 /// full row pitch; after anything else it needs only room for its label above the arrow. Returns
 /// `None` when the timeline does not describe this IR (a hand-built or edited one), so the caller
 /// keeps one row per message.
+#[allow(clippy::too_many_arguments)]
 fn sequence_timeline_rows(
     ir: &MermaidDiagramIr,
     meta: &fm_core::IrSequenceMeta,
@@ -12486,37 +12596,11 @@ fn sequence_timeline_rows(
     notes: &[LayoutSequenceNote],
     font: f32,
     messages: &[LayoutSequenceMessage],
+    fragments: &[LayoutSequenceFragment],
+    open_fragment: &[usize],
 ) -> Option<SequenceTimelineRows> {
     use fm_core::IrSequenceStep as Step;
     let timeline = &meta.timeline;
-    if timeline.is_empty() {
-        return None;
-    }
-    let count = |wanted: Step| timeline.iter().filter(|step| **step == wanted).count();
-    if count(Step::Message) != ir.edges.len()
-        || count(Step::Note) != meta.notes.len()
-        || count(Step::Close) != meta.fragments.len()
-    {
-        return None;
-    }
-    // Which fragment each `Open` starts: fragments are stored in the order they CLOSE.
-    let mut open_fragment = vec![usize::MAX; count(Step::Open)];
-    let (mut stack, mut opens, mut closes) = (Vec::new(), 0, 0);
-    for step in timeline {
-        match step {
-            Step::Open => {
-                stack.push(opens);
-                opens += 1;
-            }
-            Step::Close => {
-                if let Some(open) = stack.pop() {
-                    open_fragment[open] = closes;
-                }
-                closes += 1;
-            }
-            _ => {}
-        }
-    }
 
     let lead = |after_message: bool| message_gap * if after_message { 0.25 } else { 0.1 };
     let mut rows = SequenceTimelineRows {
@@ -12564,35 +12648,46 @@ fn sequence_timeline_rows(
                 floor = top + note.bounds.height;
             }
             Step::Open => {
-                let fragment = open_fragment
-                    .get(opens)
-                    .and_then(|&index| meta.fragments.get(index));
+                let fragment_index = *open_fragment.get(opens)?;
+                let fragment = fragments.get(fragment_index)?;
                 opens += 1;
                 let top = floor + lead(after_message);
                 // The keyword tab, and the condition beneath it; a `rect` draws neither.
-                let header = match fragment {
-                    Some(f) if f.kind == fm_core::FragmentKind::Rect => 0.0,
-                    Some(f) if !f.label.is_empty() => font.mul_add(1.75, 14.0),
-                    _ => font + 8.0,
+                let header = if fragment.kind == fm_core::FragmentKind::Rect {
+                    0.0
+                } else {
+                    font + 8.0
+                        + fragment.caption(None).map_or(0.0, |caption| {
+                            caption.font_size * 0.5
+                                + caption.bounds.height
+                                + LayoutSequenceFragmentCaption::PADDING_Y
+                        })
                 };
-                open.push((opens - 1, top, Vec::new()));
+                open.push((fragment_index, top, Vec::new()));
                 floor = top + header;
             }
             Step::Else => {
                 // The branch label is drawn just above its divider.
-                let divider = floor + lead(after_message) + font;
+                let caption_height = open
+                    .last()
+                    .and_then(|(index, _, branches)| {
+                        fragments[*index].caption(Some(branches.len()))
+                    })
+                    .map_or(font, |caption| {
+                        caption.bounds.height + LayoutSequenceFragmentCaption::DIVIDER_GAP
+                    });
+                let divider = floor + lead(after_message) + caption_height;
                 if let Some((_, _, branches)) = open.last_mut() {
                     branches.push(divider);
                 }
                 floor = divider;
             }
             Step::Close => {
-                let bottom = floor + lead(after_message);
-                if let Some((_, top, branches)) = open.pop()
-                    && let Some(slot) = rows.fragments.get_mut(closes)
-                {
-                    *slot = (top, bottom, branches);
-                }
+                let (_, top, branches) = open.pop()?;
+                // Empty colored regions still need a visible frame. Reserve that minimum
+                // here so their parents and following content see the same bottom edge.
+                let bottom = (floor + lead(after_message)).max(top + message_gap * 0.25);
+                *rows.fragments.get_mut(closes)? = (top, bottom, branches);
                 closes += 1;
                 floor = bottom;
             }
@@ -12684,77 +12779,220 @@ fn build_sequence_note_geometry(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_sequence_fragment_geometry(
+/// Measure frame-local content before laying out the source-order timeline. A note expands
+/// only its innermost frame, and a closing frame then expands its parent. This retains the
+/// authored nesting without shifting participant columns or including unrelated side notes.
+fn measure_sequence_fragments(
     ir: &MermaidDiagramIr,
-    participant_x_centers: &[f32],
-    node_sizes: &[(f32, f32)],
-    message_y_positions: &[f32],
-    first_message_y: f32,
-    diagram_bottom: f32,
+    total_width: f32,
     message_gap: f32,
-    timeline_spans: Option<&[(f32, f32, Vec<f32>)]>,
-    message_right: f32,
+    notes: &[LayoutSequenceNote],
+    metrics: &fm_core::FontMetrics,
+    open_order: Option<&[usize]>,
 ) -> Vec<LayoutSequenceFragment> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
     };
-
-    let total_width = if participant_x_centers.is_empty() {
-        200.0
-    } else {
-        let last_idx = participant_x_centers.len() - 1;
-        let last_cx = participant_x_centers[last_idx];
-        let last_half_w = node_sizes.get(last_idx).map_or(50.0, |(w, _)| w / 2.0);
-        last_cx + last_half_w
+    let padding = message_gap * 0.35;
+    let mut extents = vec![(-padding, total_width + padding); meta.fragments.len()];
+    let mut parents = vec![None; meta.fragments.len()];
+    if let Some(open_order) = open_order {
+        use fm_core::IrSequenceStep as Step;
+        let (mut opens, mut note_index) = (0, 0);
+        let mut stack = Vec::<usize>::new();
+        for step in &meta.timeline {
+            match step {
+                Step::Open => {
+                    stack.push(open_order[opens]);
+                    opens += 1;
+                }
+                Step::Note => {
+                    if let Some(&index) = stack.last() {
+                        let note = notes[note_index].bounds;
+                        extents[index].0 = extents[index].0.min(note.x - padding);
+                        extents[index].1 = extents[index].1.max(note.x + note.width + padding);
+                    }
+                    note_index += 1;
+                }
+                Step::Close => {
+                    if let Some(child) = stack.pop()
+                        && let Some(&parent) = stack.last()
+                    {
+                        parents[child] = Some(parent);
+                        let clearance = LayoutSequenceFragmentCaption::PADDING_X * 0.5;
+                        extents[parent].0 = extents[parent].0.min(extents[child].0 - clearance);
+                        extents[parent].1 = extents[parent].1.max(extents[child].1 + clearance);
+                    }
+                }
+                Step::Message | Step::Else => {}
+            }
+        }
     }
-    .max(message_right);
 
+    let font_size = metrics.font_size() * LayoutSequenceFragmentCaption::FONT_SCALE;
+    let line_height = metrics.line_height_px() * LayoutSequenceFragmentCaption::FONT_SCALE;
+    let width_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: font_size * 1.15,
+        ..metrics.config().clone()
+    });
     meta.fragments
         .iter()
         .enumerate()
-        .map(|(fragment_index, fragment)| {
-            let padding = message_gap * 0.35;
-            // The timeline's own rows when there are some; else spanned from the messages inside.
-            let (y, height, branch_tops) = if let Some((top, bottom, branches)) =
-                timeline_spans.and_then(|spans| spans.get(fragment_index))
-            {
-                (
-                    *top,
-                    (bottom - top).max(message_gap * 0.25),
-                    branches.clone(),
-                )
-            } else {
-                let start_y = message_y_positions
-                    .get(fragment.start_edge)
-                    .copied()
-                    .unwrap_or(first_message_y);
-                let end_y = message_y_positions
-                    .get(fragment.end_edge)
-                    .copied()
-                    .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
-                (
-                    message_gap.mul_add(-0.3, start_y),
-                    message_gap
-                        .mul_add(0.6, end_y - start_y)
-                        .max(message_gap * 0.5),
-                    Vec::new(),
-                )
-            };
+        .map(|(index, fragment)| {
+            let (mut left, mut right) = extents[index];
+            let mut captions = Vec::new();
+            if fragment.kind != fm_core::FragmentKind::Rect && open_order.is_some() {
+                let keyword = match fragment.kind {
+                    fm_core::FragmentKind::Loop => "loop",
+                    fm_core::FragmentKind::Alt => "alt",
+                    fm_core::FragmentKind::Opt => "opt",
+                    fm_core::FragmentKind::Par => "par",
+                    fm_core::FragmentKind::Critical => "critical",
+                    fm_core::FragmentKind::Break => "break",
+                    fm_core::FragmentKind::Rect => unreachable!("rect has no keyword tab"),
+                };
+                // Native and Scene renderers use slightly different tab insets. A lone
+                // narrow participant must still leave room for either keyword furniture.
+                let tab_width = (keyword.len() as f32 * metrics.font_size() * 0.5 + 12.0).max(
+                    metrics.estimate_width(keyword) * LayoutSequenceFragmentCaption::FONT_SCALE
+                        + 16.0,
+                );
+                let growth = (tab_width - (right - left)).max(0.0) * 0.5;
+                left -= growth;
+                right += growth;
+                let available =
+                    (right - left - 2.0 * LayoutSequenceFragmentCaption::PADDING_X).max(font_size);
+                for (alternative, label) in std::iter::once((None, fragment.label.as_str())).chain(
+                    fragment
+                        .alternatives
+                        .iter()
+                        .enumerate()
+                        .map(|(index, alternative)| (Some(index), alternative.label.as_str())),
+                ) {
+                    if label.is_empty() {
+                        continue;
+                    }
+                    let lines = width_metrics.wrap_to_width(&format!("[{label}]"), available);
+                    let text = lines.join("\n");
+                    let width = width_metrics.estimate_multiline_width(&text);
+                    captions.push(LayoutSequenceFragmentCaption {
+                        alternative,
+                        text,
+                        bounds: LayoutRect {
+                            x: if alternative.is_some() {
+                                left + LayoutSequenceFragmentCaption::PADDING_X
+                            } else {
+                                f32::midpoint(left, right) - width * 0.5
+                            },
+                            y: 0.0,
+                            width,
+                            height: font_size + lines.len().saturating_sub(1) as f32 * line_height,
+                        },
+                        font_size,
+                        line_height,
+                    });
+                }
+            }
+            // Wrapping cannot split an oversized grapheme. Widen its frame, then pass
+            // that extent up the close-order hierarchy before measuring the parent.
+            let width = captions.iter().fold(right - left, |width, caption| {
+                width.max(caption.bounds.width + 2.0 * LayoutSequenceFragmentCaption::PADDING_X)
+            });
+            let growth = (width - (right - left)) * 0.5;
+            left -= growth;
+            right += growth;
+            for caption in &mut captions {
+                caption.bounds.x = if caption.alternative.is_some() {
+                    left + LayoutSequenceFragmentCaption::PADDING_X
+                } else {
+                    f32::midpoint(left, right) - caption.bounds.width * 0.5
+                };
+            }
+            if let Some(parent) = parents[index] {
+                let clearance = LayoutSequenceFragmentCaption::PADDING_X * 0.5;
+                extents[parent].0 = extents[parent].0.min(left - clearance);
+                extents[parent].1 = extents[parent].1.max(right + clearance);
+            }
             LayoutSequenceFragment {
                 kind: fragment.kind,
                 label: fragment.label.clone(),
                 color: fragment.color.clone(),
                 bounds: LayoutRect {
-                    x: -padding,
-                    y,
-                    width: total_width + padding * 2.0,
-                    height,
+                    x: left,
+                    y: 0.0,
+                    width: right - left,
+                    height: 0.0,
                 },
-                branch_tops,
+                branch_tops: Vec::new(),
+                captions,
             }
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_sequence_fragments(
+    ir: &MermaidDiagramIr,
+    fragments: &mut [LayoutSequenceFragment],
+    message_y_positions: &[f32],
+    first_message_y: f32,
+    diagram_bottom: f32,
+    message_gap: f32,
+    timeline_spans: Option<&[(f32, f32, Vec<f32>)]>,
+    font_size: f32,
+) {
+    let Some(meta) = &ir.sequence_meta else {
+        return;
+    };
+    for (fragment_index, (fragment, placed)) in meta.fragments.iter().zip(fragments).enumerate() {
+        // The timeline's own rows when there are some; else spanned from the messages inside.
+        let (y, height, branch_tops) = if let Some((top, bottom, branches)) =
+            timeline_spans.and_then(|spans| spans.get(fragment_index))
+        {
+            (
+                *top,
+                (bottom - top).max(message_gap * 0.25),
+                branches.clone(),
+            )
+        } else {
+            let start_y = message_y_positions
+                .get(fragment.start_edge)
+                .copied()
+                .unwrap_or(first_message_y);
+            let end_y = message_y_positions
+                .get(fragment.end_edge)
+                .copied()
+                .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
+            (
+                message_gap.mul_add(-0.3, start_y),
+                message_gap
+                    .mul_add(0.6, end_y - start_y)
+                    .max(message_gap * 0.5),
+                Vec::new(),
+            )
+        };
+        placed.bounds.y = y;
+        placed.bounds.height = height;
+        placed.branch_tops = branch_tops;
+        let lead = message_y_positions
+            .get(fragment.start_edge)
+            .map_or(0.0, |first| first - y);
+        for caption in &mut placed.captions {
+            caption.bounds.y = if let Some(index) = caption.alternative {
+                let divider = placed.branch_tops.get(index).copied().or_else(|| {
+                    message_y_positions
+                        .get(fragment.alternatives.get(index)?.start_edge)
+                        .map(|message_y| message_y - lead)
+                });
+                let Some(divider) = divider else {
+                    continue;
+                };
+                divider - LayoutSequenceFragmentCaption::DIVIDER_GAP - caption.bounds.height
+            } else {
+                y + font_size + 8.0 + caption.font_size * 0.5
+            };
+        }
+    }
 }
 
 #[must_use]
@@ -44150,7 +44388,10 @@ mod tests {
                     .extensions
                     .sequence_fragments
                     .iter()
-                    .map(|fragment| fragment.bounds),
+                    .flat_map(|fragment| {
+                        std::iter::once(fragment.bounds)
+                            .chain(fragment.captions.iter().map(|caption| caption.bounds))
+                    }),
             )
             .chain(
                 layout
@@ -44226,6 +44467,227 @@ mod tests {
             assert_eq!(layout.extensions.sequence_notes.len(), expected_notes);
             assert_sequence_content_within_bounds(&layout);
         }
+    }
+
+    #[test]
+    fn sequence_fragments_measure_conditions_and_enclose_only_their_own_notes() {
+        let condition = "Continue processing each queued request until the complete transaction has been durably recorded and every subscribed observer has acknowledged the resulting change without losing the retry history";
+        let alternative = "Otherwise preserve the complete pending request and wait for the remote participant to become available before starting the next attempt to commit the transaction";
+        let source = format!(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             Note left of A: Unrelated annotation that should remain outside every interaction frame and never change which condition owns a note\n\
+             loop {condition}\nNote left of A: Inside\n\
+             rect rgb(230,240,250)\nalt {condition}\nNote right of B: Nested\n\
+             else {alternative}\nend\nend\nend\nA->>B: Done\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        let control =
+            fm_parser::parse("sequenceDiagram\nparticipant A\nparticipant B\nA->>B: Done\n").ir;
+        for font_size in [15.0, 28.0, 48.0] {
+            let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                line_height: 1.6,
+                ..Default::default()
+            });
+            let config = super::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            };
+            let layout = super::layout_diagram_with_config(&ir, config.clone());
+            let control = super::layout_diagram_with_config(&control, config);
+            assert_eq!(
+                layout
+                    .nodes
+                    .iter()
+                    .map(|node| node.bounds.center().x)
+                    .collect::<Vec<_>>(),
+                control
+                    .nodes
+                    .iter()
+                    .map(|node| node.bounds.center().x)
+                    .collect::<Vec<_>>(),
+                "conditions and notes must not move participant columns"
+            );
+            let [inner, region, outer] = layout.extensions.sequence_fragments.as_slice() else {
+                panic!("expected an alternative nested inside a region and loop");
+            };
+            let contains = |frame: super::LayoutRect, item: super::LayoutRect| {
+                frame.x <= item.x
+                    && frame.y <= item.y
+                    && frame.x + frame.width >= item.x + item.width
+                    && frame.y + frame.height >= item.y + item.height
+            };
+            assert!(contains(outer.bounds, region.bounds));
+            assert!(contains(region.bounds, inner.bounds));
+            assert!(contains(
+                outer.bounds,
+                layout.extensions.sequence_notes[1].bounds
+            ));
+            assert!(contains(
+                inner.bounds,
+                layout.extensions.sequence_notes[2].bounds
+            ));
+            assert!(
+                layout.extensions.sequence_notes[0].bounds.x < outer.bounds.x,
+                "a preceding unrelated note must not widen the loop"
+            );
+            assert!(outer.bounds.x < region.bounds.x && region.bounds.x < inner.bounds.x);
+            assert!(
+                region.captions.is_empty(),
+                "a colored region has no condition text"
+            );
+
+            let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            let text = scene_texts(&scene.root);
+            for (fragment, authored) in [(inner, condition), (outer, condition)] {
+                let caption = fragment.caption(None).expect("measured opening condition");
+                assert!(caption.text.contains('\n'), "long conditions must wrap");
+                assert_eq!(
+                    caption.text.split_whitespace().collect::<Vec<_>>(),
+                    format!("[{authored}]")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                );
+                assert!(contains(fragment.bounds, caption.bounds));
+                for (line, y) in caption.lines() {
+                    assert!(text.iter().any(|painted| painted.text == line
+                        && (painted.y - y).abs() < 0.001
+                        && (painted.x - caption.bounds.center().x).abs() < 0.001));
+                }
+            }
+            let branch = inner
+                .caption(Some(0))
+                .expect("measured empty-branch condition");
+            assert!(branch.text.contains('\n'));
+            assert_eq!(
+                branch.text.split_whitespace().collect::<Vec<_>>(),
+                format!("[{alternative}]")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+            );
+            let note = layout.extensions.sequence_notes[2].bounds;
+            assert!(
+                branch.bounds.y > note.y + note.height,
+                "the whole alternative caption follows its preceding note"
+            );
+            assert!(branch.bounds.y + branch.bounds.height < inner.branch_tops[0]);
+            assert!(layout.edges[0].points[0].y > outer.bounds.y + outer.bounds.height);
+            assert_sequence_content_within_bounds(&layout);
+            let repeated = super::layout_diagram_with_config(
+                &ir,
+                super::LayoutConfig {
+                    font_metrics: Some(metrics),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(layout.extensions, repeated.extensions);
+            assert_eq!(layout.edges, repeated.edges);
+            assert_eq!(layout.bounds, repeated.bounds);
+        }
+    }
+
+    #[test]
+    fn sequence_fragment_captions_preserve_authored_rows_and_recover_external_timelines() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\nalt Ready\nA->>B: Start\nelse Retry\nB->>A: Done\nend\n",
+        ).ir;
+        ir.sequence_meta.as_mut().unwrap().fragments[0].label = "First row\n\nLast row".into();
+        let layout = layout_diagram_sequence(&ir);
+        let fragment = &layout.extensions.sequence_fragments[0];
+        let caption = fragment.caption(None).unwrap();
+        assert_eq!(caption.text, "[First row\n\nLast row]");
+        assert_eq!(caption.lines().count(), 3);
+        assert!(
+            caption.bounds.y + caption.bounds.height
+                < layout.extensions.sequence_messages[0].bounds.y
+        );
+        assert_sequence_content_within_bounds(&layout);
+
+        // Edited external timelines must fall back without indexing a nonexistent frame
+        // or painting a measured alternative with no corresponding divider at the origin.
+        for mutation in 0..3 {
+            let mut external = ir.clone();
+            let meta = external.sequence_meta.as_mut().unwrap();
+            match mutation {
+                0 => {
+                    meta.timeline.remove(0);
+                }
+                1 => {
+                    let extra = meta.fragments[0].alternatives[0].clone();
+                    meta.fragments[0].alternatives.push(extra);
+                }
+                _ => meta.timeline.insert(1, fm_core::IrSequenceStep::Else),
+            }
+            let fallback = layout_diagram_sequence(&external);
+            assert_eq!(fallback.edges.len(), 2);
+            assert_eq!(fallback.extensions.sequence_fragments.len(), 1);
+            assert!(
+                fallback.extensions.sequence_fragments[0]
+                    .captions
+                    .is_empty()
+            );
+            assert_sequence_content_within_bounds(&fallback);
+        }
+    }
+
+    #[test]
+    fn sequence_empty_nested_regions_reserve_their_visible_frame_height() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\nparticipant A\nrect rgb(230,240,250)\nrect rgb(240,250,230)\nend\nend\nNote over A: After both regions\nA->>A: Continue\n",
+        );
+        let [inner, outer] = layout.extensions.sequence_fragments.as_slice() else {
+            panic!("expected two empty nested regions");
+        };
+        assert!(inner.bounds.y > outer.bounds.y);
+        assert!(inner.bounds.y + inner.bounds.height < outer.bounds.y + outer.bounds.height);
+        assert!(
+            outer.bounds.y + outer.bounds.height < layout.extensions.sequence_notes[0].bounds.y
+        );
+        assert!(
+            layout.extensions.sequence_notes[0].bounds.y
+                + layout.extensions.sequence_notes[0].bounds.height
+                < layout.extensions.sequence_messages[0].bounds.y
+        );
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_narrow_participant_frames_enclose_large_tabs_and_indivisible_glyphs() {
+        let ir =
+            fm_parser::parse("sequenceDiagram\nparticipant i\ncritical 雪\nopt 🇫🇷\nend\nend\n").ir;
+        let font_size = 256.0;
+        let layout = super::layout_diagram_with_config(
+            &ir,
+            super::LayoutConfig {
+                font_metrics: Some(fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let [inner, outer] = layout.extensions.sequence_fragments.as_slice() else {
+            panic!("expected two nested interactions");
+        };
+        let caption = inner.caption(None).unwrap();
+        assert_eq!(caption.text.replace('\n', ""), "[🇫🇷]");
+        assert!(
+            caption.text.contains("🇫🇷"),
+            "the flag remains indivisible even when wider than its available row"
+        );
+        assert!(
+            caption.bounds.width
+                > "opt".len() as f32 * font_size * 0.5 + 12.0
+                    - 2.0 * super::LayoutSequenceFragmentCaption::PADDING_X
+        );
+        assert!(
+            inner.bounds.width + 0.01
+                >= caption.bounds.width + 2.0 * super::LayoutSequenceFragmentCaption::PADDING_X
+        );
+        assert!(inner.bounds.x > outer.bounds.x);
+        assert!(inner.bounds.x + inner.bounds.width < outer.bounds.x + outer.bounds.width);
+        assert!(outer.bounds.width >= "critical".len() as f32 * font_size * 0.5 + 12.0);
+        assert_sequence_content_within_bounds(&layout);
     }
 
     /// A note gets its OWN row: it never overlaps the message before or after it, which it did

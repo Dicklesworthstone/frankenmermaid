@@ -5026,11 +5026,11 @@ fn lower_sequence_statement(
             if kind == fm_core::FragmentKind::Rect {
                 builder.begin_fragment(kind, String::new(), Some(label));
             } else {
-                builder.begin_fragment(kind, label, None);
+                builder.begin_fragment(kind, normalize_sequence_display_text(&label), None);
             }
         }
         SequenceStatement::FragmentElse { label } => {
-            builder.add_fragment_alternative(label);
+            builder.add_fragment_alternative(normalize_sequence_display_text(&label));
         }
         SequenceStatement::FragmentEnd => {
             // `end` can close either a fragment or a box group;
@@ -26954,6 +26954,25 @@ Rel_Back(db, app, "Responds")"#,
             "Should have one else alternative"
         );
         assert_eq!(meta.fragments[0].alternatives[0].label, "Failure");
+    }
+
+    #[test]
+    fn sequence_fragment_labels_normalize_breaks_and_entities_without_changing_rect_color() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nA->>B: go\nalt ready<br/>#quot;now#quot;\nA->>B: yes\nelse wait<br>again &amp; retry\nB-->>A: no\nend\nrect rgb(240, 240, 240)\nA->>B: same\nend\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.sequence_meta.as_ref().expect("sequence metadata");
+        assert_eq!(meta.fragments.len(), 2);
+        let alternative = &meta.fragments[0];
+        assert_eq!(alternative.kind, fm_core::FragmentKind::Alt);
+        assert_eq!(alternative.label, "ready\n\"now\"");
+        assert_eq!(alternative.alternatives.len(), 1);
+        assert_eq!(alternative.alternatives[0].label, "wait\nagain & retry");
+        let region = &meta.fragments[1];
+        assert_eq!(region.kind, fm_core::FragmentKind::Rect);
+        assert!(region.label.is_empty());
+        assert_eq!(region.color.as_deref(), Some("rgb(240, 240, 240)"));
     }
 
     #[test]

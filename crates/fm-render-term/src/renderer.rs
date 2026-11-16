@@ -311,6 +311,78 @@ fn sequence_alternative_keyword(kind: fm_core::FragmentKind) -> &'static str {
     }
 }
 
+/// Side notes and nested frames may extend left of the participant columns. Fit and rasterize
+/// one translated copy so signed layout coordinates do not collapse onto terminal column zero.
+fn sequence_layout_at_origin(layout: &DiagramLayout) -> Option<DiagramLayout> {
+    if layout.extensions.sequence_fragments.is_empty()
+        && layout.extensions.sequence_notes.is_empty()
+        && layout.extensions.sequence_messages.is_empty()
+        && layout.extensions.activation_bars.is_empty()
+        && layout.extensions.sequence_mirror_headers.is_empty()
+        && layout.extensions.sequence_lifecycle_markers.is_empty()
+    {
+        return None;
+    }
+    let (origin_x, origin_y) = (layout.bounds.x, layout.bounds.y);
+    if (origin_x == 0.0 && origin_y == 0.0) || !origin_x.is_finite() || !origin_y.is_finite() {
+        return None;
+    }
+    let shift = |rect: &mut fm_layout::LayoutRect| {
+        rect.x -= origin_x;
+        rect.y -= origin_y;
+    };
+    let mut shifted = layout.clone();
+    for node in shifted
+        .nodes
+        .iter_mut()
+        .chain(&mut shifted.extensions.sequence_mirror_headers)
+    {
+        shift(&mut node.bounds);
+    }
+    for cluster in &mut shifted.clusters {
+        shift(&mut cluster.bounds);
+    }
+    for cluster in &mut shifted.cycle_clusters {
+        shift(&mut cluster.bounds);
+    }
+    for edge in &mut shifted.edges {
+        for point in &mut edge.points {
+            point.x -= origin_x;
+            point.y -= origin_y;
+        }
+    }
+    for band in &mut shifted.extensions.bands {
+        shift(&mut band.bounds);
+    }
+    for activation in &mut shifted.extensions.activation_bars {
+        shift(&mut activation.bounds);
+    }
+    for note in &mut shifted.extensions.sequence_notes {
+        shift(&mut note.bounds);
+    }
+    for message in &mut shifted.extensions.sequence_messages {
+        shift(&mut message.bounds);
+    }
+    for fragment in &mut shifted.extensions.sequence_fragments {
+        shift(&mut fragment.bounds);
+        for y in &mut fragment.branch_tops {
+            *y -= origin_y;
+        }
+        for caption in &mut fragment.captions {
+            shift(&mut caption.bounds);
+        }
+    }
+    for marker in &mut shifted.extensions.sequence_lifecycle_markers {
+        marker.center.x -= origin_x;
+        marker.center.y -= origin_y;
+    }
+    for region in &mut shifted.dirty_regions {
+        shift(region);
+    }
+    shift(&mut shifted.bounds);
+    Some(shifted)
+}
+
 const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     match arrow {
         ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
@@ -476,6 +548,10 @@ impl TermRenderer {
     /// Render a pre-computed layout to terminal output.
     #[must_use]
     pub fn render_layout(&self, ir: &MermaidDiagramIr, layout: &DiagramLayout) -> TermRenderResult {
+        let sequence_layout = (ir.diagram_type == fm_core::DiagramType::Sequence)
+            .then(|| sequence_layout_at_origin(layout))
+            .flatten();
+        let layout = sequence_layout.as_ref().unwrap_or(layout);
         // Packet scales may use several lanes above the first field. Reserve that measured
         // space before fitting to cells, and translate a private copy so callers keep their
         // original geometry. Other diagram families retain their existing coordinate system.
@@ -571,9 +647,15 @@ impl TermRenderer {
         layout: &DiagramLayout,
         direction: GraphDirection,
     ) -> Option<TermTransform> {
+        let normalized = sequence_layout_at_origin(layout);
+        let fitted = normalized.as_ref().unwrap_or(layout);
         let (_cell_width, _cell_height, scale_x, scale_y) =
-            self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
-        TermTransform::new(scale_x, scale_y)
+            self.fit_cell_dimensions(&fitted.bounds, direction, &fitted.nodes);
+        let mut transform = TermTransform::new(scale_x, scale_y)?;
+        if normalized.is_some() {
+            transform.translate(-layout.bounds.x, -layout.bounds.y);
+        }
+        Some(transform)
     }
 
     /// Map a layout-space point into padded terminal cell coordinates `(col, row)` (`bd-z8971`).
@@ -584,6 +666,13 @@ impl TermRenderer {
         direction: GraphDirection,
         point: fm_layout::LayoutPoint,
     ) -> (usize, usize) {
+        if let Some(transform) = self.layout_transform(layout, direction) {
+            let (x, y) = transform.apply(point.x, point.y);
+            return (
+                x as usize + self.config.padding,
+                y as usize + self.config.padding,
+            );
+        }
         let (_cell_width, _cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
         self.point_to_cells(&point, scale_x, scale_y)
@@ -4062,9 +4151,21 @@ impl TermRenderer {
             }
             let mut captions = Vec::new();
             if let Some(keyword) = sequence_fragment_keyword(fragment.kind) {
-                captions.push((fy + 1, keyword, fragment.label.as_str()));
+                let end = fragment.caption(None).map_or(fy + 2, |caption| {
+                    let (_, row) = self.layout_point_to_cells(
+                        0.0,
+                        caption.bounds.y + caption.bounds.height,
+                        scale_x,
+                        scale_y,
+                    );
+                    row + self.config.padding + 1
+                });
+                captions.push((fy + 1, end, keyword, fragment.label.as_str()));
             }
-            for (y, condition) in sequence_fragment_branches(ir, layout, index) {
+            for (branch_index, (y, condition)) in sequence_fragment_branches(ir, layout, index)
+                .into_iter()
+                .enumerate()
+            {
                 let (_, row) = self.layout_point_to_cells(0.0, y, scale_x, scale_y);
                 // The condition belongs immediately above its divider. In particular, an
                 // empty trailing operand can quantize onto the frame's bottom border;
@@ -4072,9 +4173,19 @@ impl TermRenderer {
                 let row = (row + self.config.padding)
                     .saturating_sub(1)
                     .clamp(fy + 1, fy + fh - 2);
-                captions.push((row, sequence_alternative_keyword(fragment.kind), condition));
+                let top = fragment.caption(Some(branch_index)).map_or(row, |caption| {
+                    let (_, top) =
+                        self.layout_point_to_cells(0.0, caption.bounds.y, scale_x, scale_y);
+                    (top + self.config.padding).clamp(fy + 1, row)
+                });
+                captions.push((
+                    top,
+                    row + 1,
+                    sequence_alternative_keyword(fragment.kind),
+                    condition,
+                ));
             }
-            for (row, keyword, condition) in captions {
+            for (row, end, keyword, condition) in captions {
                 if row >= height || row < fy + 1 || row >= fy + fh - 1 {
                     continue;
                 }
@@ -4090,25 +4201,42 @@ impl TermRenderer {
                         .max(1)
                         .saturating_mul(self.config.max_label_lines.max(1)),
                 );
-                let mut label =
-                    CellLabel::new(usize::MAX, false, wrap_cell_label(&text, available, 1));
+                let max_rows = end
+                    .min(height)
+                    .min(fy + fh - 1)
+                    .saturating_sub(row)
+                    .min(self.config.max_label_lines.max(1));
+                if max_rows == 0 {
+                    continue;
+                }
+                let mut label = CellLabel::new(
+                    usize::MAX,
+                    false,
+                    wrap_cell_label(&text, available, max_rows),
+                );
                 label.x = x;
                 label.y = row;
                 let right = x + label.width + 1;
-                if blocked[row * width + x..row * width + right]
-                    .iter()
-                    .any(|cell| *cell)
-                    || labels.iter().any(|prior| {
-                        row >= prior.y
-                            && row < prior.y + prior.lines.len()
-                            && x < prior.x + prior.width
-                            && prior.x < right
-                    })
-                {
+                let bottom = row + label.lines.len();
+                if (row..bottom).any(|y| {
+                    blocked[y * width + x..y * width + right]
+                        .iter()
+                        .any(|cell| *cell)
+                }) || labels.iter().any(|prior| {
+                    bottom > prior.y
+                        && row < prior.y + prior.lines.len()
+                        && x < prior.x + prior.width
+                        && prior.x < right
+                }) {
                     continue;
                 }
                 // Preserve the frame's side borders while clearing the operand's backing.
-                grid[row][x..right].fill(' ');
+                for cells in grid.iter_mut().take(bottom).skip(row) {
+                    cells[x..right].fill(' ');
+                }
+                for line in &mut label.lines {
+                    line.push_str(&" ".repeat(label.width - line.width()));
+                }
                 labels.push(label);
             }
         }
@@ -9934,6 +10062,103 @@ mod tests {
             }
             assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
         }
+    }
+
+    #[test]
+    fn sequence_wrapped_conditions_and_side_notes_survive_every_terminal_mode() {
+        let opening = "OPENCAP process each queued request until the complete transaction has been durably recorded and every subscribed observer has acknowledged the resulting change without losing the previous retry history OPENTAIL";
+        let alternative = "ELSECAP preserve the complete pending request while waiting for the remote participant to become available and verify the transaction state before starting the next attempt and releasing its durable reservation ELSETAIL";
+        let ir = fm_parser::parse(&format!(
+            "sequenceDiagram\nhideFootbox\nparticipant A\nparticipant B\nalt {opening}\nNote left of A: LEFTNOTE\nNote right of B: RIGHTNOTE\nelse {alternative}\nend\nA->>B: FINISHED\n",
+        )).ir;
+        let layout = layout_diagram(&ir);
+        let original = layout.clone();
+        assert!(layout.bounds.x < 0.0);
+        assert!(
+            layout.extensions.sequence_fragments[0]
+                .captions
+                .iter()
+                .all(|caption| caption.lines().count() > 1)
+        );
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Braille,
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Rich,
+                render_mode: mode,
+                max_width: 120,
+                max_height: 240,
+                max_label_chars: 512,
+                max_label_lines: 16,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 120, 240);
+            let rows: Vec<_> = result.output.lines().collect();
+            let row_for = |text| {
+                rows.iter()
+                    .position(|row| row.contains(text))
+                    .unwrap_or_else(|| panic!("{mode:?} lost {text}:\n{}", result.output))
+            };
+            let mut previous = 0;
+            for text in [
+                "OPENCAP",
+                "OPENTAIL",
+                "LEFTNOTE",
+                "RIGHTNOTE",
+                "ELSECAP",
+                "ELSETAIL",
+                "FINISHED",
+            ] {
+                assert_eq!(
+                    result.output.matches(text).count(),
+                    1,
+                    "{mode:?} lost or duplicated {text}:\n{}",
+                    result.output
+                );
+                let row = row_for(text);
+                assert!(
+                    row > previous,
+                    "{mode:?} collapsed or reordered {text}:\n{}",
+                    result.output
+                );
+                previous = row;
+            }
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+            assert!(rows.iter().all(|row| row.width() <= result.width));
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 120, 240));
+            assert_eq!(
+                renderer.map_layout_point_to_cells(
+                    &layout,
+                    ir.direction,
+                    fm_layout::LayoutPoint {
+                        x: layout.bounds.x,
+                        y: layout.bounds.y
+                    }
+                ),
+                (config.padding, config.padding)
+            );
+            let note = renderer.map_layout_point_to_cells(
+                &layout,
+                ir.direction,
+                layout.extensions.sequence_notes[0].bounds.center(),
+            );
+            let actor = renderer.map_layout_point_to_cells(
+                &layout,
+                ir.direction,
+                layout.nodes[0].bounds.center(),
+            );
+            assert!(
+                note.0 > config.padding && note.0 < actor.0,
+                "the negative side note maps to its visible column"
+            );
+        }
+        assert_eq!(
+            layout, original,
+            "terminal normalization must not mutate shared layout geometry"
+        );
     }
 
     #[test]

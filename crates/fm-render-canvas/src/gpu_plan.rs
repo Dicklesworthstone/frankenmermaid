@@ -2652,7 +2652,17 @@ impl GpuRenderPlan {
                 font_size: fragment_font_size,
                 align: crate::TextAlign::Left,
             });
-            if !fragment.label.is_empty() {
+            if let Some(caption) = fragment.caption(None) {
+                for (text, y) in caption.lines() {
+                    sequence_fragment_text.push(SequenceFragmentText {
+                        fragment_index,
+                        text: text.to_owned(),
+                        anchor: (caption.bounds.center().x, y),
+                        font_size: caption.font_size,
+                        align: crate::TextAlign::Center,
+                    });
+                }
+            } else if !fragment.label.is_empty() {
                 sequence_fragment_text.push(SequenceFragmentText {
                     fragment_index,
                     text: format!("[{}]", fragment.label),
@@ -2698,7 +2708,17 @@ impl GpuRenderPlan {
                     dash: SEQUENCE_FRAGMENT_BORDER_DASH,
                     width: SEQUENCE_FRAGMENT_STROKE_WIDTH,
                 });
-                if !alternative.label.is_empty() {
+                if let Some(caption) = fragment.caption(Some(branch_index)) {
+                    for (text, y) in caption.lines() {
+                        sequence_fragment_text.push(SequenceFragmentText {
+                            fragment_index,
+                            text: text.to_owned(),
+                            anchor: (caption.bounds.x, y),
+                            font_size: caption.font_size,
+                            align: crate::TextAlign::Left,
+                        });
+                    }
+                } else if !alternative.label.is_empty() {
                     sequence_fragment_text.push(SequenceFragmentText {
                         fragment_index,
                         text: format!("[{}]", alternative.label),
@@ -3186,11 +3206,8 @@ impl GpuRenderPlan {
                     Some(node.bounds.width),
                     declared.get("font-size").map(String::as_str),
                 );
-                let (fill, _) = crate::renderer::resolve_node_colors_with_defaults(
-                    ir,
-                    node.node_index,
-                    config,
-                );
+                let (fill, _) =
+                    crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
                 let readable = fm_core::readable_label_color(
                     fill.as_deref().unwrap_or(&config.node_fill),
                     &config.label_color,
@@ -9385,6 +9402,79 @@ mod tests {
         assert!(
             plan.glyph_atlas.cells.iter().any(|cell| cell.glyph == '['),
             "the fragment-only bracket never reached the atlas"
+        );
+    }
+
+    #[test]
+    fn sequence_gpu_wrapped_conditions_keep_every_measured_glyph_row() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             alt Continue processing every queued request until all observers have acknowledged the completed transaction and its durable retry history\n\
+             Note left of A: Retain this annotation\n\
+             else Preserve the full pending request while waiting for the remote participant to become available for another transaction attempt\n\
+             end\nA->>B: Finished\n",
+        ).ir;
+        let config = crate::CanvasRenderConfig {
+            font_size: 28.0,
+            line_height: 1.6,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let fragment = &layout.extensions.sequence_fragments[0];
+        assert_eq!(fragment.captions.len(), 2);
+        assert!(
+            fragment
+                .captions
+                .iter()
+                .all(|caption| caption.lines().count() > 1)
+        );
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::SequenceFragment)
+            .collect();
+        assert_eq!(
+            runs.len(),
+            1 + fragment
+                .captions
+                .iter()
+                .map(|caption| caption.lines().count())
+                .sum::<usize>()
+        );
+        for caption in &fragment.captions {
+            for (line, y) in caption.lines() {
+                let matching: Vec<_> = runs
+                    .iter()
+                    .filter(|run| text_for_run(&plan, run) == line)
+                    .collect();
+                assert_eq!(matching.len(), 1, "missing or duplicated GPU row {line:?}");
+                let run = matching[0];
+                for quad in &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize] {
+                    assert!((quad.center[1] - y).abs() < 0.01);
+                    assert!((quad.half_extent[1] * 2.0 - caption.font_size).abs() < 0.01);
+                    assert!(quad.center[1] - quad.half_extent[1] >= caption.bounds.y - 0.01);
+                    assert!(
+                        quad.center[1] + quad.half_extent[1]
+                            <= caption.bounds.y + caption.bounds.height + 0.01
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            plan.sequence_fragment_border_segments.last().unwrap().from[1],
+            fragment.branch_tops[0]
+        );
+        let note = &layout.extensions.sequence_notes[0];
+        assert!(
+            fragment.bounds.x < note.bounds.x
+                && fragment.bounds.x + fragment.bounds.width > note.bounds.x + note.bounds.width
         );
     }
 

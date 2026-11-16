@@ -6306,7 +6306,25 @@ fn render_layout_to_svg(
         // meanings and mermaid styles them differently (`labelText` is the bold keyword tab,
         // `loopText` the plain condition), so a shared class would make them impossible to theme
         // apart and would let a selector meant for one silently catch the other.
-        if let Some(condition_text) = condition_text.as_deref() {
+        if let Some(caption) = fragment.caption(None) {
+            for (text, y) in caption.lines() {
+                sequence_furniture.push(
+                    Element::text()
+                        .x(caption.bounds.center().x + offset_x)
+                        .y(y + offset_y)
+                        .content(text)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "middle")
+                        .attr_num("font-size", caption.font_size)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&theme.colors.text)
+                        .class("fm-sequence-fragment-condition"),
+                );
+            }
+        } else if let Some(condition_text) = condition_text.as_deref() {
             sequence_furniture.push(
                 Element::text()
                     .x(fx + fw / 2.0)
@@ -6385,7 +6403,25 @@ fn render_layout_to_svg(
                         .stroke_dasharray("6,4")
                         .class("fm-sequence-fragment-divider"),
                 );
-                if !alternative.label.is_empty() {
+                if let Some(caption) = fragment.caption(Some(branch_index)) {
+                    for (text, y) in caption.lines() {
+                        sequence_furniture.push(
+                            Element::text()
+                                .x(caption.bounds.x + offset_x)
+                                .y(y + offset_y)
+                                .content(text)
+                                .attr("dominant-baseline", "middle")
+                                .attr_num("font-size", caption.font_size)
+                                .attr("font-weight", "bold")
+                                .font_family_unless_embedded_css(
+                                    &config.font_family,
+                                    config.embed_theme_css,
+                                )
+                                .fill(&theme.colors.text)
+                                .class("fm-sequence-fragment-alt-label"),
+                        );
+                    }
+                } else if !alternative.label.is_empty() {
                     sequence_furniture.push(
                         Element::text()
                             .x(fx + 6.0)
@@ -24376,6 +24412,7 @@ mod tests {
                         height: 60.0,
                     },
                     branch_tops: Vec::new(),
+                    captions: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -24482,6 +24519,7 @@ mod tests {
                         height: 60.0,
                     },
                     branch_tops: Vec::new(),
+                    captions: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -26605,6 +26643,91 @@ marker#arrow-open path {
                 x + width,
                 vx + vw
             );
+        }
+    }
+
+    #[test]
+    fn sequence_wrapped_conditions_use_measured_rows_in_both_svg_backends() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             alt Continue processing every queued request until all observers have acknowledged the completed transaction and its durable retry history\n\
+             Note left of A: Retain this annotation\n\
+             else Preserve the full pending request while waiting for the remote participant to become available for another transaction attempt\n\
+             end\nA->>B: Finished\n",
+        ).ir;
+        for font_size in [15.0, 28.0] {
+            let config = SvgRenderConfig {
+                font_size,
+                line_height: 1.6,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let fragment = &layout.extensions.sequence_fragments[0];
+            assert_eq!(fragment.captions.len(), 2);
+            assert!(
+                fragment
+                    .captions
+                    .iter()
+                    .all(|caption| caption.lines().count() > 1)
+            );
+            assert!(
+                layout.bounds.x < 0.0,
+                "the side annotation exercises origin translation"
+            );
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let config = SvgRenderConfig {
+                    backend,
+                    ..config.clone()
+                };
+                let svg = render_svg_with_layout(&ir, &layout, &config);
+                let (offset_x, offset_y) = match backend {
+                    SvgBackend::LegacyLayout => (
+                        config.padding - layout.bounds.x,
+                        config.padding - layout.bounds.y,
+                    ),
+                    SvgBackend::Scene => (0.0, 0.0),
+                };
+                let drawn: Vec<_> = svg
+                    .split("<text ")
+                    .skip(1)
+                    .map(|chunk| {
+                        let (attributes, tail) = chunk.split_once('>').unwrap();
+                        (attributes, tail.split_once("</text>").unwrap().0)
+                    })
+                    .collect();
+                for caption in &fragment.captions {
+                    for (line, y) in caption.lines() {
+                        let matches: Vec<_> =
+                            drawn.iter().filter(|(_, text)| *text == line).collect();
+                        assert_eq!(matches.len(), 1, "{backend:?} lost or duplicated {line:?}");
+                        let attributes = matches[0].0;
+                        let number = |name| {
+                            scene_attribute(attributes, name)
+                                .unwrap()
+                                .parse::<f32>()
+                                .unwrap()
+                        };
+                        let x = if caption.alternative.is_some() {
+                            caption.bounds.x
+                        } else {
+                            caption.bounds.center().x
+                        };
+                        assert!((number("x") - x - offset_x).abs() < 0.01);
+                        assert!((number("y") - y - offset_y).abs() < 0.01);
+                        assert!((number("font-size") - caption.font_size).abs() < 0.01);
+                        assert_eq!(
+                            scene_attribute(attributes, "dominant-baseline"),
+                            Some("middle")
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -28990,6 +29113,7 @@ marker#arrow-open path {
                         height: 80.0,
                     },
                     branch_tops: Vec::new(),
+                    captions: Vec::new(),
                 }],
                 ..Default::default()
             },

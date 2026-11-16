@@ -2944,7 +2944,10 @@ impl Canvas2dRenderer {
             self.draw_calls += 4;
             labels_drawn += 1;
 
-            if !fragment.label.is_empty() {
+            if let Some(caption) = fragment.caption(None) {
+                labels_drawn +=
+                    self.draw_sequence_fragment_caption(ctx, caption, offset_x, offset_y);
+            } else if !fragment.label.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
                 ctx.set_font(condition_font.get_or_insert_with(|| {
                     format!("{label_font_size}px {}", self.config.font_family)
@@ -2997,7 +3000,10 @@ impl Canvas2dRenderer {
                 ctx.set_line_dash(&[]);
                 self.draw_calls += 1;
 
-                if !alternative.label.is_empty() {
+                if let Some(caption) = fragment.caption(Some(branch_index)) {
+                    labels_drawn +=
+                        self.draw_sequence_fragment_caption(ctx, caption, offset_x, offset_y);
+                } else if !alternative.label.is_empty() {
                     let fragment_font = fragment_font
                         .get_or_insert_with(|| sequence_fragment_font_css(&self.config));
                     ctx.set_fill_style(&self.config.label_color);
@@ -3015,6 +3021,41 @@ impl Canvas2dRenderer {
             }
         }
         labels_drawn
+    }
+
+    fn draw_sequence_fragment_caption<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        caption: &fm_layout::LayoutSequenceFragmentCaption,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> usize {
+        let alternative = caption.alternative.is_some();
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&format!(
+            "{}{}px {}",
+            if alternative { "bold " } else { "" },
+            caption.font_size,
+            self.config.font_family,
+        ));
+        ctx.set_text_align(if alternative {
+            TextAlign::Left
+        } else {
+            TextAlign::Center
+        });
+        ctx.set_text_baseline(TextBaseline::Middle);
+        let x = f64::from(if alternative {
+            caption.bounds.x
+        } else {
+            caption.bounds.center().x
+        }) + offset_x;
+        let mut count = 0;
+        for (text, y) in caption.lines() {
+            ctx.fill_text(text, x, f64::from(y) + offset_y);
+            self.draw_calls += 1;
+            count += 1;
+        }
+        count
     }
 
     /// Draw sequence diagram notes.
@@ -9781,7 +9822,10 @@ mod tests {
                 Some(bounds.width),
                 declared.get("font-size").map(String::as_str),
             );
-            assert!(card.rows.len() >= 6, "every metadata field must become content");
+            assert!(
+                card.rows.len() >= 6,
+                "every metadata field must become content"
+            );
             let text = card
                 .rows
                 .iter()
@@ -9796,7 +9840,10 @@ mod tests {
                 "release train",
                 "UI, polish",
             ] {
-                assert!(text.contains(authored), "card lost authored value: {authored}");
+                assert!(
+                    text.contains(authored),
+                    "card lost authored value: {authored}"
+                );
             }
             let top = bounds.y + ((bounds.height - card.height) * 0.5).max(0.0);
             let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
@@ -9844,10 +9891,8 @@ mod tests {
                     .collect();
                 assert!(stack.is_empty());
                 for row in &card.rows {
-                    let rendered: Vec<_> = drawn
-                        .iter()
-                        .filter(|entry| entry.0 == row.text)
-                        .collect();
+                    let rendered: Vec<_> =
+                        drawn.iter().filter(|entry| entry.0 == row.text).collect();
                     assert_eq!(
                         rendered.len(),
                         1,
@@ -9942,7 +9987,9 @@ mod tests {
                             plan.glyph_atlas
                                 .cells
                                 .iter()
-                                .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                                .find(|cell| {
+                                    cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max
+                                })
                                 .expect("WIP glyph is in the atlas")
                                 .glyph
                         })
@@ -12138,6 +12185,101 @@ mod tests {
                 }),
                 "the {keyword} divider must use the empty branch's reserved layout row"
             );
+        }
+    }
+
+    #[test]
+    fn canvas_sequence_wrapped_conditions_match_layout_and_shared_scene_rows() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             alt Continue processing every queued request until all observers have acknowledged the completed transaction and its durable retry history\n\
+             Note left of A: Retain this annotation\n\
+             else Preserve the full pending request while waiting for the remote participant to become available for another transaction attempt\n\
+             end\nA->>B: Finished\n",
+        ).ir;
+        let config = CanvasRenderConfig {
+            font_size: 28.0,
+            line_height: 1.6,
+            auto_fit: false,
+            padding: 7.0,
+            ..Default::default()
+        };
+        let metrics = config.font_metrics();
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        let fragment = &layout.extensions.sequence_fragments[0];
+        assert_eq!(fragment.captions.len(), 2);
+        assert!(
+            fragment
+                .captions
+                .iter()
+                .all(|caption| caption.lines().count() > 1)
+        );
+        assert!(layout.bounds.x < 0.0);
+        for use_scene in [false, true] {
+            let mut ctx = MockCanvas2dContext::new(1600.0, 1200.0);
+            let mut renderer = Canvas2dRenderer::new(config.clone());
+            let (origin_x, origin_y) = if use_scene {
+                renderer.render_scene(&scene, &mut ctx);
+                (scene.bounds.x, scene.bounds.y)
+            } else {
+                renderer.render(&layout, &ir, &mut ctx);
+                (layout.bounds.x, layout.bounds.y)
+            };
+            let mut font = String::new();
+            let mut baseline = TextBaseline::Alphabetic;
+            let painted: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::SetFont(value) => {
+                        font.clone_from(value);
+                        None
+                    }
+                    DrawOperation::SetTextBaseline(value) => {
+                        baseline = *value;
+                        None
+                    }
+                    DrawOperation::FillText(text, x, y) => {
+                        Some((text.as_str(), *x, *y, font.clone(), baseline))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for caption in &fragment.captions {
+                for (line, y) in caption.lines() {
+                    let matches: Vec<_> = painted.iter().filter(|run| run.0 == line).collect();
+                    assert_eq!(
+                        matches.len(),
+                        1,
+                        "scene={use_scene} lost or duplicated {line:?}"
+                    );
+                    let run = matches[0];
+                    let x = if caption.alternative.is_some() {
+                        caption.bounds.x
+                    } else {
+                        caption.bounds.center().x
+                    };
+                    assert!((run.1 - f64::from(x - origin_x) - config.padding).abs() < 0.01);
+                    assert!((run.2 - f64::from(y - origin_y) - config.padding).abs() < 0.01);
+                    let font_size = run
+                        .3
+                        .split_whitespace()
+                        .find_map(|word| {
+                            word.strip_suffix("px")
+                                .and_then(|size| size.parse::<f32>().ok())
+                        })
+                        .unwrap();
+                    assert!((font_size - caption.font_size).abs() < 0.01);
+                    assert_eq!(run.4, TextBaseline::Middle);
+                }
+            }
         }
     }
 

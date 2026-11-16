@@ -332,7 +332,10 @@ mod tests {
         let metrics = FontMetrics::default_metrics();
         let full = ClusterCaptionLayout::new(&parsed.ir, 0, None, &metrics);
         assert_eq!(
-            full.rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            full.rows
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
             ["In", "progress", "WIP: 1 / 0 (over limit)"],
         );
         assert_eq!(full.rows[2].kind, ClusterCaptionRowKind::Wip);
