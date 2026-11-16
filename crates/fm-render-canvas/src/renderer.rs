@@ -6768,8 +6768,8 @@ mod tests {
         let plan = crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
         assert_title_colors(&plan, "#f8fafc");
 
-        // Canvas accepts HSL frame colors that the GPU paint parser cannot yet convert.
-        // Preserve configured dark surfaces for those channels instead of using light constants.
+        // Authored HSL frame colors retain the same paint on the GPU. Context-dependent colors
+        // still need a host cascade; preserve configured dark surfaces when none is available.
         ir.meta.theme_overrides.theme_variables.remove("clusterBkg");
         ir.meta
             .theme_overrides
@@ -6783,6 +6783,20 @@ mod tests {
             cluster_stroke: "#475569".into(),
             ..Default::default()
         };
+        let plan =
+            crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &dark_config);
+        let hsl = [0.24, 0.28, 0.36, 1.0];
+        for actual in [
+            plan.cluster_instances[0].stroke,
+            plan.cluster_instances[1].fill,
+        ] {
+            for (actual, expected) in actual.into_iter().zip(hsl) {
+                assert!((actual - expected).abs() < 1e-5);
+            }
+        }
+        for cluster in &mut layout.clusters {
+            cluster.color = Some("currentColor".into());
+        }
         let plan =
             crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &dark_config);
         assert_eq!(

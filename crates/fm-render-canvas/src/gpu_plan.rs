@@ -224,8 +224,9 @@ pub struct GpuNodeInstance {
 
 /// Parse a CSS colour into RGBA floats for a shader, or `None` if it is not one we can honour.
 ///
-/// Accepts `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` with integer or percentage
-/// channels, `transparent`, and the handful of bare keywords a diagram realistically uses.
+/// Accepts hexadecimal and named CSS colors, `rgb()`/`rgba()` and `hsl()`/`hsla()` in both
+/// comma-separated and space/slash forms, and `transparent`/`none`. Hue angles accept degrees,
+/// radians, gradians and turns. Intrinsic alpha stays separate from element/channel opacity.
 ///
 /// Returning `None` rather than a guess matters more on the GPU than on a canvas: a canvas ignores
 /// an unparsable `fillStyle` and keeps the previous colour, but a shader reads whatever bytes are in
@@ -242,50 +243,143 @@ pub fn parse_paint_rgba(value: &str) -> Option<[f32; 4]> {
     if matches!(lower.as_str(), "transparent" | "none") {
         return Some([0.0, 0.0, 0.0, 0.0]);
     }
-    if let Some(rgba) = named_paint_rgba(&lower) {
-        return Some(rgba);
+    if let Some(rgb) = fm_core::css_named_color_rgb(&lower) {
+        let [red, green, blue] = rgb.map(|channel| f32::from(channel) / 255.0);
+        return Some([red, green, blue, 1.0]);
     }
 
     if let Some(hex) = lower.strip_prefix('#') {
         return parse_hex_rgba(hex);
     }
 
-    for prefix in ["rgba(", "rgb("] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            let args = rest.strip_suffix(')')?;
-            let mut channels = [0.0_f32; 4];
-            channels[3] = 1.0;
-            let mut seen = 0_usize;
-            for (index, raw) in args.split(',').enumerate() {
-                if index >= 4 {
-                    return None;
-                }
-                let raw = raw.trim();
-                let (number, is_pct) = match raw.strip_suffix('%') {
-                    Some(head) => (head.trim(), true),
-                    None => (raw, false),
-                };
-                let parsed: f32 = number.parse().ok()?;
-                if !parsed.is_finite() {
-                    return None;
-                }
-                channels[index] = if index == 3 {
-                    if is_pct { parsed / 100.0 } else { parsed }
-                } else if is_pct {
-                    parsed / 100.0
-                } else {
-                    parsed / 255.0
-                };
-                seen = index + 1;
-            }
-            if seen < 3 {
-                return None;
-            }
-            return Some(channels.map(|c| c.clamp(0.0, 1.0)));
+    let (function, arguments) = lower.split_once('(')?;
+    if !matches!(function, "rgb" | "rgba" | "hsl" | "hsla") {
+        return None;
+    }
+    let arguments = arguments.strip_suffix(')')?;
+    let legacy = arguments.contains(',');
+    let (components, alpha) = paint_function_components(arguments, legacy)?;
+    let alpha = match alpha {
+        Some(value) => paint_number_or_percentage(value, 1.0)?,
+        None => 1.0,
+    }
+    .clamp(0.0, 1.0) as f32;
+    let rgb = if matches!(function, "rgb" | "rgba") {
+        // Legacy RGB permits either three numbers or three percentages, never a mixture.
+        if legacy
+            && components
+                .iter()
+                .any(|value| value.ends_with('%') != components[0].ends_with('%'))
+        {
+            return None;
+        }
+        [
+            paint_number_or_percentage(components[0], 255.0)?,
+            paint_number_or_percentage(components[1], 255.0)?,
+            paint_number_or_percentage(components[2], 255.0)?,
+        ]
+    } else {
+        // Saturation/lightness numbers belong only to modern HSL; comma syntax requires %.
+        if legacy && components[1..].iter().any(|value| !value.ends_with('%')) {
+            return None;
+        }
+        let hue = paint_hue_degrees(components[0])?;
+        let saturation = paint_number_or_percentage(components[1], 100.0)?.max(0.0);
+        let lightness = paint_number_or_percentage(components[2], 100.0)?.clamp(0.0, 1.0);
+        let amplitude = saturation * lightness.min(1.0 - lightness);
+        let channel = |offset: f64| {
+            let sector = (hue / 30.0 + offset) % 12.0;
+            lightness - amplitude * (sector - 3.0).min(9.0 - sector).clamp(-1.0, 1.0)
+        };
+        [channel(0.0), channel(8.0), channel(4.0)]
+    };
+    let [red, green, blue] = rgb.map(|channel| channel.clamp(0.0, 1.0) as f32);
+    Some([red, green, blue, alpha])
+}
+
+/// Parse exactly three color components and optional alpha without accepting mixed separators.
+fn paint_function_components(arguments: &str, legacy: bool) -> Option<([&str; 3], Option<&str>)> {
+    if legacy {
+        let mut fields = arguments.split(',').map(str::trim);
+        let components = [fields.next()?, fields.next()?, fields.next()?];
+        let alpha = fields.next();
+        return fields.next().is_none().then_some((components, alpha));
+    }
+    let mut parts = arguments.split('/');
+    let mut fields = parts.next()?.split_ascii_whitespace();
+    let components = [fields.next()?, fields.next()?, fields.next()?];
+    if fields.next().is_some() {
+        return None;
+    }
+    let alpha = parts.next().map(str::trim);
+    parts.next().is_none().then_some((components, alpha))
+}
+
+fn paint_number_or_percentage(value: &str, number_scale: f64) -> Option<f64> {
+    if let Some(number) = value.strip_suffix('%') {
+        Some(paint_number(number)? / 100.0)
+    } else {
+        Some(paint_number(value)? / number_scale)
+    }
+}
+
+/// CSS numbers have no internal whitespace or trailing decimal point. Checking the token before
+/// parsing also keeps Rust spellings such as `NaN`/`inf` and CSS expressions out of GPU buffers.
+fn paint_number(value: &str) -> Option<f64> {
+    let bytes = value.as_bytes();
+    let mut index = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let integer_start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    let integer_digits = index - integer_start;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return None;
+        }
+    } else if integer_digits == 0 {
+        return None;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return None;
         }
     }
+    if index != bytes.len() {
+        return None;
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
 
-    None
+fn paint_hue_degrees(value: &str) -> Option<f64> {
+    for (suffix, period) in [
+        ("grad", 400.0),
+        ("deg", 360.0),
+        ("rad", std::f64::consts::TAU),
+        ("turn", 1.0),
+    ] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            // Reduce before converting units so a large finite hue cannot overflow its range.
+            return Some(paint_number(number)?.rem_euclid(period) / period * 360.0);
+        }
+    }
+    Some(paint_number(value)?.rem_euclid(360.0))
 }
 
 /// `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`.
@@ -315,25 +409,6 @@ fn parse_hex_rgba(hex: &str) -> Option<[f32; 4]> {
         _ => return None,
     };
     Some(channels.map(|c| f32::from(c) / 255.0))
-}
-
-/// The bare keywords a diagram realistically writes. Deliberately short: an unknown keyword returns
-/// `None` and takes the theme default, which is visible, rather than black, which looks deliberate.
-fn named_paint_rgba(lower: &str) -> Option<[f32; 4]> {
-    let rgb = match lower {
-        "black" => [0.0, 0.0, 0.0],
-        "white" => [1.0, 1.0, 1.0],
-        "red" => [1.0, 0.0, 0.0],
-        "green" => [0.0, 0.501_960_8, 0.0],
-        "blue" => [0.0, 0.0, 1.0],
-        "yellow" => [1.0, 1.0, 0.0],
-        "cyan" | "aqua" => [0.0, 1.0, 1.0],
-        "magenta" | "fuchsia" => [1.0, 0.0, 1.0],
-        "gray" | "grey" => [0.501_960_8, 0.501_960_8, 0.501_960_8],
-        "orange" => [1.0, 0.647_058_8, 0.0],
-        _ => return None,
-    };
-    Some([rgb[0], rgb[1], rgb[2], 1.0])
 }
 
 /// One edge segment for an instanced WebGPU line pass.
@@ -7979,7 +8054,7 @@ mod tests {
 
     #[test]
     fn paint_parsing_accepts_the_forms_a_diagram_writes() {
-        let cases: [(&str, [f32; 4]); 8] = [
+        let cases: &[(&str, [f32; 4])] = &[
             ("#ff0000", [1.0, 0.0, 0.0, 1.0]),
             ("#F00", [1.0, 0.0, 0.0, 1.0]),
             ("#ff000080", [1.0, 0.0, 0.0, 0.501_960_8]),
@@ -7988,6 +8063,24 @@ mod tests {
             ("red", [1.0, 0.0, 0.0, 1.0]),
             ("transparent", [0.0, 0.0, 0.0, 0.0]),
             ("none", [0.0, 0.0, 0.0, 0.0]),
+            ("navy", [0.0, 0.0, 128.0 / 255.0, 1.0]),
+            (" RebeccaPurple ", [0.4, 0.2, 0.6, 1.0]),
+            ("rgb(100% 0% 50% / 25%)", [1.0, 0.0, 0.5, 0.25]),
+            ("rgba(255 50% 0 / .75)", [1.0, 0.5, 0.0, 0.75]),
+            ("rgba(2.55e2, +0, -10, 125%)", [1.0, 0.0, 0.0, 1.0]),
+            ("rgb(1e300 -1e300 127.5 / 1e300)", [1.0, 0.0, 0.5, 1.0]),
+            ("hsl(0,100%,50%)", [1.0, 0.0, 0.0, 1.0]),
+            ("hsla(120,100%,25%,50%)", [0.0, 0.5, 0.0, 0.5]),
+            ("HSL(240DEG 100% 50% / .125)", [0.0, 0.0, 1.0, 0.125]),
+            ("hsl(-120deg 100% 50%)", [0.0, 0.0, 1.0, 1.0]),
+            ("hsl(.5turn 100% 50%)", [0.0, 1.0, 1.0, 1.0]),
+            ("hsl(200grad 100% 50%)", [0.0, 1.0, 1.0, 1.0]),
+            ("hsl(3.141592653589793rad 100% 50%)", [0.0, 1.0, 1.0, 1.0]),
+            ("hsl(780 100 50 / 25%)", [1.0, 1.0, 0.0, 0.25]),
+            ("hsl(120,-20%,50%)", [0.5, 0.5, 0.5, 1.0]),
+            ("hsl(120 200% 25%)", [0.0, 0.75, 0.0, 1.0]),
+            ("hsl(10 0% 200%)", [1.0, 1.0, 1.0, 1.0]),
+            ("hsla(240 100% -20% / -5%)", [0.0, 0.0, 0.0, 0.0]),
         ];
         for (input, want) in cases {
             let got =
@@ -8014,6 +8107,28 @@ mod tests {
             "#gg0000",
             "rgb(255,0)",
             "rgb(255,0,0",
+            "rgb(100%,0,0)",
+            "rgb(255,0,0 / 0.5)",
+            "rgb(255 0 0,0.5)",
+            "rgb(255 0 0 0.5)",
+            "rgb(255 0 0 /)",
+            "rgb(255 0 0 / .5 / .25)",
+            "rgb(255.,0,0)",
+            "rgb(100 %,0%,0%)",
+            "rgb(1e+,0,0)",
+            "rgba(255,0,0,NaN)",
+            "rgb(inf,0,0)",
+            "hsl(0,100,50)",
+            "hsl(0% 100% 50%)",
+            "hsl(0 deg 100% 50%)",
+            "hsla(0,100%,50%,)",
+            "hsl(NaN 100% 50%)",
+            "hsl(0,100%,50% / 1)",
+            "hsl(0 100% 50% / 1,0)",
+            "hsl(0 100% 50%) trailing",
+            "rgb(calc(255) 0 0)",
+            "var(--paint)",
+            "currentColor",
             "url(#x)",
         ] {
             assert!(
@@ -8021,6 +8136,114 @@ mod tests {
                 "{input} should have been refused"
             );
         }
+    }
+
+    fn assert_paint_rgba_eq(actual: [f32; 4], expected: [f32; 4]) {
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-5),
+            "paint {actual:?} should be {expected:?}"
+        );
+    }
+
+    #[test]
+    fn authored_css_paints_reach_gpu_shapes_edges_and_text_without_losing_alpha() {
+        let ir = fm_parser::parse(
+            "flowchart LR\nsubgraph group[Workspace]\nA[Start] -->|continue| B[Finish]\nend\n\
+             classDef default fill:navy,stroke:rgb(0 50% 100% / 75%),color:rebeccapurple\n\
+             style A fill:hsla(120,100%,25%,50%),opacity:0.5,fill-opacity:0.4,stroke-opacity:0.8\n\
+             style group fill:aliceblue,stroke:hsl(240 100% 50% / 50%),color:darkslategray\n\
+             linkStyle 0 stroke:rebeccapurple,color:hsl(60 100% 25% / 40%),opacity:0.5,stroke-opacity:0.4\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        let first = ir.nodes.iter().position(|node| node.id == "A").unwrap();
+        let second = ir.nodes.iter().position(|node| node.id == "B").unwrap();
+        let node = |index: usize| {
+            plan.node_instances
+                .iter()
+                .find(|node| node.node_index as usize == index)
+                .unwrap()
+        };
+        assert_paint_rgba_eq(node(first).fill, [0.0, 0.5, 0.0, 0.1]);
+        assert_paint_rgba_eq(node(first).stroke, [0.0, 0.5, 1.0, 0.3]);
+        assert_paint_rgba_eq(node(second).fill, [0.0, 0.0, 128.0 / 255.0, 1.0]);
+        assert_paint_rgba_eq(node(second).stroke, [0.0, 0.5, 1.0, 0.75]);
+        assert_eq!(plan.cluster_instances.len(), 1);
+        assert_paint_rgba_eq(
+            plan.cluster_instances[0].fill,
+            [240.0 / 255.0, 248.0 / 255.0, 1.0, 1.0],
+        );
+        assert_paint_rgba_eq(plan.cluster_instances[0].stroke, [0.0, 0.0, 1.0, 0.5]);
+        assert!(!plan.edge_segments.is_empty());
+        for segment in &plan.edge_segments {
+            assert_paint_rgba_eq(segment.color, [0.4, 0.2, 0.6, 0.2]);
+        }
+        for (source, index, expected) in [
+            (GpuTextSource::Node, first, [0.4, 0.2, 0.6, 0.5]),
+            (GpuTextSource::Node, second, [0.4, 0.2, 0.6, 1.0]),
+            (GpuTextSource::Edge, 0, [0.5, 0.5, 0.0, 0.2]),
+            (
+                GpuTextSource::Cluster,
+                0,
+                [47.0 / 255.0, 79.0 / 255.0, 79.0 / 255.0, 1.0],
+            ),
+        ] {
+            let quads: Vec<_> = plan
+                .text_quads
+                .iter()
+                .filter(|quad| {
+                    let run = &plan.text_runs[quad.run_index as usize];
+                    run.source == source && run.node_index as usize == index
+                })
+                .collect();
+            assert!(!quads.is_empty(), "missing {source:?} {index} text");
+            for quad in quads {
+                assert_paint_rgba_eq(quad.color, expected);
+            }
+        }
+        assert_eq!(plan, GpuRenderPlan::from_layout(&ir, &layout, 1.5));
+    }
+
+    #[test]
+    fn authored_css_sequence_regions_keep_gpu_colors_and_paint_order() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nbox hsl(240,100%,50%) Participants\nparticipant A\nparticipant B\nend\n\
+             rect hsla(210,50%,40%,0.25)\nrect rebeccapurple\nA->>B: ping\nend\nend\n\
+             rect rgb(25% 50% 75% / 40%)\nB-->>A: pong\nend\n\
+             rect url(https://example.invalid/paint)\nA->>B: unsafe paint\nend\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_eq!(plan.cluster_instances.len(), 1);
+        assert_paint_rgba_eq(plan.cluster_instances[0].fill, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(plan.sequence_background_instances.len(), 3);
+        for (region, expected) in plan.sequence_background_instances.iter().zip([
+            [0.2, 0.4, 0.6, 0.25],
+            [0.4, 0.2, 0.6, 1.0],
+            [0.25, 0.5, 0.75, 0.4],
+        ]) {
+            assert_paint_rgba_eq(region.fill, expected);
+            assert_eq!(region.stroke, [0.0; 4]);
+            assert!(region.half_extent.iter().all(|extent| *extent > 0.0));
+        }
+        let parent = plan.sequence_background_instances[0];
+        let child = plan.sequence_background_instances[1];
+        for axis in 0..2 {
+            assert!(
+                parent.center[axis] - parent.half_extent[axis]
+                    <= child.center[axis] - child.half_extent[axis]
+            );
+            assert!(
+                parent.center[axis] + parent.half_extent[axis]
+                    >= child.center[axis] + child.half_extent[axis]
+            );
+        }
+        assert_eq!(plan, GpuRenderPlan::from_layout(&ir, &layout, 1.5));
     }
 
     /// A declared fill reaches the GPU instance, through the SAME resolver the raster pass uses.
