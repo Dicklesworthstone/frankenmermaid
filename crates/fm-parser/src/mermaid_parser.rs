@@ -12597,45 +12597,40 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         }
 
         // Slice: "Label" : value
-        let Some(slice_name) = parse_name_before_colon(trimmed) else {
+        let Some((slice_name, raw_value)) = parse_chart_label_value(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported pie syntax: {trimmed}"
             ));
             continue;
         };
 
-        let slice_id = normalize_identifier(slice_name);
-        if slice_id.is_empty() {
-            builder.add_warning(format!(
-                "Line {line_number}: pie slice identifier could not be derived: {trimmed}"
-            ));
-            continue;
-        }
+        let slice_id = chart_occurrence_id(&slice_name, line_number, builder);
 
         // Extract numeric value after the colon.
-        let value = match trimmed.split_once(':').map(|(_, v)| trim_fast(v)) {
-            Some(v) if !v.is_empty() => {
-                if let Ok(n) = v.parse::<f32>() {
-                    n
-                } else {
+        let value = if raw_value.is_empty() {
+            0.0
+        } else {
+            match raw_value.parse::<f32>() {
+                Ok(value) if value.is_finite() => value,
+                _ => {
                     builder.add_warning(format!(
-                        "Line {line_number}: invalid pie slice value '{v}', defaulting to 0"
+                        "Line {line_number}: invalid pie slice value '{raw_value}', defaulting to 0"
                     ));
                     0.0
                 }
             }
-            _ => 0.0,
         };
 
-        pie_meta.slices.push(fm_core::IrPieSlice {
-            // Entity codes are decoded here as they are in every other label position (bd-j06n2);
-            // the pinned mermaid-11.15.0 draws `#35;` as `#` in a pie slice label.
-            label: decode_mermaid_entities(slice_name),
-            value,
-        });
-
+        // A caption is not a graph identity. Keep every row paired with its own semantic node,
+        // including repeated captions and labels whose normalized IDs collide.
+        let label = decode_mermaid_entities(&slice_name);
         let span = span_for(line_number, line);
-        let _ = builder.intern_node(&slice_id, Some(slice_name), NodeShape::Circle, span);
+        if builder
+            .intern_fresh_node_owned_label(slice_id, label.clone(), NodeShape::Circle, span)
+            .is_some()
+        {
+            pie_meta.slices.push(fm_core::IrPieSlice { label, value });
+        }
     }
 
     if !pie_meta.slices.is_empty() || pie_meta.title.is_some() {
@@ -12757,39 +12752,31 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Data point: "Label: [x, y]", optionally "Label:::class: [x, y] radius: 12, …".
-        // The class suffix is split off FIRST: its `:::` would otherwise be read as the colon that
-        // ends the name.
-        let (trimmed, point_class) = match trimmed.find(":::") {
-            Some(at) => {
-                let after = &trimmed[at + 3..];
-                let class_end = after.find(':').unwrap_or(after.len());
-                let class = after[..class_end].trim();
-                // Re-join name and the rest of the line without the class, so everything below
-                // reads a plain `Label: [x, y] …` line.
-                let rebuilt = format!("{}{}", &trimmed[..at], &after[class_end..]);
-                (
-                    Cow::Owned(rebuilt),
-                    (!class.is_empty()).then(|| class.to_string()),
-                )
-            }
-            None => (Cow::Borrowed(trimmed), None),
-        };
-        let trimmed: &str = &trimmed;
-        let Some(point_name) = parse_name_before_colon(trimmed) else {
+        // A class suffix belongs outside a quoted label. First read the complete label and its
+        // separator, then recognize the remaining two colons of `:::class: [x, y]`.
+        let Some((point_name, after_colon)) = parse_chart_label_value(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported quadrant syntax: {trimmed}"
             ));
             continue;
         };
 
-        let point_id = normalize_identifier(point_name);
-        if point_id.is_empty() {
-            builder.add_warning(format!(
-                "Line {line_number}: quadrant point identifier could not be derived: {trimmed}"
-            ));
-            continue;
-        }
+        let (point_class, after_colon) = if let Some(class_value) = after_colon.strip_prefix("::") {
+            let Some((class, coordinates)) = class_value.split_once(':') else {
+                builder.add_warning(format!(
+                    "Line {line_number}: quadrant point class is missing its coordinate separator: {trimmed}"
+                ));
+                continue;
+            };
+            let class = trim_fast(class);
+            (
+                (!class.is_empty()).then(|| class.to_string()),
+                trim_fast(coordinates),
+            )
+        } else {
+            (None, after_colon)
+        };
+        let point_id = chart_occurrence_id(&point_name, line_number, builder);
 
         // Parse "[x, y]" after the colon.
         //
@@ -12803,7 +12790,6 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         //
         // Taking the text BETWEEN the brackets fixes that. The no-bracket fallback below is kept
         // byte-for-byte, so a bare `A: 0.3, 0.6` behaves exactly as before.
-        let after_colon = trimmed.split_once(':').map_or("", |(_, v)| v.trim());
         let (coords, point_style) = match (after_colon.find('['), after_colon.find(']')) {
             (Some(open), Some(close)) if close > open => (
                 after_colon[open + 1..close].trim(),
@@ -12829,20 +12815,24 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             (x, 0.5)
         };
 
+        let label = decode_mermaid_entities(&point_name);
+        let span = span_for(line_number, line);
+        let Some(node) =
+            builder.intern_fresh_node_owned_label(point_id, label.clone(), NodeShape::Circle, span)
+        else {
+            continue;
+        };
         if let Some(class) = point_class {
             point_classes.push((meta.points.len(), class));
         }
         meta.points.push(fm_core::IrQuadrantPoint {
-            // Entity codes decode here as in every other label position (bd-j06n2); the pinned
-            // mermaid-11.15.0 draws `#35;` as `#` in a quadrant point label.
-            label: decode_mermaid_entities(point_name),
+            label,
             x: x.clamp(0.0, 1.0),
             y: y.clamp(0.0, 1.0),
             style,
         });
 
-        let span = span_for(line_number, line);
-        point_nodes.push(builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span));
+        point_nodes.push(Some(node));
     }
 
     // A class fills in only what the point's own clause left unset, key by key.
@@ -12879,12 +12869,12 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         if let Some(color) = &style.color {
             css.push_str("fill:");
             css.push_str(color);
-            css.push(',');
+            css.push(';');
         }
         if let Some(stroke) = &style.stroke_color {
             css.push_str("stroke:");
             css.push_str(stroke);
-            css.push(',');
+            css.push(';');
         }
         let inline = fm_core::parse_style_string(&css);
         if !inline.is_empty()
@@ -17370,12 +17360,54 @@ fn normalize_subgraph_title(raw: &str) -> Option<String> {
     (!unwrapped.is_empty()).then_some(unwrapped.to_string())
 }
 
-fn parse_name_before_colon(line: &str) -> Option<&str> {
-    let (left, _) = line.split_once(':')?;
-    // trim_fast for the two whitespace trims (the char `trim_matches` quote strips stay — they are
-    // memchr, not the `is_whitespace` CharSearcher). Called per pie slice / xychart point.
-    let candidate = trim_fast(trim_fast(left).trim_matches('"').trim_matches('\''));
-    (!candidate.is_empty()).then_some(candidate)
+/// Split a chart row at the separator following its complete label. Colons, class markers and
+/// escaped quotes inside a quoted caption are content, never delimiters. Unquoted labels retain
+/// the existing first-colon spelling. An unterminated quote rejects only its own source row.
+fn parse_chart_label_value(line: &str) -> Option<(Cow<'_, str>, &str)> {
+    let (label, remainder) = if let Some(quote @ ('"' | '\'')) = line.chars().next() {
+        let mut chars = line[quote.len_utf8()..].chars();
+        let mut label = String::new();
+        loop {
+            let ch = chars.next()?;
+            if ch == quote {
+                break;
+            }
+            if ch == '\\' {
+                let escaped = chars.next()?;
+                // Only quoting escapes are syntax here; retain a literal path such as
+                // `folder\name` rather than silently consuming its backslash.
+                if escaped != quote && escaped != '\\' {
+                    label.push('\\');
+                }
+                label.push(escaped);
+            } else {
+                label.push(ch);
+            }
+        }
+        (Cow::Owned(label), chars.as_str())
+    } else {
+        let separator = line.find(':')?;
+        (
+            Cow::Borrowed(trim_fast(&line[..separator])),
+            &line[separator..],
+        )
+    };
+    let value = trim_fast(remainder).strip_prefix(':')?;
+    (!label.trim().is_empty()).then(|| (label, trim_fast(value)))
+}
+
+/// Keep normalized first-use selectors while assigning a distinct node to every chart row.
+/// Normalized labels cannot contain `@`, so a source-line suffix cannot alias an authored key.
+fn chart_occurrence_id(label: &str, line_number: usize, builder: &IrBuilder) -> String {
+    let id = normalize_identifier(label);
+    if id.is_empty() {
+        // Punctuation-only or emoji captions are still meaningful chart content.
+        format!("chart@{line_number}")
+    } else if builder.node_id_by_key(&id).is_some() {
+        format!("{id}@{line_number}")
+    } else {
+        id
+    }
 }
 
 fn bracket_contents(line: &str) -> Option<&str> {
@@ -31298,7 +31330,283 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    #[test]
+    fn pie_quoted_labels_keep_colons_escaped_quotes_and_values() {
+        let parsed = parse_mermaid(
+            r#"pie showData
+"Errors: retry" : 2
+"Quoted \"value\": \\ path" : 3
+'Owner\'s: queue' : 4
+"field:::kind: [x, y]" : 5
+"Budget #58; approved" : 6
+"\"Boundary quotes\"" : 7
+"Folder\name" : 8
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.pie_meta.as_ref().expect("pie metadata");
+        let expected = [
+            "Errors: retry",
+            "Quoted \"value\": \\ path",
+            "Owner's: queue",
+            "field:::kind: [x, y]",
+            "Budget : approved",
+            "\"Boundary quotes\"",
+            "Folder\\name",
+        ];
+        assert_eq!(meta.slices.len(), expected.len());
+        assert_eq!(parsed.ir.nodes.len(), expected.len());
+        assert!(meta.show_data);
+        for (index, label) in expected.iter().enumerate() {
+            let slice = &meta.slices[index];
+            let node = &parsed.ir.nodes[index];
+            assert_eq!(slice.label, *label);
+            assert_eq!(parsed.ir.node_display_text(node), *label);
+            assert!((slice.value - (index + 2) as f32).abs() < f32::EPSILON);
+            assert_eq!(node.span_primary.start.line as usize, index + 2);
+        }
+    }
+
+    #[test]
+    fn pie_caption_collisions_keep_every_slice_and_semantic_node() {
+        let labels = ["A B", "A_B", "A B", "A B@4", "東京", "東京", "🎯", "!!!"];
+        let mut source = String::from("pie\n");
+        for (index, label) in labels.iter().enumerate() {
+            source.push_str(&format!("\"{label}\": {}\n", index + 1));
+        }
+        let parsed = parse_mermaid(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.pie_meta.as_ref().expect("pie metadata");
+        assert_eq!(meta.slices.len(), labels.len());
+        assert_eq!(parsed.ir.nodes.len(), labels.len());
+        assert_eq!(parsed.ir.graph.nodes.len(), labels.len());
+        assert_eq!(parsed.ir.nodes[0].id, "A_B", "retain a first-use selector");
+        let keys: std::collections::BTreeSet<_> =
+            parsed.ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(keys.len(), labels.len());
+        for (index, label) in labels.iter().enumerate() {
+            let node = &parsed.ir.nodes[index];
+            assert_eq!(parsed.ir.node_display_text(node), *label);
+            assert_eq!(meta.slices[index].label, *label);
+            assert!((meta.slices[index].value - (index + 1) as f32).abs() < f32::EPSILON);
+            assert_eq!(node.span_primary.start.line as usize, index + 2);
+            assert_eq!(parsed.ir.graph.nodes[index].node_id.0, index);
+        }
+    }
+
+    #[test]
+    fn pie_malformed_labels_and_nonfinite_values_recover_by_source_row() {
+        let parsed = parse_mermaid(
+            "pie\n\"Unclosed: 3\n\"Closed\" extra: 4\nGood: 2\n\"NaN\": NaN\n\"Inf\": inf\n\"Good: again\": 6\n",
+        );
+        let meta = parsed.ir.pie_meta.as_ref().expect("pie metadata");
+        let labels: Vec<_> = meta
+            .slices
+            .iter()
+            .map(|slice| slice.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Good", "NaN", "Inf", "Good: again"]);
+        assert_eq!(parsed.ir.nodes.len(), labels.len());
+        for (slice, value) in meta.slices.iter().zip([2.0, 0.0, 0.0, 6.0]) {
+            assert!(slice.value.is_finite());
+            assert!((slice.value - value).abs() < f32::EPSILON);
+        }
+        for line in [2, 3, 5, 6] {
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with(&format!("Line {line}:"))),
+                "missing recovery diagnostic for line {line}: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn pie_and_quadrant_occurrences_keep_independent_source_lens_edits() {
+        for (header, values, replacement_value) in [
+            ("pie", ["2", "3", "4"], "7"),
+            (
+                "quadrantChart",
+                ["[0.1, 0.9]", "[0.8, 0.2]", "[0.3, 0.7]"],
+                "[0.6, 0.4]",
+            ),
+        ] {
+            let source = format!(
+                "{header}\r\n  \"A B\": {}\r\n  \"A_B\": {}\r\n  \"A B\": {}\r\n",
+                values[0], values[1], values[2]
+            );
+            let snapshot = crate::build_parse_lens(&source);
+            let nodes: Vec<_> = snapshot
+                .source_map
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == fm_core::MermaidSourceMapKind::Node)
+                .collect();
+            assert_eq!(nodes.len(), 3, "{header}");
+            let keys: std::collections::BTreeSet<_> =
+                nodes.iter().map(|entry| &entry.element_id).collect();
+            assert_eq!(keys.len(), 3, "{header}");
+            for (index, entry) in nodes.iter().enumerate() {
+                assert_eq!(entry.index, index);
+                assert_eq!(entry.span.start.line as usize, index + 2);
+                let range =
+                    crate::resolve_span_text_range(&source, entry.span).expect("source range");
+                assert_eq!(
+                    &source[range.start_byte..range.end_byte],
+                    format!("  \"{}\": {}", ["A B", "A_B", "A B"][index], values[index])
+                );
+            }
+            let replacement = format!("  \"A_B: edited\": {replacement_value}");
+            let edit = crate::apply_parse_lens_edit(
+                &source,
+                &fm_core::MermaidLensEdit {
+                    element_id: nodes[1].element_id.clone(),
+                    replacement: replacement.clone(),
+                },
+            )
+            .expect("each chart row is independently editable");
+            assert_eq!(
+                edit.result.updated_source,
+                source.replace(&format!("  \"A_B\": {}", values[1]), &replacement)
+            );
+            let updated = &edit.snapshot.parsed.ir;
+            assert_eq!(updated.nodes.len(), 3);
+            for (node, label) in updated.nodes.iter().zip(["A B", "A_B: edited", "A B"]) {
+                assert_eq!(updated.node_display_text(node), label);
+            }
+            assert_eq!(updated.nodes[1].id, snapshot.parsed.ir.nodes[1].id);
+        }
+    }
+
     // ── Quadrant chart parser tests ────────────────────────────────────
+
+    #[test]
+    fn quadrant_quoted_labels_keep_internal_class_markers_and_point_styles() {
+        let parsed = parse_mermaid(
+            r##"quadrantChart
+"Latency: p95:::ms":::hot: [0.25, 0.75] color: #0000ff, radius: 12
+"Peak \"hot\": now": [0.75, 0.25] color: #00ff00
+'Owner\'s: queue':::hot: [0.5, 0.5]
+"Budget #58; approved": [0.125, 0.875]
+classDef hot color: #ff0000, stroke-color: #111111, radius: 9
+"##,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant metadata");
+        let labels = [
+            "Latency: p95:::ms",
+            "Peak \"hot\": now",
+            "Owner's: queue",
+            "Budget : approved",
+        ];
+        assert_eq!(parsed.ir.nodes.len(), labels.len());
+        assert_eq!(meta.points.len(), labels.len());
+        for ((point, node), label) in meta.points.iter().zip(&parsed.ir.nodes).zip(labels) {
+            assert_eq!(point.label, label);
+            assert_eq!(parsed.ir.node_display_text(node), label);
+        }
+        let first = &meta.points[0];
+        assert!((first.x - 0.25).abs() < f32::EPSILON);
+        assert!((first.y - 0.75).abs() < f32::EPSILON);
+        let own = first.style.as_ref().expect("point and class styles");
+        assert_eq!(own.radius, Some(12.0));
+        assert_eq!(own.color.as_deref(), Some("#0000ff"));
+        assert_eq!(own.stroke_color.as_deref(), Some("#111111"));
+        assert_eq!(
+            parsed
+                .ir
+                .resolved_node_style(0)
+                .get("stroke")
+                .map(String::as_str),
+            Some("#111111")
+        );
+        for (index, fill) in [Some("#0000ff"), Some("#00ff00"), Some("#ff0000"), None]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                parsed
+                    .ir
+                    .resolved_node_style(index)
+                    .get("fill")
+                    .map(String::as_str),
+                fill
+            );
+        }
+    }
+
+    #[test]
+    fn quadrant_caption_collisions_keep_coordinates_styles_and_source_ownership() {
+        let labels = ["A B", "A_B", "A B", "A B@4", "東京", "東京", "🎯", "!!!"];
+        let mut source = String::from("quadrantChart\n");
+        for (index, label) in labels.iter().enumerate() {
+            let x = (index + 1) as f32 / 10.0;
+            let color = if index % 2 == 0 { "#ff0000" } else { "#0000ff" };
+            source.push_str(&format!("\"{label}\": [{x}, {}] color: {color}\n", 1.0 - x));
+        }
+        let parsed = parse_mermaid(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant metadata");
+        assert_eq!(meta.points.len(), labels.len());
+        assert_eq!(parsed.ir.nodes.len(), labels.len());
+        assert_eq!(parsed.ir.graph.nodes.len(), labels.len());
+        assert_eq!(parsed.ir.nodes[0].id, "A_B");
+        let keys: std::collections::BTreeSet<_> =
+            parsed.ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(keys.len(), labels.len());
+        for (index, label) in labels.iter().enumerate() {
+            let node = &parsed.ir.nodes[index];
+            let point = &meta.points[index];
+            let x = (index + 1) as f32 / 10.0;
+            let color = if index % 2 == 0 { "#ff0000" } else { "#0000ff" };
+            assert_eq!(parsed.ir.node_display_text(node), *label);
+            assert_eq!(point.label, *label);
+            assert!((point.x - x).abs() < 1e-6);
+            assert!((point.y - (1.0 - x)).abs() < 1e-6);
+            assert_eq!(node.span_primary.start.line as usize, index + 2);
+            assert_eq!(
+                parsed
+                    .ir
+                    .resolved_node_style(index)
+                    .get("fill")
+                    .map(String::as_str),
+                Some(color)
+            );
+        }
+    }
+
+    #[test]
+    fn quadrant_malformed_quoted_rows_do_not_shift_later_points() {
+        let parsed = parse_mermaid(
+            "quadrantChart\n\"Unclosed: [0.1, 0.9]\n\"Closed\" extra: [0.2, 0.8]\n\"Class: missing\":::hot\n\"Valid: point\": [0.25, 0.75]\nA: [0.75, 0.25]\n",
+        );
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant metadata");
+        assert_eq!(meta.points.len(), 2);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(meta.points[0].label, "Valid: point");
+        assert_eq!(meta.points[1].label, "A");
+        for (index, point) in meta.points.iter().enumerate() {
+            let x = if index == 0 { 0.25 } else { 0.75 };
+            assert!((point.x - x).abs() < f32::EPSILON);
+            assert!((point.y - (1.0 - x)).abs() < f32::EPSILON);
+            assert_eq!(
+                parsed.ir.nodes[index].span_primary.start.line as usize,
+                index + 5
+            );
+        }
+        for line in [2, 3, 4] {
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with(&format!("Line {line}:"))),
+                "missing recovery diagnostic for line {line}: {:?}",
+                parsed.warnings
+            );
+        }
+    }
 
     #[test]
     fn quadrant_parser_extracts_axes_and_points() {
