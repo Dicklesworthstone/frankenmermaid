@@ -4099,7 +4099,7 @@ pub fn build_render_scene_with_metrics(
     if ir.diagram_type == DiagramType::XyChart
         && let Some(meta) = ir.xy_chart_meta.as_ref()
     {
-        return build_xychart_render_scene(ir, meta, layout);
+        return build_xychart_render_scene(ir, meta, layout, metrics);
     }
     if ir.diagram_type == DiagramType::QuadrantChart
         && let Some(meta) = ir.quadrant_meta.as_ref()
@@ -4728,15 +4728,266 @@ fn append_measured_scene_text(
     }
 }
 
-/// Quantitative charts cannot use the graph scene: their nodes are data marks, their edges
-/// connect samples, and their labels belong on axes rather than inside every mark. Keep the
-/// layout's domain and mark geometry while projecting chart furniture into ordinary primitives.
+/// Semantic role of a measured XY chart text row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XyChartTextRole {
+    ValueTick,
+    Category,
+    AxisTitle,
+    DiagramTitle,
+}
+
+/// One alphabetic-baseline row in the original chart's layout coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XyChartText {
+    pub text: String,
+    pub anchor: (f32, f32),
+    pub font_size: f32,
+    pub align: TextAlign,
+    pub role: XyChartTextRole,
+    /// Index of the tick, category or axis (x = 0, y = 1); zero for the diagram title.
+    pub index: usize,
+}
+
+/// Compose chart text once for shared scenes, SVG, Canvas and GPU rendering. Caption bands grow
+/// away from the plot for large fonts or multiline text; the data projection never changes.
+#[must_use]
+pub fn xychart_text_rows(
+    ir: &MermaidDiagramIr,
+    meta: &IrXyChartMeta,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<XyChartText> {
+    xychart_text_rows_with_min_font_size(ir, meta, layout, metrics, 8.0)
+}
+
+/// Compose chart text using a renderer's minimum readable font size.
+#[must_use]
+pub fn xychart_text_rows_with_min_font_size(
+    ir: &MermaidDiagramIr,
+    meta: &IrXyChartMeta,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+    min_font_size: f32,
+) -> Vec<XyChartText> {
+    let min_font_size = if min_font_size.is_finite() && min_font_size > 0.0 {
+        min_font_size
+    } else {
+        8.0
+    };
+    let plot = xychart_plot_bounds(meta, layout.bounds);
+    let (min, max) = resolve_xychart_y_domain(meta);
+    let font_size = metrics.font_size();
+    let mut rows = Vec::new();
+    let mut occupied: Vec<LayoutRect> = Vec::new();
+    let mut label = |text: &str,
+                     mut anchor: (f32, f32),
+                     font_size: f32,
+                     align,
+                     role,
+                     index,
+                     outward: Option<bool>| {
+        let lines: Vec<_> = text.lines().collect();
+        if lines.is_empty() {
+            return;
+        }
+        let row_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size,
+            line_height: 1.2,
+            ..metrics.config().clone()
+        });
+        let width = lines
+            .iter()
+            .map(|line| row_metrics.estimate_width(line))
+            .fold(0.0_f32, f32::max);
+        let last_row = lines.len().saturating_sub(1) as f32 * row_metrics.line_height_px();
+        let x = anchor.0
+            - width
+                * match align {
+                    TextAlign::Start => 0.0,
+                    TextAlign::Middle => 0.5,
+                    TextAlign::End => 1.0,
+                };
+        let mut bounds = LayoutRect {
+            x,
+            y: anchor.1 - font_size,
+            width,
+            height: font_size * 1.3 + last_row,
+        };
+        // Only the two axis captions and the chart title need collision searches. Tick and
+        // category rows stay aligned with their data; the at-most-three scans are linear in
+        // the number of labels, including charts with many authored categories.
+        if let Some(upward) = outward {
+            let shift = if upward {
+                let mut bottom = (bounds.y + bounds.height).min(plot.y - 4.0);
+                for previous in &occupied {
+                    if x < previous.x + previous.width
+                        && x + width > previous.x
+                        && previous.y < bounds.y + bounds.height
+                    {
+                        bottom = bottom.min(previous.y - 4.0);
+                    }
+                }
+                bottom - (bounds.y + bounds.height)
+            } else {
+                let mut top = bounds.y.max(plot.y + plot.height + 4.0);
+                for previous in &occupied {
+                    if x < previous.x + previous.width
+                        && x + width > previous.x
+                        && previous.y + previous.height > bounds.y
+                    {
+                        top = top.max(previous.y + previous.height + 4.0);
+                    }
+                }
+                top - bounds.y
+            };
+            anchor.1 += shift;
+            bounds.y += shift;
+        }
+        occupied.push(bounds);
+        for (line_index, line) in lines.into_iter().enumerate() {
+            rows.push(XyChartText {
+                text: line.to_owned(),
+                anchor: (
+                    anchor.0,
+                    anchor.1 + line_index as f32 * row_metrics.line_height_px(),
+                ),
+                font_size,
+                align,
+                role,
+                index,
+            });
+        }
+    };
+    let value_font = (font_size * 0.72).max(min_font_size);
+    for (index, value) in xychart_y_ticks(min, max).into_iter().enumerate() {
+        let (anchor, align) = if meta.horizontal {
+            (
+                (
+                    xychart_value_to_x(value, min, max, plot),
+                    plot.y - 11.0_f32.max(value_font * 0.3 + 4.0),
+                ),
+                TextAlign::Middle,
+            )
+        } else {
+            (
+                (
+                    plot.x - 10.0,
+                    xychart_value_to_y(value, min, max, plot) + 4.0_f32.max(value_font * 0.35),
+                ),
+                TextAlign::End,
+            )
+        };
+        label(
+            &format_xychart_tick_value(value),
+            anchor,
+            value_font,
+            align,
+            XyChartTextRole::ValueTick,
+            index,
+            None,
+        );
+    }
+    let categories = xychart_categories(meta);
+    let category_font = (font_size * 0.74).max(min_font_size);
+    let band = if meta.horizontal {
+        plot.height
+    } else {
+        plot.width
+    } / categories.len().max(1) as f32;
+    for (index, category) in categories.iter().enumerate() {
+        let position = band * (index as f32 + 0.5);
+        let (anchor, align) = if meta.horizontal {
+            (
+                (
+                    plot.x - 11.0,
+                    plot.y + position + category_font * 0.35
+                        - category.lines().count().saturating_sub(1) as f32 * category_font * 0.6,
+                ),
+                TextAlign::End,
+            )
+        } else {
+            (
+                (
+                    plot.x + position,
+                    plot.y + plot.height + 24.0_f32.max(category_font + 4.0),
+                ),
+                TextAlign::Middle,
+            )
+        };
+        label(
+            category,
+            anchor,
+            category_font,
+            align,
+            XyChartTextRole::Category,
+            index,
+            None,
+        );
+    }
+    let axis_font = (font_size * 0.76).max(min_font_size);
+    if let Some(text) = meta.y_axis.label.as_deref() {
+        let (anchor, align) = if meta.horizontal {
+            (
+                (plot.x + plot.width / 2.0, plot.y - 34.0),
+                TextAlign::Middle,
+            )
+        } else {
+            ((plot.x - 52.0, plot.y - 12.0), TextAlign::Start)
+        };
+        label(
+            text,
+            anchor,
+            axis_font,
+            align,
+            XyChartTextRole::AxisTitle,
+            1,
+            Some(true),
+        );
+    }
+    if let Some(text) = meta.x_axis.label.as_deref() {
+        let (anchor, align) = if meta.horizontal {
+            ((plot.x - 11.0, plot.y - 34.0), TextAlign::End)
+        } else {
+            (
+                (plot.x + plot.width / 2.0, plot.y + plot.height + 48.0),
+                TextAlign::Middle,
+            )
+        };
+        label(
+            text,
+            anchor,
+            axis_font,
+            align,
+            XyChartTextRole::AxisTitle,
+            0,
+            Some(meta.horizontal),
+        );
+    }
+    if let Some(text) = ir.declared_title_if_drawn().or(meta.title.as_deref()) {
+        label(
+            text,
+            (
+                layout.bounds.x + layout.bounds.width / 2.0,
+                plot.y - if meta.horizontal { 70.0 } else { 34.0 },
+            ),
+            (font_size * 1.18).max(min_font_size),
+            TextAlign::Middle,
+            XyChartTextRole::DiagramTitle,
+            0,
+            Some(true),
+        );
+    }
+    rows
+}
+
+/// Quantitative charts keep their data projection while chart furniture becomes scene primitives.
 fn build_xychart_render_scene(
     ir: &MermaidDiagramIr,
     meta: &IrXyChartMeta,
     layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
 ) -> RenderScene {
-    let font_size = fm_core::FontMetrics::default_metrics().font_size();
     let plot = xychart_plot_bounds(meta, layout.bounds);
     let (left, top) = (plot.x, plot.y);
     let (right, bottom) = (left + plot.width, top + plot.height);
@@ -4758,14 +5009,12 @@ fn build_xychart_render_scene(
     let mut axes = RenderGroup::new(Some(String::from("xychart-axes")));
     let mut labels = RenderGroup::new(Some(String::from("xychart-labels")));
     for value in xychart_y_ticks(min, max) {
-        let (from, to, tick_end, anchor, align) = if meta.horizontal {
+        let (from, to, tick_end) = if meta.horizontal {
             let x = xychart_value_to_x(value, min, max, plot);
             (
                 LayoutPoint { x, y: top },
                 LayoutPoint { x, y: bottom },
                 LayoutPoint { x, y: top - 5.0 },
-                LayoutPoint { x, y: top - 11.0 },
-                TextAlign::Middle,
             )
         } else {
             let y = xychart_value_to_y(value, min, max, plot);
@@ -4773,11 +5022,6 @@ fn build_xychart_render_scene(
                 LayoutPoint { x: left, y },
                 LayoutPoint { x: right, y },
                 LayoutPoint { x: left - 5.0, y },
-                LayoutPoint {
-                    x: left - 10.0,
-                    y: y + 4.0,
-                },
-                TextAlign::End,
             )
         };
         axes.children.push(scene_line(
@@ -4794,14 +5038,6 @@ fn build_xychart_render_scene(
             tick_end,
             StrokeStyle::solid("#1e293b", 1.0),
         ));
-        append_xychart_scene_label(
-            &mut labels,
-            &mut bounds,
-            &format_xychart_tick_value(value),
-            anchor,
-            (font_size * 0.72).max(8.0),
-            align,
-        );
     }
     axes.children.push(scene_line(
         LayoutPoint { x: left, y: top },
@@ -4819,105 +5055,44 @@ fn build_xychart_render_scene(
     ));
 
     let categories = xychart_categories(meta);
-    let category_font = (font_size * 0.74).max(8.0);
     let band = if meta.horizontal {
         plot.height
     } else {
         plot.width
     } / categories.len().max(1) as f32;
-    for (index, category) in categories.iter().enumerate() {
+    for index in 0..categories.len() {
         let position = band * (index as f32 + 0.5);
-        let (from, to, anchor, align) = if meta.horizontal {
+        let (from, to) = if meta.horizontal {
             let y = top + position;
-            (
-                LayoutPoint { x: left - 5.0, y },
-                LayoutPoint { x: left, y },
-                LayoutPoint {
-                    x: left - 11.0,
-                    y: y + category_font * 0.35,
-                },
-                TextAlign::End,
-            )
+            (LayoutPoint { x: left - 5.0, y }, LayoutPoint { x: left, y })
         } else {
             let x = left + position;
             (
                 LayoutPoint { x, y: bottom },
                 LayoutPoint { x, y: bottom + 5.0 },
-                LayoutPoint {
-                    x,
-                    y: bottom + 24.0,
-                },
-                TextAlign::Middle,
             )
         };
         axes.children
             .push(scene_line(from, to, StrokeStyle::solid("#1e293b", 1.0)));
-        append_xychart_scene_label(
-            &mut labels,
-            &mut bounds,
-            category,
-            anchor,
-            category_font,
-            align,
-        );
-    }
-    let axis_font = (font_size * 0.76).max(8.0);
-    for (text, anchor, align) in [
-        (
-            meta.y_axis.label.as_deref(),
-            if meta.horizontal {
-                LayoutPoint {
-                    x: left + plot.width / 2.0,
-                    y: top - 34.0,
-                }
-            } else {
-                LayoutPoint {
-                    x: left - 52.0,
-                    y: top - 12.0,
-                }
-            },
-            if meta.horizontal {
-                TextAlign::Middle
-            } else {
-                TextAlign::Start
-            },
-        ),
-        (
-            meta.x_axis.label.as_deref(),
-            if meta.horizontal {
-                LayoutPoint {
-                    x: left - 11.0,
-                    y: top - 34.0,
-                }
-            } else {
-                LayoutPoint {
-                    x: left + plot.width / 2.0,
-                    y: bottom + 48.0,
-                }
-            },
-            if meta.horizontal {
-                TextAlign::End
-            } else {
-                TextAlign::Middle
-            },
-        ),
-    ] {
-        if let Some(text) = text {
-            append_xychart_scene_label(&mut labels, &mut bounds, text, anchor, axis_font, align);
-        }
     }
     let mut title = RenderGroup::new(Some(String::from("xychart-title")));
-    if let Some(text) = ir.declared_title_if_drawn() {
+    for row in xychart_text_rows(ir, meta, layout, metrics) {
+        let layer = if row.role == XyChartTextRole::DiagramTitle {
+            &mut title
+        } else {
+            &mut labels
+        };
         append_xychart_scene_label(
-            &mut title,
+            layer,
             &mut bounds,
-            text,
+            &row.text,
             LayoutPoint {
-                x: layout.bounds.x + layout.bounds.width / 2.0,
-                y: top - if meta.horizontal { 70.0 } else { 34.0 },
+                x: row.anchor.0,
+                y: row.anchor.1,
             },
-            (font_size * 1.18).max(8.0),
-            TextAlign::Middle,
+            row.font_size,
+            row.align,
+            metrics,
         );
     }
 
@@ -4975,11 +5150,12 @@ fn append_xychart_scene_label(
     anchor: LayoutPoint,
     font_size: f32,
     align: TextAlign,
+    base_metrics: &fm_core::FontMetrics,
 ) {
     let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
         font_size,
         line_height: 1.2,
-        ..Default::default()
+        ..base_metrics.config().clone()
     });
     for (index, line) in text.lines().enumerate() {
         let width = metrics.estimate_width(line);
@@ -7166,7 +7342,14 @@ fn compute_traced_layout_with_config_and_guardrails(
             config.spacing,
         ),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
-        LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
+        LayoutAlgorithm::Sankey => layout_diagram_sankey_traced_with_metrics(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
+        ),
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(
             ir,
             config
@@ -15204,9 +15387,20 @@ pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_sankey_traced_with_metrics(
+        ir,
+        &fm_core::FontMetrics::default_metrics(),
+        LayoutSpacing::default(),
+    )
+}
+
+fn layout_diagram_sankey_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let mut node_sizes = compute_node_sizes(ir, &metrics);
+    let mut node_sizes = compute_node_sizes(ir, metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -15283,6 +15477,8 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         } else {
             0.0
         };
+        let node_metrics = ir.effective_node_font_metrics(node_index, metrics);
+        let metrics = node_metrics.as_ref();
         let name = ir.node_display_text(&ir.nodes[node_index]);
         let rendered_label = sankey_node_label(ir, node_index);
         let (label_width, label_height) =
@@ -15324,7 +15520,6 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         crossings_after,
     );
 
-    let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
@@ -15366,7 +15561,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         cursor_x += column_width + spacing.rank_spacing;
     }
 
-    let mut traced = finalize_specialized_layout(
+    let mut traced = finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -15374,6 +15569,8 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         centers,
         trace,
         true,
+        spacing,
+        metrics,
     );
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
     let layout = Arc::make_mut(&mut traced.layout);
@@ -35056,6 +35253,127 @@ mod tests {
     }
 
     #[test]
+    fn sankey_configured_fonts_fit_complete_scene_labels() {
+        let mut ir = parse(
+            "sankey-beta\n\
+             Regional generation portfolio,Distribution operations,123456789012345\n\
+             P,Distribution operations,123456789012345\n\
+             Distribution operations,Manufacturing consumption,123456789012345\n",
+        )
+        .ir;
+        // A short node name with a long quantity exercises the additional throughput row,
+        // which generic node sizing cannot account for even when it resolves this style.
+        ir.nodes[2].inline_style = Some(Box::new(fm_core::IrInlineStyle {
+            properties: [
+                ("font-size".into(), "54px".into()),
+                ("font-family".into(), "monospace".into()),
+            ]
+            .into_iter()
+            .collect(),
+        }));
+
+        for metrics in [
+            fm_core::FontMetrics::default_metrics(),
+            fm_core::FontMetrics::monospace(32.0),
+            fm_core::FontMetrics::monospace(64.0),
+        ] {
+            let config = LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            };
+            let layout = layout_diagram_with_config(&ir, config.clone());
+            assert_eq!(layout, layout_diagram_with_config(&ir, config));
+            assert_eq!(layout.nodes.len(), 4);
+            assert_eq!(layout.edges.len(), 3);
+            let (labels, _) = super::build_label_layer(&ir, &layout, &metrics);
+            for node in &layout.nodes {
+                let effective = ir.effective_node_font_metrics(node.node_index, &metrics);
+                let rows: Vec<_> = labels
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Text(text)
+                            if text.source == RenderSource::Node(node.node_index) =>
+                        {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(rows.len(), 2, "name and throughput must both be painted");
+                assert_eq!(
+                    rows[0].text,
+                    ir.node_display_text(&ir.nodes[node.node_index])
+                );
+                for row in rows {
+                    let width = effective.estimate_width(&row.text);
+                    assert_eq!(row.font_size, effective.font_size());
+                    assert!(row.x - width * 0.5 >= node.bounds.x - 0.01);
+                    assert!(row.x + width * 0.5 <= node.bounds.x + node.bounds.width + 0.01);
+                    assert!(row.y - row.font_size * 0.5 >= node.bounds.y - 0.01);
+                    assert!(
+                        row.y + row.font_size * 0.5 <= node.bounds.y + node.bounds.height + 0.01
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_configured_spacing_preserves_clear_rows_and_column_corridors() {
+        let ir = parse("sankey-beta\nA,M,10\nB,M,5\nM,Y,10\nM,Z,5\n").ir;
+        let baseline = layout_diagram_sankey(&ir);
+        let default_config = layout_diagram_with_config(&ir, LayoutConfig::default());
+        assert_eq!(baseline.nodes, default_config.nodes);
+        assert_eq!(baseline.edges, default_config.edges);
+
+        let spacing = LayoutSpacing {
+            node_spacing: 200.0,
+            rank_spacing: 180.0,
+            cluster_padding: 72.0,
+            ..Default::default()
+        };
+        let layout = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                spacing,
+                ..Default::default()
+            },
+        );
+        assert!(layout.bounds.width > baseline.bounds.width);
+        assert!(layout.bounds.height > baseline.bounds.height);
+        for node in &layout.nodes {
+            assert!(node.bounds.x - layout.bounds.x >= spacing.cluster_padding - 0.01);
+            assert!(node.bounds.y - layout.bounds.y >= spacing.cluster_padding - 0.01);
+            assert!(
+                layout.bounds.x + layout.bounds.width - node.bounds.x - node.bounds.width
+                    >= spacing.cluster_padding - 0.01
+            );
+            assert!(
+                layout.bounds.y + layout.bounds.height - node.bounds.y - node.bounds.height
+                    >= spacing.cluster_padding - 0.01
+            );
+        }
+        for left in &layout.nodes {
+            for right in &layout.nodes {
+                if left.rank + 1 == right.rank {
+                    let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+                    assert!(gap >= spacing.rank_spacing - 0.01);
+                } else if left.rank == right.rank && left.order + 1 == right.order {
+                    let gap = right.bounds.y - (left.bounds.y + left.bounds.height);
+                    assert!(gap >= spacing.node_spacing.mul_add(0.45, 18.0) - 0.01);
+                }
+            }
+        }
+        assert_eq!(layout.edges.len(), ir.edges.len());
+        assert!(layout.edges.iter().all(|edge| {
+            edge.points
+                .iter()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+        }));
+    }
+
+    #[test]
     fn sankey_layout_extreme_and_invalid_values_keep_geometry_finite() {
         for source in [
             "sankey-beta\nA,M,1e308\nB,M,1e308\nC,M,1e308\nM,Z,1e308\n",
@@ -37247,6 +37565,134 @@ mod tests {
             }
         }
         assert_eq!(marks, 2);
+    }
+
+    #[test]
+    fn render_scene_xychart_measures_configured_type_without_moving_data() {
+        let title = "Worldwide operating results and the complete regional breakdown ".repeat(3);
+        let category = "An especially descriptive regional category";
+        let x_axis = "Regional operating divisions and market channels";
+        let y_axis = "Total quarterly revenue attributable to each operating area";
+        for orientation in ["", " horizontal"] {
+            let ir = parse(&format!(
+                "xychart-beta{orientation}\n title {title}\n\
+                 x-axis \"{x_axis}\" [{category}, Short]\n y-axis \"{y_axis}\" -10 --> 20\n\
+                 bar [-10, 20]\n line [0, 10]\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let baseline = build_render_scene(&ir, &layout);
+            for metrics in [
+                fm_core::FontMetrics::monospace(48.0),
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::Serif,
+                    font_size: 32.0,
+                    ..Default::default()
+                }),
+            ] {
+                let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+                assert_eq!(scene.root.clip, Some(RenderClip::Rect(scene.bounds)));
+                assert!(scene.bounds.width > baseline.bounds.width);
+                let mut text_count = 0;
+                for (item, original) in scene.root.children.iter().zip(&baseline.root.children) {
+                    let RenderItem::Group(group) = item else {
+                        continue;
+                    };
+                    if !matches!(
+                        group.id.as_deref(),
+                        Some("xychart-labels" | "xychart-title")
+                    ) {
+                        assert_eq!(
+                            item, original,
+                            "font changes must preserve quantitative geometry"
+                        );
+                    }
+                    for item in &group.children {
+                        let RenderItem::Text(text) = item else {
+                            continue;
+                        };
+                        text_count += 1;
+                        let factor = if group.id.as_deref() == Some("xychart-title") {
+                            1.18
+                        } else if text.text == category || text.text == "Short" {
+                            0.74
+                        } else if text.text == x_axis || text.text == y_axis {
+                            0.76
+                        } else {
+                            0.72
+                        };
+                        assert!((text.font_size - metrics.font_size() * factor).abs() < 0.001);
+                        let row_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                            font_size: text.font_size,
+                            ..metrics.config().clone()
+                        });
+                        let width = row_metrics.estimate_width(&text.text);
+                        let left = text.x
+                            - width
+                                * match text.align {
+                                    super::TextAlign::Start => 0.0,
+                                    super::TextAlign::Middle => 0.5,
+                                    super::TextAlign::End => 1.0,
+                                };
+                        assert!(left >= scene.bounds.x - 0.01);
+                        assert!(left + width <= scene.bounds.x + scene.bounds.width + 0.01);
+                        assert!(text.y - text.font_size >= scene.bounds.y - 0.01);
+                        assert!(
+                            text.y + text.font_size * 0.3
+                                <= scene.bounds.y + scene.bounds.height + 0.01
+                        );
+                    }
+                }
+                assert!(
+                    text_count > 6,
+                    "ticks, categories, axis labels and title must survive"
+                );
+                let rows = super::xychart_text_rows(
+                    &ir,
+                    ir.xy_chart_meta.as_ref().unwrap(),
+                    &layout,
+                    &metrics,
+                );
+                let text_bounds = |row: &super::XyChartText| {
+                    let row_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                        font_size: row.font_size,
+                        ..metrics.config().clone()
+                    });
+                    let width = row_metrics.estimate_width(&row.text);
+                    LayoutRect {
+                        x: row.anchor.0
+                            - width
+                                * match row.align {
+                                    super::TextAlign::Start => 0.0,
+                                    super::TextAlign::Middle => 0.5,
+                                    super::TextAlign::End => 1.0,
+                                },
+                        y: row.anchor.1 - row.font_size,
+                        width,
+                        height: row.font_size * 1.3,
+                    }
+                };
+                for caption in rows.iter().filter(|row| {
+                    matches!(
+                        row.role,
+                        super::XyChartTextRole::AxisTitle | super::XyChartTextRole::DiagramTitle
+                    )
+                }) {
+                    for other in &rows {
+                        if (caption.role, caption.index) == (other.role, other.index) {
+                            continue;
+                        }
+                        assert!(
+                            !rects_overlap(text_bounds(caption), text_bounds(other)),
+                            "caption {:?} overlaps {:?} at {}px{orientation}",
+                            caption.text,
+                            other.text,
+                            metrics.font_size()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
