@@ -90,42 +90,10 @@ impl ClusterCaptionLayout {
         }
         // A malformed canvas font shorthand is ignored as a whole. Resolve the same bounded
         // components here for measurement and every surface, before composing that shorthand.
-        let font_family = properties.get("font-family").and_then(|family| {
-            let family = family.trim();
-            (!family.is_empty()
-                && family.len() <= 128
-                && family.chars().all(|character| {
-                    character.is_ascii_alphanumeric()
-                        || matches!(character, ' ' | ',' | '-' | '_' | '.' | '\'' | '"')
-                }))
-            .then(|| family.to_owned())
-        });
-        let font_weight = properties.get("font-weight").and_then(|weight| {
-            match weight.trim().to_ascii_lowercase().as_str() {
-                "normal" => Some("normal"),
-                "bold" => Some("bold"),
-                "bolder" => Some("bolder"),
-                "lighter" => Some("lighter"),
-                "100" => Some("100"),
-                "200" => Some("200"),
-                "300" => Some("300"),
-                "400" => Some("400"),
-                "500" => Some("500"),
-                "600" => Some("600"),
-                "700" => Some("700"),
-                "800" => Some("800"),
-                "900" => Some("900"),
-                _ => None,
-            }
-        });
-        let font_style = properties.get("font-style").and_then(|style| {
-            match style.trim().to_ascii_lowercase().as_str() {
-                "normal" => Some("normal"),
-                "italic" => Some("italic"),
-                "oblique" => Some("oblique"),
-                _ => None,
-            }
-        });
+        let font = crate::RenderFont::from_style(&properties);
+        let font_family = font.family().map(str::to_owned);
+        let font_weight = font.weight();
+        let font_style = font.style();
         let base_metrics = FontMetrics::new(FontMetricsConfig {
             font_size: default_font_size,
             ..metrics.config().clone()

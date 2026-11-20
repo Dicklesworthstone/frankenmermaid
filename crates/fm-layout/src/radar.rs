@@ -332,6 +332,11 @@ impl RadarChartLayout {
                     x: point.x,
                     y: point.y,
                     font_size: block.font_size,
+                    font: crate::RenderFont::new(
+                        None,
+                        (block.role == RadarTextRole::Title).then_some("600"),
+                        None,
+                    ),
                     align: block.align,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {

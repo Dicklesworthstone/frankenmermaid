@@ -35,6 +35,7 @@ pub struct TreemapTextBlock {
     pub lines: Vec<String>,
     pub bounds: LayoutRect,
     pub font_size: f32,
+    pub font: crate::RenderFont,
     pub line_height: f32,
     pub align: TextAlign,
     /// None uses the renderer's resolved theme text color.
@@ -337,6 +338,7 @@ impl TreemapChartLayout {
                     x: point.x,
                     y: point.y,
                     font_size: block.font_size,
+                    font: block.font.clone(),
                     align: block.align,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -450,9 +452,9 @@ fn measured_block(
     metrics: &FontMetrics,
     style: &BTreeMap<String, String>,
 ) -> TreemapTextBlock {
-    // SVG can honor an authored face while Canvas scenes and the GPU atlas use their configured
-    // face. Reserve the largest width of both, including the GPU's independent glyph advances
-    // and square-cell overhang. Joined Unicode must not fit only because one font fuses it.
+    // Reserve fallback widths as well as the declared face, including the GPU's independent
+    // glyph advances and square-cell overhang. Joined Unicode must not fit only because one
+    // platform font fuses it.
     let candidates: Vec<_> = std::iter::once(metrics.config().preset)
         .chain(metrics.config().fallback_chain.iter().copied())
         .map(|preset| {
@@ -507,6 +509,8 @@ fn measured_block(
         },
         lines,
         font_size: metrics.font_size(),
+        font: crate::RenderFont::from_style(style)
+            .with_defaults((role == TreemapTextRole::Title).then_some("600"), None),
         line_height,
         align: TextAlign::Start,
         color: style.get("color").cloned(),
@@ -739,7 +743,7 @@ mod tests {
 
     #[test]
     fn author_classes_preserve_paints_opacity_and_requested_text_size() {
-        let source = "treemap\n\"Root\"\n    \"Alpha\": 10:::hot\n    \"Beta\": 20\nclassDef hot fill:#123456,stroke:#abcdef,stroke-width:3px,opacity:0.5,fill-opacity:0.8,stroke-opacity:0.6,color:#654321,font-size:24px\n";
+        let source = "treemap\n\"Root\"\n    \"Alpha\": 10:::hot\n    \"Beta\": 20\nclassDef hot fill:#123456,stroke:#abcdef,stroke-width:3px,opacity:0.5,fill-opacity:0.8,stroke-opacity:0.6,color:#654321,font-size:24px,font-family:monospace,font-weight:700,font-style:italic\n";
         let (ir, _, chart) = chart(source);
         let meta = ir.treemap_meta.as_ref().unwrap();
         let node = meta
@@ -757,6 +761,9 @@ mod tests {
         assert_eq!(styled.len(), 2);
         for block in styled {
             assert_eq!(block.font_size, 24.0);
+            assert_eq!(block.font.family(), Some("monospace"));
+            assert_eq!(block.font.weight(), Some("700"));
+            assert_eq!(block.font.style(), Some("italic"));
             assert_eq!(block.color.as_deref(), Some("#654321"));
             assert_eq!(block.opacity, 0.5);
         }

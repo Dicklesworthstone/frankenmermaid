@@ -2646,8 +2646,6 @@ fn render_scene_group(
         elem = elem.clip_path_ref(&format!("url(#{clip_id})"));
     }
 
-    let treemap_typography =
-        ir.and_then(|ir| resolve_treemap_scene_typography(ir, group.id.as_deref()));
     let furniture_theme = matches!(
         group.id.as_deref(),
         Some("gantt-sections" | "sequence-lifelines" | "layout-bands" | "layout-band-labels")
@@ -2714,14 +2712,6 @@ fn render_scene_group(
                 rendered = rendered.attr("aria-hidden", "true");
             }
         }
-        if matches!(child, RenderItem::Text(_))
-            && group
-                .id
-                .as_deref()
-                .is_some_and(|id| id == "quadrant-title" || id.starts_with("quadrant-heading-"))
-        {
-            rendered = rendered.attr("font-weight", "600");
-        }
         if matches!(child, RenderItem::Path(_))
             && let Some(point_index) = group
                 .id
@@ -2759,28 +2749,19 @@ fn render_scene_group(
         }
         if group.id.as_deref() == Some("layout-band-labels") && matches!(child, RenderItem::Text(_))
         {
-            rendered = rendered.attr("font-weight", "600").class("fm-band-label");
+            rendered = rendered.class("fm-band-label");
             if let Some(theme) = &furniture_theme {
                 rendered = rendered.fill(&theme.colors.text);
             }
-        }
-        if group.id.as_deref() == Some("gantt-labels")
-            && matches!(child, RenderItem::Text(text) if text.source == RenderSource::Diagram)
-        {
-            rendered = rendered.attr("font-weight", "600");
         }
         if matches!(child, RenderItem::Text(_))
             && matches!(group.source, RenderSource::Cluster(_))
             && let Some(id) = group.id.as_deref()
         {
             if id.starts_with("fm-cluster-caption-") {
-                rendered = rendered
-                    .attr("font-weight", "600")
-                    .class("fm-cluster-label");
+                rendered = rendered.class("fm-cluster-label");
             } else if id.starts_with("fm-cluster-type-caption-") {
-                rendered = rendered
-                    .attr("font-weight", "400")
-                    .class("fm-cluster-type-label");
+                rendered = rendered.class("fm-cluster-type-label");
             }
         }
         if matches!(child, RenderItem::Text(_))
@@ -2798,19 +2779,6 @@ fn render_scene_group(
             .find_map(|(prefix, role)| id.starts_with(prefix).then_some(role));
             if let Some(role) = role {
                 rendered = rendered.class("fm-kanban-row").class(role);
-                if role == "fm-kanban-title" {
-                    rendered = rendered.attr("font-weight", "600");
-                }
-            }
-        }
-        if matches!(child, RenderItem::Text(_))
-            && let Some(typography) = &treemap_typography
-        {
-            // Size, color and opacity already belong to the measured scene. Attach only
-            // typography absent from RenderText, directly on text so standalone exports
-            // override TextBuilder's configured family as well as inherited theme CSS.
-            for (property, value) in typography {
-                rendered = rendered.attr(property.clone(), value.as_str());
             }
         }
         if matches!(child, RenderItem::Path(_) | RenderItem::Text(_)) {
@@ -3530,7 +3498,42 @@ fn render_scene_text(
             elem = elem.attr("style", &style);
         }
     }
+    elem = apply_scene_text_font(elem, &text.font);
     apply_source_metadata(elem, text.source, config.include_source_spans, ir, announce)
+}
+
+/// Keep the face resolved by scene composition on the text leaf, including when theme CSS or
+/// interaction wrappers add their own declarations. RenderFont admits only validated components.
+fn apply_scene_text_font(mut element: Element, font: &fm_layout::RenderFont) -> Element {
+    let mut style = element
+        .attribute("style")
+        .map_or_else(String::new, |value| match value {
+            AttributeValue::String(value) => value.clone(),
+            value => value.to_string(),
+        });
+    let mut changed = false;
+    for (property, value) in [
+        ("font-family", font.family()),
+        ("font-weight", font.weight()),
+        ("font-style", font.style()),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        element = element.attr(property, value);
+        if !style.is_empty() && !style.ends_with(';') {
+            style.push(';');
+        }
+        style.push_str(property);
+        style.push(':');
+        style.push_str(value);
+        changed = true;
+    }
+    if changed {
+        element.attr_owned("style", style)
+    } else {
+        element
+    }
 }
 
 fn apply_source_metadata(
@@ -22619,6 +22622,7 @@ mod tests {
             x: 12.0,
             y: 18.0,
             font_size: 13.0,
+            font: fm_layout::RenderFont::default(),
             align: RenderTextAlign::Middle,
             baseline: RenderTextBaseline::Middle,
             fill: FillStyle::Solid {
@@ -22819,6 +22823,81 @@ mod tests {
             .filter(|(name, _)| *name == property)
             .map(|(_, value)| value.trim())
             .next_back()
+    }
+
+    #[test]
+    fn standalone_scene_svg_preserves_authored_font_faces_without_semantic_ir() {
+        let scene = {
+            let ir = fm_parser::parse(
+                "flowchart TB\nsubgraph Group[Platform]\nA[Alpha] --> B[Beta]\nend\n\
+                 classDef default font-family:serif,font-weight:700,font-style:italic\n\
+                 classDef loud font-family:monospace\nclass A loud\n\
+                 style B font-weight:400,font-style:normal\n\
+                 style Group font-family:Georgia,font-weight:900,font-style:oblique\n",
+            )
+            .ir;
+            build_render_scene_with_metrics(
+                &ir,
+                &layout_diagram(&ir),
+                &fm_core::FontMetrics::default_metrics(),
+            )
+        };
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                font_family: "sans-serif".to_owned(),
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_scene_to_svg(&scene, &config);
+            for (kind, index, family, weight, style) in [
+                ("node", 0, "monospace", "700", "italic"),
+                ("node", 1, "serif", "400", "normal"),
+                ("cluster", 0, "Georgia", "900", "oblique"),
+            ] {
+                let tag = scene_tag_for_source(&svg, "text", kind, index);
+                for (name, expected) in [
+                    ("font-family", family),
+                    ("font-weight", weight),
+                    ("font-style", style),
+                ] {
+                    assert_eq!(scene_attribute(tag, name), Some(expected), "{tag}");
+                    assert_eq!(scene_style_property(tag, name), Some(expected), "{tag}");
+                }
+            }
+            assert_eq!(svg, render_scene_to_svg(&scene, &config));
+        }
+    }
+
+    #[test]
+    fn standalone_scene_svg_default_and_invalid_faces_keep_the_configured_font() {
+        let mut scene = create_scene_with_path_and_text();
+        let config = SvgRenderConfig {
+            font_family: "Georgia".to_owned(),
+            embed_theme_css: false,
+            ..Default::default()
+        };
+        let baseline = render_scene_to_svg(&scene, &config);
+        let text = scene
+            .root
+            .children
+            .iter_mut()
+            .find_map(|item| match item {
+                RenderItem::Text(text) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        text.font = fm_layout::RenderFont::new(
+            Some("serif;fill:red"),
+            Some("900;opacity:0"),
+            Some("url(https://example.test/style)"),
+        );
+        let svg = render_scene_to_svg(&scene, &config);
+        assert_eq!(baseline, svg);
+        let tag = scene_tag_for_source(&svg, "text", "edge", 2);
+        assert_eq!(scene_attribute(tag, "font-family"), Some("Georgia"));
+        assert_eq!(scene_attribute(tag, "fill-opacity"), Some("0.80"));
+        assert!(!svg.contains("example.test"));
+        assert!(!svg.contains("fill:red"));
     }
 
     #[test]
@@ -23799,6 +23878,7 @@ mod tests {
             x: 4.0,
             y: 8.0,
             font_size: 12.0,
+            font: fm_layout::RenderFont::default(),
             align: RenderTextAlign::Start,
             baseline: RenderTextBaseline::Top,
             fill: FillStyle::Solid {

@@ -2417,6 +2417,11 @@ impl LayoutJourneyText {
             x: center.x,
             y: center.y,
             font_size: self.font_size,
+            font: RenderFont::new(
+                None,
+                matches!(self.role, JourneyTextRole::DiagramTitle).then_some("600"),
+                None,
+            ),
             align: TextAlign::Middle,
             baseline: TextBaseline::Middle,
             fill: FillStyle::Solid {
@@ -2556,6 +2561,7 @@ impl LayoutPacketBitLabel {
             x: self.x,
             y: self.y,
             font_size: self.font_size,
+            font: RenderFont::default(),
             align: self.align,
             baseline: TextBaseline::Alphabetic,
             fill: FillStyle::Solid {
@@ -4044,6 +4050,156 @@ pub enum TextBaseline {
     Alphabetic,
 }
 
+/// Validated font-face components carried by a standalone render scene.
+///
+/// Size belongs to each measured text row. The remaining components must survive after semantic
+/// IR is discarded, including on Canvas where an invalid shorthand silently retains the previous
+/// row's font. Private fields ensure every authored component passes the same validation first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RenderFont {
+    family: Option<String>,
+    weight: Option<&'static str>,
+    style: Option<&'static str>,
+}
+
+impl RenderFont {
+    #[must_use]
+    pub fn new(family: Option<&str>, weight: Option<&str>, style: Option<&str>) -> Self {
+        let family = family.map(str::trim).filter(|value| {
+            !value.is_empty() && value.len() <= 128 && valid_scene_font_family(value)
+        });
+        let weight = weight.and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some("normal"),
+            "bold" => Some("bold"),
+            "bolder" => Some("bolder"),
+            "lighter" => Some("lighter"),
+            "100" => Some("100"),
+            "200" => Some("200"),
+            "300" => Some("300"),
+            "400" => Some("400"),
+            "500" => Some("500"),
+            "600" => Some("600"),
+            "700" => Some("700"),
+            "800" => Some("800"),
+            "900" => Some("900"),
+            _ => None,
+        });
+        let style = style.and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some("normal"),
+            "italic" => Some("italic"),
+            "oblique" => Some("oblique"),
+            _ => None,
+        });
+        Self {
+            family: family.map(str::to_owned),
+            weight,
+            style,
+        }
+    }
+
+    #[must_use]
+    pub fn from_style(style: &BTreeMap<String, String>) -> Self {
+        Self::new(
+            style.get("font-family").map(String::as_str),
+            style.get("font-weight").map(String::as_str),
+            style.get("font-style").map(String::as_str),
+        )
+    }
+
+    #[must_use]
+    pub fn family(&self) -> Option<&str> {
+        self.family.as_deref()
+    }
+
+    #[must_use]
+    pub const fn weight(&self) -> Option<&'static str> {
+        self.weight
+    }
+
+    #[must_use]
+    pub const fn style(&self) -> Option<&'static str> {
+        self.style
+    }
+
+    /// Authored components take precedence over the semantic role's defaults.
+    #[must_use]
+    pub(crate) fn with_defaults(mut self, weight: Option<&str>, style: Option<&str>) -> Self {
+        let defaults = Self::new(None, weight, style);
+        self.weight = self.weight.or(defaults.weight);
+        self.style = self.style.or(defaults.style);
+        self
+    }
+}
+
+fn valid_scene_font_family(value: &str) -> bool {
+    // Validate whole family names as well as characters. Empty entries and unmatched quotes are
+    // legal characters but invalid Canvas font shorthands, so they must not poison the next draw.
+    let mut quote = None;
+    let mut start = 0;
+    for (offset, character) in value.char_indices() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+        } else if character == ',' {
+            if !valid_scene_font_name(value[start..offset].trim()) {
+                return false;
+            }
+            start = offset + 1;
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        }
+    }
+    quote.is_none() && valid_scene_font_name(value[start..].trim())
+}
+
+fn valid_scene_font_name(value: &str) -> bool {
+    let Some(first) = value.chars().next() else {
+        return false;
+    };
+    if matches!(first, '\'' | '"') {
+        return value
+            .strip_prefix(first)
+            .and_then(|name| name.strip_suffix(first))
+            .is_some_and(|name| {
+                !name.trim().is_empty()
+                    && name.chars().all(|character| {
+                        character != first
+                            && !character.is_control()
+                            && (character.is_alphanumeric()
+                                || !character.is_ascii()
+                                || matches!(character, ' ' | ',' | '-' | '_' | '.' | '\'' | '"'))
+                    })
+            });
+    }
+    let identifier_start = |character: char| {
+        character.is_ascii_alphabetic()
+            || character == '_'
+            || (!character.is_ascii() && !character.is_control() && !character.is_whitespace())
+    };
+    value.split_ascii_whitespace().all(|word| {
+        if matches!(
+            word.to_ascii_lowercase().as_str(),
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "default"
+        ) {
+            return false;
+        }
+        let mut characters = word.chars();
+        let first = characters.next().unwrap_or_default();
+        let starts_identifier = if first == '-' {
+            characters
+                .next()
+                .is_some_and(|character| character == '-' || identifier_start(character))
+        } else {
+            identifier_start(first)
+        };
+        starts_identifier
+            && characters.all(|character| {
+                identifier_start(character) || character.is_ascii_digit() || character == '-'
+            })
+    })
+}
+
 /// Text primitive in the shared render IR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderText {
@@ -4052,6 +4208,7 @@ pub struct RenderText {
     pub x: f32,
     pub y: f32,
     pub font_size: f32,
+    pub font: RenderFont,
     pub align: TextAlign,
     pub baseline: TextBaseline,
     pub fill: FillStyle,
@@ -4279,6 +4436,7 @@ fn build_layout_band_scene_layers(
                 x: rect.x + 8.0,
                 y: rect.y + 16.0,
                 font_size: (metrics.font_size() * 0.82).max(8.0),
+                font: RenderFont::new(None, Some("600"), None),
                 align: TextAlign::Start,
                 baseline: TextBaseline::Alphabetic,
                 fill: FillStyle::Solid {
@@ -4371,6 +4529,7 @@ fn complete_packet_scene_layers(
                 x: center.x,
                 y: center.y,
                 font_size: metrics.font_size(),
+                font: RenderFont::from_style(&declared),
                 align: TextAlign::Middle,
                 baseline: TextBaseline::Middle,
                 fill: FillStyle::Solid {
@@ -4435,6 +4594,7 @@ fn build_gantt_render_scene(
                 x: band.bounds.x + 6.0,
                 y: band.bounds.y + font_size * 0.9,
                 font_size: font_size * 0.85,
+                font: RenderFont::new(None, Some("600"), None),
                 align: TextAlign::Start,
                 baseline: TextBaseline::Alphabetic,
                 fill: FillStyle::Solid {
@@ -4481,6 +4641,7 @@ fn build_gantt_render_scene(
                     x: tick.position + 3.0,
                     y: gantt_axis_label_baseline(*axis, axis_label_rows[index], metrics),
                     font_size: gantt_axis_font_size(metrics),
+                    font: RenderFont::default(),
                     align: TextAlign::Start,
                     baseline: TextBaseline::Alphabetic,
                     fill: FillStyle::Solid {
@@ -4588,6 +4749,7 @@ fn build_gantt_render_scene(
                 x: placement.map_or(center.x, |entry| entry.x),
                 y: center.y + font_size * 0.3,
                 font_size: font_size * 0.8,
+                font: RenderFont::from_style(&ir.resolved_node_style(node.node_index)),
                 align: match placement.map(|entry| entry.placement) {
                     Some(GanttLabelPlacement::OutsideRight) => TextAlign::Start,
                     Some(GanttLabelPlacement::OutsideLeft) => TextAlign::End,
@@ -4655,6 +4817,7 @@ fn build_gantt_render_scene(
                 x: layout.bounds.x + layout.bounds.width / 2.0,
                 y: content_bounds.y - 12.0,
                 font_size: font_size + 4.0,
+                font: RenderFont::new(None, Some("600"), None),
                 align: TextAlign::Middle,
                 baseline: TextBaseline::Alphabetic,
                 fill: FillStyle::Solid {
@@ -5082,18 +5245,7 @@ fn build_xychart_render_scene(
         } else {
             &mut labels
         };
-        append_xychart_scene_label(
-            layer,
-            &mut bounds,
-            &row.text,
-            LayoutPoint {
-                x: row.anchor.0,
-                y: row.anchor.1,
-            },
-            row.font_size,
-            row.align,
-            metrics,
-        );
+        append_xychart_scene_label(layer, &mut bounds, &row, metrics);
     }
 
     let mut data = build_xychart_scene_data(ir, meta, layout, plot, min, max);
@@ -5146,18 +5298,21 @@ fn scene_line(from: LayoutPoint, to: LayoutPoint, stroke: StrokeStyle) -> Render
 fn append_xychart_scene_label(
     layer: &mut RenderGroup,
     bounds: &mut LayoutRect,
-    text: &str,
-    anchor: LayoutPoint,
-    font_size: f32,
-    align: TextAlign,
+    row: &XyChartText,
     base_metrics: &fm_core::FontMetrics,
 ) {
+    let font_size = row.font_size;
+    let align = row.align;
+    let anchor = LayoutPoint {
+        x: row.anchor.0,
+        y: row.anchor.1,
+    };
     let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
         font_size,
         line_height: 1.2,
         ..base_metrics.config().clone()
     });
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in row.text.lines().enumerate() {
         let width = metrics.estimate_width(line);
         let x = match align {
             TextAlign::Start => anchor.x,
@@ -5181,6 +5336,11 @@ fn append_xychart_scene_label(
             x: anchor.x,
             y,
             font_size,
+            font: RenderFont::new(
+                None,
+                (row.role == XyChartTextRole::DiagramTitle).then_some("600"),
+                None,
+            ),
             align,
             baseline: TextBaseline::Alphabetic,
             fill: FillStyle::Solid {
@@ -5453,6 +5613,7 @@ fn sequence_scene_text(
     font_size: f32,
     align: TextAlign,
     baseline: TextBaseline,
+    weight: Option<&str>,
 ) -> RenderItem {
     RenderItem::Text(RenderText {
         source: RenderSource::Diagram,
@@ -5460,6 +5621,7 @@ fn sequence_scene_text(
         x,
         y,
         font_size,
+        font: RenderFont::new(None, weight, None),
         align,
         baseline,
         fill: FillStyle::Solid {
@@ -5529,6 +5691,7 @@ fn build_sequence_fragment_layer(
             label_font_size,
             TextAlign::Start,
             TextBaseline::Middle,
+            Some("bold"),
         ));
         if let Some(caption) = fragment.caption(None) {
             for (text, y) in caption.lines() {
@@ -5539,6 +5702,7 @@ fn build_sequence_fragment_layer(
                     caption.font_size,
                     TextAlign::Middle,
                     TextBaseline::Middle,
+                    None,
                 ));
             }
         } else if !fragment.label.is_empty() {
@@ -5549,6 +5713,7 @@ fn build_sequence_fragment_layer(
                 label_font_size,
                 TextAlign::Middle,
                 TextBaseline::Middle,
+                None,
             ));
         }
 
@@ -5599,6 +5764,7 @@ fn build_sequence_fragment_layer(
                         caption.font_size,
                         TextAlign::Start,
                         TextBaseline::Middle,
+                        None,
                     ));
                 }
             } else if !alternative.label.is_empty() {
@@ -5609,6 +5775,7 @@ fn build_sequence_fragment_layer(
                     label_font_size,
                     TextAlign::Start,
                     TextBaseline::Bottom,
+                    None,
                 ));
             }
         }
@@ -5643,6 +5810,7 @@ fn build_sequence_note_layer(
                 font_size,
                 TextAlign::Start,
                 TextBaseline::Top,
+                None,
             ));
         }
     }
@@ -5717,6 +5885,7 @@ fn build_sequence_number_layer(
             x: center.x,
             y: center.y,
             font_size: number.font_size,
+            font: RenderFont::default(),
             align: TextAlign::Middle,
             baseline: TextBaseline::Middle,
             fill: FillStyle::Solid {
@@ -6057,6 +6226,7 @@ fn build_state_note_layer(layout: &DiagramLayout, metrics: &fm_core::FontMetrics
                 x: note.bounds.x + STATE_NOTE_PAD_X,
                 y: note.bounds.y + STATE_NOTE_PAD_Y + row as f32 * line_height,
                 font_size,
+                font: RenderFont::default(),
                 align: TextAlign::Start,
                 baseline: TextBaseline::Top,
                 fill: FillStyle::Solid {
@@ -6329,6 +6499,7 @@ fn build_label_layer(
                 .unwrap_or_else(|| String::from("#0f172a"));
             layer.children.extend(step.rows.iter().map(|row| {
                 let mut text = row.to_render_text(RenderSource::Node(node_box.node_index), &color);
+                text.font = RenderFont::from_style(&declared);
                 text.fill = FillStyle::Solid {
                     color: color.clone(),
                     opacity,
@@ -6448,6 +6619,10 @@ fn build_label_layer(
                     x,
                     y,
                     font_size: row.font_size,
+                    font: RenderFont::from_style(&declared).with_defaults(
+                        (row.kind == fm_core::ClassCompartmentRowKind::Name).then_some("600"),
+                        row.italic.then_some("italic"),
+                    ),
                     align: if centered {
                         TextAlign::Middle
                     } else {
@@ -6578,6 +6753,8 @@ fn build_label_layer(
                         }),
                     y: bounds.y + run.center_y,
                     font_size: run.font_size,
+                    font: RenderFont::from_style(&declared)
+                        .with_defaults(Some(if run.emphasized { "bold" } else { "normal" }), None),
                     align: if run.column.is_some() {
                         TextAlign::Start
                     } else {
@@ -6668,6 +6845,11 @@ fn build_label_layer(
                     x: bounds.x + bounds.width * 0.5,
                     y: top + row.center_y,
                     font_size: row.font_size,
+                    font: RenderFont::from_style(&declared).with_defaults(
+                        (row.kind == fm_core::RequirementCardRowKind::Name).then_some("600"),
+                        (row.kind == fm_core::RequirementCardRowKind::Stereotype)
+                            .then_some("italic"),
+                    ),
                     align: TextAlign::Middle,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -6728,6 +6910,10 @@ fn build_label_layer(
                     x: node_box.bounds.x + card.padding,
                     y: top + row.center_y,
                     font_size: row.font_size,
+                    font: RenderFont::from_style(&declared).with_defaults(
+                        (row.kind == fm_core::KanbanCardRowKind::Title).then_some("600"),
+                        None,
+                    ),
                     align: TextAlign::Start,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -6767,6 +6953,10 @@ fn build_label_layer(
                     x: node_box.bounds.x + node_box.bounds.width * 0.5,
                     y: top + row.center_y,
                     font_size: row.font_size,
+                    font: RenderFont::from_style(&declared).with_defaults(
+                        (row.kind == fm_core::C4CardRowKind::Name).then_some("600"),
+                        None,
+                    ),
                     align: TextAlign::Middle,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -6825,6 +7015,12 @@ fn build_label_layer(
                     + (row as f32 - row_count.saturating_sub(1) as f32 / 2.0)
                         * metrics.line_height_px(),
                 font_size: metrics.font_size(),
+                font: RenderFont::from_style(&declared).with_defaults(
+                    fm_core::mindmap::node_role(ir, node_box.node_index)
+                        .is_some_and(|role| role.is_root)
+                        .then_some("600"),
+                    None,
+                ),
                 align: TextAlign::Middle,
                 baseline: TextBaseline::Middle,
                 fill: FillStyle::Solid {
@@ -6889,6 +7085,7 @@ fn build_label_layer(
                     x: center.x,
                     y: center.y,
                     font_size: message.font_size,
+                    font: RenderFont::from_style(&style),
                     align: TextAlign::Middle,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -6947,6 +7144,7 @@ fn build_label_layer(
                     x: center.x,
                     y: center.y + (row as f32 - (line_count - 1) as f32 / 2.0) * line_height,
                     font_size,
+                    font: RenderFont::from_style(&style),
                     align: TextAlign::Middle,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -6963,6 +7161,7 @@ fn build_label_layer(
                 x: midpoint.x,
                 y: midpoint.y,
                 font_size: 12.0,
+                font: RenderFont::from_style(&style),
                 align: TextAlign::Middle,
                 baseline: TextBaseline::Middle,
                 fill: FillStyle::Solid { color, opacity },
@@ -6993,13 +7192,18 @@ fn build_label_layer(
             .and_then(|value| scene_paint(value))
             .unwrap_or_else(|| String::from("#1e293b"));
         let opacity = scene_style_opacity(&style, "opacity");
-        for row in caption.rows {
+        for row in &caption.rows {
             let text = RenderItem::Text(RenderText {
                 source,
-                text: row.text,
+                text: row.text.clone(),
                 x: cluster.bounds.x + cluster_caption::CAPTION_INSET,
                 y: cluster.bounds.y + row.baseline,
                 font_size: caption.font_size,
+                font: RenderFont::new(
+                    caption.font_family.as_deref(),
+                    Some(caption.row_weight(row)),
+                    caption.font_style,
+                ),
                 align: TextAlign::Start,
                 baseline: TextBaseline::Alphabetic,
                 fill: FillStyle::Solid {
@@ -7057,6 +7261,7 @@ fn append_sequence_participant_text(
                     * font_size
                     * metrics.config().line_height,
             font_size,
+            font: RenderFont::from_style(&style),
             align: TextAlign::Middle,
             baseline: TextBaseline::Middle,
             fill: FillStyle::Solid {
@@ -36366,6 +36571,138 @@ mod tests {
             }
         }
         texts
+    }
+
+    #[test]
+    fn render_scene_retains_authored_faces_and_independent_style_overrides() {
+        let ir = fm_parser::parse(
+            "flowchart TB\nsubgraph Group[Platform]\nA[Alpha] -->|request| B[Beta]\nend\n\
+             classDef default font-family:serif,font-weight:700,font-style:italic\n\
+             classDef loud font-family:monospace\nclass A loud\n\
+             style B font-weight:400,font-style:normal\n\
+             style Group font-family:serif,font-weight:900,font-style:oblique\n\
+             linkStyle 0 font-family:Georgia,font-weight:500,font-style:italic\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let rows = scene_texts(&scene.root);
+        for (label, family, weight, style) in [
+            ("Alpha", "monospace", "700", "italic"),
+            ("Beta", "serif", "400", "normal"),
+            ("Platform", "serif", "900", "oblique"),
+            ("request", "Georgia", "500", "italic"),
+        ] {
+            let row = rows.iter().find(|row| row.text == label).expect(label);
+            assert_eq!(row.font.family(), Some(family), "{label}");
+            assert_eq!(row.font.weight(), Some(weight), "{label}");
+            assert_eq!(row.font.style(), Some(style), "{label}");
+        }
+    }
+
+    #[test]
+    fn render_scene_semantic_faces_keep_card_hierarchy_without_group_names() {
+        for (source, label, weight, style) in [
+            (
+                "classDiagram\nclass Service {\n<<interface>>\n+String name\n+run()\n}\n",
+                "Service",
+                Some("600"),
+                None,
+            ),
+            (
+                "erDiagram\nCUSTOMER {\nint id PK\nstring name\n}\n",
+                "CUSTOMER",
+                Some("bold"),
+                None,
+            ),
+            (
+                "requirementDiagram\nrequirement safety {\nid: 1\ntext: safe\nrisk: high\nverifymethod: test\n}\n",
+                "safety",
+                Some("600"),
+                None,
+            ),
+            ("kanban\nTodo\n  task[Work]\n", "Work", Some("600"), None),
+            (
+                "C4Context\nPerson(user, \"Reader\", \"Reads documents\")\n",
+                "Reader",
+                Some("600"),
+                None,
+            ),
+            (
+                "requirementDiagram\nrequirement safety {\nid: 1\ntext: safe\nrisk: high\nverifymethod: test\n}\n",
+                "<<Requirement>>",
+                None,
+                Some("italic"),
+            ),
+            (
+                "sequenceDiagram\nparticipant A\nparticipant B\nloop retry\nA->>B: request\nend\n",
+                "loop",
+                Some("bold"),
+                None,
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let scene = build_render_scene(&ir, &layout_diagram(&ir));
+            let rows = scene_texts(&scene.root);
+            let row = rows.iter().find(|row| row.text == label).expect(label);
+            assert_eq!(row.font.weight(), weight, "{label}");
+            assert_eq!(row.font.style(), style, "{label}");
+        }
+    }
+
+    #[test]
+    fn render_font_rejects_malformed_components_independently() {
+        let font = super::RenderFont::new(
+            Some("'Open Sans', Arial, sans-serif"),
+            Some(" BOLD "),
+            Some("ITALIC"),
+        );
+        assert_eq!(font.family(), Some("'Open Sans', Arial, sans-serif"));
+        assert_eq!(font.weight(), Some("bold"));
+        assert_eq!(font.style(), Some("italic"));
+        for family in [
+            "'IBM Plex Sans', serif",
+            "'Initial Design', serif",
+            "-apple-system, sans-serif",
+            "'游ゴシック', 宋体",
+        ] {
+            assert_eq!(
+                super::RenderFont::new(Some(family), None, None).family(),
+                Some(family)
+            );
+        }
+        for family in [
+            "",
+            " ",
+            "'unclosed",
+            "Arial,,serif",
+            "Arial,",
+            "''",
+            "'A'B",
+            "url(https://example.test/font)",
+            "serif;fill:red",
+            "123",
+            ".bad",
+            "Font.2",
+            "inherit",
+            "initial",
+            "unset",
+            "Arial, revert",
+            "Arial inherit",
+            "INITIAL Design",
+            "revert-layer Face",
+        ] {
+            let font = super::RenderFont::new(Some(family), Some("700"), Some("oblique"));
+            assert_eq!(font.family(), None, "{family}");
+            assert_eq!(font.weight(), Some("700"));
+            assert_eq!(font.style(), Some("oblique"));
+        }
+        let font =
+            super::RenderFont::new(Some("monospace"), Some("700;fill:red"), Some("italic(1)"));
+        assert_eq!(font.family(), Some("monospace"));
+        assert_eq!(font.weight(), None);
+        assert_eq!(font.style(), None);
     }
 
     #[test]

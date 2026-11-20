@@ -741,6 +741,7 @@ mod tests {
                 x,
                 y,
                 font_size: 12.0,
+                font: fm_layout::RenderFont::default(),
                 align: fm_layout::TextAlign::Start,
                 baseline: fm_layout::TextBaseline::Middle,
                 fill: FillStyle::Solid {

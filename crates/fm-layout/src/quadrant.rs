@@ -284,6 +284,7 @@ impl QuadrantChartLayout {
                     TextAlign::Start,
                     TextBaseline::Middle,
                     label_color,
+                    Some("600"),
                 ));
             }
             root.children.push(RenderItem::Group(group));
@@ -362,6 +363,7 @@ impl QuadrantChartLayout {
                     annotation.align,
                     TextBaseline::Alphabetic,
                     label_color,
+                    (annotation.role == QuadrantTextRole::Title).then_some("600"),
                 ));
             }
             root.children.push(RenderItem::Group(group));
@@ -398,6 +400,7 @@ impl QuadrantChartLayout {
                     TextAlign::Start,
                     TextBaseline::Middle,
                     label_color,
+                    None,
                 ));
             }
             root.children.push(RenderItem::Group(group));
@@ -472,6 +475,7 @@ fn text_item(
     align: TextAlign,
     baseline: TextBaseline,
     color: &str,
+    weight: Option<&str>,
 ) -> RenderItem {
     RenderItem::Text(RenderText {
         source: RenderSource::Diagram,
@@ -479,6 +483,7 @@ fn text_item(
         x: position.x,
         y: position.y,
         font_size,
+        font: crate::RenderFont::new(None, weight, None),
         align,
         baseline,
         fill: FillStyle::Solid {

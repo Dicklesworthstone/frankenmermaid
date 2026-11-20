@@ -412,7 +412,7 @@ pub(crate) fn build_pie_render_scene(ir: &MermaidDiagramIr, metrics: &FontMetric
         .get("textColor")
         .and_then(|paint| crate::scene_paint(paint))
         .unwrap_or_else(|| String::from("#1e293b"));
-    let text = |block: &PieTextBlock, source| {
+    let text = |block: &PieTextBlock, source, weight| {
         block
             .rows()
             .map(|(text, point)| {
@@ -422,6 +422,7 @@ pub(crate) fn build_pie_render_scene(ir: &MermaidDiagramIr, metrics: &FontMetric
                     x: point.x,
                     y: point.y,
                     font_size: block.font_size,
+                    font: crate::RenderFont::new(None, weight, None),
                     align: block.align,
                     baseline: TextBaseline::Middle,
                     fill: FillStyle::Solid {
@@ -433,7 +434,8 @@ pub(crate) fn build_pie_render_scene(ir: &MermaidDiagramIr, metrics: &FontMetric
             .collect::<Vec<_>>()
     };
     if let Some(title) = &pie.title {
-        root.children.extend(text(title, RenderSource::Diagram));
+        root.children
+            .extend(text(title, RenderSource::Diagram, Some("600")));
     }
     for (index, slice) in pie.slices.iter().enumerate() {
         let source = if index < ir.nodes.len() {
@@ -482,7 +484,7 @@ pub(crate) fn build_pie_render_scene(ir: &MermaidDiagramIr, metrics: &FontMetric
                 marker_end: MarkerKind::None,
             }));
         }
-        root.children.extend(text(&slice.label, source));
+        root.children.extend(text(&slice.label, source, None));
         let entry = &pie.entries[index];
         root.children.push(crate::scene_path(
             source,
@@ -493,7 +495,7 @@ pub(crate) fn build_pie_render_scene(ir: &MermaidDiagramIr, metrics: &FontMetric
             }),
             None,
         ));
-        root.children.extend(text(&entry.label, source));
+        root.children.extend(text(&entry.label, source, None));
     }
     RenderScene {
         bounds: pie.bounds.into(),

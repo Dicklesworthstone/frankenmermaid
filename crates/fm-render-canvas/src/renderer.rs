@@ -1131,19 +1131,7 @@ impl Canvas2dRenderer {
                     self.render_path_item(path, ctx, offset_x, offset_y, stats);
                 }
                 RenderItem::Text(text) => {
-                    let font_weight = match group.id.as_deref() {
-                        Some("layout-band-labels") => "600 ",
-                        Some(id) if id.starts_with("fm-cluster-caption-") => "600 ",
-                        Some(id) if id.starts_with("fm-cluster-type-caption-") => "400 ",
-                        Some(id) if id.starts_with("fm-kanban-title-") => "600 ",
-                        Some(id)
-                            if id == "quadrant-title" || id.starts_with("quadrant-heading-") =>
-                        {
-                            "600 "
-                        }
-                        _ => "",
-                    };
-                    self.render_text_item(text, ctx, offset_x, offset_y, stats, font_weight);
+                    self.render_text_item(text, ctx, offset_x, offset_y, stats);
                 }
             }
         }
@@ -1348,13 +1336,23 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
         stats: &mut SceneRenderStats,
-        font_weight: &str,
     ) {
         self.apply_fill(ctx, &text.fill);
-        ctx.set_font(&format!(
-            "{font_weight}{}px {}",
-            text.font_size, self.config.font_family
+        let mut font = String::new();
+        if let Some(style) = text.font.style() {
+            font.push_str(style);
+            font.push(' ');
+        }
+        if let Some(weight) = text.font.weight() {
+            font.push_str(weight);
+            font.push(' ');
+        }
+        font.push_str(&format!(
+            "{}px {}",
+            text.font_size,
+            text.font.family().unwrap_or(&self.config.font_family),
         ));
+        ctx.set_font(&font);
         ctx.set_text_align(match text.align {
             IrTextAlign::Start => TextAlign::Left,
             IrTextAlign::Middle => TextAlign::Center,
@@ -6973,6 +6971,16 @@ mod tests {
                 }
             }
             let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            let mut scene_context = MockCanvas2dContext::new(1600.0, 1000.0);
+            Canvas2dRenderer::new(config.clone()).render_scene(&scene, &mut scene_context);
+            let (_, scene_painted) = record_gantt_canvas_paint(scene_context.operations());
+            for expected_row in &painted {
+                let row = scene_painted
+                    .iter()
+                    .find(|row| row.text == expected_row.text)
+                    .expect("standalone scene paints the cluster caption");
+                assert_eq!(row.paint.font, expected_row.paint.font, "{}", row.text);
+            }
             let mut scene_rows = Vec::new();
             scene_captions(&scene.root, &mut scene_rows);
             assert_eq!(scene_rows.len(), painted.len());
@@ -7025,6 +7033,101 @@ mod tests {
             }
             assert_eq!(ir.labels[title_id.0].text, title);
         }
+    }
+
+    #[test]
+    fn standalone_scene_canvas_uses_resolved_faces_without_group_name_conventions() {
+        fn remove_group_names(group: &mut RenderGroup) {
+            group.id = None;
+            for child in &mut group.children {
+                if let RenderItem::Group(group) = child {
+                    remove_group_names(group);
+                }
+            }
+        }
+
+        let mut scene = {
+            let ir = fm_parser::parse(
+                "flowchart TB\nsubgraph Group[Platform]\nA[Alpha] --> B[Beta]\nend\n\
+                 classDef default font-family:serif,font-weight:700,font-style:italic\n\
+                 classDef loud font-family:monospace\nclass A loud\n\
+                 style A opacity:0.5\nstyle B font-weight:400,font-style:normal\n\
+                 style Group font-family:Georgia,font-weight:900,font-style:oblique\n",
+            )
+            .ir;
+            fm_layout::build_render_scene(&ir, &fm_layout::layout_diagram(&ir))
+        };
+        remove_group_names(&mut scene.root);
+        let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+        Canvas2dRenderer::new(CanvasRenderConfig::default()).render_scene(&scene, &mut context);
+        let (_, rows) = record_gantt_canvas_paint(context.operations());
+        for (label, expected_font, alpha) in [
+            ("Alpha", "italic 700 15px monospace", 0.5),
+            ("Beta", "normal 400 15px serif", 1.0),
+            ("Platform", "oblique 900 13.5px Georgia", 1.0),
+        ] {
+            let row = rows.iter().find(|row| row.text == label).expect(label);
+            assert_eq!(row.paint.font, expected_font, "{label}");
+            assert!((row.paint.alpha - alpha).abs() < 0.0001, "{label}");
+        }
+    }
+
+    #[test]
+    fn standalone_scene_canvas_invalid_face_resets_to_the_configured_family() {
+        let mut root = RenderGroup::new(None);
+        for (label, font) in [
+            (
+                "Styled",
+                fm_layout::RenderFont::new(
+                    Some("'IBM Plex Sans', monospace"),
+                    Some("700"),
+                    Some("italic"),
+                ),
+            ),
+            (
+                "Invalid",
+                fm_layout::RenderFont::new(Some("Font.2"), Some("bold;fill:red"), Some("url(bad)")),
+            ),
+            ("Default", fm_layout::RenderFont::default()),
+        ] {
+            root.children.push(RenderItem::Text(RenderText {
+                source: RenderSource::Diagram,
+                text: label.to_owned(),
+                x: 50.0,
+                y: 25.0,
+                font_size: 18.0,
+                font,
+                align: IrTextAlign::Middle,
+                baseline: IrTextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: "#000000".to_owned(),
+                    opacity: 1.0,
+                },
+            }));
+        }
+        let scene = RenderScene {
+            bounds: fm_layout::RenderRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            root,
+        };
+        let mut context = MockCanvas2dContext::new(100.0, 50.0);
+        Canvas2dRenderer::new(CanvasRenderConfig {
+            font_family: "Georgia".to_owned(),
+            ..Default::default()
+        })
+        .render_scene(&scene, &mut context);
+        let (_, rows) = record_gantt_canvas_paint(context.operations());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].paint.font,
+            "italic 700 18px 'IBM Plex Sans', monospace"
+        );
+        assert_eq!(rows[1].paint.font, "18px Georgia");
+        assert_eq!(rows[2].paint.font, "18px Georgia");
     }
 
     #[test]
