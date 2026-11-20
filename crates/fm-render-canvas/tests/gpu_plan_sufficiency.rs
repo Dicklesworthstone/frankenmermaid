@@ -23,7 +23,8 @@ fn treemap_gpu_rows(plan: &GpuRenderPlan) -> Vec<(fm_render_canvas::GpuTextSourc
                 [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
                 .iter()
                 .map(|quad| {
-                    plan.glyph_atlas
+                    let cell = plan
+                        .glyph_atlas
                         .cells
                         .iter()
                         .find(|cell| {
@@ -32,8 +33,12 @@ fn treemap_gpu_rows(plan: &GpuRenderPlan) -> Vec<(fm_render_canvas::GpuTextSourc
                                 && cell.uv_max[0] >= quad.uv_max[0] - 1e-6
                                 && cell.uv_max[1] >= quad.uv_max[1] - 1e-6
                         })
-                        .expect("even a clipped glyph must sample its original atlas cell")
-                        .glyph
+                        .expect("even a clipped glyph must sample its original atlas cell");
+                    assert_eq!(
+                        cell.face_index, run.face_index,
+                        "a glyph sampled another face"
+                    );
+                    cell.glyph
                 })
                 .collect();
             (run.source, run.node_index, text)
@@ -193,6 +198,101 @@ fn treemap_gpu_retains_requested_paints_opacity_fonts_and_tile_clipping() {
             );
         }
     }
+}
+
+#[test]
+fn treemap_gpu_faces_preserve_styled_default_detail_and_title_rows() {
+    use fm_render_canvas::{GlyphFace, GpuTextSource};
+
+    let source = r#"treemap
+title Shared
+"Root"
+    "Shared": 10:::styled
+    "Plain": 10
+    "Family": 10:::family
+    "Small": 0:::styled
+classDef styled font-family:monospace,font-weight:700,font-style:italic
+classDef family font-family:Courier New
+"#;
+    let ir = fm_parser::parse(source).ir;
+    let meta = ir.treemap_meta.as_ref().unwrap();
+    assert_eq!(
+        meta.nodes
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Root", "Shared", "Plain", "Family", "Small"]
+    );
+    let layout = fm_layout::layout_diagram(&ir);
+    let config = CanvasRenderConfig {
+        font_family: "serif".to_owned(),
+        ..Default::default()
+    };
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let default = GlyphFace::new("serif");
+    let styled = GlyphFace {
+        family: "monospace".to_owned(),
+        weight: "700".to_owned(),
+        style: "italic".to_owned(),
+    };
+    let family = GlyphFace::new("Courier New");
+    let title = GlyphFace {
+        weight: "600".to_owned(),
+        ..default.clone()
+    };
+
+    for run in &plan.text_runs {
+        let expected = match run.source {
+            GpuTextSource::DiagramTitle => &title,
+            GpuTextSource::TreemapLabel
+            | GpuTextSource::TreemapValue
+            | GpuTextSource::TreemapDetail
+            | GpuTextSource::TreemapReference => match run.node_index {
+                1 | 4 => &styled,
+                3 => &family,
+                _ => &default,
+            },
+            other => panic!("unexpected treemap text source: {other:?}"),
+        };
+        assert!(run.quad_count > 0);
+        assert_eq!(&plan.glyph_atlas.faces[run.face_index as usize], expected);
+    }
+
+    // Reconstruct the visible text from the actual UVs, checking that every glyph samples its
+    // run's face even after tile clipping. A descriptor alone cannot prove the quad uses it.
+    let rows = treemap_gpu_rows(&plan);
+    for (source, node, text) in [
+        (GpuTextSource::TreemapLabel, 1, "Shared"),
+        (GpuTextSource::TreemapValue, 1, "10"),
+        (GpuTextSource::TreemapLabel, 2, "Plain"),
+        (GpuTextSource::TreemapValue, 2, "10"),
+        (GpuTextSource::TreemapLabel, 3, "Family"),
+        (GpuTextSource::TreemapValue, 3, "10"),
+        (GpuTextSource::TreemapValue, 4, "0"),
+        (GpuTextSource::DiagramTitle, 0, "Shared"),
+    ] {
+        assert!(
+            rows.contains(&(source, node, text.to_owned())),
+            "missing {text:?}"
+        );
+    }
+    assert!(rows.iter().any(|(source, node, text)| {
+        *source == GpuTextSource::TreemapDetail && *node == 4 && text.contains("Root / Small")
+    }));
+
+    let faces = [&default, &styled, &family, &title];
+    assert_eq!(plan.glyph_atlas.faces.len(), faces.len());
+    let mut cells = Vec::new();
+    for face in faces {
+        let index = plan.glyph_atlas.face_index(face).unwrap();
+        let cell = plan.glyph_atlas.cell_for_face(index, 'a').unwrap();
+        assert!(cells.iter().all(|uv| *uv != (cell.uv_min, cell.uv_max)));
+        cells.push((cell.uv_min, cell.uv_max));
+    }
+    assert_eq!(
+        plan,
+        GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+    );
 }
 
 #[test]

@@ -992,6 +992,14 @@ impl GlyphFace {
         }
     }
 
+    fn from_render_font(font: &fm_layout::RenderFont, base: &Self) -> Self {
+        Self {
+            family: font.family().unwrap_or(&base.family).to_owned(),
+            weight: font.weight().unwrap_or(&base.weight).to_owned(),
+            style: font.style().unwrap_or(&base.style).to_owned(),
+        }
+    }
+
     /// Resolve the same declared components and semantic defaults as Canvas2D's node text.
     fn for_node(
         node_fonts: &[crate::renderer::DeclaredNodeFont],
@@ -3731,9 +3739,15 @@ impl GpuRenderPlan {
                 mirror_header_label(ir, node_box),
             ));
         }
+        if let Some(chart) = &treemap_chart {
+            for block in &chart.text {
+                let face = GlyphFace::from_render_font(&block.font, &default_face);
+                styled_texts.extend(block.lines.iter().map(|line| (face.clone(), line.as_str())));
+            }
+        }
 
-        // Annotation text uses the configured default face. Node and compartment rows above feed
-        // only their requested face/glyph pairs, rather than an atlas-wide fonts × glyphs product.
+        // Unstyled annotation text uses the configured default face. Styled rows above feed only
+        // their requested face/glyph pairs, rather than an atlas-wide fonts × glyphs product.
         let default_texts = layout
             .extensions
             .sequence_messages
@@ -3828,12 +3842,6 @@ impl GpuRenderPlan {
                     .flat_map(|(block, _, _)| block.lines.iter().map(String::as_str)),
             )
             .chain(radar_chart.iter().flat_map(|chart| {
-                chart
-                    .text
-                    .iter()
-                    .flat_map(|block| block.lines.iter().map(String::as_str))
-            }))
-            .chain(treemap_chart.iter().flat_map(|chart| {
                 chart
                     .text
                     .iter()
@@ -4441,6 +4449,8 @@ impl GpuRenderPlan {
                     parse_paint_rgba(block.color.as_deref().unwrap_or(&config.label_color))
                         .unwrap_or(DEFAULT_LABEL_RGBA);
                 color[3] *= block.opacity;
+                let face = GlyphFace::from_render_font(&block.font, &default_face);
+                let mut sink = sink.with_face(&face, &metrics);
                 for (text, point) in block.rows() {
                     let first_quad = sink.quads.len();
                     sink.push_line(
@@ -11083,6 +11093,10 @@ mod tests {
             "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
             "draw_sequence_fragments",
+            // Measured caption.lines() feed sequence_fragment_text, the atlas, and
+            // GpuTextSource::SequenceFragment quads. Row geometry and content are covered by
+            // sequence_gpu_wrapped_conditions_keep_every_measured_glyph_row.
+            "draw_sequence_fragment_caption",
             "draw_sequence_backgrounds",
             "draw_sequence_notes",
             "draw_state_notes",
