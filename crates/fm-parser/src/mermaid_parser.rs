@@ -582,7 +582,14 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     // pass. Until then, a successfully terminated multi-line deck block is source, not diagram
     // syntax: blank it with its newlines preserved so no body parser can mistake JSON5 keys for
     // nodes. Unterminated/over-limit blocks stay visible to recovery after recording an init error.
-    let deck_directives = scan_multiline_deck_directives(content);
+    // CSV fields may contain physical lines that look exactly like directives. Only standalone
+    // Sankey directives reach these generic passes; masking keeps their original byte positions.
+    let directive_content = if diagram_type == DiagramType::Sankey {
+        sankey_directive_source(content)
+    } else {
+        Cow::Borrowed(content)
+    };
+    let deck_directives = scan_multiline_deck_directives(&directive_content);
     for error in &deck_directives.errors {
         let message = match error.kind {
             MultilineDeckDirectiveErrorKind::TooLarge => format!(
@@ -611,10 +618,10 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     }
     let body_content = blank_multiline_deck_directives(content, &deck_directives.blocks);
 
-    parse_init_directives(content, &mut builder);
+    parse_init_directives(&directive_content, &mut builder);
     // The deck pass reads the ORIGINAL text (block byte offsets index into it); keep a handle
     // before `content` is shadowed by the blanked body copy.
-    let deck_source = content;
+    let deck_source = directive_content.as_ref();
     let content = body_content.as_ref();
 
     match diagram_type {
@@ -658,12 +665,21 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
         }
     }
 
+    let generic_content = if diagram_type == DiagramType::Sankey {
+        blank_multiline_deck_directives(&directive_content, &deck_directives.blocks)
+    } else {
+        Cow::Borrowed(content)
+    };
     // Extract accessibility directives (accTitle / accDescr) from any diagram type.
-    extract_accessibility_directives(content, &mut builder, diagram_type == DiagramType::Sequence);
+    extract_accessibility_directives(
+        &generic_content,
+        &mut builder,
+        diagram_type == DiagramType::Sequence,
+    );
 
     // Promote a `title` directive that the statement loop dropped rather than promoted (bd-193x
     // sibling). No-op when a type-specific parser already set one.
-    extract_generic_diagram_title(content, &mut builder);
+    extract_generic_diagram_title(&generic_content, &mut builder);
 
     // Extract style/classDef/linkStyle directives for all diagram types.
     // (Previously only called from parse_flowchart; now runs generically
@@ -671,7 +687,7 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     // `venn-beta` owns its `style` statement: its targets are SET ids and REGIONS, not node ids,
     // and the generic pass would read `style A,B fill: …` as a node directive naming `A,B`.
     if diagram_type != DiagramType::Flowchart && diagram_type != DiagramType::Venn {
-        extract_style_directives(content, &mut builder);
+        extract_style_directives(&generic_content, &mut builder);
     }
 
     // Deck pass (bd-jw8m8): consume %%{deck: …}%% directives into ir.deck, after the body so
@@ -13097,59 +13113,32 @@ fn xychart_point_label(base_name: &str, x_label: &str, value: f32) -> String {
 }
 
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in byte_lines(input).enumerate() {
-        let line_number = index + 1;
-        let trimmed = trim_fast(line);
-        if trimmed.is_empty() || is_comment(trimmed) {
+    for record in sankey_records(input) {
+        if record.directive {
             continue;
         }
-
-        // Header/title skip without the per-line `to_ascii_lowercase()` heap alloc (most lines are
-        // data records). `is_sankey_header` now lowercases-compare in place; the title check folds
-        // ASCII case over the first 6 bytes — byte-identical to the old `lower.starts_with`.
-        if is_sankey_header(trimmed)
-            || trimmed
-                .get(..6)
-                .is_some_and(|p| p.eq_ignore_ascii_case("title "))
-        {
-            continue;
-        }
-
-        // ⚠️ SANKEY IS THE ONE FAMILY WHERE THE REFERENCE DISAGREES, AND WE ACCEPT ANYWAY.
-        // mermaid 11.15.0's sankey grammar REJECTS `accTitle:` outright — measured, a hard parse
-        // error where the other twenty families render it into `<title>`/`<desc>`. We honour it
-        // here for the same reason the other twenty do: this parser is best-effort and the value
-        // has already been extracted into `ir.meta`, so refusing the line would mean dropping an
-        // accessibility title we are holding. What must not survive is calling it UNSUPPORTED while
-        // honouring it (bd-xym5x).
-        // `extract_accessibility_directives` has ALREADY taken this line's
-        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
-        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
-        // working directive unsupported (bd-xym5x).
-        if is_accessibility_directive_statement(trimmed) {
-            continue;
-        }
-
-        let Some((source, target, value)) = parse_sankey_record(trimmed) else {
+        let line_number = record.span.start.line;
+        let trimmed = trim_fast(record.source);
+        let Some([source, target, value]) = record.fields else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported sankey syntax: {trimmed}"
             ));
             continue;
         };
-
-        let span = span_for(line_number, line);
-        let Some(source_label) = clean_label(Some(&source)) else {
+        // The CSV scanner has already decoded the quoting. Running Mermaid's label-quote
+        // stripper again would erase literal quotes/apostrophes and merge distinct categories.
+        if source.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: sankey row is missing a source label: {trimmed}"
             ));
             continue;
-        };
-        let Some(target_label) = clean_label(Some(&target)) else {
+        }
+        if target.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: sankey row is missing a target label: {trimmed}"
             ));
             continue;
-        };
+        }
 
         if value.parse::<f64>().is_err() {
             builder.add_warning(format!(
@@ -13158,7 +13147,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
         }
 
         let Some(source_node) =
-            builder.intern_node(&source_label, Some(&source_label), NodeShape::Rect, span)
+            builder.intern_node(&source, Some(&source), NodeShape::Rect, record.span)
         else {
             builder.add_warning(format!(
                 "Line {line_number}: sankey source node could not be created: {trimmed}"
@@ -13166,7 +13155,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         };
         let Some(target_node) =
-            builder.intern_node(&target_label, Some(&target_label), NodeShape::Rect, span)
+            builder.intern_node(&target, Some(&target), NodeShape::Rect, record.span)
         else {
             builder.add_warning(format!(
                 "Line {line_number}: sankey target node could not be created: {trimmed}"
@@ -13182,7 +13171,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             target_node,
             ArrowType::Arrow,
             Some(&value),
-            span,
+            record.span,
         );
 
         // Add flow data attribute for gradient rendering.
@@ -17596,8 +17585,16 @@ pub(crate) fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
 /// behavior, but config tooling needs a precise error for an ignored key or malformed directive.
 pub(crate) fn validate_init_directives(input: &str) -> MermaidConfigValidation {
     let mut errors = Vec::new();
+    // Keep the explicit admission boundary consistent with rendering: a physical line inside a
+    // quoted Sankey field is CSV data, even when it resembles a configuration directive.
+    let directive_content =
+        if crate::detect_type_with_confidence(input).diagram_type == DiagramType::Sankey {
+            sankey_directive_source(input)
+        } else {
+            Cow::Borrowed(input)
+        };
 
-    for (index, line) in byte_lines(input).enumerate() {
+    for (index, line) in byte_lines(&directive_content).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(line);
         if !trimmed.starts_with("%%{") {
@@ -19244,56 +19241,217 @@ fn split_statements(line: &str) -> SplitStatements<'_> {
     SplitStatements::Multiple(statements.into_iter())
 }
 
-fn parse_sankey_record(line: &str) -> Option<(String, String, String)> {
-    let fields = split_csv_fields(line)?;
-    if fields.len() != 3 {
-        return None;
-    }
-
-    Some((
-        fields[0].trim().to_string(),
-        fields[1].trim().to_string(),
-        fields[2].trim().to_string(),
-    ))
+struct SankeyRecord<'a> {
+    source: &'a str,
+    start_byte: usize,
+    fields: Option<[String; 3]>,
+    span: Span,
+    directive: bool,
 }
 
-fn split_csv_fields(line: &str) -> Option<Vec<String>> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quote: Option<char> = None;
-    let mut chars = line.chars().peekable();
+struct SankeyRecordScan {
+    end: usize,
+    consumed: usize,
+    fields: Option<[String; 3]>,
+}
 
-    while let Some(ch) = chars.next() {
-        if let Some(quote) = in_quote {
-            if ch == quote {
-                if chars.peek().copied() == Some(quote) {
-                    current.push(quote);
+/// Decode one RFC 4180 record. Only a double quote at a field boundary opens a quoted
+/// field; apostrophes are data. A malformed record consumes its first physical line so
+/// subsequent valid rows survive, even after an unterminated quote at the end of the input.
+fn scan_sankey_record(input: &str) -> SankeyRecordScan {
+    let line_end = memchr::memchr(b'\n', input.as_bytes()).unwrap_or(input.len());
+    let first_line_end = input[..line_end]
+        .strip_suffix('\r')
+        .map_or(line_end, str::len);
+    let malformed = || SankeyRecordScan {
+        end: first_line_end,
+        consumed: (line_end + usize::from(line_end < input.len())).min(input.len()),
+        fields: None,
+    };
+    let mut fields = Vec::with_capacity(3);
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut closed_quote = false;
+    let mut chars = input.char_indices().peekable();
+    let mut end = input.len();
+    let mut consumed = input.len();
+    while let Some((index, ch)) = chars.next() {
+        if quoted {
+            if ch == '"' {
+                if chars.peek().is_some_and(|&(_, next)| next == '"') {
+                    current.push('"');
                     let _ = chars.next();
                 } else {
-                    in_quote = None;
+                    quoted = false;
+                    closed_quote = true;
                 }
-            } else {
+            } else if ch != '\r' || !chars.peek().is_some_and(|&(_, next)| next == '\n') {
+                // Normalize CRLF within display text while retaining the physical source below.
                 current.push(ch);
             }
             continue;
         }
-
         match ch {
-            '"' | '\'' => in_quote = Some(ch),
+            '\n' => {
+                end = input[..index].strip_suffix('\r').map_or(index, str::len);
+                consumed = index + 1;
+                break;
+            }
             ',' => {
                 fields.push(current.trim().to_string());
+                if fields.len() == 3 {
+                    return malformed();
+                }
                 current.clear();
+                closed_quote = false;
             }
-            _ => current.push(ch),
+            '"' if current.trim().is_empty() && !closed_quote => {
+                current.clear();
+                quoted = true;
+            }
+            '"' => return malformed(),
+            ch if closed_quote && !ch.is_whitespace() => return malformed(),
+            ch if !closed_quote => current.push(ch),
+            _ => {}
         }
     }
-
-    if in_quote.is_some() {
-        return None;
+    if quoted {
+        return malformed();
     }
-
     fields.push(current.trim().to_string());
-    Some(fields)
+    let Ok(fields) = fields.try_into() else {
+        return malformed();
+    };
+    SankeyRecordScan {
+        end,
+        consumed,
+        fields: Some(fields),
+    }
+}
+
+fn sankey_record_is_directive(source: &str, fields: Option<&[String; 3]>) -> bool {
+    let trimmed = trim_fast(source);
+    if is_comment(trimmed) {
+        return true;
+    }
+    // A category may itself start with a keyword: `title Producer,Consumer,10` is data.
+    if fields.is_some_and(|fields| fields[2].parse::<f64>().is_ok()) {
+        return false;
+    }
+    if fields.is_some()
+        && !is_non_graph_statement(trimmed)
+        && !trimmed.starts_with("class ")
+        && !is_comment(trimmed)
+    {
+        return false;
+    }
+    trimmed.is_empty()
+        || is_comment(trimmed)
+        || is_sankey_header(trimmed)
+        || trimmed
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("title "))
+        || is_accessibility_directive_statement(trimmed)
+        || is_non_graph_statement(trimmed)
+        || trimmed.starts_with("class ")
+}
+
+fn sankey_records(input: &str) -> impl Iterator<Item = SankeyRecord<'_>> {
+    let mut remaining = input;
+    let mut line_number = 1_usize;
+    let mut directive_end: Option<&str> = None;
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let line_end = memchr::memchr(b'\n', remaining.as_bytes()).unwrap_or(remaining.len());
+        let physical_line = &remaining[..line_end];
+        let scan = if directive_end.is_some() || is_comment(trim_fast(physical_line)) {
+            // Comments and directive bodies own physical lines. A quote in comment prose must
+            // not consume the beginning of a later CSV row; a quoted "%% category" is still data.
+            SankeyRecordScan {
+                end: remaining[..line_end]
+                    .strip_suffix('\r')
+                    .map_or(line_end, str::len),
+                consumed: line_end + usize::from(line_end < remaining.len()),
+                fields: None,
+            }
+        } else {
+            scan_sankey_record(remaining)
+        };
+        let source = &remaining[..scan.end];
+        let trimmed = trim_fast(source);
+        let directive = if let Some(ending) = directive_end {
+            if (ending == "}" && trimmed == ending) || (ending != "}" && trimmed.ends_with(ending))
+            {
+                directive_end = None;
+            }
+            true
+        } else {
+            let directive = sankey_record_is_directive(source, scan.fields.as_ref());
+            if directive {
+                // Only completed deck blocks own multiple lines. Init/constraints remain
+                // one-line directives, and a broken deck must leave following CSV recoverable.
+                if is_multiline_deck_start(trimmed)
+                    && !trimmed.contains("}%%")
+                    && sankey_has_completed_deck(remaining)
+                {
+                    directive_end = Some("}%%");
+                } else if trimmed.starts_with("accDescr") && trimmed.ends_with('{') {
+                    // The generic accessibility parser owns its EOF auto-close policy too.
+                    directive_end = Some("}");
+                }
+            }
+            directive
+        };
+        let end_line = line_number + memchr::memchr_iter(b'\n', source.as_bytes()).count();
+        let last_line = source.rsplit('\n').next().unwrap_or(source);
+        let span = Span::new(
+            span_for(line_number, "").start,
+            span_for(end_line, last_line).end,
+        );
+        line_number += memchr::memchr_iter(b'\n', remaining[..scan.consumed].as_bytes()).count();
+        remaining = &remaining[scan.consumed..];
+        Some(SankeyRecord {
+            source,
+            start_byte: input.len() - remaining.len() - scan.consumed,
+            fields: scan.fields,
+            span,
+            directive,
+        })
+    })
+}
+
+fn sankey_has_completed_deck(input: &str) -> bool {
+    let mut byte_count = 0;
+    for (index, line) in input.split_inclusive('\n').enumerate() {
+        byte_count += line.len();
+        if index >= MAX_DECK_BLOCK_LINES || byte_count > MAX_DECK_BLOCK_BYTES {
+            return false;
+        }
+        if index > 0 && trim_fast(line).ends_with("}%%") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Hide CSV text from generic Mermaid directive parsers without changing any source offsets.
+fn sankey_directive_source(input: &str) -> Cow<'_, str> {
+    let mut masked = None;
+    for record in sankey_records(input) {
+        if !record.directive {
+            let bytes = masked.get_or_insert_with(|| input.as_bytes().to_vec());
+            for byte in &mut bytes[record.start_byte..record.start_byte + record.source.len()] {
+                if !matches!(*byte, b'\r' | b'\n') {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    masked.map_or(Cow::Borrowed(input), |bytes| {
+        Cow::Owned(String::from_utf8(bytes).expect("source ranges are replaced by ASCII spaces"))
+    })
 }
 
 fn parse_function_call(line: &str) -> Option<(String, Vec<String>, bool)> {
@@ -25431,6 +25589,298 @@ cherry-pick id: feat1",
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("sankey flow value is not numeric"))
+        );
+    }
+
+    #[test]
+    fn sankey_csv_preserves_apostrophes_escaped_quotes_and_literal_categories() {
+        let parsed = parse_mermaid(
+            r#"sankey-beta
+O'Brien,"North, South",12.5
+"North, South","He said ""yes""",2
+'literal',"""quoted""",3
+"""","C:\data",4
+A 'quoted' B,`literal`,5
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let names: Vec<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "O'Brien",
+                "North, South",
+                "He said \"yes\"",
+                "'literal'",
+                "\"quoted\"",
+                "\"",
+                r"C:\data",
+                "A 'quoted' B",
+                "`literal`",
+            ]
+        );
+        for node in &parsed.ir.nodes {
+            assert_eq!(parsed.ir.node_display_text(node), node.id);
+        }
+        assert_eq!(parsed.ir.edges.len(), 5);
+        assert_eq!(parsed.ir.edges[0].to, parsed.ir.edges[1].from);
+        let quantities: Vec<_> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| parsed.ir.labels[edge.label.unwrap().0].text.as_str())
+            .collect();
+        assert_eq!(quantities, ["12.5", "2", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn sankey_multiline_csv_keeps_physical_source_spans_and_exact_lens_edits() {
+        let first = "  \"北\r\nSouth\",\"Target\r\nvalue\",1";
+        let second = "\"北\r\nSouth\",Other,2";
+        let source = format!("sankey-beta\r\n{first}\r\n{second}\r\n");
+        let snapshot = crate::build_parse_lens(&source);
+        assert!(
+            snapshot.parsed.warnings.is_empty(),
+            "{:?}",
+            snapshot.parsed.warnings
+        );
+        assert_eq!(snapshot.parsed.ir.nodes.len(), 3);
+        assert_eq!(snapshot.parsed.ir.nodes[0].id, "北\nSouth");
+        assert_eq!(snapshot.parsed.ir.nodes[1].id, "Target\nvalue");
+        let edges: Vec<_> = snapshot
+            .source_map
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == fm_core::MermaidSourceMapKind::Edge)
+            .collect();
+        assert_eq!(edges.len(), 2);
+        for (entry, expected, first_line, last_line) in
+            [(edges[0], first, 2, 4), (edges[1], second, 5, 6)]
+        {
+            assert_eq!(entry.span.start.line, first_line);
+            assert_eq!(entry.span.end.line, last_line);
+            let range = crate::resolve_span_text_range(&source, entry.span).unwrap();
+            assert_eq!(&source[range.start_byte..range.end_byte], expected);
+        }
+        let replacement = "  \"北\r\nWest\",\"Target\r\nvalue\",7";
+        let edit = crate::apply_parse_lens_edit(
+            &source,
+            &fm_core::MermaidLensEdit {
+                element_id: edges[0].element_id.clone(),
+                replacement: replacement.to_string(),
+            },
+        )
+        .expect("a logical CSV record is one source edit");
+        assert_eq!(
+            edit.result.updated_source,
+            source.replacen(first, replacement, 1)
+        );
+        assert_eq!(edit.snapshot.parsed.ir.edges.len(), 2);
+        assert_eq!(edit.snapshot.parsed.ir.nodes[0].id, "北\nWest");
+        assert!(
+            edit.snapshot
+                .parsed
+                .ir
+                .nodes
+                .iter()
+                .any(|node| node.id == "北\nSouth")
+        );
+    }
+
+    #[test]
+    fn sankey_csv_recovers_after_malformed_records_without_phantom_nodes() {
+        let parsed = parse_mermaid(
+            "sankey-beta\n\
+             Bad\"quote,Node,1\n\
+             \"missing close\n\
+             Valid,Node,3\n\
+             \"A\"x,B,4\n\
+             Still,Node,5\n\
+             \"Extra\",Too,Many,6\n\
+             Empty,,7\n\
+             ,Target,8\n\
+             Good,Node,9\n",
+        );
+        let names: Vec<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(names, ["Valid", "Node", "Still", "Good"]);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        for line in [2, 3, 5, 7, 8, 9] {
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with(&format!("Line {line}:"))),
+                "missing recovery diagnostic for line {line}: {:?}",
+                parsed.warnings
+            );
+        }
+        let at_eof = parse_mermaid("sankey-beta\n\"unclosed\nRecovered,Target,1\n");
+        assert_eq!(at_eof.ir.edges.len(), 1);
+        assert_eq!(at_eof.ir.nodes[0].id, "Recovered");
+        assert_eq!(at_eof.ir.edges[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn sankey_csv_content_cannot_become_a_mermaid_directive() {
+        let source = r#"sankey-beta
+title Actual title
+accTitle: Actual accessible title
+accDescr {
+Actual description
+}
+"Start
+title Injected title
+accTitle: Injected accessible title
+style Target fill:#ff0000
+classDef evil fill:#ff0000
+%%{init: this is not JSON}%%
+%%{deck: this is not a deck}%%
+End",Target,7
+title Producer,Consumer,1
+style Partner,Consumer,2
+class Supplier,Consumer,3
+accTitle: Source,Consumer,4
+sankey Source,Consumer,5
+"#;
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let validation = crate::validate_mermaid_init_directives(source);
+        assert!(validation.is_valid(), "{:?}", validation.errors);
+        assert_eq!(parsed.ir.edges.len(), 6);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Actual title"));
+        assert_eq!(
+            parsed.ir.meta.acc_title.as_deref(),
+            Some("Actual accessible title")
+        );
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("Actual description")
+        );
+        assert!(parsed.ir.style_refs.is_empty());
+        assert!(parsed.ir.style_defs.is_empty());
+        assert!(parsed.ir.nodes[0].id.contains("title Injected title"));
+        assert!(
+            parsed.ir.nodes[0]
+                .id
+                .contains("%%{init: this is not JSON}%%")
+        );
+        for expected in [
+            "title Producer",
+            "style Partner",
+            "class Supplier",
+            "accTitle: Source",
+            "sankey Source",
+        ] {
+            assert!(parsed.ir.nodes.iter().any(|node| node.id == expected));
+        }
+    }
+
+    #[test]
+    fn sankey_comments_and_standalone_directives_keep_their_physical_boundaries() {
+        let parsed = parse_mermaid(
+            r##"sankey-beta
+%% comment,A,1
+%% comment,"an unclosed quote
+%%{init: {"theme": "dark"}}%%
+accDescr {
+A description with commas, "quotes", and 1
+}
+First,Target,2
+"%% literal category",Target,3
+"  Spaced  ","Quoted ""name""",4
+%% last comment,Target,5
+"##,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        let names: Vec<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "First",
+                "Target",
+                "%% literal category",
+                "Spaced",
+                "Quoted \"name\""
+            ]
+        );
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("A description with commas, \"quotes\", and 1")
+        );
+        assert_eq!(parsed.ir.edges[0].span.start.line, 8);
+        assert_eq!(parsed.ir.edges[2].span.start.line, 10);
+    }
+
+    #[test]
+    fn sankey_unterminated_directives_preserve_following_csv_records() {
+        for directive in [
+            r#"%%{init: {"theme":"dark"}"#,
+            "%%{constraints: {",
+            "%%{deck: {",
+        ] {
+            let parsed = parse_mermaid(&format!("sankey-beta\n{directive}\nA,B,1\nB,C,2\n"));
+            assert_eq!(parsed.ir.nodes.len(), 3, "{directive}");
+            assert_eq!(parsed.ir.edges.len(), 2, "{directive}");
+            assert_eq!(parsed.ir.edges[0].span.start.line, 3, "{directive}");
+        }
+        let oversized = format!(
+            "sankey-beta\n%%{{deck: {{\n{}A,B,1\n}}}}%%\nB,C,2\n",
+            "\n".repeat(super::MAX_DECK_BLOCK_LINES),
+        );
+        let parsed = parse_mermaid(&oversized);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("exceeds"))
+        );
+    }
+
+    #[test]
+    fn sankey_completed_description_and_deck_blocks_preserve_their_own_grammar() {
+        let parsed = parse_mermaid(
+            "sankey-beta\n\
+             accDescr {\n\
+             A description ending in a brace }\n\
+             Not,A,12\n\
+             }\n\
+             %%{deck: {\n\
+               title: 'Actual deck',\n\
+               slides: [{id: 'first', focus: ['A', 'B']}]\n\
+             }}%%\n\
+             A,B,1\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].span.start.line, 10);
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("A description ending in a brace }\nNot,A,12")
+        );
+        assert_eq!(
+            parsed
+                .ir
+                .deck
+                .as_ref()
+                .and_then(|deck| deck.title.as_deref()),
+            Some("Actual deck")
         );
     }
 
