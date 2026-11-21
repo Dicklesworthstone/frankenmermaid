@@ -540,14 +540,15 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     config: &ParserConfig,
     defaults: Option<&Value>,
 ) -> ParseResult {
-    let (content, front_matter_payload) = split_front_matter_block(input);
+    let (body, front_matter_payload) = split_front_matter_block(input);
+    let content = blank_front_matter_prefix(input, body);
     // bd-ec1t: a fuzzy-matched header is a MIS-TYPED header, not a node. Detection has already
     // decided that; without this the statement loop interns the typo as a graph node and draws it.
     // Allocates only on the fuzzy path, which is the rare one.
     let fuzzy_blanked = (detection.method == crate::DetectionMethod::FuzzyKeyword)
-        .then(|| blank_fuzzy_matched_header(content))
+        .then(|| blank_fuzzy_matched_header(&content))
         .flatten();
-    let content = fuzzy_blanked.as_deref().unwrap_or(content);
+    let content = fuzzy_blanked.as_deref().unwrap_or(&content);
     let diagram_type = detection.diagram_type;
     // Capacity hint only (feeds `with_capacity_hint`'s node/edge estimates — no semantic
     // effect), so an approximate line count is fine. Count `\n` with memchr's SIMD scan: the
@@ -15491,7 +15492,7 @@ fn parse_edge_statement_asts(
     let (first_operator_idx, first_operator, first_arrow) =
         find_operator(statement, operators, gate)?;
     let left_source = trim_fast(&statement[..first_operator_idx]);
-    let edge_id = trailing_edge_id(left_source).map(|(_, edge_id)| edge_id.to_string());
+    let mut edge_id = trailing_edge_id(left_source).map(|(_, edge_id)| edge_id.to_string());
     let left_raw = strip_trailing_edge_id(left_source);
     if left_raw.is_empty() {
         return None;
@@ -15547,9 +15548,7 @@ fn parse_edge_statement_asts(
                         arrow,
                         min_length: current_min_length,
                         label: None,
-                        edge_id: (asts.is_empty() && edge_position == 0)
-                            .then(|| edge_id.clone())
-                            .flatten(),
+                        edge_id: (edge_position == 0).then(|| edge_id.clone()).flatten(),
                         to: placeholder.clone().into(),
                     });
                 }
@@ -15560,6 +15559,18 @@ fn parse_edge_statement_asts(
             edge_label = label;
             right_without_label = target;
         }
+
+        // In a chain, the text before the next operator is both this edge's target and the next
+        // edge's source. Its trailing `nextId@` belongs to that NEXT link, not to the node. Leaving
+        // it attached invented `B_e2` in `A e1@--> B e2@--> C` and lost every ID after the first.
+        let (right_without_label, next_edge_id) = if next_operator.is_some() {
+            trailing_edge_id(right_without_label)
+                .map_or((right_without_label, None), |(node, id)| {
+                    (node, Some(id.to_string()))
+                })
+        } else {
+            (right_without_label, None)
+        };
 
         let to_nodes = match (!right_without_label.is_empty())
             .then(|| {
@@ -15583,7 +15594,7 @@ fn parse_edge_statement_asts(
                     arrow: current_arrow,
                     min_length: current_min_length,
                     label: edge_label.clone(),
-                    edge_id: asts.is_empty().then(|| edge_id.clone()).flatten(),
+                    edge_id: edge_id.take(),
                     to: to_node.clone().into(),
                 });
             }
@@ -15594,6 +15605,7 @@ fn parse_edge_statement_asts(
             operator_idx = next_idx;
             operator = next_operator_token;
             arrow = next_arrow;
+            edge_id = next_edge_id;
             continue;
         }
 
@@ -17585,13 +17597,15 @@ pub(crate) fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
 /// behavior, but config tooling needs a precise error for an ignored key or malformed directive.
 pub(crate) fn validate_init_directives(input: &str) -> MermaidConfigValidation {
     let mut errors = Vec::new();
+    let (body, _) = split_front_matter_block(input);
+    let content = blank_front_matter_prefix(input, body);
     // Keep the explicit admission boundary consistent with rendering: a physical line inside a
     // quoted Sankey field is CSV data, even when it resembles a configuration directive.
     let directive_content =
         if crate::detect_type_with_confidence(input).diagram_type == DiagramType::Sankey {
-            sankey_directive_source(input)
+            sankey_directive_source(&content)
         } else {
-            Cow::Borrowed(input)
+            Cow::Borrowed(content.as_ref())
         };
 
     for (index, line) in byte_lines(&directive_content).enumerate() {
@@ -19065,6 +19079,25 @@ fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
     (input, None)
 }
 
+/// Hide YAML from the diagram parsers without changing any original source coordinates.
+///
+/// Keeping only `body` shifts every line-based span, and padding with newlines alone still
+/// corrupts the byte-based spans used by multiline CSV records and deck directives. Preserve
+/// both line endings and byte lengths so diagnostics and source-lens edits address the input.
+fn blank_front_matter_prefix<'a>(input: &'a str, body: &'a str) -> Cow<'a, str> {
+    let prefix_len = input.len() - body.len();
+    if prefix_len == 0 {
+        return Cow::Borrowed(input);
+    }
+    let mut blanked = input.as_bytes().to_vec();
+    for byte in &mut blanked[..prefix_len] {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
+    Cow::Owned(String::from_utf8(blanked).expect("spaces preserve UTF-8 validity"))
+}
+
 fn extract_config_directive_payload(trimmed: &str) -> Option<(&str, &str)> {
     if !(trimmed.starts_with("%%{") && trimmed.ends_with("}%%")) {
         return None;
@@ -20304,8 +20337,8 @@ pub fn first_significant_line(input: &str) -> Option<&str> {
 /// headerless diagram reaches flowchart through `ContentHeuristic` instead, and there the first
 /// line genuinely IS content — blanking it there would delete a node the user wrote.
 ///
-/// The line's bytes are removed but its newline is KEPT, so every subsequent line keeps its number
-/// and the existing typo warning still points at line 1.
+/// Blank the header's bytes while retaining its line endings and length. Later byte-based spans
+/// (including deck directives and Sankey records) must still address the original source.
 fn blank_fuzzy_matched_header(content: &str) -> Option<String> {
     let header = first_significant_line(content)?;
     // `first_significant_line` trims, so locate the untrimmed line that contains it.
@@ -20314,9 +20347,10 @@ fn blank_fuzzy_matched_header(content: &str) -> Option<String> {
     for line in content.split_inclusive('\n') {
         if !blanked && trim_fast(line.trim_end_matches('\n')) == header {
             blanked = true;
-            if line.ends_with('\n') {
-                out.push('\n');
-            }
+            out.extend(line.bytes().map(|byte| match byte {
+                b'\n' | b'\r' => char::from(byte),
+                _ => ' ',
+            }));
             continue;
         }
         out.push_str(line);
@@ -28829,6 +28863,137 @@ Rel_Back(db, app, "Responds")"#,
             ),
             ("A".to_string(), "B".to_string()),
             "the edge must connect the declared nodes, not a phantom"
+        );
+    }
+
+    #[test]
+    fn flowchart_chained_edge_ids_preserve_nodes_and_independent_metadata() {
+        use fm_core::{EdgeAnimation, MermaidEdgeRoutingHint as Routing};
+        let parsed = parse_mermaid(
+            "flowchart LR\n\
+             A first@-->|one| B[Middle] second@-.->|two| C third@==>|three| D\n\
+             first@{ curve: basis, animation: slow }\n\
+             second@{ curve: linear, animation: fast }\n\
+             third@{ curve: basis }\n\
+             classDef alert stroke:#ff0000,stroke-width:4px\n\
+             class second alert\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+        assert_eq!(parsed.ir.edges.len(), 3);
+        assert_eq!(
+            parsed.ir.labels[parsed.ir.nodes[1].label.unwrap().0].text,
+            "Middle"
+        );
+        for (index, label) in ["one", "two", "three"].into_iter().enumerate() {
+            let edge = &parsed.ir.edges[index];
+            assert_eq!(
+                edge.from,
+                fm_core::IrEndpoint::Node(fm_core::IrNodeId(index))
+            );
+            assert_eq!(
+                edge.to,
+                fm_core::IrEndpoint::Node(fm_core::IrNodeId(index + 1))
+            );
+            assert_eq!(parsed.ir.labels[edge.label.unwrap().0].text, label);
+        }
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
+        assert_eq!(parsed.ir.edges[1].arrow, ArrowType::DottedArrow);
+        assert_eq!(parsed.ir.edges[2].arrow, ArrowType::ThickArrow);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[1].routing(), Some(Routing::Orthogonal));
+        assert_eq!(parsed.ir.edges[2].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[0].animation(), Some(EdgeAnimation::Slow));
+        assert_eq!(parsed.ir.edges[1].animation(), Some(EdgeAnimation::Fast));
+        assert_eq!(parsed.ir.edges[2].animation(), None);
+        assert!(parsed.ir.style_refs.iter().any(|style_ref| {
+            style_ref.target == fm_core::IrStyleTarget::Link(1)
+                && style_ref.style.contains("stroke:#ff0000")
+        }));
+        assert!(
+            parsed.ir.style_refs.iter().all(|style_ref| {
+                !matches!(style_ref.target, fm_core::IrStyleTarget::Link(0 | 2))
+            })
+        );
+    }
+
+    #[test]
+    fn flowchart_chained_edge_ids_follow_text_labels_and_unnamed_links() {
+        for statement in [
+            "A first@-- one --> B second@-- two --> C",
+            "A -- one --> B second@-- two --> C",
+            "A -->|one| B second@-->|two| C",
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "flowchart LR\n{statement}\nsecond@{{ animation: fast }}\n"
+            ));
+            assert_eq!(
+                parsed
+                    .ir
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["A", "B", "C"],
+                "{statement}"
+            );
+            assert_eq!(parsed.ir.edges.len(), 2, "{statement}");
+            assert_eq!(parsed.ir.edges[0].animation(), None, "{statement}");
+            assert_eq!(
+                parsed.ir.edges[1].animation(),
+                Some(fm_core::EdgeAnimation::Fast),
+                "{statement}"
+            );
+            assert_eq!(
+                parsed.ir.labels[parsed.ir.edges[0].label.unwrap().0].text,
+                "one"
+            );
+            assert_eq!(
+                parsed.ir.labels[parsed.ir.edges[1].label.unwrap().0].text,
+                "two"
+            );
+        }
+    }
+
+    #[test]
+    fn flowchart_chained_edge_ids_keep_parallel_expansion_and_recovery() {
+        let parallel = parse_mermaid(
+            "flowchart LR\nA & B first@--> C & D second@--> E\n\
+             first@{ animation: slow }\nsecond@{ animation: fast }\n",
+        );
+        assert_eq!(parallel.ir.nodes.len(), 5);
+        assert_eq!(parallel.ir.edges.len(), 6);
+        assert_eq!(
+            parallel.ir.edges[0].animation(),
+            Some(fm_core::EdgeAnimation::Slow)
+        );
+        assert_eq!(
+            parallel.ir.edges[4].animation(),
+            Some(fm_core::EdgeAnimation::Fast)
+        );
+        for index in [1, 2, 3, 5] {
+            assert_eq!(parallel.ir.edges[index].animation(), None);
+        }
+
+        let dangling =
+            parse_mermaid("flowchart LR\nA first@--> B second@-->\nsecond@{ animation: fast }\n");
+        assert_eq!(dangling.ir.edges.len(), 2);
+        assert_eq!(dangling.ir.nodes[1].id, "B");
+        assert_eq!(
+            dangling.ir.edges[1].from,
+            fm_core::IrEndpoint::Node(fm_core::IrNodeId(1))
+        );
+        assert_eq!(
+            dangling.ir.edges[1].animation(),
+            Some(fm_core::EdgeAnimation::Fast)
         );
     }
 

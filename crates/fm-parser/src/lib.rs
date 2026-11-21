@@ -30,25 +30,13 @@ pub fn validate_mermaid_init_directives(source: &str) -> fm_core::MermaidConfigV
     mermaid_parser::validate_init_directives(source)
 }
 
-/// Normalize a Mermaid identifier by trimming, stripping quotes, and replacing unsafe characters
-/// with underscores -- BORROWING when the input already normalizes to itself.
+/// Normalize a Mermaid identifier by trimming and stripping quotes, borrowing unchanged IDs.
 ///
-/// This ensures consistent node identity across the engine and safe identifiers for backend layout
-/// engines and rendering formats.
-///
-/// The ledger has carried this as a deferred lever since 2026-07-12: "`normalize_identifier`'s
-/// remaining self-time is its `to_owned()` alloc on the fast path -- a structural Cow/borrow lever
-/// (return `&str`/`Cow` when unchanged so the interner clones once instead of twice), deferred as
-/// it touches ~30 callers."
-///
-/// This lands the borrow WITHOUT touching those callers. `normalize_identifier` keeps its `String`
-/// signature and delegates here, so all 49 existing call sites are byte-identical and pay exactly
-/// what they paid before. A call site that only reads or compares the result can switch to this one
-/// and pay nothing.
-///
-/// The fast path -- an id already made of `[A-Za-z0-9_./-]` with no trailing `_` -- is the
-/// overwhelmingly common case for generated node ids, and returns `Cow::Borrowed` into the caller's
-/// own input rather than a fresh allocation.
+/// Unicode is part of an authored identity, including combining marks. Truncating at the first
+/// non-ASCII character aliases distinct nodes such as `Café` and `Cafè` to `Caf`, and hashing only
+/// fully non-ASCII names can collide with an explicitly authored ASCII ID. Keep these characters
+/// intact; rendering backends escape identifiers when serializing their own output formats.
+/// Whitespace and malformed syntax still use the best-effort normalization path.
 #[must_use]
 pub fn normalize_identifier_cow(raw: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
@@ -74,13 +62,13 @@ pub fn normalize_identifier_cow(raw: &str) -> std::borrow::Cow<'_, str> {
         return Cow::Borrowed("");
     }
 
-    // THE LEVER. This branch previously ended in `cleaned.to_owned()` -- one heap allocation per
-    // identifier, on the hottest path in the parser. It now borrows.
-    let cleaned_bytes = cleaned.as_bytes();
-    if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
-        && cleaned_bytes
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
+    // Retain the byte-only common path. A trailing underscore is a valid authored character too:
+    // the flowchart fast parser already retains it, so stripping it here made identity depend on
+    // whether the same node occurred in a simple statement or a longer chain.
+    if cleaned
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+        || (!cleaned.is_ascii() && cleaned.chars().all(is_preserved_identifier_char))
     {
         return Cow::Borrowed(cleaned);
     }
@@ -88,12 +76,18 @@ pub fn normalize_identifier_cow(raw: &str) -> std::borrow::Cow<'_, str> {
     Cow::Owned(normalize_identifier_rebuild(cleaned, was_quoted))
 }
 
-/// Owning slow path: the char-by-char rebuild, its `_`-trim, the grapheme fallback and the hashed
-/// last resort. Unchanged from the original function body; only its home moved.
+/// Characters retained verbatim in an authored identifier, including Unicode grapheme components.
+fn is_preserved_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric()
+        || matches!(character, '_' | '-' | '.' | '/')
+        || (!character.is_ascii() && !character.is_whitespace() && !character.is_control())
+}
+
+/// Owning recovery path for whitespace and syntax that is not a complete identifier.
 fn normalize_identifier_rebuild(cleaned: &str, was_quoted: bool) -> String {
     let mut out = String::with_capacity(cleaned.len());
     for ch in cleaned.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+        if is_preserved_identifier_char(ch) {
             out.push(ch);
         } else if ch.is_whitespace() {
             // Replace spaces with underscores for all identifiers to ensure they are safe
@@ -145,10 +139,7 @@ fn normalize_identifier_rebuild(cleaned: &str, was_quoted: bool) -> String {
     result
 }
 
-/// Normalize an identifier to an owned `String`.
-///
-/// Delegates to [`normalize_identifier_cow`]; byte-identical to the previous implementation. Kept
-/// so the existing call sites need no change.
+/// Normalize an identifier to an owned `String` using [`normalize_identifier_cow`].
 #[must_use]
 pub fn normalize_identifier(raw: &str) -> String {
     normalize_identifier_cow(raw).into_owned()
@@ -2889,7 +2880,7 @@ fn find_flowchart_label_text_range(
 }
 
 fn is_flowchart_identifier_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+    is_preserved_identifier_char(character)
 }
 
 /// Finds the visible alias text in `participant id as label` or `actor id as label`. Sequence
@@ -4221,25 +4212,128 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         ));
         assert!(matches!(
             normalize_identifier_cow("trailing_"),
-            std::borrow::Cow::Owned(_)
+            std::borrow::Cow::Borrowed(_)
         ));
     }
 
     #[test]
-    fn normalize_identifier_falls_back_to_hashed_id_for_non_ascii() {
-        let first = normalize_identifier("你好");
-        let second = normalize_identifier("你好");
-        let other = normalize_identifier("こんにちは");
+    fn normalize_identifier_preserves_unicode_and_authored_underscores() {
+        let identities = [
+            "Café",
+            "Cafè",
+            "Caf",
+            "Cafe\u{301}",
+            "你好",
+            "こんにちは",
+            "データ🚀",
+            "A_",
+            "A",
+            "___",
+            "id_1234",
+        ];
+        for identity in identities {
+            assert_eq!(normalize_identifier(identity), identity);
+            assert_eq!(normalize_identifier(&format!("\"{identity}\"")), identity);
+            assert!(matches!(
+                normalize_identifier_cow(identity),
+                std::borrow::Cow::Borrowed(_)
+            ));
+        }
+        let normalized: std::collections::BTreeSet<_> =
+            identities.into_iter().map(normalize_identifier).collect();
+        assert_eq!(normalized.len(), identities.len());
+    }
 
-        assert!(!first.is_empty());
-        assert!(first.starts_with("id_"));
-        assert_eq!(first, second);
-        assert_ne!(first, other);
-        assert!(
-            first
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    #[test]
+    fn unicode_node_identities_keep_distinct_edges_across_diagram_families() {
+        let sources = [
+            "flowchart LR\nCafé --> Cafè\nCafè --> Caf\n",
+            "classDiagram\nCafé --> Cafè\nCafè --> Caf\n",
+            "stateDiagram-v2\nCafé --> Cafè\nCafè --> Caf\n",
+            "erDiagram\nCafé ||--o{ Cafè : has\nCafè ||--o{ Caf : has\n",
+            "sequenceDiagram\nCafé->>Cafè: request\nCafè->>Caf: response\n",
+        ];
+        for source in sources {
+            let parsed = super::parse(source);
+            assert_eq!(
+                parsed
+                    .ir
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["Café", "Cafè", "Caf"],
+                "{source}"
+            );
+            assert_eq!(parsed.ir.edges.len(), 2, "{source}");
+            for (index, edge) in parsed.ir.edges.iter().enumerate() {
+                assert_eq!(
+                    edge.from,
+                    fm_core::IrEndpoint::Node(fm_core::IrNodeId(index)),
+                    "{source}"
+                );
+                assert_eq!(
+                    edge.to,
+                    fm_core::IrEndpoint::Node(fm_core::IrNodeId(index + 1)),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_styles_and_links_resolve_the_authored_node() {
+        let source = "flowchart LR\nCafé[Coffee] --> Cafè[Tea]\nCafè --> Caf[Plain]\n\
+                      class Café featured\nclassDef featured fill:#abcdef\n\
+                      click Café \"https://example.com/coffee\" \"Coffee menu\"\n";
+        let parsed = super::parse(source);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        let coffee = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Café")
+            .unwrap();
+        assert!(coffee.classes.iter().any(|class| class == "featured"));
+        assert!(coffee.interaction.is_some());
+        assert_eq!(parsed.ir.labels[coffee.label.unwrap().0].text, "Coffee");
+        for node in parsed.ir.nodes.iter().filter(|node| node.id != "Café") {
+            assert!(node.interaction.is_none());
+            assert!(!node.classes.iter().any(|class| class == "featured"));
+        }
+    }
+
+    #[test]
+    fn flowchart_unicode_labels_reemit_without_rebinding_similar_ids() {
+        let source = "flowchart LR\r\nCafé[First] --> Cafè[Second]\r\nCafè --> Caf[Third]\r\n";
+        let lens = super::FlowchartParseLens::parse(source).unwrap();
+        let mut edited = lens.ir().clone();
+        let node = edited.nodes.iter().find(|node| node.id == "Cafè").unwrap();
+        let label = node.label.unwrap();
+        edited.labels[label.0].text = "Updated".to_string();
+        assert_eq!(
+            lens.put(&edited).unwrap(),
+            source.replace("Second", "Updated")
         );
+        assert_eq!(lens.put(lens.ir()).unwrap(), source);
+    }
+
+    #[test]
+    fn trailing_underscore_identity_agrees_between_fast_and_chained_paths() {
+        let source = "flowchart LR\nA_[First] --> B\nB --> A_ --> A[Other]\n";
+        let parsed = super::parse(source);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        let index = parsed
+            .ir
+            .nodes
+            .iter()
+            .position(|node| node.id == "A_")
+            .unwrap();
+        let endpoint = fm_core::IrEndpoint::Node(fm_core::IrNodeId(index));
+        assert_eq!(parsed.ir.edges[0].from, endpoint);
+        assert_eq!(parsed.ir.edges[1].to, endpoint);
+        assert_eq!(parsed.ir.edges[2].from, endpoint);
+        assert_ne!(parsed.ir.edges[2].to, endpoint);
     }
 
     #[test]
