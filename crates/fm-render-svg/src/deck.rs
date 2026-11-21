@@ -22,10 +22,10 @@ use fm_core::{
     DECK_MANIFEST_SCHEMA_VERSION, DeckEdgeEndpoints, DeckManifest, DeckManifestCluster,
     DeckManifestEdge, DeckManifestNode, DeckManifestOptions, DeckManifestOverview,
     DeckManifestSlide, DeckManifestStep, DeckRect, DiagramType, IrDeck, IrDeckEdgePolicy,
-    IrDeckReveal, MermaidDiagramIr, deck_manifest_supported, mermaid_cluster_element_id,
+    IrDeckReveal, IrEdge, MermaidDiagramIr, deck_manifest_supported, mermaid_cluster_element_id,
     mermaid_edge_element_id, mermaid_node_element_id,
 };
-use fm_layout::{DiagramLayout, LayoutRect};
+use fm_layout::{DiagramLayout, LayoutEdgePath, LayoutRect};
 
 use crate::{
     Element, SvgBackend, SvgDocument, SvgFrame, SvgRenderConfig, render_svg_with_layout, svg_frame,
@@ -84,6 +84,17 @@ pub(crate) struct ResolvedScene {
 /// chunk into waves of this many per step. One keypress ≈ one thought-group; tunable without
 /// any schema change.
 const AUTO_WAVE_SIZE: usize = 5;
+
+/// Only painted layout paths have addressable SVG roots. Both slide membership and the
+/// whole-diagram morph joins must use this rule: the browser validates every join, including
+/// off-slide edges, before it can mount the paired artifact.
+fn addressable_layout_edge<'a>(
+    ir: &'a MermaidDiagramIr,
+    path: &LayoutEdgePath,
+) -> Option<&'a IrEdge> {
+    let edge = ir.edges.get(path.edge_index)?;
+    (!path.bundled && edge.arrow != fm_core::ArrowType::Invisible).then_some(edge)
+}
 
 /// Phase 1: resolve every slide against the diagram. `None` when the input can produce no
 /// scenes at all: no deck, an unsupported family, or zero slides surviving resolution.
@@ -208,14 +219,9 @@ pub(crate) fn resolve_scenes(
         let mut edges = Vec::new();
         if slide.edges != IrDeckEdgePolicy::None {
             for edge_path in &layout.edges {
-                let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+                let Some(edge) = addressable_layout_edge(ir, edge_path) else {
                     continue;
                 };
-                // Layout-only links and absorbed bundle members have no addressable SVG root.
-                // Keep the manifest aligned with the rendered artifact, including slide bounds.
-                if edge.arrow == fm_core::ArrowType::Invisible || edge_path.bundled {
-                    continue;
-                }
                 let from = ir.resolve_endpoint_node(edge.from).map(|id| id.0);
                 let to = ir.resolve_endpoint_node(edge.to).map(|id| id.0);
                 let from_member = from.is_some_and(|index| members.contains(&index));
@@ -431,14 +437,20 @@ pub(crate) fn project_manifest(
         element_id_by_node.insert(node_box.node_index, element_id);
     }
     let mut edge_endpoints: BTreeMap<String, DeckEdgeEndpoints> = BTreeMap::new();
-    for (edge_index, edge) in ir.edges.iter().enumerate() {
+    // Start with the supplied layout, rather than IR topology: filtered feedback edges and
+    // absorbed bundle members remain in the IR but have no element in this rendered SVG.
+    // Keep painted edges outside every slide too, since overview and morphing need them.
+    for edge_path in &layout.edges {
+        let Some(edge) = addressable_layout_edge(ir, edge_path) else {
+            continue;
+        };
         let endpoint = |end| {
             ir.resolve_endpoint_node(end)
                 .and_then(|node_id| element_id_by_node.get(&node_id.0))
         };
         if let (Some(from), Some(to)) = (endpoint(edge.from), endpoint(edge.to)) {
             edge_endpoints.insert(
-                mermaid_edge_element_id(edge_index),
+                mermaid_edge_element_id(edge_path.edge_index),
                 DeckEdgeEndpoints {
                     from_element_id: from.clone(),
                     to_element_id: to.clone(),
@@ -1163,24 +1175,111 @@ mod tests {
 
     #[test]
     fn slide_manifests_omit_unpainted_edges() {
-        let source = "flowchart LR\n%%{deck: {slides:[{id:'all',nodes:['*']}]}}%%\nA ~~~ B\nB --> C\nA --> C\n";
+        let source = "flowchart LR\n%%{deck: {slides:[{id:'selected',nodes:['B','C']}]}}%%\nA ~~~ B\nB --> C\nB --> C\nD --> E\n";
         let parsed = fm_parser::parse(source);
-        let mut layout = layout_diagram(&parsed.ir);
-        // A member absorbed by bundling has no independent SVG root, just like a layout-only link.
-        let bundled = layout
+        let layout = layout_diagram(&parsed.ir);
+        // Exercise real layout bundling: the duplicate connection has no independent SVG root,
+        // just like the authored layout-only link. D -> E remains painted outside every slide.
+        assert!(layout.edges.iter().any(|path| path.bundled));
+        let invisible_index = parsed
+            .ir
             .edges
-            .iter_mut()
-            .find(|path| parsed.ir.edges[path.edge_index].arrow != fm_core::ArrowType::Invisible)
+            .iter()
+            .position(|edge| edge.arrow == fm_core::ArrowType::Invisible)
             .unwrap();
-        bundled.bundled = true;
-        let bundled_index = bundled.edge_index;
         let mut config = SvgRenderConfig::default();
         config.make_portable();
         let (svg, manifest) = render_svg_with_deck(&parsed.ir, &layout, &config);
         let manifest = manifest.unwrap();
         assert_eq!(manifest.slides[0].edges.len(), 1);
-        assert_ne!(manifest.slides[0].edges[0].index, bundled_index);
-        assert!(export_deck_slide_svg(&svg, &manifest, "all", Default::default()).is_ok());
+        assert_eq!(manifest.edge_endpoints.len(), 2);
+        assert!(
+            !manifest
+                .edge_endpoints
+                .contains_key(&mermaid_edge_element_id(invisible_index))
+        );
+        for path in layout.edges.iter().filter(|path| path.bundled) {
+            assert!(
+                !manifest
+                    .edge_endpoints
+                    .contains_key(&mermaid_edge_element_id(path.edge_index))
+            );
+        }
+        let off_slide = manifest
+            .edge_endpoints
+            .iter()
+            .find(|(id, _)| id.as_str() != manifest.slides[0].edges[0].element_id)
+            .expect("painted off-slide edge remains available for overview and morphing");
+        let node_d = parsed
+            .ir
+            .nodes
+            .iter()
+            .position(|node| node.id == "D")
+            .unwrap();
+        let node_e = parsed
+            .ir
+            .nodes
+            .iter()
+            .position(|node| node.id == "E")
+            .unwrap();
+        assert_eq!(
+            off_slide.1.from_element_id,
+            mermaid_node_element_id("D", node_d)
+        );
+        assert_eq!(
+            off_slide.1.to_element_id,
+            mermaid_node_element_id("E", node_e)
+        );
+        assert_manifest_element_joins(&svg, &manifest);
+        assert!(export_deck_slide_svg(&svg, &manifest, "selected", Default::default()).is_ok());
+    }
+
+    /// The browser adapter namespaces and validates all these references, including entries
+    /// outside slide membership. A dangling morph join rejects the entire native deck result.
+    fn assert_manifest_element_joins(svg: &str, manifest: &DeckManifest) {
+        let ids = svg_element_ids(svg);
+        for id in manifest.node_geometry.keys() {
+            assert!(
+                ids.contains(id.as_str()),
+                "node geometry has no SVG element: {id}"
+            );
+        }
+        for (id, endpoints) in &manifest.edge_endpoints {
+            assert!(
+                ids.contains(id.as_str()),
+                "edge endpoints have no SVG element: {id}"
+            );
+            for endpoint in [&endpoints.from_element_id, &endpoints.to_element_id] {
+                assert!(
+                    ids.contains(endpoint.as_str()),
+                    "edge {id} has no SVG endpoint: {endpoint}"
+                );
+                assert!(manifest.node_geometry.contains_key(endpoint));
+            }
+        }
+        for slide in &manifest.slides {
+            for edge in &slide.edges {
+                assert!(manifest.edge_endpoints.contains_key(&edge.element_id));
+            }
+        }
+    }
+
+    #[test]
+    fn deck_endpoint_joins_follow_the_supplied_filtered_layout() {
+        let source = "flowchart LR\n%%{deck: {slides:[{id:'cycle',nodes:['*']}]}}%%\nA --> B\nB --> C\nC --> A\n";
+        let parsed = fm_parser::parse(source);
+        let mut layout = layout_diagram(&parsed.ir);
+        let original_edges = layout.edges.len();
+        // The CLI's show_back_edges=false path passes a filtered layout to both consumers.
+        // IR topology still includes the hidden feedback edge and must not resurrect its ID.
+        layout.edges.retain(|edge| !edge.reversed);
+        assert!(!layout.edges.is_empty());
+        assert!(layout.edges.len() < original_edges);
+        let (svg, manifest) =
+            render_svg_with_deck(&parsed.ir, &layout, &SvgRenderConfig::default());
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest.edge_endpoints.len(), layout.edges.len());
+        assert_manifest_element_joins(&svg, &manifest);
     }
 
     #[test]

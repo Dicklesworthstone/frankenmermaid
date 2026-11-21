@@ -103,6 +103,22 @@ fn deck_manifests_match_checked_in_goldens() {
                 );
             }
         }
+        // Schema 1.1 also exposes whole-diagram geometry and endpoint joins, including edges
+        // that belong to no slide. Browser namespacing validates these before playback too.
+        for id in manifest.node_geometry.keys() {
+            assert!(
+                svg.contains(&format!("id=\"{id}\"")),
+                "{case}: geometry {id} missing from SVG"
+            );
+        }
+        for (id, endpoints) in &manifest.edge_endpoints {
+            for joined_id in [id, &endpoints.from_element_id, &endpoints.to_element_id] {
+                assert!(
+                    svg.contains(&format!("id=\"{joined_id}\"")),
+                    "{case}: endpoint join {joined_id} missing from SVG"
+                );
+            }
+        }
 
         // ViewBox equality (closes the D5 loop): the manifest's viewBox equals the rendered
         // SVG's viewBox attribute NUMERICALLY — the SVG prints full float precision while
@@ -718,11 +734,19 @@ fn deck_source_strategy() -> impl Strategy<Value = String> {
         0usize..3,                 // reveal flavor: none / auto / groups
         0usize..3,                 // edge policy index
         prop::bool::ANY,           // include a junk selector
+        prop::bool::ANY,           // include an invisible layout-only link
+        prop::bool::ANY,           // include an automatically bundled duplicate edge
     )
-        .prop_map(|(nodes, subgraph, reveal, edges, junk)| {
+        .prop_map(|(nodes, subgraph, reveal, edges, junk, invisible, duplicate)| {
             let mut body = String::from("flowchart LR\n");
             for index in 1..nodes {
                 body.push_str(&format!("  n{} --> n{}\n", index - 1, index));
+            }
+            if invisible {
+                body.push_str(&format!("  n0 ~~~ n{}\n", nodes - 1));
+            }
+            if duplicate {
+                body.push_str("  n0 --> n1\n");
             }
             if subgraph {
                 body.push_str("  subgraph grp\n    n0\n  end\n");
@@ -785,6 +809,16 @@ proptest! {
         let (svg, manifest) =
             render_svg_with_deck(&parsed.ir, &layout, &SvgRenderConfig::default());
         if let Some(manifest) = manifest {
+            for id in manifest.node_geometry.keys() {
+                let needle = format!("id=\"{id}\"");
+                prop_assert!(svg.contains(&needle), "missing geometry id {needle}");
+            }
+            for (id, endpoints) in &manifest.edge_endpoints {
+                for joined_id in [id, &endpoints.from_element_id, &endpoints.to_element_id] {
+                    let needle = format!("id=\"{joined_id}\"");
+                    prop_assert!(svg.contains(&needle), "missing endpoint join {needle}");
+                }
+            }
             for slide in &manifest.slides {
                 for node in &slide.nodes {
                     let needle = format!("id=\"{}\"", node.element_id);
