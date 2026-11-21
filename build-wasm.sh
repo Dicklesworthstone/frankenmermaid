@@ -406,10 +406,7 @@ mkdir -p "$OUT_DIR"
       --out-name "$OUT_NAME" \
       . \
       -- -Zbuild-std=std,panic_abort \
-         --config 'profile.release.package.fm-layout.opt-level="z"' \
-         --config 'profile.release.package.fm-parser.opt-level="z"' \
-         --config 'profile.release.package.fm-render-svg.opt-level="z"' \
-         --config 'profile.release.package.fm-core.opt-level="z"'
+         --config 'profile.release.opt-level="z"'
 )
 
 if [[ ! -f "$WASM_PATH" ]]; then
