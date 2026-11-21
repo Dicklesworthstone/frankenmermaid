@@ -275,11 +275,11 @@
       "edge_count": 0,
       "edges_checksum": "cbf29ce484222325",
       "layout_algorithm": "auto",
-      "layout_checksum": "162662715c81a211",
-      "layout_height": 351.549988,
-      "layout_width": 784.0,
+      "layout_checksum": "07f52cad451b4dfa",
+      "layout_height": 383.950012,
+      "layout_width": 802.0,
       "node_count": 7,
-      "nodes_checksum": "d592e0e76ba48c04"
+      "nodes_checksum": "8ae79c1dd6b05131"
     },
     "malformed_recovery": {
       "edge_count": 2,
@@ -363,11 +363,11 @@
     },
     "sequence_advanced": {
       "edge_count": 11,
-      "edges_checksum": "14ccc7675f71ca5f",
+      "edges_checksum": "dcc6aae2f7437773",
       "layout_algorithm": "auto",
-      "layout_checksum": "193bcf5e147923af",
-      "layout_height": 900.650024,
-      "layout_width": 642.699951,
+      "layout_checksum": "02096354acfb3023",
+      "layout_height": 905.525024,
+      "layout_width": 662.408508,
       "node_count": 3,
       "nodes_checksum": "700e39086431c162"
     },
