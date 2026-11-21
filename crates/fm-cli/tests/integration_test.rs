@@ -1072,6 +1072,35 @@ fn validate_fail_on_warning_returns_nonzero() {
 }
 
 #[test]
+fn validate_fail_on_warning_passes_for_styled_diagram_gh18() {
+    let input = "flowchart LR\n  A --> B\n  classDef hot fill:#f96\n  class A hot\n";
+    let validate = run_cli(
+        &["validate", "-", "--format", "json", "--fail-on", "warning"],
+        input,
+    );
+    assert!(
+        validate.status.success(),
+        "styled diagram should pass --fail-on warning (style note is info severity); stdout={} stderr={}",
+        String::from_utf8_lossy(&validate.stdout),
+        String::from_utf8_lossy(&validate.stderr)
+    );
+    let svg = run_cli(&["render", "-", "--format", "svg"], input);
+    assert!(svg.status.success());
+    let svg_text = String::from_utf8_lossy(&svg.stdout);
+    assert!(
+        !svg_text.contains("Diagnostics: 1 warning"),
+        "SVG accessible description must not count style-directive note as a warning"
+    );
+    let term = run_cli(&["render", "-", "--format", "term"], input);
+    assert!(term.status.success());
+    let term_err = String::from_utf8_lossy(&term.stderr);
+    assert!(
+        term_err.contains("terminal output"),
+        "terminal render should still report the style-directive note; stderr={term_err}"
+    );
+}
+
+#[test]
 fn validate_diagnostics_out_writes_artifact_file() {
     let input = "flowchart TD\nA-->B\n";
     let diagnostics_file = NamedTempFile::new().expect("temp diagnostics file");

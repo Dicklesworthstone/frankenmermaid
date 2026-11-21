@@ -369,6 +369,7 @@ click a "https://example.com/task" "Open task" _self
                         backend,
                         embed_theme_css,
                         include_source_spans: true,
+                        link_mode: fm_core::MermaidLinkMode::Inline,
                         ..Default::default()
                     },
                 );

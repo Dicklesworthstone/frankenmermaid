@@ -35050,36 +35050,43 @@ mod tests {
 
     #[test]
     fn sankey_extreme_independent_flows_cannot_undersize_visible_ribbon_ports() {
-        let mut source = String::from("sankey-beta\nHuge,Other,1e300\n");
-        for index in 0..16 {
-            source.push_str(&format!("Source,Destination{index},1\n"));
-        }
-        let ir = parse(&source).ir;
-        let layout = layout_diagram_sankey(&ir);
-        let card = layout
-            .nodes
-            .iter()
-            .find(|node| node.node_id == "Source")
-            .unwrap();
-        let widest = super::sankey_widest_flow(&ir);
-        let mut painted_slots = Vec::new();
-        for path in &layout.edges {
-            let edge = &ir.edges[path.edge_index];
-            if edge.from != IrEndpoint::Node(IrNodeId(card.node_index)) {
-                continue;
+        // An overflowing f64 flow (1e400) is ignored so ordinary flows retain max width (24px);
+        // an extreme finite f64 flow (1e300) clamps ordinary flows to the visible floor (1.5px).
+        // In both cases every painted ribbon slot must stay inside the card with >= 8px gaps.
+        for (extreme_value, expected_width) in [("1e400", 24.0_f32), ("1e300", 1.5_f32)] {
+            let mut source = format!("sankey-beta\nHuge,Other,{extreme_value}\n");
+            for index in 0..16 {
+                source.push_str(&format!("Source,Destination{index},1\n"));
             }
-            let width = super::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap();
-            assert_eq!(width, 24.0);
-            let center = path.points[0];
-            assert_eq!(center.x, card.bounds.x + card.bounds.width);
-            assert!(center.y - width * 0.5 >= card.bounds.y + 12.0 - 0.001);
-            assert!(center.y + width * 0.5 <= card.bounds.y + card.bounds.height - 12.0 + 0.001);
-            painted_slots.push((center.y - width * 0.5, center.y + width * 0.5));
-        }
-        assert_eq!(painted_slots.len(), 16);
-        painted_slots.sort_by(|left, right| left.0.total_cmp(&right.0));
-        for pair in painted_slots.windows(2) {
-            assert!(pair[1].0 - pair[0].1 >= 8.0 - 0.001);
+            let ir = parse(&source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            let card = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "Source")
+                .unwrap();
+            let widest = super::sankey_widest_flow(&ir);
+            let mut painted_slots = Vec::new();
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                if edge.from != IrEndpoint::Node(IrNodeId(card.node_index)) {
+                    continue;
+                }
+                let width = super::sankey_flow_stroke_width(&ir, Some(edge), widest).unwrap();
+                assert_eq!(width, expected_width, "extreme_value={extreme_value}");
+                let center = path.points[0];
+                assert_eq!(center.x, card.bounds.x + card.bounds.width);
+                assert!(center.y - width * 0.5 >= card.bounds.y + 12.0 - 0.001);
+                assert!(
+                    center.y + width * 0.5 <= card.bounds.y + card.bounds.height - 12.0 + 0.001
+                );
+                painted_slots.push((center.y - width * 0.5, center.y + width * 0.5));
+            }
+            assert_eq!(painted_slots.len(), 16);
+            painted_slots.sort_by(|left, right| left.0.total_cmp(&right.0));
+            for pair in painted_slots.windows(2) {
+                assert!(pair[1].0 - pair[0].1 >= 8.0 - 0.001);
+            }
         }
     }
 

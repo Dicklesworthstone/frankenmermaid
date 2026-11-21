@@ -72,8 +72,20 @@ fn repeated_mindmap_captions_render_as_independent_branches() {
         assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
         assert_eq!(svg.matches(">Review</text>").count(), 2, "{backend:?}");
         for (index, node) in &reviews {
-            let id = fm_core::mermaid_node_element_id(&node.id, *index);
-            assert_eq!(svg.matches(&format!("id=\"{id}\"")).count(), 1);
+            match backend {
+                SvgBackend::LegacyLayout => {
+                    let id = fm_core::mermaid_node_element_id(&node.id, *index);
+                    assert_eq!(svg.matches(&format!("id=\"{id}\"")).count(), 1);
+                }
+                SvgBackend::Scene => {
+                    let marker =
+                        format!("data-fm-source-kind=\"node\" data-fm-source-index=\"{index}\"");
+                    assert!(
+                        svg.contains(&marker),
+                        "Scene SVG missing source marker {marker}"
+                    );
+                }
+            }
         }
         assert!(!svg.contains("NaN") && !svg.contains("Infinity"));
     }

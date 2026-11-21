@@ -332,3 +332,46 @@ fn an_ampersand_list_of_subgraph_endpoints_attaches_every_edge() {
         assert!(extras.from_subgraph.is_some() && extras.to_subgraph.is_some());
     }
 }
+
+/// GH #12 item 1: `G --> a` where `a` is G's first member marks only the source end as G,
+/// and `Outer --> Inner` where both share first member `x` marks source as Outer and target as Inner.
+#[test]
+fn subgraph_to_first_member_and_nested_subgraph_edges_preserve_distinct_ends() {
+    let source_to_member = "flowchart TD\n  subgraph G\n    a\n    b\n  end\n  G --> a\n";
+    let ir = fm_parser::parse(source_to_member).ir;
+    assert_eq!(ir.edges.len(), 1);
+    let extras = ir.edges[0]
+        .extras
+        .as_ref()
+        .expect("source subgraph recorded");
+    assert_eq!(
+        extras
+            .from_subgraph
+            .map(|id| ir.graph.subgraphs[id.0].key.as_str()),
+        Some("G")
+    );
+    assert_eq!(
+        extras.to_subgraph, None,
+        "target endpoint named node `a`, not subgraph `G`"
+    );
+
+    let nested = "flowchart TD\n  subgraph Outer\n    subgraph Inner\n      x\n    end\n  end\n  Outer --> Inner\n";
+    let ir = fm_parser::parse(nested).ir;
+    assert_eq!(ir.edges.len(), 1);
+    let extras = ir.edges[0]
+        .extras
+        .as_ref()
+        .expect("both subgraphs recorded");
+    assert_eq!(
+        extras
+            .from_subgraph
+            .map(|id| ir.graph.subgraphs[id.0].key.as_str()),
+        Some("Outer")
+    );
+    assert_eq!(
+        extras
+            .to_subgraph
+            .map(|id| ir.graph.subgraphs[id.0].key.as_str()),
+        Some("Inner")
+    );
+}

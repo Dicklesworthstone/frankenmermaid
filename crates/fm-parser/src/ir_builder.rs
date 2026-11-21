@@ -217,6 +217,8 @@ pub struct IrBuilder {
     /// subgraph. Resolved to subgraph ids once lowering ends, because a forward reference names
     /// a subgraph that does not exist yet when the edge is pushed.
     subgraph_edge_ends: Vec<(usize, bool, String)>,
+    #[cfg(test)]
+    peak_subgraph_edge_ends_len: usize,
     /// Subgraph PUBLIC key -> index into `ir.graph.subgraphs`.
     ///
     /// ⚠️ NOT `subgraph_index_by_key`, WHICH IS KEYED DIFFERENTLY. That map holds
@@ -574,6 +576,8 @@ impl IrBuilder {
             flow_forward_subgraph_members,
             pending_subgraph_endpoints,
             subgraph_edge_ends,
+            #[cfg(test)]
+                peak_subgraph_edge_ends_len: _,
             subgraph_index_by_public_key,
             cluster_member_set,
             subgraph_member_set,
@@ -630,6 +634,8 @@ impl IrBuilder {
             flow_forward_subgraph_members: FxHashMap::default(),
             pending_subgraph_endpoints: Vec::new(),
             subgraph_edge_ends: Vec::new(),
+            #[cfg(test)]
+            peak_subgraph_edge_ends_len: 0,
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -683,6 +689,8 @@ impl IrBuilder {
             flow_forward_subgraph_members: FxHashMap::default(),
             pending_subgraph_endpoints: Vec::new(),
             subgraph_edge_ends: Vec::new(),
+            #[cfg(test)]
+            peak_subgraph_edge_ends_len: 0,
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -2394,7 +2402,23 @@ impl IrBuilder {
 
     /// Turn the recorded subgraph-named edge ends into `from_subgraph` / `to_subgraph`, now that
     /// every subgraph exists.
+    #[cfg(test)]
+    pub(crate) const fn peak_subgraph_edge_ends_len(&self) -> usize {
+        self.peak_subgraph_edge_ends_len
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ir_edge_count(&self) -> usize {
+        self.ir.edges.len()
+    }
+
     pub(crate) fn finish_subgraph_edge_ends(&mut self) {
+        #[cfg(test)]
+        {
+            self.peak_subgraph_edge_ends_len = self
+                .peak_subgraph_edge_ends_len
+                .max(self.subgraph_edge_ends.len());
+        }
         for (edge, is_source, key) in &self.subgraph_edge_ends {
             let (Some(&index), Some(edge)) = (
                 self.subgraph_index_by_public_key.get(key),

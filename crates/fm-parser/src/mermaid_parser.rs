@@ -9484,6 +9484,12 @@ struct WardleyLink<'a> {
 /// percentage. Out of range is an error upstream (the whole map fails); here it is clamped and
 /// reported.
 fn wardley_percent(value: f32, builder: &mut IrBuilder, line_number: usize) -> f32 {
+    if !value.is_finite() {
+        builder.add_warning(format!(
+            "Line {line_number}: wardley-beta coordinates must be finite; clamped {value}"
+        ));
+        return 0.0;
+    }
     let percent = if value <= 1.0 { value * 100.0 } else { value };
     if !(0.0..=100.0).contains(&percent) {
         builder.add_warning(format!(
@@ -9493,13 +9499,18 @@ fn wardley_percent(value: f32, builder: &mut IrBuilder, line_number: usize) -> f
     percent.clamp(0.0, 100.0)
 }
 
-/// The numbers inside the first `[…]` of `text`, and the text after the `]`.
+/// The finite numbers inside the first `[…]` of `text`, and the text after the `]`.
 fn wardley_bracket(text: &str) -> Option<(Vec<f32>, &str)> {
     let open = text.find('[')?;
     let close = open + text[open..].find(']')?;
     let numbers = text[open + 1..close]
         .split(',')
-        .map(|value| trim_fast(value).parse::<f32>().ok())
+        .map(|value| {
+            trim_fast(value)
+                .parse::<f32>()
+                .ok()
+                .filter(|number| number.is_finite())
+        })
         .collect::<Option<Vec<f32>>>()?;
     Some((numbers, trim_fast(&text[close + 1..])))
 }
@@ -9833,7 +9844,15 @@ fn parse_wardley(content: &str, builder: &mut IrBuilder) {
             "evolve" => {
                 let target = rest
                     .rsplit_once(char::is_whitespace)
-                    .and_then(|(name, value)| Some((name, value.parse::<f32>().ok()?)));
+                    .and_then(|(name, value)| {
+                        Some((
+                            name,
+                            value
+                                .parse::<f32>()
+                                .ok()
+                                .filter(|number| number.is_finite())?,
+                        ))
+                    });
                 match target {
                     Some((name, value)) => {
                         let value = wardley_percent(value, builder, line_number);
@@ -10639,6 +10658,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
     let mut current_column_indent: Option<usize> = None;
     let mut columns: Vec<Option<fm_core::IrKanbanColumn>> = Vec::new();
     let mut cards: Vec<Option<fm_core::IrKanbanCard>> = Vec::new();
+    let mut pending_clicks: Vec<(usize, Span, &str)> = Vec::new();
     let mut in_acc_descr_block = false;
 
     // Reserve explicit identities before generating anonymous ones. Otherwise a later authored
@@ -10679,6 +10699,10 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
             .is_some_and(|rest| rest.trim() == "{")
         {
             in_acc_descr_block = true;
+            continue;
+        }
+        if trimmed.starts_with("click ") {
+            pending_clicks.push((line_number, span_for(line_number, line), trimmed));
             continue;
         }
         if is_accessibility_directive_statement(trimmed)
@@ -10837,6 +10861,44 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
                     "Line {line_number}: kanban wip limits apply to columns, not cards"
                 ));
             }
+        }
+    }
+
+    for (line_number, span, statement) in pending_clicks {
+        let mut click_warnings = Vec::new();
+        let parsed = parse_click_directive_ast(
+            statement,
+            line_number,
+            &mut click_warnings,
+            normalize_identifier,
+        );
+        for warning in click_warnings {
+            builder.add_warning(warning);
+        }
+        let Some(directives) = parsed else {
+            continue;
+        };
+        for directive in directives {
+            let FlowAst::ClickDirective {
+                node,
+                target,
+                tooltip,
+                link_target,
+                is_callback,
+            } = directive
+            else {
+                continue;
+            };
+            apply_click_directive(
+                builder,
+                &node,
+                &target,
+                tooltip.as_ref(),
+                link_target.as_ref(),
+                is_callback,
+                line_number,
+                span,
+            );
         }
     }
 
@@ -11591,7 +11653,7 @@ fn strip_trailing_er_cardinality(side: &str) -> (&str, Option<ErCardinalitySpell
         let Some(head) = side
             .len()
             .checked_sub(spelling.len())
-            .filter(|at| side[*at..].eq_ignore_ascii_case(spelling))
+            .filter(|at| side.is_char_boundary(*at) && side[*at..].eq_ignore_ascii_case(spelling))
             .map(|at| &side[..at])
         else {
             continue;
@@ -11607,7 +11669,10 @@ fn strip_trailing_er_cardinality(side: &str) -> (&str, Option<ErCardinalitySpell
 /// Strip a cardinality spelling off the front of the TARGET side, returning `(spelling, entity)`.
 fn strip_leading_er_cardinality(side: &str) -> (Option<ErCardinalitySpelling>, &str) {
     for (spelling, shape) in ER_CARDINALITY_SPELLINGS {
-        if side.len() < spelling.len() || !side[..spelling.len()].eq_ignore_ascii_case(spelling) {
+        if side.len() < spelling.len()
+            || !side.is_char_boundary(spelling.len())
+            || !side[..spelling.len()].eq_ignore_ascii_case(spelling)
+        {
             continue;
         }
         let tail = &side[spelling.len()..];
@@ -13147,8 +13212,10 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             ));
         }
 
+        let source_label = decode_mermaid_entities(&source);
+        let target_label = decode_mermaid_entities(&target);
         let Some(source_node) =
-            builder.intern_node(&source, Some(&source), NodeShape::Rect, record.span)
+            builder.intern_node(&source, Some(&source_label), NodeShape::Rect, record.span)
         else {
             builder.add_warning(format!(
                 "Line {line_number}: sankey source node could not be created: {trimmed}"
@@ -13156,7 +13223,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         };
         let Some(target_node) =
-            builder.intern_node(&target, Some(&target), NodeShape::Rect, record.span)
+            builder.intern_node(&target, Some(&target_label), NodeShape::Rect, record.span)
         else {
             builder.add_warning(format!(
                 "Line {line_number}: sankey target node could not be created: {trimmed}"
@@ -19443,7 +19510,7 @@ fn sankey_records(input: &str) -> impl Iterator<Item = SankeyRecord<'_>> {
             span_for(line_number, "").start,
             span_for(end_line, last_line).end,
         );
-        line_number += memchr::memchr_iter(b'\n', remaining[..scan.consumed].as_bytes()).count();
+        line_number += memchr::memchr_iter(b'\n', &remaining.as_bytes()[..scan.consumed]).count();
         remaining = &remaining[scan.consumed..];
         Some(SankeyRecord {
             source,
@@ -20805,7 +20872,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     }
 
     if saw_style_directive {
-        let mut diagnostic = Diagnostic::warning(STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
+        let mut diagnostic = Diagnostic::info(STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
             .with_category(DiagnosticCategory::Compatibility)
             .with_suggestion(STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION.to_string())
             .with_rule_id("style-directive-not-applied");
@@ -34263,7 +34330,7 @@ classDef hot color: #ff0000, stroke-color: #111111, radius: 9
                 .find(|diag| diag.message == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
                 .unwrap_or_else(|| panic!("expected the style diagnostic for {source:?}"));
             assert_eq!(diagnostic.category, DiagnosticCategory::Compatibility);
-            assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
             assert_eq!(
                 diagnostic.rule_id.as_deref(),
                 Some("style-directive-not-applied"),
@@ -36017,6 +36084,23 @@ Tasks awaiting review.
                 .any(|w| w.contains("layout constraint conflict")),
             "expected conflict warning, got {:?}",
             conflicting.warnings
+        );
+    }
+
+    /// GH #12 item 2: verify `subgraph_edge_ends` stays linear in the edge count (2 entries per
+    /// edge, never quadratic O(E^2)) when expanding an `&` list of subgraph endpoints.
+    #[test]
+    fn ampersand_subgraph_endpoints_keep_subgraph_edge_ends_linear() {
+        let side = vec!["G"; 30].join(" & ");
+        let source = format!("flowchart TD\n  subgraph G\n    a\n  end\n  {side} --> {side}\n");
+        let mut builder = super::IrBuilder::new(DiagramType::Flowchart);
+        super::parse_flowchart(&source, &mut builder);
+        let edge_count = builder.ir_edge_count();
+        assert_eq!(edge_count, 900);
+        assert_eq!(
+            builder.peak_subgraph_edge_ends_len(),
+            edge_count * 2,
+            "subgraph_edge_ends must remain strictly linear (2 ends per edge)"
         );
     }
 }

@@ -202,7 +202,13 @@ impl TextBuilder {
     /// Set the CSS class.
     #[must_use]
     pub fn class(mut self, class: &str) -> Self {
-        self.class = Some(class.to_string());
+        match &mut self.class {
+            Some(existing) if !existing.is_empty() => {
+                existing.push(' ');
+                existing.push_str(class);
+            }
+            _ => self.class = Some(class.to_string()),
+        }
         self
     }
 

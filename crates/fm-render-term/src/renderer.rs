@@ -7847,7 +7847,7 @@ mod tests {
             }
         }
 
-        for value in ["0", "-3", "NaN", "inf", "1e100"] {
+        for value in ["0", "-3", "NaN", "inf", "1e400"] {
             let mut invalid = ir.clone();
             for edge in &invalid.edges {
                 invalid.labels[edge.label.unwrap().0].text = value.to_owned();
@@ -7889,10 +7889,10 @@ mod tests {
 
     #[test]
     fn sankey_throughput_survives_a_sum_larger_than_f32() {
-        // Each branch is exactly 2^127 and finite in f32; the hub's total is exactly 2^128.
-        // Accumulating the two individually valid flows in f32 would display `inf` instead.
+        // Each branch is 2^127 (finite f32/f64); the hub's total is 2^128 (overflows f32).
+        // Extreme magnitudes (>= 1e15) format in bounded scientific notation, and sums
+        // exceeding f64::MAX (1e308 + 1e308 = 2e308) stay finite rather than displaying `inf`.
         let branch = "170141183460469231731687303715884105728";
-        let total = "340282366920938463463374607431768211456";
         let ir = fm_parser::parse(&format!(
             "sankey-beta\nHub,Left,{branch}\nHub,Right,{branch}\n"
         ))
@@ -7905,15 +7905,40 @@ mod tests {
                 ..TermRenderConfig::rich()
             };
             let result = crate::render_term_with_config(&ir, &config, 240, 80);
-            assert_eq!(result.output.matches(total).count(), 1, "{}", result.output);
             assert_eq!(
-                result.output.matches(branch).count(),
+                result.output.matches("3.402824e38").count(),
+                1,
+                "{}",
+                result.output
+            );
+            assert_eq!(
+                result.output.matches("1.701412e38").count(),
                 2,
                 "{}",
                 result.output
             );
             assert!(!result.output.contains("inf") && !result.output.contains("NaN"));
         }
+
+        let ir_f64_overflow = fm_parser::parse("sankey-beta\nHub,Left,1e308\nHub,Right,1e308\n").ir;
+        let result = crate::render_term_with_config(
+            &ir_f64_overflow,
+            &TermRenderConfig {
+                render_mode: MermaidRenderMode::CellOnly,
+                max_width: 240,
+                max_height: 80,
+                ..TermRenderConfig::rich()
+            },
+            240,
+            80,
+        );
+        assert_eq!(
+            result.output.matches("2e308").count(),
+            1,
+            "{}",
+            result.output
+        );
+        assert!(!result.output.contains("inf") && !result.output.contains("NaN"));
     }
 
     #[test]

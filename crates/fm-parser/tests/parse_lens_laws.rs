@@ -376,9 +376,9 @@ fn front_matter_and_fuzzy_headers_preserve_deck_locations_and_diagnostics() {
             .ir
             .meta
             .init
-            .errors
+            .warnings
             .iter()
-            .any(|error| error.to_string().contains("Line 6"))
+            .any(|warning| warning.message.contains("Line 6"))
     );
     let validation = fm_parser::validate_mermaid_init_directives(source);
     assert!(
