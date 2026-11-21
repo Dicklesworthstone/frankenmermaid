@@ -232,7 +232,7 @@ The authoritative parity matrix against the FrankenTUI reference implementation 
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh" | bash
 ```
 
-The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.5.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
+The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.6.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
 
 Use `--from-source` to build with `cargo install --locked`; this path installs a minimal Rust toolchain via `rustup` if needed. Explicit `FM_INSTALL_PATH` or `FM_INSTALL_GIT_*` selectors also choose source installation. Source builds require a C/C++ toolchain and CMake. Existing source-selector precedence is preserved.
 
@@ -296,7 +296,7 @@ available without a C++ toolchain. Enable `highs` on either library or on
 
 ### Crates.io status
 
-The workspace is at version `0.5.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.6.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -484,12 +484,30 @@ fm-cli deck talk.mmd -o talk.html            # self-contained presentation HTML 
 fm-cli deck talk.mmd --format json --pretty  # the deck manifest JSON only
 fm-cli deck talk.mmd -o talk.html --manifest-out talk.deck.json   # both artifacts
 fm-cli deck talk.mmd --theme dark -o talk.html                    # themed diagram + chrome
+fm-cli deck talk.mmd --format svg --slide intro -o intro.svg      # one fully revealed slide
+fm-cli deck talk.mmd --format svg --slide intro --step 0 -W 1280 -o intro-start.svg
+fm-cli deck talk.mmd --format png --slide intro -W 1920 -H 1080 -o intro.png
 ```
 
 Shares `--theme`, `--parse-mode`, `--layout-algorithm`, `--font-size`, and `--config` with
 `render`. Deckless input is a hard error (the flag expresses deck intent); `render` also
 accepts `--deck-manifest-out <path>` to emit the same byte-identical manifest artifact
 alongside a normal SVG render.
+
+SVG and PNG slide images require `--slide <ID>`; use the JSON manifest to see the available
+IDs and reveal steps. Omit `--step` to include all reveals, or select a step from `0` through
+the slide's `max_step`. The image uses the existing layout, crops to the slide's camera and
+fit margin, and hides off-slide members and later reveals while preserving authored styling.
+Touching edges stay visible without enlarging the crop. Fully contained cluster frames and
+their captions follow their reveal step. The slide title and caption become accessible SVG
+metadata; whole-diagram titles, backgrounds and C4 legends remain as reference context.
+
+`-W`/`--width` and `-H`/`--height` set image dimensions in pixels. One dimension preserves the
+crop's aspect ratio; supplying both fits the diagram into that canvas without stretching.
+PNG export requires a build with `--features png`. Static slide images currently support
+flowchart, class, ER, requirement, mindmap, architecture, block and C4 diagrams. Other deck
+families retain HTML and JSON output and report an explicit error for slide image export.
+`--manifest-out` accompanies HTML/JSON decks; images have their own cropped coordinate frame.
 
 ### `fm-cli interactive`
 
@@ -894,7 +912,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.5.0)
+├── Cargo.toml                 # Workspace root (version 0.6.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
@@ -1445,13 +1463,28 @@ XY charts have a dedicated Canvas2D path with numeric ticks and gridlines, categ
 labels, chart titles, grouped bars, connected line points, and area fills. Vertical and
 horizontal charts share their domains, tick values, and category labels with SVG; data marks
 use the layout's exact rectangles and point centers, including negative values and zero
-baselines. The GPU scene does not yet carry these dedicated XY draws.
+baselines. The GPU plan uses the same chart domains, labels, and quantitative geometry.
 
 ### Trait-based abstraction
 
 `Canvas2dContext` is a trait with 40 methods covering path operations (`begin_path`, `move_to`, `line_to`, `quadratic_curve_to`, `bezier_curve_to`, `arc`, `arc_to`, `rect`, …), drawing (`fill`, `stroke`, `fill_rect`, `stroke_rect`, `clear_rect`), text (`fill_text`, `stroke_text`, `measure_text`, plus alignment / baseline setters), style (fill / stroke / line-width / line-cap / line-join / line-dash / global-alpha / font), transform (`save`, `restore`, `translate`, `scale`, `rotate`, `set_transform`, `reset_transform`, `clip`), and shadows.
 
 In WASM builds, the trait is implemented against `web_sys::CanvasRenderingContext2d` with font-size-aware text metrics. For testing, a `MockCanvas2dContext` records all draw operations into a `Vec<DrawOperation>` so the full render pipeline can be tested in CI without a browser.
+
+### WebGPU text and authored fonts
+
+The optional `webgpu` feature provides a device renderer, including the asynchronous WASM
+`renderWebGpuToRgba` export. Its text atlas distinguishes **family, weight, style, and character**.
+Authored node fonts, compartment heading styles, cluster captions, and mirrored sequence
+participant headers retain their resolved faces. Text size remains per run, so different sizes
+can share a face without multiplying the atlas's glyph cells.
+
+Browser rasterization loads each requested face with its actual character sample, preserving
+web-font subsets and the browser's character fallback. Native callers bind supplied font bytes
+to the atlas's `GlyphFace` descriptors through `glyph_raster::rasterize_atlas_with_faces` and
+ordered `GlyphFaceFonts` stacks. Missing bindings, missing characters, and clipped glyphs are
+reported by face and character. The single-font convenience entry points accept a single
+unstyled face; styled or mixed-face plans require explicit bindings.
 
 ### Viewport transform
 
@@ -1645,17 +1678,20 @@ The gantt layout dispatcher emits a time-axis bar layout where each task's `x` i
 
 ### Kanban — metadata
 
-The kanban parser accepts metadata blocks on cards:
+Kanban columns accept WIP limits, and cards accept assignees, priorities, tickets, and tags:
 
 ```
 kanban
-  Todo
-    Task 1@{wip: 3, priority: high, assigned: alice}
-  Doing
-    Task 2@{assigned: bob}
+  todo[Todo] @{ wip: 3 }
+    design[Review design] @{ assigned: Alice, priority: High, ticket: "UI-42", tags: ["UX", "release"] }
+  doing[Doing] @{ wip: 1 }
+    build[Build preview] @{ assigned: Bob, priority: Medium }
+  done[Done]
 ```
 
-`wip` triggers warning styling on the column when exceeded, `priority` maps to color, and `assigned` becomes a badge on the card.
+Column headings show occupancy, including `WIP: 2 / 1 (over limit)` when a limit is exceeded. An explicit `wip: 0` marks any card in that lane as over limit; omitting `wip` leaves it unlimited. Limits belong on columns, not cards.
+
+Cards display each authored metadata field across SVG, Canvas, GPU, and terminal output. Priorities also supply a default card color on graphical surfaces. Long titles and metadata wrap into measured rows, and repeated card captions keep their own identities and metadata.
 
 Column widths and card positions follow their measured contents. Cards align within each lane, lane frames share a common height, and named empty lanes remain visible. Long headings and multiline cards reserve space instead of overlapping neighboring content.
 
@@ -2320,7 +2356,7 @@ A --> B
 - **`classDef` / `style` directives** apply to SVG and Canvas nodes, including the implicit default class, named-class overrides, and direct styles. GPU node plans use the same resolved node styles. Terminal output does not provide a CSS color channel.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
-- **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
+- **WebGPU backend** has an opt-in device renderer and asynchronous `renderWebGpuToRgba` export. The synchronous `Diagram` canvas API continues to use its Canvas2D fallback; the default WASM bundle does not include the optional device backend.
 - **FNX directed analysis** (Phase 2) is in canary rollout via the `RolloutPhase` state machine in `fm-core/src/canary.rs` (`Disabled → Canary → Partial → Full`, with `RolledBack` for health-criteria violations). Enable explicitly with `--features fnx-experimental-directed` if you want to drive it.
 - **`@frankenmermaid/core` npm package** is not on npm yet. The supported release path is `/dsr`, and no npm publication from that path has been verified. Until then, use the WASM bundle from the live demo or build locally with `./build-wasm.sh`.
 - Some niche Mermaid syntax may parse with warnings and produce different visual output from mermaid-js; the `Compatibility` diagnostic category surfaces these explicitly.
@@ -2924,7 +2960,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **CEGIS layout constraint synthesis** (`bd-1iwz`) | Speculative | Counterexample-guided synthesis to auto-generate layout constraints from user-provided examples |
 | **Geometric/Conformal Algebra extensions** (`bd-3cd8`) | In progress | The CGA pipeline currently covers transforms + intersection queries; the broader epic includes coordinate-free PGA/CGA for layout primitives |
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |
-| **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | The WebRenderer selector exists; Canvas2D is the current fallback; full WebGPU implementation is queued |
+| **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | Opt-in device rendering includes multi-face text; the synchronous `Diagram` API retains its Canvas2D fallback |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
 | **`@frankenmermaid/core` npm publish** | Awaiting `/dsr` release | Build and verify the package through `/dsr`, then confirm the public registry from a clean consumer before documenting npm installation |

@@ -327,7 +327,11 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # codegen unit and immediate-abort std. 1095K is the smallest whole-KiB ceiling fitting 1121070,
 # leaving 210 bytes. Render equivalence, package provenance, and source-freshness assertions are
 # unchanged.
-MAX_GZIP_BYTES=$((1095 * 1024))
+# Raised 1095K -> 1143K for v0.6.0 (measured: 1170278 gzip / 2969944 raw across the 46 commits
+# since v0.5.0: full Kanban card measurement/rendering, f64 Sankey CSV/typography, sequence
+# fragment captions & activations, Gantt calendars, Scene paint cascade, deck export, and
+# refreshed dependencies). Smallest whole-KiB ceiling fitting 1170278 (154 bytes headroom).
+MAX_GZIP_BYTES=$((1143 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

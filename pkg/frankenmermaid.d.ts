@@ -319,8 +319,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
-    readonly acquireWebGpuCanvasContext: (a: number, b: number) => void;
-    readonly applyIrLensEdit: (a: number, b: number, c: number, d: number) => void;
+    readonly acquireWebGpuCanvasContext: (a: number, b: any) => void;
+    readonly applyIrLensEdit: (a: number, b: number, c: number, d: any) => void;
     readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
@@ -335,16 +335,16 @@ export interface InitOutput {
     readonly diagram_clearSelection: (a: number, b: number) => void;
     readonly diagram_commitSelectionGesture: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_destroy: (a: number) => void;
-    readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
+    readonly diagram_fromOffscreenCanvas: (a: number, b: any, c: number) => void;
     readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_hitTestInteraction: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_invalidateFrame: (a: number, b: number) => void;
     readonly diagram_navigateSelection: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly diagram_new: (a: number, b: number, c: number) => void;
-    readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_new: (a: number, b: any, c: number) => void;
+    readonly diagram_on: (a: number, b: number, c: number, d: number, e: any) => void;
     readonly diagram_previewSelectionBox: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
-    readonly diagram_previewSelectionLasso: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_previewSelectionLasso: (a: number, b: number, c: number, d: number, e: any) => void;
     readonly diagram_redraw: (a: number, b: number) => void;
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_selectAt: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
@@ -364,9 +364,13 @@ export interface InitOutput {
     readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_export3: (a: number) => void;
+    readonly __wbindgen_export3: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export4: (a: number) => void;
+    readonly __wbindgen_export5: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export6: (a: number) => void;
+    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

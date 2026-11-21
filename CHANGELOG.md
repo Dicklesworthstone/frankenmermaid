@@ -4,6 +4,26 @@ All notable changes to **frankenmermaid** are documented here.
 
 Historical scope: project inception through 2026-08-19; the v0.3.0 release section below extends that record through 2026-09-26 and the release fixes.
 
+## v0.6.0 — 2026-11-21
+
+Fidelity, precision, and performance release covering 46 commits since `v0.5.0` plus release-gate hardening and dependency updates.
+
+- **SVG Scene paint cascade & authored fidelity (fixes #21):** Resolved Scene SVG paints now stay authoritative over embedded theme CSS without applying opacity twice; authored font faces, silhouettes, opacity, and dash patterns are preserved across SVG, Canvas, and WebGPU renderers.
+- **Nested horizontal subgraph alignment (fixes #20):** Nested subgraphs in `LR`/`RL` flowcharts now carry full measured member-to-frame offsets through recursive compound placement, keeping chained members on the chain centre line.
+- **Complete Kanban cards & interactions:** Measured Kanban card rows (title, assignee, priority, ticket, tags, WIP headers) now render consistently across SVG (`LegacyLayout` and `Scene`), Canvas, GPU, and terminal backends, including `click` link/tooltip directives and preserved `.fm-kanban-row` classes.
+- **Sankey, Pie, XY, Packet, Mindmap, Sequence & Gantt fidelity:**
+  - Full `f64` precision across Sankey quantities, CSV record parsing (multiline records, literal quotes/apostrophes, HTML entity decoding), directive isolation, and bounded scientific notation for extreme totals.
+  - Full `f64` pie slice precision, aligned XY axes across tiny and extreme scales, readable per-row packet bit scales, independent repeated mindmap occurrences, sequence fragment captions/activations/note-introduced participants, and Gantt calendar durations/milestones.
+  - Preserved original line/byte source locations across YAML frontmatter, fuzzy headers, Unicode identifiers, and source-lens edits.
+- **Parser robustness & diagnostics (fixes #12, #18):**
+  - Fixed a UTF-8 char-boundary panic in ER cardinality stripping on multi-byte entity names.
+  - Rejected non-finite (`NaN`/`Inf`) Wardley coordinates, evolutions, and map sizes with warnings; verified linear `subgraph_edge_ends` bounds and distinct `G --> a` / `Outer --> Inner` subgraph endpoints (#12).
+  - Downgraded the `style-directive-not-applied` compatibility diagnostic to `info` severity so `fm-cli validate --fail-on warning` passes on styled diagrams while terminal renders still emit the note (#18).
+- **Graph-deck authoring & export:** Added slide create/duplicate/remove, directive reopen/edit in the browser composer, selected slide/reveal SVG & PNG export, fullscreen narration/navigation fixes, and manifest edge joins.
+- **Native performance (`opt-level = 3`):** Switched workspace `[profile.release]` from `opt-level = "z"` to `opt-level = 3` across the entire native dependency graph (while `build-wasm.sh` overrides `profile.release.opt-level="z"` for the browser bundle), cutting terminal and Sankey render times by 30–87%.
+- **Dependencies & security:** Refreshed workspace and fuzz lockfiles (`franken-kernel` 0.7, `chumsky` 0.14, `toml` 1.2, `notify` 9.0, `resvg`/`usvg` 0.50, `wasm-bindgen` 0.2.130, `rustix` 1.1.6, `tokio` 1.54.1), resolving both unsound advisories (`RUSTSEC-2026-0486`, `RUSTSEC-2026-0386`) to 0 vulnerabilities and 0 yanked crates (`wgpu` remains on 27).
+- **Goldens & WebAssembly (`pkg/`):** Re-blessed the 2 updated layout goldens (`kanban_basic`, `sequence_advanced`) and 6 SVG goldens (`sequence_advanced`, `pie_basic`, `kanban_basic`, `packet_basic`, `journey_basic`, `flowchart_classdef`), and rebuilt `pkg/` (`@frankenmermaid/core` 0.6.0) via `build-wasm.sh` with re-pinned source and cross-target digests.
+
 ## v0.5.0 — 2026-11-06
 
 Measured, readable rendering across every backend, with refreshed layout defaults. The release covers 214 commits since `v0.4.0` (73 features, 80 fixes).

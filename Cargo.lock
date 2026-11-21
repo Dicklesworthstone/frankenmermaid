@@ -733,7 +733,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
 name = "fm-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "franken-kernel",
  "memchr",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "fm-layout"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "egg",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "fm-parser"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chumsky",
  "criterion",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "fm-regression-harness"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "fm-render-canvas"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fm-core",
  "fm-layout",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "fm-render-svg"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fm-core",
  "fm-layout",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "fm-render-term"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fm-core",
  "fm-layout",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "fm-wasm"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fm-core",
  "fm-layout",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "frankenmermaid-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
