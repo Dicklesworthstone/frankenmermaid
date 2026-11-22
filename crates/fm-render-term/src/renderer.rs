@@ -5,6 +5,7 @@ use fm_core::{
     NodeShape,
 };
 use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::canvas::Canvas;
@@ -127,16 +128,7 @@ fn overlay_debug_panel(
     if width == 0 || height == 0 {
         return;
     }
-    let mut lines: Vec<Vec<char>> = output
-        .split('\n')
-        .map(|line| {
-            let mut chars: Vec<char> = line.chars().take(width).collect();
-            chars.resize(width, ' ');
-            chars
-        })
-        .collect();
-    lines.resize_with(height, || vec![' '; width]);
-    lines.truncate(height);
+    let lines: Vec<String> = output.split('\n').take(height).map(str::to_owned).collect();
 
     let labels = [
         "[layout debug]".to_string(),
@@ -149,22 +141,30 @@ fn overlay_debug_panel(
             metrics.nodes, metrics.edges, metrics.ranks, metrics.cycles
         ),
     ];
-    for (row, label) in labels.iter().take(height).enumerate() {
-        for (column, ch) in label.chars().take(width).enumerate() {
-            lines[row][column] = ch;
-        }
-    }
-
     output.clear();
-    for (row, line) in lines.iter().enumerate() {
+    for row in 0..height {
         if row > 0 {
             output.push('\n');
         }
-        let end = line
-            .iter()
-            .rposition(|ch| *ch != ' ')
-            .map_or(0, |index| index + 1);
-        output.extend(line[..end].iter().copied());
+        let mut line: String = labels
+            .get(row)
+            .map_or_else(String::new, |label| label.chars().take(width).collect());
+        let prefix_width = line.width();
+        let mut column = 0;
+        for grapheme in lines.get(row).map_or("", String::as_str).graphemes(true) {
+            let end = column + grapheme.width();
+            if end > width {
+                break;
+            }
+            if column >= prefix_width {
+                line.push_str(grapheme);
+            } else if end > prefix_width {
+                // Erase a glyph crossed by the panel boundary without shifting later columns.
+                line.push_str(&" ".repeat(end - prefix_width));
+            }
+            column = end;
+        }
+        output.push_str(line.trim_end_matches(' '));
     }
 }
 
@@ -235,7 +235,7 @@ pub struct TermRenderer {
 
 #[inline]
 fn compact_label_width(line: &str) -> usize {
-    line.chars().count()
+    line.width()
 }
 
 /// A `~~~` link shapes the layout and is never drawn, nor is its label.
@@ -721,7 +721,7 @@ impl TermRenderer {
             buffer.set_string(start_x, cy, &marker);
         }
 
-        self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        self.render_generic_diagram_title(&mut buffer, ir);
         let mut output = buffer.to_output_string();
         let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
         let (links_rows, links_width) =
@@ -1096,22 +1096,25 @@ impl TermRenderer {
         }
 
         if self.config.show_labels {
-            self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+            self.render_generic_diagram_title(&mut buffer, ir);
         }
         let mut grid: Vec<Vec<char>> = buffer
             .cells
             .chunks(cell_width)
             .map(<[char]>::to_vec)
             .collect();
+        let mut text_labels = buffer.labels;
+        let protected = cell_label_rects(&text_labels);
         self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
         let (mut edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
-                self.overlay_sequence_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
+                self.overlay_sequence_labels(&mut grid, ir, layout, scale_x, scale_y, &protected)
             } else {
-                self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[])
+                self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &protected)
             };
         edge_labels.extend(self.kanban_cell_labels(&grid, ir, layout, scale_x, scale_y));
-        let mut output = serialize_cell_labels(&grid, &edge_labels, true);
+        text_labels.extend(edge_labels);
+        let mut output = serialize_cell_labels(&grid, &text_labels, true);
         let debug_metrics = self
             .config
             .debug_overlay
@@ -1719,7 +1722,7 @@ impl TermRenderer {
         if let Some(title_text) = title_text {
             let title = self.truncate_label(title_text);
             let title_x = x + 2;
-            buffer.set_string(title_x, y, &title);
+            buffer.set_label(title_x, y, &title, w.saturating_sub(3));
         }
     }
 
@@ -1990,9 +1993,10 @@ impl TermRenderer {
         let start_y = y + (h.saturating_sub(lines.len())) / 2;
 
         for (i, line) in lines.iter().enumerate() {
-            let label_len = compact_label_width(line);
+            let line = self.fit_node_label_line(ir, ir_node, line, w.saturating_sub(2));
+            let label_len = compact_label_width(&line);
             let label_x = x + (w.saturating_sub(label_len)) / 2;
-            buffer.set_string(label_x, start_y + i, line);
+            buffer.set_label(label_x, start_y + i, &line, w.saturating_sub(2));
         }
     }
 
@@ -2552,6 +2556,7 @@ impl TermRenderer {
         while lines.len() < cell_height {
             lines.push(vec![' '; cell_width]);
         }
+        let mut text_labels = Vec::new();
 
         // Overlay BAND labels (kanban columns, gantt sections).
         //
@@ -2956,14 +2961,11 @@ impl TermRenderer {
                 if row >= lines.len() {
                     continue;
                 }
-                let text: String = self.truncate_label(title).chars().take(w - 2).collect();
+                let text = fit_cell_text(&self.truncate_label(title), w - 2);
                 let start = x + 1;
                 // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
                 // space-only check would read every empty cell as occupied and drop every title.
-                // `chars().enumerate()`, NOT `char_indices()`: the write loop below advances one
-                // CELL per char, so a byte offset would check the wrong columns for any title with
-                // a multi-byte character in it.
-                let is_free = text.chars().enumerate().all(|(offset, _)| {
+                let is_free = (0..text.width()).all(|offset| {
                     let col = start + offset;
                     col < cell_width
                         && lines[row]
@@ -2973,9 +2975,14 @@ impl TermRenderer {
                 if !is_free {
                     continue;
                 }
-                for (offset, ch) in text.chars().enumerate() {
-                    lines[row][start + offset] = ch;
-                }
+                stage_cell_label(
+                    &mut lines[row],
+                    &mut text_labels,
+                    (start, row),
+                    &text,
+                    w - 2,
+                    true,
+                );
 
                 // THE C4 BOUNDARY TYPE, on its own row beneath the label (bd-c23yq).
                 //
@@ -2994,23 +3001,16 @@ impl TermRenderer {
                     .and_then(|cluster| cluster.c4_boundary_type.as_deref())
                 {
                     let type_row = row + 1;
-                    let type_text: String = format!("[{kind}]")
-                        .chars()
-                        .take(w.saturating_sub(2))
-                        .collect();
+                    let type_text = fit_cell_text(&format!("[{kind}]"), w.saturating_sub(2));
                     if type_row < lines.len() && !type_text.is_empty() {
-                        let free = type_text.chars().enumerate().all(|(offset, _)| {
-                            let col = start + offset;
-                            col < cell_width
-                                && lines[type_row]
-                                    .get(col)
-                                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                        });
-                        if free {
-                            for (offset, ch) in type_text.chars().enumerate() {
-                                lines[type_row][start + offset] = ch;
-                            }
-                        }
+                        stage_cell_label(
+                            &mut lines[type_row],
+                            &mut text_labels,
+                            (start, type_row),
+                            &type_text,
+                            w.saturating_sub(2),
+                            true,
+                        );
                     }
                 }
 
@@ -3174,11 +3174,13 @@ impl TermRenderer {
             };
 
             for (i, line) in label_lines.iter().enumerate() {
-                // Iterate the label line's chars directly for both the centering width and the placement —
-                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
-                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
-                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
-                let label_len = line.chars().count();
+                let available = if gantt_anchor.is_some() {
+                    cell_width
+                } else {
+                    w.saturating_sub(2)
+                };
+                let line = self.fit_node_label_line(ir, ir_node, line, available);
+                let label_len = line.width();
                 let label_x = match gantt_anchor {
                     Some(entry) => {
                         // Mirror `bounds_to_cells`' x arithmetic so the anchor lands in the same cell
@@ -3200,12 +3202,14 @@ impl TermRenderer {
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in line.chars().enumerate() {
-                        let col = label_x + j;
-                        if col < cell_width && col < lines[label_y].len() {
-                            lines[label_y][col] = ch;
-                        }
-                    }
+                    stage_cell_label(
+                        &mut lines[label_y],
+                        &mut text_labels,
+                        (label_x, label_y),
+                        &line,
+                        available,
+                        false,
+                    );
                 }
             }
         }
@@ -3226,21 +3230,20 @@ impl TermRenderer {
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
             for (i, line) in label_lines.iter().enumerate() {
-                // Iterate the label line's chars directly for both the centering width and the placement —
-                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
-                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
-                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
-                let label_len = line.chars().count();
+                let line = self.fit_node_label_line(ir, ir_node, line, w.saturating_sub(2));
+                let label_len = line.width();
                 let label_x = x + (w.saturating_sub(label_len)) / 2;
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in line.chars().enumerate() {
-                        let col = label_x + j;
-                        if col < cell_width && col < lines[label_y].len() {
-                            lines[label_y][col] = ch;
-                        }
-                    }
+                    stage_cell_label(
+                        &mut lines[label_y],
+                        &mut text_labels,
+                        (label_x, label_y),
+                        &line,
+                        w.saturating_sub(2),
+                        false,
+                    );
                 }
             }
         }
@@ -3620,18 +3623,20 @@ impl TermRenderer {
         if let Some(title) = generic_terminal_diagram_title(ir)
             && let Some(first_line) = lines.first_mut()
         {
-            let title = self.truncate_label(title);
-            let title_len = title.chars().count().min(cell_width);
-            let start_x = cell_width.saturating_sub(title_len) / 2;
-            for (index, ch) in title.chars().take(title_len).enumerate() {
-                let col = start_x + index;
-                if col < first_line.len() {
-                    first_line[col] = ch;
-                }
-            }
+            let title = fit_cell_text(&self.truncate_label(title), cell_width);
+            let start_x = cell_width.saturating_sub(title.width()) / 2;
+            stage_cell_label(
+                first_line,
+                &mut text_labels,
+                (start_x, 0),
+                &title,
+                cell_width,
+                false,
+            );
         }
 
         self.overlay_packet_bit_labels(&mut lines, ir, layout, scale_x, scale_y);
+        edge_label_rects.extend(cell_label_rects(&text_labels));
         let (mut labels, occluded) = if ir.diagram_type == fm_core::DiagramType::Sequence {
             self.overlay_sequence_labels(
                 &mut lines,
@@ -3652,7 +3657,8 @@ impl TermRenderer {
             )
         };
         labels.extend(self.kanban_cell_labels(&lines, ir, layout, scale_x, scale_y));
-        (serialize_cell_labels(&lines, &labels, false), occluded)
+        text_labels.extend(labels);
+        (serialize_cell_labels(&lines, &text_labels, false), occluded)
     }
 
     /// Keep measured Kanban content on distinct terminal rows. Unicode text is emitted by
@@ -4588,28 +4594,17 @@ impl TermRenderer {
         }
     }
 
-    fn render_generic_diagram_title(
-        &self,
-        cells: &mut [char],
-        row_width: usize,
-        ir: &MermaidDiagramIr,
-    ) {
+    fn render_generic_diagram_title(&self, buffer: &mut CellBuffer, ir: &MermaidDiagramIr) {
         let Some(title) = generic_terminal_diagram_title(ir) else {
             return;
         };
-        if row_width == 0 || cells.len() < row_width {
+        if buffer.width == 0 || buffer.height == 0 {
             return;
         }
 
-        let title = self.truncate_label(title);
-        // Iterate the title chars directly (matches the other title path above): `chars().count()` for the
-        // width, `chars().take().enumerate()` for placement — no per-title Vec<char> allocation.
-        let title_len = title.chars().count().min(row_width);
-        let start_x = row_width.saturating_sub(title_len) / 2;
-
-        for (index, ch) in title.chars().take(title_len).enumerate() {
-            cells[start_x + index] = ch;
-        }
+        let title = fit_cell_text(&self.truncate_label(title), buffer.width);
+        let start_x = buffer.width.saturating_sub(title.width()) / 2;
+        buffer.set_label(start_x, 0, &title, buffer.width);
     }
 
     fn bounds_to_cells(
@@ -4695,14 +4690,8 @@ impl TermRenderer {
                 if lines.len() >= max_lines {
                     // Truncate the last line with ellipsis if there's more content.
                     if let Some(last) = lines.last_mut() {
-                        let chars: Vec<char> = last.chars().collect();
-                        if chars.len() >= max_chars {
-                            *last = format!(
-                                "{}…",
-                                chars[..max_chars.saturating_sub(1)]
-                                    .iter()
-                                    .collect::<String>()
-                            );
+                        if last.width() >= max_chars {
+                            *last = ellipsize_cell_text(last, max_chars);
                         }
                     }
                     break;
@@ -4813,6 +4802,36 @@ impl TermRenderer {
         }
 
         Some(text)
+    }
+
+    /// A clipped name must retain its link marker so readers can still find the right URL.
+    fn fit_node_label_line(
+        &self,
+        ir: &MermaidDiagramIr,
+        node: Option<&fm_core::IrNode>,
+        text: &str,
+        width: usize,
+    ) -> String {
+        if matches!(self.config.link_mode, fm_core::MermaidLinkMode::Footnote)
+            && let Some(node) = node
+            && let Some(index) = Self::footnote_index(ir, &node.id)
+        {
+            let suffix = format!(" [{index}]");
+            if let Some(name) = text.strip_suffix(&suffix) {
+                if suffix.len() <= width {
+                    let mut fitted = fit_cell_text(name, width - suffix.len());
+                    fitted.push_str(&suffix);
+                    return fitted;
+                }
+                // Never abbreviate a footnote number into a different index.
+                return if suffix.trim_start().len() <= width {
+                    suffix.trim_start().to_owned()
+                } else {
+                    String::new()
+                };
+            }
+        }
+        fit_cell_text(text, width)
     }
 
     /// Render a UML-style three-compartment class box into the character grid.
@@ -5359,7 +5378,7 @@ fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     }
 }
 
-/// Wrap text at word boundaries to fit within `max_width` characters per line.
+/// Wrap text at word boundaries to fit within `max_width` display columns per line.
 ///
 /// Uses greedy word-fit: words are placed on the current line until the next
 /// word would exceed the width. A single word wider than the target is placed
@@ -5374,18 +5393,17 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let mut current_line = String::new();
 
     for word in text.split_whitespace() {
-        let word_len = word.chars().count();
+        let word_len = word.width();
 
         if current_line.is_empty() {
             // First word on line — always place it, truncate if needed.
             if word_len <= max_width {
                 current_line.push_str(word);
             } else {
-                let truncated: String = word.chars().take(max_width.saturating_sub(1)).collect();
-                current_line = format!("{truncated}…");
+                current_line = fit_cell_text(word, max_width);
             }
         } else {
-            let current_len = current_line.chars().count();
+            let current_len = current_line.width();
             // Check if word fits on current line (+ 1 for space).
             if current_len + 1 + word_len <= max_width {
                 current_line.push(' ');
@@ -5396,9 +5414,7 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
                 if word_len <= max_width {
                     current_line = word.to_string();
                 } else {
-                    let truncated: String =
-                        word.chars().take(max_width.saturating_sub(1)).collect();
-                    current_line = format!("{truncated}…");
+                    current_line = fit_cell_text(word, max_width);
                 }
             }
         }
@@ -5418,6 +5434,7 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 /// Simple character cell buffer for cell-mode rendering.
 struct CellBuffer {
     cells: Vec<char>,
+    labels: Vec<CellLabel>,
     width: usize,
     height: usize,
 }
@@ -5426,6 +5443,7 @@ impl CellBuffer {
     fn new(width: usize, height: usize) -> Self {
         Self {
             cells: vec![' '; width * height],
+            labels: Vec::new(),
             width,
             height,
         }
@@ -5443,7 +5461,24 @@ impl CellBuffer {
         }
     }
 
+    /// Keep text separate from single-column geometry until the final serialization pass.
+    fn set_label(&mut self, x: usize, y: usize, text: &str, width: usize) {
+        if y >= self.height {
+            return;
+        }
+        let row = &mut self.cells[y * self.width..(y + 1) * self.width];
+        stage_cell_label(row, &mut self.labels, (x, y), text, width, false);
+    }
+
     fn to_output_string(&self) -> String {
+        if !self.labels.is_empty() {
+            let grid: Vec<_> = self
+                .cells
+                .chunks(self.width)
+                .map(<[char]>::to_vec)
+                .collect();
+            return serialize_cell_labels(&grid, &self.labels, true);
+        }
         let mut output = String::with_capacity(
             self.cells
                 .len()
@@ -5467,6 +5502,9 @@ impl CellBuffer {
 
 impl std::fmt::Display for CellBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.labels.is_empty() {
+            return f.write_str(&self.to_output_string());
+        }
         for y in 0..self.height {
             if y > 0 {
                 writeln!(f)?;
@@ -5611,6 +5649,103 @@ struct CellLabel {
     y: usize,
     width: usize,
     lines: Vec<String>,
+    /// Generic captions yield if later geometry paints into their cleared columns.
+    /// Check once when serializing rather than scanning all labels on every pixel write.
+    require_clear_cells: bool,
+}
+
+/// Fit a caption without splitting a grapheme (combining text, emoji or a ZWJ sequence).
+fn fit_cell_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let text = if text.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(
+            text.chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect::<String>(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    if text.width() <= width {
+        return text.into_owned();
+    }
+    ellipsize_cell_text(&text, width)
+}
+
+fn ellipsize_cell_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true) {
+        let columns = grapheme.width();
+        if used + columns >= width {
+            break;
+        }
+        output.push_str(grapheme);
+        used += columns;
+    }
+    output.push('…');
+    output
+}
+
+/// Stage one text row and clear its measured columns. Later text wins overlapping runs;
+/// geometry stays a one-column grid, so wide glyphs never shift a border to their right.
+fn stage_cell_label(
+    row: &mut [char],
+    labels: &mut Vec<CellLabel>,
+    (x, y): (usize, usize),
+    text: &str,
+    width: usize,
+    only_if_blank: bool,
+) {
+    let width = width.min(row.len().saturating_sub(x));
+    if width == 0 {
+        return;
+    }
+    let text = fit_cell_text(text, width);
+    let end = x + text.width();
+    if text.width() == 0
+        || (only_if_blank
+            && (!row[x..end].iter().copied().all(blank_terminal_cell)
+                || labels.iter().any(|prior| {
+                    y >= prior.y
+                        && y < prior.y + prior.lines.len()
+                        && x < prior.x + prior.width
+                        && end > prior.x
+                })))
+    {
+        return;
+    }
+    labels.retain(|prior| {
+        y < prior.y
+            || y >= prior.y + prior.lines.len()
+            || x >= prior.x + prior.width
+            || end <= prior.x
+    });
+    row[x..end].fill(' ');
+    let mut label = CellLabel::new(usize::MAX, false, vec![text]);
+    label.x = x;
+    label.y = y;
+    label.require_clear_cells = true;
+    labels.push(label);
+}
+
+fn cell_label_rects(labels: &[CellLabel]) -> Vec<(usize, usize, usize, usize)> {
+    labels
+        .iter()
+        .map(|label| {
+            (
+                label.x,
+                label.y,
+                label.x + label.width,
+                label.y + label.lines.len(),
+            )
+        })
+        .collect()
 }
 
 impl CellLabel {
@@ -5623,6 +5758,7 @@ impl CellLabel {
             y: 0,
             width,
             lines,
+            require_clear_cells: false,
         }
     }
 
@@ -5797,6 +5933,9 @@ fn sequence_message_lines(
 
 fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     let mut lines = Vec::new();
+    if width == 0 || max_lines == 0 {
+        return lines;
+    }
     for source_line in text.lines() {
         let mut line = String::new();
         for word in source_line.split_whitespace() {
@@ -5811,14 +5950,7 @@ fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
             if word.width() <= width {
                 line.push_str(word);
             } else {
-                for ch in word.chars() {
-                    line.push(ch);
-                    if line.width() >= width {
-                        line.pop();
-                        break;
-                    }
-                }
-                line.push('…');
+                line.push_str(&fit_cell_text(word, width));
             }
         }
         lines.push(line);
@@ -5826,10 +5958,7 @@ fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     if lines.len() > max_lines {
         lines.truncate(max_lines);
         if let Some(last) = lines.last_mut() {
-            while last.width() >= width {
-                last.pop();
-            }
-            last.push('…');
+            *last = ellipsize_cell_text(last, width);
         }
     }
     lines
@@ -5848,13 +5977,21 @@ fn serialize_cell_labels(grid: &[Vec<char>], labels: &[CellLabel], trim: bool) -
             .filter_map(|label| {
                 let offset = row_index.checked_sub(label.y)?;
                 let text = label.lines.get(offset)?;
-                Some((label.x + (label.width - text.width()) / 2, text))
+                let col = label.x + label.width.saturating_sub(text.width()) / 2;
+                let cells = row.get(col..col + text.width())?;
+                (!label.require_clear_cells || cells.iter().copied().all(blank_terminal_cell))
+                    .then_some((col, text))
             })
             .collect();
         runs.sort_by_key(|(col, _)| *col);
         let mut line = String::new();
         let mut cursor = 0;
         for (col, text) in runs {
+            // At very small scales independently placed annotations can coincide. Keep the
+            // first complete run; slicing backwards would panic or split another grapheme.
+            if col < cursor {
+                continue;
+            }
             line.extend(row[cursor..col].iter());
             line.push_str(text);
             cursor = col + text.width();
@@ -9271,27 +9408,240 @@ mod tests {
 
     #[inline]
     fn owned_compact_label_width_reference(line: &str) -> usize {
-        let chars: Vec<char> = line.chars().collect();
-        chars.len()
+        let graphemes: Vec<&str> = line.graphemes(true).collect();
+        graphemes.iter().map(|grapheme| grapheme.width()).sum()
     }
 
     #[test]
-    fn compact_label_width_preserves_unicode_scalar_centering() {
-        for line in [
-            "",
-            "Node 42",
-            "界面 → 缓存",
-            "e\u{301}quipe",
-            "🦀 worker",
-            "مرحبا",
-            "🏳️‍🌈",
+    fn compact_label_width_measures_display_columns() {
+        for (line, width) in [
+            ("", 0),
+            ("Node 42", 7),
+            ("界面 → 缓存", 11),
+            ("e\u{301}quipe", 6),
+            ("🦀 worker", 9),
+            ("مرحبا", 5),
+            ("🏳️‍🌈", 2),
         ] {
             assert_eq!(
                 compact_label_width(line),
-                owned_compact_label_width_reference(line),
-                "Unicode-scalar width changed for {line:?}"
+                width,
+                "incorrect terminal display width for {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn generic_unicode_node_captions_keep_border_columns_in_every_render_mode() {
+        for text in ["界面缓存", "e\u{301}quipe", "👩🏽‍💻 🏳️‍🌈"] {
+            let ir = fm_parser::parse(&format!("flowchart TB\nA[\"{text}\"]")).ir;
+            let mut layout = layout_diagram(&ir);
+            layout.nodes[0].bounds = LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 80.0,
+            };
+            layout.bounds = layout.nodes[0].bounds;
+            let mut narrow_ir = ir.clone();
+            let label = ir.nodes[0].label.unwrap();
+            let same_columns = "X".repeat(text.width());
+            narrow_ir.labels[label.0].text.clone_from(&same_columns);
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::HalfBlock,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::Braille,
+            ] {
+                let config = TermRenderConfig {
+                    tier: MermaidTier::Normal,
+                    render_mode: mode,
+                    max_label_chars: 80,
+                    max_label_lines: 1,
+                    ..Default::default()
+                };
+                let rendered = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 20);
+                let reference =
+                    render_diagram_with_layout_and_config(&narrow_ir, &layout, &config, 80, 20);
+                assert!(
+                    rendered.output.contains(text),
+                    "{mode:?}: {}",
+                    rendered.output
+                );
+                assert!(
+                    rendered
+                        .output
+                        .lines()
+                        .all(|row| row.width() <= rendered.width)
+                );
+                assert_eq!(
+                    rendered.output.replace(text, &same_columns),
+                    reference.output,
+                    "{mode:?} displaced geometry around {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_unicode_cluster_captions_keep_border_columns_in_every_render_mode() {
+        let ir = fm_parser::parse("flowchart TB\nsubgraph s[Cluster]\nA[Member]\nend").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.clusters[0].bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        layout.nodes[0].bounds = LayoutRect {
+            x: 120.0,
+            y: 80.0,
+            width: 120.0,
+            height: 60.0,
+        };
+        layout.bounds = layout.clusters[0].bounds;
+        for text in ["系统边界", "e\u{301}quipe", "👩🏽‍💻 🏳️‍🌈"] {
+            layout.clusters[0].title = Some(text.to_owned());
+            let mut narrow_layout = layout.clone();
+            let same_columns = "X".repeat(text.width());
+            narrow_layout.clusters[0].title = Some(same_columns.clone());
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::HalfBlock,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::Braille,
+            ] {
+                let config = TermRenderConfig {
+                    tier: MermaidTier::Normal,
+                    render_mode: mode,
+                    max_label_chars: 80,
+                    max_label_lines: 1,
+                    ..Default::default()
+                };
+                let rendered =
+                    render_diagram_with_layout_and_config(&ir, &layout, &config, 100, 30);
+                let reference =
+                    render_diagram_with_layout_and_config(&ir, &narrow_layout, &config, 100, 30);
+                assert!(
+                    rendered.output.contains(text),
+                    "{mode:?}: {}",
+                    rendered.output
+                );
+                assert!(
+                    rendered
+                        .output
+                        .lines()
+                        .all(|row| row.width() <= rendered.width)
+                );
+                assert_eq!(
+                    rendered.output.replace(text, &same_columns),
+                    reference.output,
+                    "{mode:?} displaced cluster geometry around {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_caption_clipping_preserves_graphemes_and_tiny_widths() {
+        for (text, width, expected) in [
+            ("界面缓存", 5, "界面…"),
+            ("e\u{301}e\u{301}e\u{301}e\u{301}", 3, "e\u{301}e\u{301}…"),
+            ("👩🏽‍💻👩🏽‍💻👩🏽‍💻", 5, "👩🏽‍💻👩🏽‍💻…"),
+            ("🏳️‍🌈🏳️‍🌈", 3, "🏳️‍🌈…"),
+            ("界面", 1, "…"),
+            ("界面", 0, ""),
+            ("\u{301}", 0, ""),
+        ] {
+            assert_eq!(fit_cell_text(text, width), expected);
+            assert_eq!(
+                wrap_cell_label(text, width, 1),
+                if width == 0 {
+                    Vec::new()
+                } else {
+                    vec![expected.to_owned()]
+                }
+            );
+        }
+        assert!(wrap_cell_label("anything", 4, 0).is_empty());
+        assert_eq!(fit_cell_text("two\nrows", 20), "two rows");
+    }
+
+    #[test]
+    fn blank_only_caption_placement_respects_already_staged_text() {
+        let mut row = vec![' '; 12];
+        let mut labels = Vec::new();
+        stage_cell_label(&mut row, &mut labels, (1, 0), "First", 5, true);
+        stage_cell_label(&mut row, &mut labels, (2, 0), "Next", 4, true);
+        assert_eq!(
+            serialize_cell_labels(&[row.clone()], &labels, true),
+            " First"
+        );
+        stage_cell_label(&mut row, &mut labels, (2, 0), "Next", 4, false);
+        assert_eq!(serialize_cell_labels(&[row], &labels, true), "  Next");
+    }
+
+    #[test]
+    fn unicode_node_clipping_keeps_selection_and_footnote_markers() {
+        let ir = fm_parser::parse(
+            "flowchart TB\nA[\"👩🏽‍💻界面缓存服务\"]\nclick A \"https://example.com\"",
+        )
+        .ir;
+        let config = TermRenderConfig {
+            tier: MermaidTier::Normal,
+            render_mode: MermaidRenderMode::CellOnly,
+            show_selection: true,
+            selected_node: Some(0),
+            link_mode: fm_core::MermaidLinkMode::Footnote,
+            max_label_chars: 80,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 40, 12));
+        let mut node = layout_diagram(&ir).nodes[0].clone();
+        node.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 14.0,
+            height: 5.0,
+        };
+        let mut buffer = CellBuffer::new(40, 12);
+        renderer.render_node_cell(&mut buffer, &ir, &node, 1.0, 1.0, false);
+        let output = buffer.to_output_string();
+        assert!(output.contains("▶ 👩🏽‍💻界… [1]"), "{output}");
+        assert!(output.lines().all(|row| row.width() <= 40));
+        assert_eq!(
+            renderer.fit_node_label_line(&ir, ir.nodes.first(), "name [1]", 3),
+            "[1]"
+        );
+        assert!(
+            renderer
+                .fit_node_label_line(&ir, ir.nodes.first(), "name [1]", 2)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn debug_panel_preserves_unicode_columns_outside_its_prefix() {
+        let tail = "|界面 e\u{301} 👩🏽‍💻|";
+        let mut output = format!("x{}\n\n\n{tail}", "界".repeat(10));
+        overlay_debug_panel(
+            &mut output,
+            20,
+            4,
+            TermDebugMetrics {
+                crossings: 0,
+                bends: 0,
+                symmetry_permille: 1000,
+                nodes: 1,
+                edges: 0,
+                ranks: 1,
+                cycles: 0,
+            },
+        );
+        let rows: Vec<_> = output.lines().collect();
+        assert_eq!(rows[0], "[layout debug] 界界");
+        assert_eq!(rows[3], tail);
+        assert!(rows.iter().all(|row| row.width() <= 20));
     }
 
     #[test]

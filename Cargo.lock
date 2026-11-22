@@ -836,6 +836,7 @@ dependencies = [
  "fm-parser",
  "proptest",
  "serde",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

@@ -36,7 +36,7 @@ pub struct TermRenderConfig {
     pub max_width: usize,
     /// Maximum height in terminal rows.
     pub max_height: usize,
-    /// Maximum label characters before truncation.
+    /// Maximum label display columns before wrapping or truncation.
     pub max_label_chars: usize,
     /// Maximum label lines before truncation.
     pub max_label_lines: usize,
