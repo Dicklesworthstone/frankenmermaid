@@ -4669,10 +4669,10 @@ impl TermRenderer {
             for wrapped_line in wrapped {
                 if lines.len() >= max_lines {
                     // Truncate the last line with ellipsis if there's more content.
-                    if let Some(last) = lines.last_mut() {
-                        if last.width() >= max_chars {
-                            *last = ellipsize_cell_text(last, max_chars);
-                        }
+                    if let Some(last) = lines.last_mut()
+                        && last.width() >= max_chars
+                    {
+                        *last = ellipsize_cell_text(last, max_chars);
                     }
                     break;
                 }
@@ -9761,7 +9761,9 @@ mod tests {
 
     #[test]
     fn generic_unicode_node_captions_keep_border_columns_in_every_render_mode() {
-        for text in ["界面缓存", "e\u{301}quipe", "👩🏽‍💻 🏳️‍🌈"] {
+        // A leading emoji is parsed as a separate node icon. Keep both emoji in the
+        // caption here so this test exercises their display columns and grapheme boundaries.
+        for text in ["界面缓存", "e\u{301}quipe", "Team 👩🏽‍💻 🏳️‍🌈"] {
             let ir = fm_parser::parse(&format!("flowchart TB\nA[\"{text}\"]")).ir;
             let mut layout = layout_diagram(&ir);
             layout.nodes[0].bounds = LayoutRect {
@@ -9912,7 +9914,7 @@ mod tests {
     #[test]
     fn unicode_node_clipping_keeps_selection_and_footnote_markers() {
         let ir = fm_parser::parse(
-            "flowchart TB\nA[\"👩🏽‍💻界面缓存服务\"]\nclick A \"https://example.com\"",
+            "flowchart TB\nA[\"界👩🏽‍💻面缓存服务\"]\nclick A \"https://example.com\"",
         )
         .ir;
         let config = TermRenderConfig {
@@ -9935,7 +9937,7 @@ mod tests {
         let mut buffer = CellBuffer::new(40, 12);
         renderer.render_node_cell(&mut buffer, &ir, &node, 1.0, 1.0, false);
         let output = buffer.to_output_string();
-        assert!(output.contains("▶ 👩🏽‍💻界… [1]"), "{output}");
+        assert!(output.contains("▶ 界👩🏽‍💻… [1]"), "{output}");
         assert!(output.lines().all(|row| row.width() <= 40));
         assert_eq!(
             renderer.fit_node_label_line(&ir, ir.nodes.first(), "name [1]", 3),
