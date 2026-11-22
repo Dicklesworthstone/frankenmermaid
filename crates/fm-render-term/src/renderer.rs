@@ -1104,6 +1104,24 @@ impl TermRenderer {
             .map(<[char]>::to_vec)
             .collect();
         let mut text_labels = buffer.labels;
+        // Raster mode and content fidelity are independent: Normal/Rich CellOnly keeps the same
+        // typed rows as subcell rendering, at its existing unshifted node coordinates.
+        for node_box in &layout.nodes {
+            let bounds = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let node = ir.nodes.get(node_box.node_index);
+            if self.use_cell_compartments(node, bounds.2, bounds.3)
+                && let Some(node) = node
+            {
+                self.overlay_node_compartments(
+                    &mut grid,
+                    &mut text_labels,
+                    bounds,
+                    ir,
+                    node,
+                    cell_width,
+                );
+            }
+        }
         let protected = cell_label_rects(&text_labels);
         self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
         let (mut edge_labels, occluded_edge_label_count) =
@@ -1980,6 +1998,11 @@ impl TermRenderer {
 
         if measured_kanban_card {
             // Full card content is placed once, after both cell and subcell geometry passes.
+            return;
+        }
+
+        if self.use_cell_compartments(ir_node, w, h) {
+            // The shared typed-caption pass runs after all cell geometry has been drawn.
             return;
         }
 
@@ -3079,58 +3102,16 @@ impl TermRenderer {
                 continue;
             }
 
-            // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
-                && let Some(ref meta) = node.class_meta
-                && meta.has_compartments()
+                && self.overlay_node_compartments(
+                    &mut lines,
+                    &mut text_labels,
+                    (x, y, w, h),
+                    ir,
+                    node,
+                    cell_width,
+                )
             {
-                self.overlay_class_compartments(&mut lines, x, y, w, h, ir, node, meta, cell_width);
-                continue;
-            }
-
-            // ER entities get the SAME treatment (bd-ekx2).
-            //
-            // `IrNode::members` is populated only for ER entities, and the identifier `members` did
-            // not appear anywhere in this file: the terminal drew the box and the entity name and
-            // stopped. Measured on `CUSTOMER { string name PK / int age }`, the IR carried 2 members
-            // while `name`, `age` and `PK` were absent at 100x40, 200x60 AND 400x120 —
-            // size-independent, so not the viewport ceiling of bd-8tsw. The class branch directly
-            // above proves the terminal can draw compartments; ER simply never got them.
-            //
-            // No layout change is needed: `er_compartment_dimensions` already sizes the entity box
-            // to hold its rows, so the box has been big enough all along and only the text was
-            // missing.
-            if let Some(node) = ir_node
-                && !node.members.is_empty()
-            {
-                self.overlay_er_compartments(&mut lines, x, y, w, h, ir, node, cell_width);
-                continue;
-            }
-
-            // REQUIREMENT rows reach the terminal too (bd-039t).
-            //
-            // Measured SVG vs terminal on the same IR: `requirement R { id: 1 / text: hello /
-            // risk: high }` drew `hello` and `high` in the SVG and NEITHER in the terminal. Same
-            // shape as bd-ekx2 — content attached to the node that the terminal never learned to
-            // draw, while it drew the node's label happily. `requirement_row_dimensions` already
-            // sizes the box for these rows (that is what bd-jnc1 and bd-f3tc are about), so the
-            // box has room and only the text was missing.
-            if let Some(node) = ir_node
-                && let Some(meta) = node.requirement_meta.as_deref()
-            {
-                self.overlay_requirement_rows(&mut lines, x, y, w, h, ir, node, meta, cell_width);
-                continue;
-            }
-
-            // C4 element type, technology and description reach the terminal too (bd-039t).
-            //
-            // Measured SVG vs terminal: `Person(a, "Alice", "A user")` drew `A user` in the SVG and
-            // not in the terminal. Third member of the same class as bd-ekx2 and the requirement
-            // rows above — node-attached content the terminal never learned to draw.
-            if let Some(node) = ir_node
-                && let Some(meta) = node.c4_meta.as_deref()
-            {
-                self.overlay_c4_rows(&mut lines, x, y, w, h, ir, node, meta, cell_width);
                 continue;
             }
 
@@ -3449,7 +3430,7 @@ impl TermRenderer {
                         );
                         let (bx, by) = self.point_to_cells(&anchor, scale_x, scale_y);
                         let text = self.truncate_label(text);
-                        let width = text.chars().count();
+                        let width = text.width();
 
                         // SEARCH BESIDE THE LINE. The anchor cell lies ON the edge itself, whose glyph
                         // is never blank, so writing there is always rejected — measured: the first two
@@ -3468,16 +3449,15 @@ impl TermRenderer {
                             if cy >= lines.len() || cx + width > cell_width {
                                 continue;
                             }
-                            let free = (0..width).all(|offset| {
-                                lines[cy]
-                                    .get(cx + offset)
-                                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                            });
-                            if !free {
+                            if !stage_cell_label(
+                                &mut lines[cy],
+                                &mut text_labels,
+                                (cx, cy),
+                                &text,
+                                width,
+                                true,
+                            ) {
                                 continue;
-                            }
-                            for (offset, ch) in text.chars().enumerate() {
-                                lines[cy][cx + offset] = ch;
                             }
                             edge_label_rects.push((
                                 cx.saturating_sub(1),
@@ -4766,12 +4746,21 @@ impl TermRenderer {
             return None;
         }
 
-        let mut text = node
+        let text = node
             .label
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|label| self.truncate_label(&label.text))
             .unwrap_or_else(|| self.truncate_label(fallback_id));
 
+        Some(self.decorate_node_label(ir, node, text))
+    }
+
+    fn decorate_node_label(
+        &self,
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        mut text: String,
+    ) -> String {
         if matches!(self.config.link_mode, fm_core::MermaidLinkMode::Footnote)
             && let Some(idx) = Self::footnote_index(ir, &node.id)
         {
@@ -4801,7 +4790,7 @@ impl TermRenderer {
             }
         }
 
-        Some(text)
+        text
     }
 
     /// A clipped name must retain its link marker so readers can still find the right URL.
@@ -4834,19 +4823,77 @@ impl TermRenderer {
         fit_cell_text(text, width)
     }
 
-    /// Render a UML-style three-compartment class box into the character grid.
-    ///
-    /// Layout:
-    /// ```text
-    /// ┌──────────┐
-    /// │ ClassName │  ← header (centered)
-    /// ├──────────┤
-    /// │ +name    │  ← attributes with visibility
-    /// │ -age     │
-    /// ├──────────┤
-    /// │ +eat()   │  ← methods with visibility
-    /// └──────────┘
-    /// ```
+    fn use_cell_compartments(
+        &self,
+        node: Option<&fm_core::IrNode>,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        self.config.show_labels
+            && self.config.tier != MermaidTier::Compact
+            && matches!(
+                self.config.fidelity,
+                fm_core::MermaidFidelity::Normal | fm_core::MermaidFidelity::Rich
+            )
+            && width >= 3
+            && node.is_some_and(|node| {
+                // A stereotype must not consume the only row available for the node's name.
+                let header_rows = 1 + usize::from(
+                    node.class_meta
+                        .as_deref()
+                        .is_some_and(|meta| meta.stereotype.is_some()),
+                );
+                height >= header_rows + 2
+                    && (node
+                        .class_meta
+                        .as_deref()
+                        .is_some_and(fm_core::IrClassNodeMeta::has_compartments)
+                        || !node.members.is_empty()
+                        || node.requirement_meta.is_some()
+                        || node.c4_meta.is_some())
+            })
+    }
+
+    /// Shared typed-node content; each surface supplies its own already-resolved cell bounds.
+    fn overlay_node_compartments(
+        &self,
+        grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
+        (x, y, w, h): (usize, usize, usize, usize),
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        grid_width: usize,
+    ) -> bool {
+        if !self.config.show_labels {
+            return false;
+        }
+        if let Some(meta) = node.class_meta.as_deref()
+            && meta.has_compartments()
+        {
+            self.overlay_class_compartments(grid, labels, x, y, w, h, ir, node, meta, grid_width);
+        } else if !node.members.is_empty() {
+            self.overlay_er_compartments(grid, labels, x, y, w, h, ir, node, grid_width);
+        } else if let Some(meta) = node.requirement_meta.as_deref() {
+            self.overlay_requirement_rows(grid, labels, x, y, w, h, ir, node, meta, grid_width);
+        } else if let Some(meta) = node.c4_meta.as_deref() {
+            self.overlay_c4_rows(grid, labels, x, y, w, h, ir, node, meta, grid_width);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    fn compartment_header_label(
+        &self,
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        name: &str,
+        width: usize,
+    ) -> String {
+        let text = self.decorate_node_label(ir, node, self.truncate_label(name));
+        self.fit_node_label_line(ir, Some(node), &text, width)
+    }
+
     /// Draw a C4 node as a name header, a divider, then its type, technology and description
     /// (bd-039t).
     ///
@@ -4856,6 +4903,7 @@ impl TermRenderer {
     fn overlay_c4_rows(
         &self,
         grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
         x: usize,
         y: usize,
         w: usize,
@@ -4868,16 +4916,17 @@ impl TermRenderer {
         let inner_w = w.saturating_sub(2);
         let glyphs = &self.box_glyphs;
 
-        let write_text =
+        let mut write_text =
             |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
-                if row >= grid.len() {
-                    return;
-                }
-                for (i, ch) in text.chars().take(max_w).enumerate() {
-                    let c = col + i;
-                    if c < grid_width && c < grid[row].len() {
-                        grid[row][c] = ch;
-                    }
+                if let Some(cells) = grid.get_mut(row) {
+                    stage_cell_label(
+                        cells,
+                        labels,
+                        (col, row),
+                        text,
+                        max_w.min(grid_width.saturating_sub(col)),
+                        false,
+                    );
                 }
             };
 
@@ -4908,9 +4957,8 @@ impl TermRenderer {
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
-        let name_text = self.truncate_label(name);
-        let name_chars = name_text.chars().count();
-        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        let name_text = self.compartment_header_label(ir, node, name, inner_w);
+        let name_x = x + 1 + inner_w.saturating_sub(name_text.width()) / 2;
         if row < max_content_row {
             write_text(grid, row, name_x, &name_text, inner_w);
             row += 1;
@@ -4948,6 +4996,7 @@ impl TermRenderer {
     fn overlay_requirement_rows(
         &self,
         grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
         x: usize,
         y: usize,
         w: usize,
@@ -4960,16 +5009,17 @@ impl TermRenderer {
         let inner_w = w.saturating_sub(2);
         let glyphs = &self.box_glyphs;
 
-        let write_text =
+        let mut write_text =
             |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
-                if row >= grid.len() {
-                    return;
-                }
-                for (i, ch) in text.chars().take(max_w).enumerate() {
-                    let c = col + i;
-                    if c < grid_width && c < grid[row].len() {
-                        grid[row][c] = ch;
-                    }
+                if let Some(cells) = grid.get_mut(row) {
+                    stage_cell_label(
+                        cells,
+                        labels,
+                        (col, row),
+                        text,
+                        max_w.min(grid_width.saturating_sub(col)),
+                        false,
+                    );
                 }
             };
 
@@ -5000,9 +5050,8 @@ impl TermRenderer {
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
-        let name_text = self.truncate_label(name);
-        let name_chars = name_text.chars().count();
-        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        let name_text = self.compartment_header_label(ir, node, name, inner_w);
+        let name_x = x + 1 + inner_w.saturating_sub(name_text.width()) / 2;
         if row < max_content_row {
             write_text(grid, row, name_x, &name_text, inner_w);
             row += 1;
@@ -5050,6 +5099,7 @@ impl TermRenderer {
     fn overlay_er_compartments(
         &self,
         grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
         x: usize,
         y: usize,
         w: usize,
@@ -5061,16 +5111,17 @@ impl TermRenderer {
         let inner_w = w.saturating_sub(2);
         let glyphs = &self.box_glyphs;
 
-        let write_text =
+        let mut write_text =
             |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
-                if row >= grid.len() {
-                    return;
-                }
-                for (i, ch) in text.chars().take(max_w).enumerate() {
-                    let c = col + i;
-                    if c < grid_width && c < grid[row].len() {
-                        grid[row][c] = ch;
-                    }
+                if let Some(cells) = grid.get_mut(row) {
+                    stage_cell_label(
+                        cells,
+                        labels,
+                        (col, row),
+                        text,
+                        max_w.min(grid_width.saturating_sub(col)),
+                        false,
+                    );
                 }
             };
 
@@ -5103,9 +5154,8 @@ impl TermRenderer {
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
-        let name_text = self.truncate_label(entity_name);
-        let name_chars = name_text.chars().count();
-        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        let name_text = self.compartment_header_label(ir, node, entity_name, inner_w);
+        let name_x = x + 1 + inner_w.saturating_sub(name_text.width()) / 2;
         if row < max_content_row {
             write_text(grid, row, name_x, &name_text, inner_w);
             row += 1;
@@ -5116,22 +5166,11 @@ impl TermRenderer {
             row += 1;
         }
 
-        // ER attribute cells at shared CHARACTER columns when they fit, fused otherwise (bd-jbrzc).
-        //
-        // ⚠️ CHARACTER COLUMNS, NOT `fm_core::er_cell_columns`. That helper returns PIXEL offsets
-        // measured from proportional font metrics, which is the right answer for SVG and canvas and
-        // a meaningless one on a grid where every glyph occupies exactly one cell. Reusing it here
-        // would be sharing a name rather than a rule.
-        //
-        // ⚠️ AND THE TWO MEASURES HAVE NO GUARANTEED RELATIONSHIP. The box's cell width comes from
-        // scaling a PIXEL width that was itself sized from pixel columns; character columns count
-        // characters. Text made of wide glyphs measures large in pixels and small in characters,
-        // and narrow glyphs the reverse — so a document exists for which aligned columns do not fit
-        // a box that the pixel columns fit fine. Hence the guard: align when there is room, and
-        // otherwise draw exactly what this surface drew before, which shows the start of every
-        // field rather than a truncated first column. Measured on the bead's skew fixture
-        // `T { verylongtypename a / t verylongattributename PK }`: 41 columns needed against 54
-        // available, so that one aligns.
+        // Align ER cells by terminal display columns when they fit, fused otherwise (bd-jbrzc).
+        // `fm_core::er_cell_columns` measures proportional-font pixels for SVG/canvas; those
+        // offsets cannot be reused in a terminal. A wide grapheme occupies two columns here and a
+        // combining mark occupies none. Scaling the pixel-sized box may leave less room than the
+        // terminal columns need, so retain the fused-row fallback for constrained viewports.
         let (offsets, columns_width) = Self::er_character_columns(&node.members);
         let columns_fit = columns_width <= inner_w;
 
@@ -5169,17 +5208,9 @@ impl TermRenderer {
         }
     }
 
-    /// Character-cell column offsets for an ER entity's attributes, and the total width they need.
-    ///
-    /// ⚠️ CHARACTERS, NOT `fm_core::er_cell_columns`. That helper returns PIXEL offsets from
-    /// proportional font metrics — the right answer for SVG and canvas, and a meaningless one on a grid
-    /// where every glyph occupies exactly one cell. Reusing it here would share a name rather than a
-    /// rule.
-    ///
-    /// Extracted from the drawing loop so the fits-or-fuse decision can be tested directly. The
-    /// fallback it feeds could not be reached from any rendered fixture tried — narrow glyphs, wide
-    /// glyphs, long comments, and six attributes all fit — so a rendering test cannot cover it, and an
-    /// untestable branch is exactly what this bead warns against shipping.
+    /// Display-column offsets for an ER entity's attributes, and the total width they need.
+    /// These terminal measurements are independent of the proportional-font pixel columns used
+    /// by layout, SVG and canvas. Empty columns contribute neither width nor a gutter.
     pub(crate) fn er_character_columns(
         members: &[fm_core::IrEntityAttribute],
     ) -> ([usize; 4], usize) {
@@ -5193,7 +5224,7 @@ impl TermRenderer {
                 attr.comment.as_deref().unwrap_or(""),
             ];
             for (index, cell) in cells.iter().enumerate() {
-                widths[index] = widths[index].max(cell.chars().count());
+                widths[index] = widths[index].max(cell.width());
             }
         }
         let mut offsets = [0_usize; 4];
@@ -5212,6 +5243,7 @@ impl TermRenderer {
     fn overlay_class_compartments(
         &self,
         grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
         x: usize,
         y: usize,
         w: usize,
@@ -5224,17 +5256,18 @@ impl TermRenderer {
         let inner_w = w.saturating_sub(2); // Width inside borders
         let glyphs = &self.box_glyphs;
 
-        // Helper to write a left-aligned string into the grid at (row, col).
-        let write_text =
+        // Stage text separately from geometry so a grapheme cannot shift the right border.
+        let mut write_text =
             |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
-                if row >= grid.len() {
-                    return;
-                }
-                for (i, ch) in text.chars().take(max_w).enumerate() {
-                    let c = col + i;
-                    if c < grid_width && c < grid[row].len() {
-                        grid[row][c] = ch;
-                    }
+                if let Some(cells) = grid.get_mut(row) {
+                    stage_cell_label(
+                        cells,
+                        labels,
+                        (col, row),
+                        text,
+                        max_w.min(grid_width.saturating_sub(col)),
+                        false,
+                    );
                 }
             };
 
@@ -5276,9 +5309,8 @@ impl TermRenderer {
             && row < max_content_row
         {
             let stereo_text = stereotype.label();
-            let stereo = self.truncate_label(&stereo_text);
-            let stereo_chars = stereo.chars().count();
-            let stereo_x = x + 1 + inner_w.saturating_sub(stereo_chars) / 2;
+            let stereo = fit_cell_text(&self.truncate_label(&stereo_text), inner_w);
+            let stereo_x = x + 1 + inner_w.saturating_sub(stereo.width()) / 2;
             write_text(grid, row, stereo_x, &stereo, inner_w);
             row += 1;
         }
@@ -5290,11 +5322,12 @@ impl TermRenderer {
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
         let display_name = meta.display_header(class_name);
-        let name_text = self.truncate_label(&display_name);
-        let name_chars = name_text.chars().count();
-        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
-        write_text(grid, row, name_x, &name_text, inner_w);
-        row += 1;
+        let name_text = self.compartment_header_label(ir, node, &display_name, inner_w);
+        let name_x = x + 1 + inner_w.saturating_sub(name_text.width()) / 2;
+        if row < max_content_row {
+            write_text(grid, row, name_x, &name_text, inner_w);
+            row += 1;
+        }
 
         // Separator after header.
         if row < max_content_row {
@@ -5701,10 +5734,10 @@ fn stage_cell_label(
     text: &str,
     width: usize,
     only_if_blank: bool,
-) {
+) -> bool {
     let width = width.min(row.len().saturating_sub(x));
     if width == 0 {
-        return;
+        return false;
     }
     let text = fit_cell_text(text, width);
     let end = x + text.width();
@@ -5718,7 +5751,7 @@ fn stage_cell_label(
                         && end > prior.x
                 })))
     {
-        return;
+        return false;
     }
     labels.retain(|prior| {
         y < prior.y
@@ -5732,6 +5765,7 @@ fn stage_cell_label(
     label.y = y;
     label.require_clear_cells = true;
     labels.push(label);
+    true
 }
 
 fn cell_label_rects(labels: &[CellLabel]) -> Vec<(usize, usize, usize, usize)> {
@@ -7591,6 +7625,17 @@ mod er_character_column_tests {
         assert_eq!(offsets, [0, 0, 0, 0]);
         assert_eq!(width, 0);
     }
+
+    #[test]
+    fn unicode_columns_measure_wide_and_combining_graphemes() {
+        let members = [
+            attr("界面", "e\u{301}", true, Some("👩🏽‍💻")),
+            attr("t", "用户", false, None),
+        ];
+        let (offsets, width) = TermRenderer::er_character_columns(&members);
+        assert_eq!(offsets, [0, 5, 10, 13]);
+        assert_eq!(width, 15);
+    }
 }
 
 #[cfg(test)]
@@ -9429,6 +9474,286 @@ mod tests {
                 "incorrect terminal display width for {line:?}"
             );
         }
+    }
+
+    const TYPED_NODE_SOURCES: [&str; 4] = [
+        "classDiagram\nclass Header {\n+String field\n+run() String\n}\n",
+        "erDiagram\nHeader {\nstring field PK\nint count FK\n}\n",
+        "C4Context\nPerson(actor, \"Header\", \"description\")\n",
+        "requirementDiagram\nrequirement Header {\nid: 1\ntext: description\nrisk: high\n}\n",
+    ];
+
+    fn roomy_typed_node_layout(ir: &MermaidDiagramIr) -> DiagramLayout {
+        assert_eq!(ir.nodes.len(), 1);
+        let mut layout = layout_diagram(ir);
+        layout.nodes[0].bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 480.0,
+        };
+        layout.bounds = layout.nodes[0].bounds;
+        layout
+    }
+
+    fn replace_typed_node_fixture_text(ir: &mut MermaidDiagramIr, text: &str) {
+        let node = &mut ir.nodes[0];
+        let label = node.label.unwrap_or_else(|| {
+            let id = IrLabelId(ir.labels.len());
+            ir.labels.push(IrLabel::default());
+            node.label = Some(id);
+            id
+        });
+        ir.labels[label.0].text = text.to_owned();
+        node.interaction_mut().href = Some("https://example.com/details".to_owned());
+        if let Some(meta) = node.class_meta.as_deref_mut() {
+            meta.stereotype = Some(fm_core::ClassStereotype::Custom(text.to_owned()));
+            meta.generics = vec![text.to_owned()];
+            meta.attributes[0].name = format!("String {text}");
+            meta.methods[0].name = format!("{text}()");
+            meta.methods[0].return_type = Some("List~T~".to_owned());
+            meta.methods[0].is_static = true;
+            let mut abstract_method = meta.methods[0].clone();
+            abstract_method.is_static = false;
+            abstract_method.is_abstract = true;
+            meta.methods.push(abstract_method);
+        }
+        if !node.members.is_empty() {
+            node.members[0].data_type = text.to_owned();
+            node.members[0].comment = Some(text.to_owned());
+            node.members[1].name = text.to_owned();
+        }
+        if let Some(meta) = node.c4_meta.as_deref_mut() {
+            meta.technology = Some(text.to_owned());
+            meta.description = Some(text.to_owned());
+        }
+        if let Some(meta) = node.requirement_meta.as_deref_mut() {
+            meta.text = Some(text.to_owned());
+            meta.doc_ref = Some(text.to_owned());
+        }
+    }
+
+    #[test]
+    fn typed_unicode_compartments_keep_contents_and_border_columns_in_all_modes() {
+        for (family, source) in TYPED_NODE_SOURCES.iter().enumerate() {
+            let original = fm_parser::parse(source).ir;
+            let layout = roomy_typed_node_layout(&original);
+            for text in ["界面缓存", "e\u{301}quipe", "👩🏽‍💻 🏳️‍🌈"] {
+                let mut ir = original.clone();
+                replace_typed_node_fixture_text(&mut ir, text);
+                let same_columns = "X".repeat(text.width());
+                let mut narrow_ir = original.clone();
+                replace_typed_node_fixture_text(&mut narrow_ir, &same_columns);
+                for (tier, mode) in [
+                    (MermaidTier::Normal, MermaidRenderMode::CellOnly),
+                    (MermaidTier::Rich, MermaidRenderMode::CellOnly),
+                    (MermaidTier::Rich, MermaidRenderMode::HalfBlock),
+                    (MermaidTier::Rich, MermaidRenderMode::Block),
+                    (MermaidTier::Rich, MermaidRenderMode::Braille),
+                ] {
+                    let config = TermRenderConfig {
+                        tier,
+                        render_mode: mode,
+                        max_label_chars: 80,
+                        selected_node: Some(0),
+                        link_mode: fm_core::MermaidLinkMode::Footnote,
+                        ..TermRenderConfig::rich()
+                    };
+                    let rendered =
+                        render_diagram_with_layout_and_config(&ir, &layout, &config, 120, 40);
+                    let reference = render_diagram_with_layout_and_config(
+                        &narrow_ir, &layout, &config, 120, 40,
+                    );
+                    let header = if family == 0 {
+                        format!("{text}<{text}>")
+                    } else {
+                        text.to_owned()
+                    };
+                    assert!(
+                        rendered.output.contains(&format!("▶ {header} [1]")),
+                        "{tier:?}/{mode:?} lost a decorated header:\n{}",
+                        rendered.output
+                    );
+                    assert_eq!(
+                        rendered.output.matches("▶ ").count(),
+                        1,
+                        "duplicate node caption"
+                    );
+                    let fields = match family {
+                        0 => vec![
+                            format!("«{text}»"),
+                            format!("+String {text}"),
+                            format!("+{text}()$ : List<T>"),
+                            format!("+{text}()* : List<T>"),
+                        ],
+                        1 => vec![text.to_owned(), "field".into(), "PK".into(), "FK".into()],
+                        2 => vec!["<<person>>".into(), format!("[{text}]"), text.to_owned()],
+                        _ => vec![
+                            format!("text: {text}"),
+                            format!("doc: {text}"),
+                            "risk: high".into(),
+                        ],
+                    };
+                    for field in fields {
+                        assert!(
+                            rendered.output.contains(&field),
+                            "{tier:?}/{mode:?} lost {field:?}:\n{}",
+                            rendered.output
+                        );
+                    }
+                    assert!(
+                        rendered
+                            .output
+                            .lines()
+                            .all(|row| row.width() <= rendered.width),
+                        "{tier:?}/{mode:?} exceeded the declared display width"
+                    );
+                    assert_eq!(
+                        rendered.output.replace(text, &same_columns),
+                        reference.output,
+                        "family {family}, {tier:?}/{mode:?} displaced geometry around {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_outline_and_hidden_labels_do_not_enable_typed_rows() {
+        for source in TYPED_NODE_SOURCES {
+            let ir = fm_parser::parse(source).ir;
+            let layout = roomy_typed_node_layout(&ir);
+            for (tier, fidelity_override, show_labels, expect_header) in [
+                (MermaidTier::Compact, None, true, true),
+                (
+                    MermaidTier::Rich,
+                    Some(fm_core::MermaidFidelity::Outline),
+                    true,
+                    false,
+                ),
+                (MermaidTier::Rich, None, false, false),
+            ] {
+                let config = TermRenderConfig {
+                    tier,
+                    fidelity_override,
+                    show_labels,
+                    render_mode: MermaidRenderMode::CellOnly,
+                    ..TermRenderConfig::rich()
+                };
+                let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 120, 40);
+                assert_eq!(
+                    result.output.contains("Header"),
+                    expect_header,
+                    "{}",
+                    result.output
+                );
+                for field in [
+                    "field",
+                    "run",
+                    "count",
+                    "PK",
+                    "FK",
+                    "person",
+                    "description",
+                    "risk:",
+                ] {
+                    assert!(
+                        !result.output.contains(field),
+                        "{tier:?} exposed {field:?}:\n{}",
+                        result.output
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_class_compartments_preserve_bottom_borders_and_cell_mode_name() {
+        let ir = fm_parser::parse("classDiagram\nclass Tiny\n<<interface>> Tiny\n").ir;
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 40, 20));
+        for height in [2, 3, 4] {
+            let mut buffer = CellBuffer::new(40, 20);
+            renderer.draw_shape_border(&mut buffer, 2, 1, 20, height, NodeShape::Rect);
+            let mut grid: Vec<_> = buffer.cells.chunks(40).map(<[char]>::to_vec).collect();
+            let bottom = grid[height].clone();
+            let mut labels = Vec::new();
+            assert!(renderer.overlay_node_compartments(
+                &mut grid,
+                &mut labels,
+                (2, 1, 20, height),
+                &ir,
+                &ir.nodes[0],
+                40,
+            ));
+            assert_eq!(grid[height], bottom, "height {height} overwrote the border");
+            assert!(labels.iter().all(|label| label.y < height));
+        }
+
+        let mut node_box = layout_diagram(&ir).nodes[0].clone();
+        node_box.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 3.0,
+        };
+        let mut buffer = CellBuffer::new(40, 20);
+        renderer.render_node_cell(&mut buffer, &ir, &node_box, 1.0, 1.0, false);
+        let output = buffer.to_output_string();
+        assert!(
+            output.contains("Tiny"),
+            "small-box fallback lost the name:\n{output}"
+        );
+        assert!(
+            !output.contains("interface"),
+            "the stereotype displaced the name"
+        );
+        assert!(!renderer.use_cell_compartments(ir.nodes.first(), 20, 3));
+    }
+
+    #[test]
+    fn cardinality_candidates_cannot_erase_staged_compartment_rows() {
+        let ir = fm_parser::parse(
+            "classDiagram\nclass A {\n+String field\n}\nclass B\nA \"1\" --> \"many\" B\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        let config = TermRenderConfig {
+            padding: 0,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 20));
+        let mut buffer = CellBuffer::new(60, 20);
+        for (node, x) in layout.nodes.iter_mut().zip([2, 35]) {
+            node.bounds = LayoutRect {
+                x: x as f32,
+                y: 2.0,
+                width: 20.0,
+                height: 8.0,
+            };
+            renderer.draw_shape_border(&mut buffer, x, 2, 20, 8, NodeShape::Rect);
+        }
+        // The source anchor is (2, 5); its first candidate (3, 5) is the staged attribute's
+        // first column. The next candidate (1, 5) is free and must retain the cardinality.
+        layout.edges[0].points = vec![
+            fm_layout::LayoutPoint { x: 2.0, y: 4.0 },
+            fm_layout::LayoutPoint { x: 2.0, y: 8.0 },
+        ];
+        let grid = buffer.cells.chunks(60).map(<[char]>::to_vec).collect();
+        let (output, _) = renderer.overlay_labels(grid, &ir, &layout, 60, 20, 1.0, 1.0);
+        let row = output.lines().nth(5).expect("attribute row");
+        assert!(
+            row.contains("+String field"),
+            "cardinality erased a member:\n{output}"
+        );
+        assert_eq!(
+            row.chars().nth(1),
+            Some('1'),
+            "cardinality had no safe fallback:\n{output}"
+        );
     }
 
     #[test]

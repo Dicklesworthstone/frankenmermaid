@@ -8,7 +8,7 @@
 
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
-    IrNodeId, MermaidDiagramIr,
+    IrNodeId, MermaidDiagramIr, MermaidRenderMode, MermaidTier,
 };
 use fm_render_term::{TermRenderConfig, render_term_with_config};
 
@@ -1130,6 +1130,49 @@ fn class_compartments_still_render_after_the_er_branch() {
         out.contains("Alpha") && out.contains("name") && out.contains("run"),
         "class compartments regressed:\n{out}"
     );
+}
+
+#[test]
+fn typed_node_contents_survive_cell_only_rasterization() {
+    let fixtures: [(&str, &[&str]); 5] = [
+        (
+            "classDiagram\nclass Alpha {\n+String name\n+run()$ String\n}\n<<interface>> Alpha\n",
+            &["Alpha", "«interface»", "+String name", "+run()$ : String"],
+        ),
+        ("classDiagram\nclass Repository~T~\n", &["Repository<T>"]),
+        (
+            "erDiagram\nCUSTOMER {\nstring name PK \"primary name\"\nint age\n}\n",
+            &["CUSTOMER", "string", "name", "PK", "primary name", "age"],
+        ),
+        (
+            "requirementDiagram\nrequirement R {\nid: 1\ntext: hello\nrisk: high\n}\n",
+            &["R", "id: 1", "text: hello", "risk: high"],
+        ),
+        (
+            "C4Container\nContainer(store, \"Store\", \"Rust\", \"Persists records\")\n",
+            &["Store", "<<container>>", "[Rust]", "Persists records"],
+        ),
+    ];
+    for (source, fields) in fixtures {
+        let ir = fm_parser::parse(source).ir;
+        for tier in [MermaidTier::Normal, MermaidTier::Rich] {
+            let config = TermRenderConfig {
+                tier,
+                render_mode: MermaidRenderMode::CellOnly,
+                ..TermRenderConfig::rich()
+            };
+            let result = render_term_with_config(&ir, &config, 200, 60);
+            assert_eq!(result.tier, tier);
+            assert_eq!(result.render_mode, MermaidRenderMode::CellOnly);
+            for field in fields {
+                assert!(
+                    result.output.contains(field),
+                    "{tier:?} CellOnly lost {field:?} from {source:?}:\n{}",
+                    result.output
+                );
+            }
+        }
+    }
 }
 
 /// CONTROL: an ER entity with NO attributes still draws its name.
