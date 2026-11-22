@@ -13861,19 +13861,20 @@ fn layout_diagram_gantt_from_meta(
     // A tick is emitted only on an interval boundary, so `tickInterval 1month` on a year-long chart
     // gives twelve ticks instead of three hundred and sixty five overlapping ones — the density
     // problem is the whole reason mermaid has the directive.
-    let tick_interval = gantt_meta.tick_interval.unwrap_or_else(|| {
-        if total_span >= GANTT_MILLISECONDS_PER_DAY {
-            GanttTickInterval::Day
-        } else if total_span >= 3_600_000 {
-            GanttTickInterval::Hour
-        } else if total_span >= 60_000 {
-            GanttTickInterval::Minute
-        } else if total_span >= 1_000 {
-            GanttTickInterval::Second
-        } else {
-            GanttTickInterval::Millisecond
-        }
-    });
+    let tick_interval =
+        gantt_meta
+            .tick_interval
+            .unwrap_or(if total_span >= GANTT_MILLISECONDS_PER_DAY {
+                GanttTickInterval::Day
+            } else if total_span >= 3_600_000 {
+                GanttTickInterval::Hour
+            } else if total_span >= 60_000 {
+                GanttTickInterval::Minute
+            } else if total_span >= 1_000 {
+                GanttTickInterval::Second
+            } else {
+                GanttTickInterval::Millisecond
+            });
     // mermaid's `weekday` default is sunday, which is also the parser's encoding for 0.
     let weekday_start = gantt_meta.weekday_start.unwrap_or(0);
     let axis_format = gantt_meta.axis_format.as_deref().or(match tick_interval {

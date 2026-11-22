@@ -6681,6 +6681,7 @@ impl TermRenderer {
             }
         }
         let mut buffer = CellBuffer {
+            labels: Vec::new(),
             cells: canvas
                 .render_char_grid()
                 .into_iter()
@@ -6979,6 +6980,7 @@ impl TermRenderer {
         }
 
         let mut buffer = CellBuffer {
+            labels: Vec::new(),
             cells: canvas
                 .render_char_grid()
                 .into_iter()
@@ -9741,7 +9743,8 @@ mod tests {
         layout.edges[0].points = vec![
             fm_layout::LayoutPoint { x: 2.0, y: 4.0 },
             fm_layout::LayoutPoint { x: 2.0, y: 8.0 },
-        ];
+        ]
+        .into();
         let grid = buffer.cells.chunks(60).map(<[char]>::to_vec).collect();
         let (output, _) = renderer.overlay_labels(grid, &ir, &layout, 60, 20, 1.0, 1.0);
         let row = output.lines().nth(5).expect("attribute row");
