@@ -165,3 +165,48 @@ fn no_names_are_emitted_when_text_alternatives_are_off() {
         "CONTROL FAILED: no gantt marks rendered at all"
     );
 }
+
+#[test]
+fn intraday_gantt_names_and_visible_axes_retain_duration_precision() {
+    let parsed = fm_parser::parse(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm:ss.SSS\naxisFormat %H:%M:%S.%L\ntickInterval 1hour\n\
+         Long :Long, 2026-11-22 09:00:00.000, 1.5h\n\
+         Short :Short, after Long, 30m\n\
+         Pulse :Pulse, after Short, 500ms\n\
+         Gate :milestone, Gate, after Pulse, 0ms\n",
+    );
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let svg = render_svg_with_config(
+        &parsed.ir,
+        &SvgRenderConfig {
+            a11y: A11yConfig::full(),
+            ..SvgRenderConfig::default()
+        },
+    );
+    let names = mark_names(&svg);
+    assert_eq!(
+        names,
+        [
+            "Long, starts 2026-11-22T09:00:00.000, 90 minutes",
+            "Short, 30 minutes",
+            "Pulse, 500 milliseconds",
+            "Gate, 0 milliseconds, milestone",
+        ]
+    );
+    for backend in [
+        fm_render_svg::SvgBackend::LegacyLayout,
+        fm_render_svg::SvgBackend::Scene,
+    ] {
+        let config = SvgRenderConfig {
+            backend,
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&parsed.ir, &config);
+        for time in ["09:00:00.000", "10:00:00.000", "11:00:00.000"] {
+            assert!(svg.contains(time), "{backend:?} omitted axis label {time}");
+        }
+        assert!(!svg.contains("NaN"));
+        assert!(!svg.contains("Infinity"));
+        assert_eq!(svg, render_svg_with_config(&parsed.ir, &config));
+    }
+}

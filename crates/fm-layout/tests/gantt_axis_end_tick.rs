@@ -492,3 +492,323 @@ fn gantt_large_calendar_periods_saturate_without_wrapping_or_scanning_years() {
         assert!(layout.bounds.width.is_finite());
     }
 }
+
+fn assert_task_times(
+    ir: &fm_core::MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
+    task_index: usize,
+    start: &str,
+    end: &str,
+) {
+    let task = &ir.gantt_meta.as_ref().unwrap().tasks[task_index];
+    let node = layout
+        .nodes
+        .iter()
+        .find(|node| node.node_index == task.node.0)
+        .unwrap();
+    let axis = layout.extensions.gantt_day_axis.unwrap();
+    let x = |value| {
+        axis.x_for_millisecond(fm_layout::parse_iso_millisecond_number(value).unwrap())
+            .unwrap()
+    };
+    assert!(
+        (node.bounds.x - x(start)).abs() < 0.01,
+        "{} starts at {start}: {:?}",
+        node.node_id,
+        node.bounds
+    );
+    assert!(
+        (node.bounds.x + node.bounds.width - x(end)).abs() < 0.01,
+        "{} ends at {end}: {:?}",
+        node.node_id,
+        node.bounds
+    );
+}
+
+#[test]
+fn gantt_intraday_dependencies_and_axis_share_exact_instants() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm:ss.SSS\naxisFormat %H:%M:%S.%L\ntickInterval 1hour\n\
+         Ship :Ship, after Build Test, 30m\n\
+         Test :Test, after Prep, 90m\n\
+         Prep :Prep, 2026-03-02 08:30:00.125, 30m\n\
+         Build :Build, after Prep, 2h\n\
+         Hold :Hold, 2026-03-02 08:30:00.125, until Ship\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "2026-03-02T11:00:00.125",
+        "2026-03-02T11:30:00.125",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        1,
+        "2026-03-02T09:00:00.125",
+        "2026-03-02T10:30:00.125",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        2,
+        "2026-03-02T08:30:00.125",
+        "2026-03-02T09:00:00.125",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        3,
+        "2026-03-02T09:00:00.125",
+        "2026-03-02T11:00:00.125",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        4,
+        "2026-03-02T08:30:00.125",
+        "2026-03-02T11:00:00.125",
+    );
+    assert_eq!(
+        layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .map(|tick| tick.label.as_str())
+            .collect::<Vec<_>>(),
+        ["09:00:00.000", "10:00:00.000", "11:00:00.000"]
+    );
+    assert!((layout.nodes[3].bounds.width / layout.nodes[2].bounds.width - 4.0).abs() < 0.0001);
+    let axis = layout.extensions.gantt_day_axis.unwrap();
+    for (tick, hour) in layout.extensions.axis_ticks.iter().zip([9, 10, 11]) {
+        let time =
+            fm_layout::parse_iso_millisecond_number(&format!("2026-03-02T{hour:02}:00:00.000"))
+                .unwrap();
+        assert!((tick.position - axis.x_for_millisecond(time).unwrap()).abs() < 0.001);
+    }
+    assert!(
+        axis.x_for_day(fm_layout::parse_iso_day_number("2026-03-02").unwrap())
+            .is_none(),
+        "midnight is outside this intraday chart"
+    );
+    assert_eq!(layout, fm_layout::layout_diagram(&ir));
+}
+
+#[test]
+fn gantt_millisecond_tasks_cross_midnight_without_epoch_precision_loss() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm:ss.SSS\n\
+         First :First, 2026-11-21 23:59:59.750, 500ms\n\
+         Second :250ms\nThird :1ms\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "2026-11-21T23:59:59.750",
+        "2026-11-22T00:00:00.250",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        1,
+        "2026-11-22T00:00:00.250",
+        "2026-11-22T00:00:00.500",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        2,
+        "2026-11-22T00:00:00.500",
+        "2026-11-22T00:00:00.501",
+    );
+    assert!((layout.nodes[0].bounds.width / layout.nodes[1].bounds.width - 2.0).abs() < 0.0001);
+    assert!((layout.nodes[1].bounds.width / layout.nodes[2].bounds.width - 250.0).abs() < 0.001);
+    assert!(
+        layout
+            .extensions
+            .axis_ticks
+            .last()
+            .unwrap()
+            .label
+            .ends_with("00.501")
+    );
+    assert!(
+        layout.bounds.width < 2_000.0,
+        "a millisecond chart should have a usable viewport"
+    );
+}
+
+#[test]
+fn gantt_partial_workdays_skip_weekends_and_holidays() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm\nexcludes weekends, 2026-02-09\n\
+         Work :Work, 2026-02-06 23:30, 2h\n\
+         Follow :Follow, after Work, 1.5h\n\
+         Day :Day, 2026-02-06 23:30, 1d\n\
+         Weekend start :Weekend, 2026-02-07 10:30, 30m\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "2026-02-06T23:30:00.000",
+        "2026-02-10T01:30:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        1,
+        "2026-02-10T01:30:00.000",
+        "2026-02-10T03:00:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        2,
+        "2026-02-06T23:30:00.000",
+        "2026-02-10T23:30:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        3,
+        "2026-02-10T10:30:00.000",
+        "2026-02-10T11:00:00.000",
+    );
+}
+
+#[test]
+fn gantt_clock_deadlines_and_calendar_periods_preserve_time_of_day() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm\n\
+         Month :Month, 2024-01-31 09:15, 1M\n\
+         Year :Year, after Month, 1y\n\
+         Deadline :Deadline, after Year, 2025-02-28 10:45\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "2024-01-31T09:15:00.000",
+        "2024-02-29T09:15:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        1,
+        "2024-02-29T09:15:00.000",
+        "2025-02-28T09:15:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        2,
+        "2025-02-28T09:15:00.000",
+        "2025-02-28T10:45:00.000",
+    );
+}
+
+#[test]
+fn gantt_time_only_milestones_use_a_deterministic_epoch_and_midpoint() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat HH:mm\naxisFormat %I:%M %p\n\
+         Initial task :Task, 17:49, 2m\n\
+         Gate :milestone, Gate, after Task, 2m\n\
+         Follow :Follow, after Gate, 1m\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "1970-01-01T17:49:00.000",
+        "1970-01-01T17:51:00.000",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        2,
+        "1970-01-01T17:53:00.000",
+        "1970-01-01T17:54:00.000",
+    );
+    let axis = layout.extensions.gantt_day_axis.unwrap();
+    let midpoint = axis
+        .x_for_millisecond(
+            fm_layout::parse_iso_millisecond_number("1970-01-01T17:52:00.000").unwrap(),
+        )
+        .unwrap();
+    assert!((layout.nodes[1].bounds.center().x - midpoint).abs() < 0.01);
+    assert!(
+        layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .all(|tick| tick.label.ends_with(" PM"))
+    );
+}
+
+#[test]
+fn gantt_subday_intervals_and_huge_durations_have_bounded_tick_work() {
+    for interval in ["1millisecond", "1second", "1minute", "1hour"] {
+        let (_, layout) = parse_and_layout(&format!(
+            "gantt\ndateFormat YYYY-MM-DD HH:mm\ntickInterval {interval}\n\
+             Large :Large, 1969-12-31 12:00, 18446744073709551615ms\n"
+        ));
+        let axis = layout.extensions.gantt_day_axis.unwrap();
+        assert_eq!(axis.last_day, i32::MAX);
+        assert!(layout.extensions.axis_ticks.len() <= 4096);
+        assert!(layout.bounds.width.is_finite());
+        assert!(
+            layout
+                .extensions
+                .axis_ticks
+                .iter()
+                .all(|tick| tick.position.is_finite())
+        );
+    }
+}
+
+#[test]
+fn gantt_clock_arithmetic_and_ticks_work_before_the_epoch() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ndateFormat YYYY-MM-DD HH:mm:ss.SSS\ntickInterval 1second\naxisFormat %Y-%m-%d %H:%M:%S.%L\n\
+         Cross :Cross, 1969-12-31 23:59:59.500, 1s\n",
+    );
+    assert_task_times(
+        &ir,
+        &layout,
+        0,
+        "1969-12-31T23:59:59.500",
+        "1970-01-01T00:00:00.500",
+    );
+    assert_eq!(
+        layout.extensions.axis_ticks[0].label,
+        "1970-01-01 00:00:00.000"
+    );
+    assert_eq!(
+        fm_layout::parse_iso_millisecond_number("1969-12-31T23:59:59.500"),
+        Some(-500)
+    );
+}
+
+#[test]
+fn gantt_public_timestamp_mapping_rejects_malformed_clock_fields() {
+    for value in [
+        "2026-03-02T+1:00:00",
+        "2026-03-02T-0:00:00",
+        "2026-03-02T12:+1:00",
+        "2026-03-02T12:00:-0",
+        "2026-03-02T24:00:00",
+        "2026-03-02T12:60:00",
+        "2026-03-02T12:00:60",
+        "2026-03-02T12:00:00.1234",
+        "2026-03-02T12:00:00.é",
+    ] {
+        assert_eq!(
+            fm_layout::parse_iso_millisecond_number(value),
+            None,
+            "{value}"
+        );
+    }
+}

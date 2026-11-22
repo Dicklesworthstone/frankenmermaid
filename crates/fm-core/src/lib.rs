@@ -8258,11 +8258,16 @@ impl GanttTaskFlags {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GanttDate {
+    /// A date (`YYYY-MM-DD`) or a wall-clock timestamp (`YYYY-MM-DDTHH:mm:ss.SSS`).
+    /// Timestamps are normalized without consulting a host timezone or the current date.
     Absolute(String),
     AfterTask(String),
     /// End at the earliest start among the named tasks, without inclusive-end adjustment.
     UntilTasks(Vec<String>),
     DurationDays(u32),
+    /// An exact fixed duration for hours, minutes, seconds, milliseconds and fractional days.
+    /// Keeping milliseconds integral avoids rounding short tasks out of the shared schedule.
+    DurationMilliseconds(u64),
     /// Calendar months, preserving the starting day where possible and clamping at month end.
     DurationMonths(u32),
     /// Calendar years, with February 29 clamped to February 28 in a non-leap target year.
@@ -8279,6 +8284,10 @@ pub enum GanttExclude {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GanttTickInterval {
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
     Day,
     Week,
     Month,

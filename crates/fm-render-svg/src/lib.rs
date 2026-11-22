@@ -8508,6 +8508,24 @@ fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -
         Some(fm_core::GanttDate::DurationDays(days)) => {
             let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
         }
+        Some(fm_core::GanttDate::DurationMilliseconds(milliseconds)) => {
+            let (count, unit) = [
+                (86_400_000, "day"),
+                (3_600_000, "hour"),
+                (60_000, "minute"),
+                (1_000, "second"),
+            ]
+            .into_iter()
+            .find(|(size, _)| *milliseconds > 0 && milliseconds.is_multiple_of(*size))
+            .map_or((*milliseconds, "millisecond"), |(size, unit)| {
+                (milliseconds / size, unit)
+            });
+            let _ = write!(
+                name,
+                ", {count} {unit}{}",
+                if count == 1 { "" } else { "s" }
+            );
+        }
         Some(fm_core::GanttDate::DurationMonths(months)) => {
             let _ = write!(
                 name,

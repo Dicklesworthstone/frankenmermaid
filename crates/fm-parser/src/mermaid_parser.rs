@@ -12080,6 +12080,12 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
                 ));
             }
         }
+        for token in &parsed_meta.invalid_scheduling_tokens {
+            builder.add_warning(format!(
+                "Line {line_number}: invalid gantt scheduling value '{token}'; \
+                 invalid end values use zero duration"
+            ));
+        }
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
             task_ids_to_keys
@@ -12227,6 +12233,8 @@ struct ParsedGanttTaskMeta {
     /// fallback (bd-v9zd). Collected here rather than warned about in place because this function
     /// has no builder; the caller emits the diagnostic.
     date_format_mismatches: Vec<String>,
+    /// Values in scheduling positions must not be reinterpreted as task identifiers.
+    invalid_scheduling_tokens: Vec<String>,
 }
 
 fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> ParsedGanttTaskMeta {
@@ -12284,11 +12292,23 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
     // the start. In particular, a lone absolute date is not an explicit start date. The permissive
     // `id, end` form follows the same rule when its first item cannot be a start expression.
     let end_only = scheduling_tokens.len() == 1
-        || (scheduling_tokens.len() == 2
+        || (parsed.task_id.is_none()
+            && scheduling_tokens.len() == 2
             && parse_gantt_absolute_date_checked(scheduling_tokens[0], date_format).is_none()
             && !scheduling_tokens[0]
                 .split_once(char::is_whitespace)
                 .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("after")));
+    let scheduling_tokens = if end_only && scheduling_tokens.len() == 2 {
+        // Retain the permissive `id, end` form, but bind the identifier by its position.
+        // A malformed END (or an unrecognized duration) must never become the task's id.
+        let task_id = normalize_compound_identifier(scheduling_tokens[0]);
+        if !task_id.is_empty() {
+            parsed.task_id = Some(task_id);
+        }
+        &scheduling_tokens[1..]
+    } else {
+        scheduling_tokens
+    };
     let scheduling_token_count = scheduling_tokens.len();
     for (token_index, token) in scheduling_tokens.iter().copied().enumerate() {
         let (keyword, references) = token.split_once(char::is_whitespace).unwrap_or((token, ""));
@@ -12326,6 +12346,7 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         }
 
         if !end_only
+            && token_index == 0
             && parsed.start.is_none()
             && let Some((date, fallback)) = parse_gantt_absolute_date_checked(token, date_format)
         {
@@ -12353,11 +12374,10 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             continue;
         }
 
-        if parsed.task_id.is_none() {
-            let task_id = normalize_compound_identifier(token);
-            if !task_id.is_empty() {
-                parsed.task_id = Some(task_id);
-            }
+        parsed.invalid_scheduling_tokens.push(token.to_string());
+        if token_index + 1 == scheduling_token_count && parsed.end.is_none() {
+            // Match the duration fallback, rather than silently inventing a one-day task.
+            parsed.end = Some(GanttDate::DurationMilliseconds(0));
         }
     }
 
@@ -12385,11 +12405,23 @@ fn parse_gantt_absolute_date_checked(
     if let Some(date) = normalize_gantt_date_with_format(token, declared) {
         return Some((date, false));
     }
+    if gantt_format_has_time(declared) {
+        // The permissive date-only normalizer accepts separators such as `/`. Do not let that
+        // fallback reinterpret a rejected clock value (`01:02:03`) as the year 0001, month 02,
+        // day 03. A time format may fall back only to an actual ISO calendar-date spelling.
+        let bytes = token.trim().as_bytes();
+        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+            return None;
+        }
+    }
     let date = normalize_gantt_date_with_format(token, "YYYY-MM-DD")?;
     Some((date, declared != "YYYY-MM-DD"))
 }
 
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
+    if gantt_format_has_time(date_format) {
+        return normalize_gantt_timestamp_with_format(token, date_format);
+    }
     // This normalizer handles numeric calendar formats. In a reduced format such as `YYYY`,
     // silently stripping letters would turn the duration `1M` into the absolute year 0001.
     if token.chars().any(|ch| ch.is_ascii_alphabetic()) {
@@ -12461,6 +12493,198 @@ fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<St
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
+/// Detect time fields while respecting Day.js bracket literals and quoted literal text.
+fn gantt_format_has_time(format: &str) -> bool {
+    let mut literal_end = None;
+    for ch in format.chars() {
+        if let Some(end) = literal_end {
+            if ch == end {
+                literal_end = None;
+            }
+        } else if ch == '[' {
+            literal_end = Some(']');
+        } else if matches!(ch, '\'' | '"') {
+            literal_end = Some(ch);
+        } else if matches!(ch, 'H' | 'h' | 'm' | 's' | 'S' | 'A' | 'a' | 'X' | 'x') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Normalize authored wall-clock values without the machine's timezone or today's date.
+/// Time-only formats use 1970-01-01; date-bearing formats still require an explicit year.
+fn normalize_gantt_timestamp_with_format(token: &str, format: &str) -> Option<String> {
+    let mut format = format.trim();
+    if matches!(format, "X" | "x") {
+        let token = token.trim();
+        let (negative, magnitude) = token
+            .strip_prefix('-')
+            .map_or((false, token), |magnitude| (true, magnitude));
+        let scale = if format == "X" { 1_000 } else { 1 };
+        let magnitude = parse_gantt_fixed_milliseconds(magnitude, scale)?;
+        let timestamp = if negative {
+            -i128::from(magnitude)
+        } else {
+            i128::from(magnitude)
+        };
+        return normalize_gantt_unix_milliseconds(i64::try_from(timestamp).ok()?);
+    }
+
+    let mut input = token.trim();
+    let (mut year, mut month, mut day) = (None, None, None);
+    let (mut hour, mut minute, mut second, mut millisecond) = (None, None, None, None);
+    let mut twelve_hour = false;
+    let mut meridiem = None;
+    while !format.is_empty() {
+        let first = format.chars().next()?;
+        if matches!(first, '[' | '\'' | '"') {
+            let end = if first == '[' { ']' } else { first };
+            let tail = &format[first.len_utf8()..];
+            let end_index = tail.find(end)?;
+            input = input.strip_prefix(&tail[..end_index])?;
+            format = &tail[end_index + end.len_utf8()..];
+            continue;
+        }
+        let field = [
+            "YYYY", "SSS", "YY", "MM", "DD", "HH", "hh", "mm", "ss", "SS", "M", "D", "H", "h", "m",
+            "s", "S", "A", "a",
+        ]
+        .into_iter()
+        .find(|field| format.starts_with(*field));
+        let Some(field) = field else {
+            if first.is_whitespace() {
+                if !input.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                input = input.trim_start();
+                format = format.trim_start();
+            } else {
+                input = input.strip_prefix(first)?;
+                format = &format[first.len_utf8()..];
+            }
+            continue;
+        };
+        format = &format[field.len()..];
+        if matches!(field, "A" | "a") {
+            let value = input.get(..2)?;
+            let pm = if value.eq_ignore_ascii_case("am") {
+                false
+            } else if value.eq_ignore_ascii_case("pm") {
+                true
+            } else {
+                return None;
+            };
+            if meridiem.replace(pm).is_some() {
+                return None;
+            }
+            input = &input[2..];
+            continue;
+        }
+        let max_digits = if field.len() == 1 && field != "S" {
+            2
+        } else {
+            field.len()
+        };
+        let digits = input
+            .bytes()
+            .take(max_digits)
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if digits == 0 || (field.len() > 1 && digits != max_digits) {
+            return None;
+        }
+        let value = input[..digits].parse::<u32>().ok()?;
+        input = &input[digits..];
+        let previous = match field {
+            "YYYY" => year.replace(value),
+            "YY" => year.replace(if value > 68 {
+                1900 + value
+            } else {
+                2000 + value
+            }),
+            "M" | "MM" => month.replace(value),
+            "D" | "DD" => day.replace(value),
+            "H" | "HH" => hour.replace(value),
+            "h" | "hh" => {
+                twelve_hour = true;
+                hour.replace(value)
+            }
+            "m" | "mm" => minute.replace(value),
+            "s" | "ss" => second.replace(value),
+            "S" => millisecond.replace(value * 100),
+            "SS" => millisecond.replace(value * 10),
+            "SSS" => millisecond.replace(value),
+            _ => return None,
+        };
+        if previous.is_some() {
+            return None;
+        }
+    }
+    if !input.is_empty()
+        || (year.is_none() && (month.is_some() || day.is_some()))
+        || (hour.is_none() && minute.is_none() && second.is_none() && millisecond.is_none())
+    {
+        return None;
+    }
+    let (year, month, day) = (year.unwrap_or(1970), month.unwrap_or(1), day.unwrap_or(1));
+    let mut hour = hour.unwrap_or(0);
+    if twelve_hour {
+        if !(1..=12).contains(&hour) {
+            return None;
+        }
+        // Without a meridiem, keep a declared 12:00 as noon, rather than guessing midnight.
+        if let Some(pm) = meridiem {
+            hour = hour % 12 + if pm { 12 } else { 0 };
+        }
+    } else if meridiem.is_some() {
+        return None;
+    }
+    let (minute, second, millisecond) = (
+        minute.unwrap_or(0),
+        second.unwrap_or(0),
+        millisecond.unwrap_or(0),
+    );
+    if year > 9999
+        || !is_valid_gantt_calendar_date(year, month, day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}"
+    ))
+}
+
+fn normalize_gantt_unix_milliseconds(timestamp: i64) -> Option<String> {
+    let day = timestamp.div_euclid(86_400_000);
+    // Civil date from epoch days, using the same proleptic Gregorian calendar as layout.
+    let z = day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (year_of_era * 365 + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    let time = timestamp.rem_euclid(86_400_000);
+    let hour = time / 3_600_000;
+    let minute = time / 60_000 % 60;
+    let second = time / 1_000 % 60;
+    let millisecond = time % 1_000;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}"
+    ))
+}
+
 fn is_valid_gantt_calendar_date(year: u32, month: u32, day: u32) -> bool {
     let Some(max_day) = gantt_days_in_month(year, month) else {
         return false;
@@ -12520,9 +12744,17 @@ fn parse_gantt_duration(raw: &str) -> Option<GanttDate> {
     // Strip the unit suffix from the ORIGINAL (case-insensitively) rather than allocating a lowercased
     // copy — the leading digits are ASCII and parse identically regardless of the suffix's case.
     if let Some(days) = trimmed.strip_suffix(['d', 'D']) {
+        if days.contains('.') {
+            return parse_gantt_fixed_milliseconds(days, 86_400_000)
+                .map(GanttDate::DurationMilliseconds);
+        }
         return days.trim().parse::<u32>().ok().map(GanttDate::DurationDays);
     }
     if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
+        if weeks.contains('.') {
+            return parse_gantt_fixed_milliseconds(weeks, 604_800_000)
+                .map(GanttDate::DurationMilliseconds);
+        }
         return weeks
             .trim()
             .parse::<u32>()
@@ -12546,7 +12778,38 @@ fn parse_gantt_duration(raw: &str) -> Option<GanttDate> {
             .ok()
             .map(GanttDate::DurationYears);
     }
+    for (suffix, scale) in [("ms", 1), ("s", 1_000), ("m", 60_000), ("h", 3_600_000)] {
+        if let Some(value) = trimmed.strip_suffix(suffix) {
+            return parse_gantt_fixed_milliseconds(value, scale)
+                .map(GanttDate::DurationMilliseconds);
+        }
+    }
     None
+}
+
+/// Scale an unsigned decimal exactly, truncating only precision below one millisecond.
+/// No floating-point conversion can round a large value into a different duration or overflow.
+fn parse_gantt_fixed_milliseconds(value: &str, scale: u64) -> Option<u64> {
+    let value = value.trim();
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+    {
+        return None;
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().ok()?
+    };
+    // Long division from the least significant decimal digit keeps memory bounded even for a
+    // long fraction and yields floor(fraction * scale) without rounding at the integer boundary.
+    let fraction = fraction.bytes().rev().fold(0_u64, |carry, digit| {
+        (u64::from(digit - b'0') * scale + carry) / 10
+    });
+    whole.checked_mul(scale)?.checked_add(fraction)
 }
 
 fn parse_gantt_progress(token: &str) -> Option<f32> {
@@ -12557,6 +12820,12 @@ fn parse_gantt_progress(token: &str) -> Option<f32> {
 
 fn parse_gantt_tick_interval(token: &str) -> Option<GanttTickInterval> {
     match token.trim().to_ascii_lowercase().as_str() {
+        "1millisecond" | "1milliseconds" | "millisecond" | "milliseconds" | "1ms" | "ms" => {
+            Some(GanttTickInterval::Millisecond)
+        }
+        "1second" | "1seconds" | "second" | "seconds" | "1s" => Some(GanttTickInterval::Second),
+        "1minute" | "1minutes" | "minute" | "minutes" | "1m" => Some(GanttTickInterval::Minute),
+        "1hour" | "1hours" | "hour" | "hours" | "hourly" | "1h" => Some(GanttTickInterval::Hour),
         "1day" | "day" | "daily" => Some(GanttTickInterval::Day),
         "1week" | "week" | "weekly" => Some(GanttTickInterval::Week),
         "1month" | "month" | "monthly" => Some(GanttTickInterval::Month),
@@ -30548,7 +30817,11 @@ Rel_Back(db, app, "Responds")"#,
             assert_eq!(super::parse_gantt_duration(token), Some(expected));
         }
         // A minute must never silently become a month, and overflow must not wrap.
-        for invalid in ["2m", "2MY", "-1M", "4294967296M", "4294967296y"] {
+        assert_eq!(
+            super::parse_gantt_duration("2m"),
+            Some(GanttDate::DurationMilliseconds(120_000))
+        );
+        for invalid in ["2MY", "-1M", "4294967296M", "4294967296y"] {
             assert_eq!(super::parse_gantt_duration(invalid), None, "{invalid}");
         }
         let parsed = parse_mermaid("gantt\nFirst :A, 2024-01-31, 1M\nSecond :B, after A, 1y\n");
@@ -30692,6 +30965,264 @@ Rel_Back(db, app, "Responds")"#,
             super::normalize_gantt_date_with_format("2025-02-29", "YYYY-MM-DD"),
             None
         );
+    }
+
+    #[test]
+    fn gantt_fixed_durations_preserve_subday_precision_and_reject_overflow() {
+        for (token, milliseconds) in [
+            ("24h", 86_400_000),
+            ("20h", 72_000_000),
+            ("48h", 172_800_000),
+            ("30m", 1_800_000),
+            ("30s", 30_000),
+            ("500ms", 500),
+            ("1.5h", 5_400_000),
+            (".25m", 15_000),
+            ("0.5d", 43_200_000),
+            ("1.5w", 907_200_000),
+            ("0.000001d", 86),
+            ("1.1234567890123456789s", 1_123),
+            ("0.999999999999999999999999999999h", 3_599_999),
+            ("0.0001s", 0),
+            ("18446744073709551615ms", u64::MAX),
+        ] {
+            assert_eq!(
+                super::parse_gantt_duration(token),
+                Some(GanttDate::DurationMilliseconds(milliseconds)),
+                "{token}"
+            );
+        }
+        for token in [
+            "18446744073709551616ms",
+            "18446744073709551615h",
+            "-1h",
+            "+1h",
+            "NaNh",
+            "infh",
+            "1e3h",
+            "1.2.3h",
+            "1.h",
+            ".h",
+            "1.5M",
+            "3dX",
+        ] {
+            assert_eq!(super::parse_gantt_duration(token), None, "{token}");
+        }
+        // Existing integer calendar units keep their representation and month/minute distinction.
+        assert_eq!(
+            super::parse_gantt_duration("2d"),
+            Some(GanttDate::DurationDays(2))
+        );
+        assert_eq!(
+            super::parse_gantt_duration("2M"),
+            Some(GanttDate::DurationMonths(2))
+        );
+    }
+
+    #[test]
+    fn gantt_timestamp_formats_preserve_clock_fields_literals_and_epoch_values() {
+        for (token, format, expected) in [
+            (
+                "2026-11-22 09:30:12.125",
+                "YYYY-MM-DD HH:mm:ss.SSS",
+                "2026-11-22T09:30:12.125",
+            ),
+            (
+                "22/11/2026 at 9:05 pm",
+                "DD/MM/YYYY [at] h:mm a",
+                "2026-11-22T21:05:00.000",
+            ),
+            (
+                "2026-11-22 at 9:05",
+                "YYYY-MM-DD 'at' H:mm",
+                "2026-11-22T09:05:00.000",
+            ),
+            (
+                "2024-02-29T00:00:00.1",
+                "YYYY-MM-DD[T]HH:mm:ss.S",
+                "2024-02-29T00:00:00.100",
+            ),
+            (
+                "2024-02-29T00:00:00.12",
+                "YYYY-MM-DDTHH:mm:ss.SS",
+                "2024-02-29T00:00:00.120",
+            ),
+            (
+                "2026-11-22 12:00 AM",
+                "YYYY-MM-DD hh:mm A",
+                "2026-11-22T00:00:00.000",
+            ),
+            (
+                "2026-11-22 12:00 PM",
+                "YYYY-MM-DD hh:mm A",
+                "2026-11-22T12:00:00.000",
+            ),
+            (
+                "20261122093015",
+                "YYYYMMDDHHmmss",
+                "2026-11-22T09:30:15.000",
+            ),
+            ("23:59:59.999", "HH:mm:ss.SSS", "1970-01-01T23:59:59.999"),
+            ("09:00", "HH:mm", "1970-01-01T09:00:00.000"),
+            ("0", "X", "1970-01-01T00:00:00.000"),
+            ("-0.5", "X", "1969-12-31T23:59:59.500"),
+            ("-1", "x", "1969-12-31T23:59:59.999"),
+            ("1709164800000", "x", "2024-02-29T00:00:00.000"),
+        ] {
+            assert_eq!(
+                super::normalize_gantt_date_with_format(token, format).as_deref(),
+                Some(expected),
+                "{token} under {format}"
+            );
+        }
+    }
+
+    #[test]
+    fn gantt_invalid_timestamps_cannot_become_calendar_dates() {
+        for (token, format) in [
+            ("2025-02-29 09:00", "YYYY-MM-DD HH:mm"),
+            ("2026-11-22 24:00", "YYYY-MM-DD HH:mm"),
+            ("2026-11-22 23:60", "YYYY-MM-DD HH:mm"),
+            ("2026-11-22 23:59:60", "YYYY-MM-DD HH:mm:ss"),
+            ("2026-11-22 13:00 PM", "YYYY-MM-DD hh:mm A"),
+            ("2026-11-22 00:00 AM", "YYYY-MM-DD hh:mm A"),
+            ("2026-11-22 12:00 PM", "YYYY-MM-DD HH:mm A"),
+            ("01:02:03", "HH:mm"),
+            ("12:00junk", "HH:mm"),
+            ("12:00:00", "HH:mm:mm"),
+            ("11-22 12:00", "MM-DD HH:mm"),
+            ("9223372036854775807", "x"),
+            ("not-a-time", "X"),
+        ] {
+            assert_eq!(
+                super::parse_gantt_absolute_date_checked(token, Some(format)),
+                None,
+                "{token} under {format}"
+            );
+        }
+        assert_eq!(
+            super::parse_gantt_absolute_date_checked("2026-11-22", Some("HH:mm")),
+            Some(("2026-11-22".into(), true)),
+            "an actual ISO date keeps the documented fallback"
+        );
+    }
+
+    #[test]
+    fn gantt_subday_schedule_metadata_survives_the_shared_ir_roundtrip() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat YYYY-MM-DD HH:mm:ss.SSS\n\
+             tickInterval 1hour\n\
+             Build :Build, 2026-11-22 09:30:00.125, 90m\n\
+             Test :Test, after Build, 0.5h\n\
+             Ship :Ship, after Test, 2026-11-22 12:00:00.500\n\
+             Wait :Wait, after Ship, until Next\n\
+             Next :Next, 2026-11-22 13:00:00.000, 500ms\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(meta.tick_interval, Some(fm_core::GanttTickInterval::Hour));
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::Absolute("2026-11-22T09:30:00.125".into()))
+        );
+        assert_eq!(
+            meta.tasks[0].end,
+            Some(GanttDate::DurationMilliseconds(5_400_000))
+        );
+        assert_eq!(
+            meta.tasks[1].end,
+            Some(GanttDate::DurationMilliseconds(1_800_000))
+        );
+        assert_eq!(
+            meta.tasks[2].end,
+            Some(GanttDate::Absolute("2026-11-22T12:00:00.500".into()))
+        );
+        assert_eq!(
+            meta.tasks[3].end,
+            Some(GanttDate::UntilTasks(vec!["Next".into()]))
+        );
+        assert_eq!(
+            meta.tasks[4].end,
+            Some(GanttDate::DurationMilliseconds(500))
+        );
+        assert_eq!(parsed.ir.edges.len(), 4);
+        let json = serde_json::to_string(meta).expect("serialize time-aware IR");
+        let decoded: fm_core::IrGanttMeta =
+            serde_json::from_str(&json).expect("deserialize time-aware IR");
+        assert_eq!(&decoded, meta);
+    }
+
+    #[test]
+    fn gantt_invalid_durations_warn_without_minting_task_ids() {
+        let parsed = parse_mermaid(
+            "gantt\nBad :A, 2026-11-22, 3dX\n\
+             Next :B, after A, 1h\n\
+             Unnamed :24q\n\
+             NamedDuration :1h, after B, 2h\n\
+             Finish :after 1h, 30m\n\
+             BadStart :KeepMe, not-a-date, 1h\n\
+             Deadline :Deadline, not-a-date, 2026-11-23\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(parsed.ir.nodes.len(), 7);
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("A"));
+        assert_eq!(meta.tasks[0].end, Some(GanttDate::DurationMilliseconds(0)));
+        assert_eq!(meta.tasks[2].task_id, None);
+        assert_eq!(meta.tasks[2].end, Some(GanttDate::DurationMilliseconds(0)));
+        assert_eq!(meta.tasks[3].task_id.as_deref(), Some("1h"));
+        assert_eq!(meta.tasks[4].depends_on, ["1h"]);
+        assert_eq!(meta.tasks[5].task_id.as_deref(), Some("KeepMe"));
+        assert_eq!(meta.tasks[5].start, None);
+        assert_eq!(
+            meta.tasks[5].end,
+            Some(GanttDate::DurationMilliseconds(3_600_000))
+        );
+        assert_eq!(meta.tasks[6].task_id.as_deref(), Some("Deadline"));
+        assert_eq!(meta.tasks[6].start, None);
+        assert_eq!(
+            meta.tasks[6].end,
+            Some(GanttDate::Absolute("2026-11-23".to_string()))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("3dX"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("24q"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not-a-date"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("Unresolved"))
+        );
+    }
+
+    #[test]
+    fn gantt_subday_tick_intervals_have_typed_units() {
+        for (source, expected) in [
+            ("1millisecond", fm_core::GanttTickInterval::Millisecond),
+            ("milliseconds", fm_core::GanttTickInterval::Millisecond),
+            ("1second", fm_core::GanttTickInterval::Second),
+            ("seconds", fm_core::GanttTickInterval::Second),
+            ("1minute", fm_core::GanttTickInterval::Minute),
+            ("minutes", fm_core::GanttTickInterval::Minute),
+            ("1hour", fm_core::GanttTickInterval::Hour),
+            ("hours", fm_core::GanttTickInterval::Hour),
+        ] {
+            assert_eq!(super::parse_gantt_tick_interval(source), Some(expected));
+        }
     }
 
     // --- Pie parser tests ---

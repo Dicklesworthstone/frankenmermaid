@@ -3053,22 +3053,22 @@ pub enum LayoutBandKind {
     Column,
 }
 
-/// The gantt time axis as a day -> x mapping, published so a consumer can place an element at a DATE
-/// without re-deriving day positions (bd-j0va).
+/// The Gantt time axis shared by bars, ticks, and date markers.
 ///
-/// `write_gantt_axis_into` already warns that "re-deriving day positions here is how an axis and its
-/// bars come to disagree about where a day is". A today marker has exactly that hazard: it is drawn
-/// at a date, and if it computes its own x it will drift from the ticks. This carries the same
-/// `(day - first_day) * day_width + origin_x` the tick builder uses, so both land on one arithmetic.
-///
-/// `first_day` / `last_day` are inclusive epoch day numbers in the same space as
-/// [`parse_iso_day_number`], which is what makes "is this date inside the chart?" answerable.
+/// Dates use epoch days; times use integer milliseconds in the same calendar, without a
+/// machine-local timezone. Positions are calculated relative to `first_millisecond` before
+/// converting to floating point, so a millisecond task in a modern year keeps its precision.
+/// `origin_x` is the position of that first instant. The day fields describe the enclosing
+/// calendar dates, while the millisecond fields retain the exact inclusive axis bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutGanttDayAxis {
     pub first_day: i32,
     pub last_day: i32,
     pub day_width: f32,
     pub origin_x: f32,
+    pub first_millisecond: i64,
+    pub last_millisecond: i64,
+    pub millisecond_width: f64,
 }
 
 impl LayoutGanttDayAxis {
@@ -3079,12 +3079,18 @@ impl LayoutGanttDayAxis {
     /// anyway at the edge.
     #[must_use]
     pub fn x_for_day(self, day: i32) -> Option<f32> {
-        if day < self.first_day || day > self.last_day {
+        self.x_for_millisecond(i64::from(day) * GANTT_MILLISECONDS_PER_DAY)
+    }
+
+    /// Position of an exact date/time, or `None` outside the charted time span.
+    #[must_use]
+    pub fn x_for_millisecond(self, millisecond: i64) -> Option<f32> {
+        if millisecond < self.first_millisecond || millisecond > self.last_millisecond {
             return None;
         }
         Some(
-            ((i64::from(day) - i64::from(self.first_day)) as f32)
-                .mul_add(self.day_width, self.origin_x),
+            ((millisecond - self.first_millisecond) as f64)
+                .mul_add(self.millisecond_width, f64::from(self.origin_x)) as f32,
         )
     }
 }
@@ -13560,7 +13566,6 @@ fn layout_diagram_gantt_from_meta(
         size.1 = size.1.max(40.0);
     }
 
-    let base_col_width = 48.0_f32;
     let row_gap = gantt_row_gap(&node_sizes, spacing);
     let section_padding = gantt_section_padding(metrics);
     let section_gap = (section_padding * 2.0 + 8.0).max(56.0);
@@ -13602,7 +13607,7 @@ fn layout_diagram_gantt_from_meta(
         }
     }
 
-    let base_start_day = explicit_starts.iter().flatten().copied().min().unwrap_or(0);
+    let base_start = explicit_starts.iter().flatten().copied().min().unwrap_or(0);
     let section_count = gantt_meta.sections.len().max(1);
     // Start and end are separate scheduling events. `after` waits for predecessor ENDS,
     // while `until` waits only for target STARTS. A whole-task dependency graph would report
@@ -13653,12 +13658,12 @@ fn layout_diagram_gantt_from_meta(
         .enumerate()
         .filter_map(|(index, &count)| (count == 0).then_some(index))
         .collect();
-    let mut resolved_days: Vec<Option<i32>> = vec![None; event_count];
+    let mut resolved_times: Vec<Option<i64>> = vec![None; event_count];
     for _ in 0..event_count {
         let event_idx = ready.pop_first().unwrap_or_else(|| {
             // Anchor the first unresolved event using only resolved predecessors. The bound is
             // the event count, so cyclic input cannot loop or drift with unrelated task counts.
-            let index = resolved_days.iter().position(Option::is_none).unwrap_or(0);
+            let index = resolved_times.iter().position(Option::is_none).unwrap_or(0);
             warn!(
                 task_index = index / 2,
                 end_event = index % 2 == 1,
@@ -13668,26 +13673,26 @@ fn layout_diagram_gantt_from_meta(
         });
         let task_idx = event_idx / 2;
         let task = &gantt_meta.tasks[task_idx];
-        let day = if event_idx.is_multiple_of(2) {
+        let time = if event_idx.is_multiple_of(2) {
             let start = explicit_starts[task_idx].unwrap_or_else(|| {
                 dependencies[event_idx]
                     .iter()
-                    .filter_map(|&predecessor| resolved_days[predecessor])
+                    .filter_map(|&predecessor| resolved_times[predecessor])
                     .max()
-                    .unwrap_or(base_start_day)
+                    .unwrap_or(base_start)
             });
-            advance_gantt_start_day(start, excluded_weekdays, &excluded_dates)
+            advance_gantt_start_time(start, excluded_weekdays, &excluded_dates)
         } else {
-            let start = resolved_days[task_idx * 2].unwrap_or(base_start_day);
+            let start = resolved_times[task_idx * 2].unwrap_or(base_start);
             let until_end = match task.end.as_ref() {
                 Some(GanttDate::UntilTasks(targets)) => targets
                     .iter()
                     .filter_map(|id| task_id_to_idx.get(id.as_str()))
-                    .filter_map(|&index| resolved_days[index * 2])
+                    .filter_map(|&index| resolved_times[index * 2])
                     .min(),
                 _ => None,
             };
-            let end = gantt_task_end_day(
+            let end = gantt_task_end_time(
                 task,
                 start,
                 until_end,
@@ -13699,34 +13704,51 @@ fn layout_diagram_gantt_from_meta(
                 matches!(task.flags.primary_type(), GanttTaskType::Milestone) || end == start;
             end
         };
-        resolved_days[event_idx] = Some(day);
+        resolved_times[event_idx] = Some(time);
         for &dependent in &dependents[event_idx] {
             unresolved[dependent] = unresolved[dependent].saturating_sub(1);
-            if unresolved[dependent] == 0 && resolved_days[dependent].is_none() {
+            if unresolved[dependent] == 0 && resolved_times[dependent].is_none() {
                 ready.insert(dependent);
             }
         }
     }
-    let task_dates = resolved_days.as_chunks::<2>().0;
-    let start_days: Vec<i32> = task_dates
+    let task_dates = resolved_times.as_chunks::<2>().0;
+    let start_times: Vec<i64> = task_dates
         .iter()
-        .map(|dates| dates[0].unwrap_or(base_start_day))
+        .map(|dates| dates[0].unwrap_or(base_start))
         .collect();
-    let end_exclusive_days: Vec<i32> = task_dates
+    let end_times: Vec<i64> = task_dates
         .iter()
-        .map(|dates| dates[1].unwrap_or(base_start_day))
+        .map(|dates| dates[1].unwrap_or(base_start))
         .collect();
 
-    let min_start_day = start_days.iter().copied().min().unwrap_or(base_start_day);
+    let min_start = start_times.iter().copied().min().unwrap_or(base_start);
+    let has_subday_times = gantt_meta.tasks.iter().any(|task| {
+        [&task.start, &task.end].into_iter().any(|date| match date {
+            Some(GanttDate::DurationMilliseconds(_)) => true,
+            Some(GanttDate::Absolute(value)) => value.len() > 10,
+            _ => false,
+        })
+    });
     // Bars, dependency starts, and the date axis share the resolved calendar end. Exclusions
     // lengthen a duration-based bar; drawing its raw working-day count hides the extension.
-    let max_end_day = end_exclusive_days
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(min_start_day)
-        .max(min_start_day.saturating_add(1));
-    let total_span_days = i64::from(max_end_day) - i64::from(min_start_day);
+    let max_end = end_times.iter().copied().max().unwrap_or(min_start).max(
+        min_start
+            .saturating_add(if has_subday_times {
+                1
+            } else {
+                GANTT_MILLISECONDS_PER_DAY
+            })
+            .min(GANTT_MAX_MILLISECOND),
+    );
+    let total_span = (max_end - min_start).max(1);
+    // Day-scale charts retain their established scale. An intraday schedule gets a readable
+    // timeline instead of squeezing an hour into two pixels or inflating every bar to one day.
+    let millisecond_width = if total_span < GANTT_MILLISECONDS_PER_DAY {
+        576.0 / total_span as f64
+    } else {
+        48.0 / GANTT_MILLISECONDS_PER_DAY as f64
+    };
 
     let mut section_base_y = 0.0_f32;
     let mut per_section_counts = vec![0_usize; section_count];
@@ -13738,18 +13760,15 @@ fn layout_diagram_gantt_from_meta(
 
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
         let row_index = per_section_counts[section_idx];
-        let start_offset_days =
-            (i64::from(start_days[task_idx]) - i64::from(min_start_day)).max(0) as f32;
-        let duration_days =
-            (i64::from(end_exclusive_days[task_idx]) - i64::from(start_days[task_idx])) as f32;
+        let start_offset = (start_times[task_idx] - min_start).max(0);
+        let duration = end_times[task_idx] - start_times[task_idx];
         // A gantt bar's position and length ARE the data: where it starts is its start date and how
         // long it is is its duration. Both were wrong (bd-h9gx).
         //
         // The width used to be `max(label_width, duration * col, 156)`, so a long task NAME lengthened
         // the bar — a 1-day task with a 68-character name measured 524.10px against a 10-day task's
-        // 480.00px, inverting the one comparison a gantt chart exists to support. Width is now purely
-        // temporal, and the 156px floor goes with it: a bar's span is clamped to >= 1 below, so the
-        // narrowest task bar is one column (48px), visible without lying about length.
+        // 480.00px, inverting the one comparison a gantt chart exists to support. Width is purely
+        // temporal, including sub-day durations; only zero-duration tasks use a milestone marker.
         //
         // The centre used to be `start_offset_days * col`, and `node_boxes_from_centers` derives
         // `bounds.x = center_x - width / 2`, so every bar straddled its start date, beginning half a
@@ -13765,13 +13784,13 @@ fn layout_diagram_gantt_from_meta(
         let (bar_width, bar_center_x) = if milestones[task_idx] {
             (
                 72.0,
-                (start_offset_days + duration_days / 2.0) * base_col_width,
+                ((start_offset as f64 + duration as f64 / 2.0) * millisecond_width) as f32,
             )
         } else {
-            let width = duration_days.max(1.0) * base_col_width;
+            let width = (duration as f64 * millisecond_width) as f32;
             (
                 width,
-                start_offset_days.mul_add(base_col_width, width / 2.0),
+                ((start_offset as f64).mul_add(millisecond_width, f64::from(width) / 2.0)) as f32,
             )
         };
         node_sizes[node_index].0 = bar_width;
@@ -13780,8 +13799,7 @@ fn layout_diagram_gantt_from_meta(
         let y = (row_index as f32).mul_add(row_gap, section_base_y);
         centers[node_index] = (x, y);
         rank_by_node[node_index] =
-            usize::try_from((i64::from(start_days[task_idx]) - i64::from(min_start_day)).max(0))
-                .unwrap_or(0);
+            usize::try_from(start_offset / GANTT_MILLISECONDS_PER_DAY).unwrap_or(usize::MAX);
         order_by_node[node_index] = row_index + section_idx * 128;
         section_to_nodes
             .entry(section_idx)
@@ -13843,50 +13861,73 @@ fn layout_diagram_gantt_from_meta(
     // A tick is emitted only on an interval boundary, so `tickInterval 1month` on a year-long chart
     // gives twelve ticks instead of three hundred and sixty five overlapping ones — the density
     // problem is the whole reason mermaid has the directive.
-    let tick_interval = gantt_meta.tick_interval.unwrap_or(GanttTickInterval::Day);
+    let tick_interval = gantt_meta.tick_interval.unwrap_or_else(|| {
+        if total_span >= GANTT_MILLISECONDS_PER_DAY {
+            GanttTickInterval::Day
+        } else if total_span >= 3_600_000 {
+            GanttTickInterval::Hour
+        } else if total_span >= 60_000 {
+            GanttTickInterval::Minute
+        } else if total_span >= 1_000 {
+            GanttTickInterval::Second
+        } else {
+            GanttTickInterval::Millisecond
+        }
+    });
     // mermaid's `weekday` default is sunday, which is also the parser's encoding for 0.
     let weekday_start = gantt_meta.weekday_start.unwrap_or(0);
-    let axis_format = gantt_meta.axis_format.as_deref();
-    let tick_at = |day: i32| LayoutAxisTick {
-        label: format_gantt_axis_label(day, axis_format),
-        position: ((i64::from(day) - i64::from(min_start_day)) as f32)
-            .mul_add(base_col_width, day_zero_x),
+    let axis_format = gantt_meta.axis_format.as_deref().or(match tick_interval {
+        GanttTickInterval::Millisecond => Some("%H:%M:%S.%L"),
+        GanttTickInterval::Second => Some("%H:%M:%S"),
+        GanttTickInterval::Minute | GanttTickInterval::Hour => Some("%H:%M"),
+        _ => None,
+    });
+    let tick_at = |time: i64| LayoutAxisTick {
+        label: format_gantt_time_axis_label(time, axis_format),
+        position: ((time - min_start) as f64).mul_add(millisecond_width, f64::from(day_zero_x))
+            as f32,
     };
     // Publish the same mapping the ticks are built from, so anything placed at a DATE agrees with
     // the axis by construction rather than by a second derivation (bd-j0va).
     layout.extensions.gantt_day_axis = Some(LayoutGanttDayAxis {
-        first_day: min_start_day,
-        last_day: max_end_day,
-        day_width: base_col_width,
+        first_day: gantt_day_from_millisecond(min_start),
+        last_day: gantt_day_from_millisecond(max_end),
+        day_width: (millisecond_width * GANTT_MILLISECONDS_PER_DAY as f64) as f32,
         origin_x: day_zero_x,
+        first_millisecond: min_start,
+        last_millisecond: max_end,
+        millisecond_width,
     });
     // A large duration must not allocate one tick per day or loop for billions of days. Thin
     // only the labels while retaining the exact date-to-position mapping and interval alignment.
     const MAX_AXIS_TICKS: i64 = 4096;
-    let tick_stride = ((total_span_days + MAX_AXIS_TICKS - 2) / (MAX_AXIS_TICKS - 1)).max(1);
+    let interval_step =
+        gantt_fixed_tick_milliseconds(tick_interval).unwrap_or(GANTT_MILLISECONDS_PER_DAY);
+    let minimum_stride = (total_span + MAX_AXIS_TICKS - 2) / (MAX_AXIS_TICKS - 1);
+    let tick_stride = ((minimum_stride + interval_step - 1) / interval_step).max(1) * interval_step;
     let mut axis_ticks = Vec::new();
-    let mut next_tick = i64::from(min_start_day);
-    while next_tick <= i64::from(max_end_day) {
-        let Some(day) = next_gantt_tick_day(next_tick as i32, tick_interval, weekday_start) else {
+    let mut next_tick = min_start;
+    while next_tick <= max_end {
+        let Some(time) = next_gantt_tick_time(next_tick, tick_interval, weekday_start) else {
             break;
         };
-        if day > max_end_day {
+        if time > max_end {
             break;
         }
-        axis_ticks.push(tick_at(day));
-        next_tick = i64::from(day) + tick_stride;
+        axis_ticks.push(tick_at(time));
+        next_tick = time + tick_stride;
     }
     // A short chart with a coarse interval can contain no boundary at all — `tickInterval 1month`
     // over six days crosses no first-of-month. Falling back to the first day keeps an axis the
     // reader can anchor on; emitting nothing would silently undo bd-trsd for exactly the documents
     // that asked for a coarser axis.
     if axis_ticks.is_empty() {
-        axis_ticks.push(tick_at(min_start_day));
+        axis_ticks.push(tick_at(min_start));
     }
     if gantt_meta.tick_interval.is_none() {
         // The default is a readable scale, not one overlapping ISO string per day.
         // An authored interval remains exact; dense labels then use additional rows.
-        axis_ticks = readable_gantt_axis_ticks(axis_ticks, tick_at(max_end_day), metrics);
+        axis_ticks = readable_gantt_axis_ticks(axis_ticks, tick_at(max_end), metrics);
     }
     layout.extensions.axis_ticks = axis_ticks;
     layout.extensions.bands = section_to_nodes
@@ -14775,38 +14816,95 @@ const fn is_iso_leap_year(year: i32) -> bool {
     (year.rem_euclid(4) == 0 && year.rem_euclid(100) != 0) || year.rem_euclid(400) == 0
 }
 
-fn gantt_task_absolute_start(task: &fm_core::IrGanttTask) -> Option<i32> {
+const GANTT_MILLISECONDS_PER_DAY: i64 = 86_400_000;
+const GANTT_MAX_MILLISECOND: i64 = i32::MAX as i64 * GANTT_MILLISECONDS_PER_DAY;
+
+/// Epoch milliseconds for a normalized Gantt date or date/time, without timezone conversion.
+/// Date-only input denotes midnight; fractional seconds may contain one to three digits.
+#[must_use]
+pub fn parse_iso_millisecond_number(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let day = parse_iso_day_number(value.get(..10)?)?;
+    let midnight = i64::from(day) * GANTT_MILLISECONDS_PER_DAY;
+    if value.len() == 10 {
+        return Some(midnight);
+    }
+    let bytes = value.as_bytes();
+    if !value.is_ascii()
+        || !matches!(bytes.get(10), Some(b'T' | b' '))
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    for field in [value.get(11..13)?, value.get(14..16)?, value.get(17..19)?] {
+        if !field.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let hour: i64 = value.get(11..13)?.parse().ok()?;
+    let minute: i64 = value.get(14..16)?.parse().ok()?;
+    let second: i64 = value.get(17..19)?.parse().ok()?;
+    if !(0..24).contains(&hour) || !(0..60).contains(&minute) || !(0..60).contains(&second) {
+        return None;
+    }
+    let fraction = match value.get(19..) {
+        Some("") => 0,
+        Some(suffix) if suffix.starts_with('.') && (2..=4).contains(&suffix.len()) => {
+            let digits = &suffix[1..];
+            if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse::<i64>().ok()? * 10_i64.pow(3 - digits.len() as u32)
+        }
+        _ => return None,
+    };
+    Some(midnight + hour * 3_600_000 + minute * 60_000 + second * 1_000 + fraction)
+}
+
+fn gantt_day_from_millisecond(time: i64) -> i32 {
+    time.div_euclid(GANTT_MILLISECONDS_PER_DAY)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn gantt_task_absolute_start(task: &fm_core::IrGanttTask) -> Option<i64> {
     match task.start.as_ref() {
-        Some(GanttDate::Absolute(value)) => parse_iso_day_number(value),
+        Some(GanttDate::Absolute(value)) => parse_iso_millisecond_number(value),
         _ => None,
     }
 }
 
-fn gantt_task_end_day(
+fn gantt_task_end_time(
     task: &fm_core::IrGanttTask,
-    start: i32,
-    until_end: Option<i32>,
+    start: i64,
+    until_end: Option<i64>,
     inclusive_end_dates: bool,
     excluded_weekdays: u8,
     excluded_dates: &BTreeSet<i32>,
-) -> i32 {
+) -> i64 {
     let duration = match task.end.as_ref() {
-        Some(GanttDate::DurationDays(days)) => i64::from(*days),
+        Some(GanttDate::DurationMilliseconds(milliseconds)) => {
+            i64::try_from(*milliseconds).unwrap_or(i64::MAX)
+        }
+        Some(GanttDate::DurationDays(days)) => i64::from(*days) * GANTT_MILLISECONDS_PER_DAY,
         Some(GanttDate::DurationMonths(months)) => {
-            gantt_calendar_duration_days(start, i64::from(*months))
+            gantt_calendar_duration_days(gantt_day_from_millisecond(start), i64::from(*months))
+                * GANTT_MILLISECONDS_PER_DAY
         }
         Some(GanttDate::DurationYears(years)) => {
-            gantt_calendar_duration_days(start, i64::from(*years) * 12)
+            gantt_calendar_duration_days(gantt_day_from_millisecond(start), i64::from(*years) * 12)
+                * GANTT_MILLISECONDS_PER_DAY
         }
         Some(GanttDate::Absolute(end)) => {
             // A calendar deadline is already an end date, including when its start comes from
             // a predecessor. Exclusions extend durations, never an explicitly authored deadline.
-            if let Some(end) = parse_iso_day_number(end) {
+            if let Some(end) = parse_iso_millisecond_number(end) {
                 return end
-                    .saturating_add(i32::from(inclusive_end_dates))
+                    .saturating_add(i64::from(inclusive_end_dates) * GANTT_MILLISECONDS_PER_DAY)
+                    .min(GANTT_MAX_MILLISECOND)
                     .max(start);
             }
-            1
+            GANTT_MILLISECONDS_PER_DAY
         }
         Some(GanttDate::UntilTasks(_)) => {
             if let Some(end) = until_end {
@@ -14817,15 +14915,66 @@ fn gantt_task_end_day(
             i64::from(!matches!(
                 task.flags.primary_type(),
                 GanttTaskType::Milestone
-            ))
+            )) * GANTT_MILLISECONDS_PER_DAY
         }
-        Some(GanttDate::AfterTask(_)) => 1,
-        None => i64::from(!matches!(
-            task.flags.primary_type(),
-            GanttTaskType::Milestone
-        )),
+        Some(GanttDate::AfterTask(_)) => GANTT_MILLISECONDS_PER_DAY,
+        None => {
+            i64::from(!matches!(
+                task.flags.primary_type(),
+                GanttTaskType::Milestone
+            )) * GANTT_MILLISECONDS_PER_DAY
+        }
     };
-    advance_gantt_end_day(start, duration, excluded_weekdays, excluded_dates)
+    advance_gantt_end_time(start, duration, excluded_weekdays, excluded_dates)
+}
+
+fn advance_gantt_start_time(
+    time: i64,
+    excluded_weekdays: u8,
+    excluded_dates: &BTreeSet<i32>,
+) -> i64 {
+    let day = advance_gantt_start_day(
+        gantt_day_from_millisecond(time),
+        excluded_weekdays,
+        excluded_dates,
+    );
+    (i64::from(day) * GANTT_MILLISECONDS_PER_DAY + time.rem_euclid(GANTT_MILLISECONDS_PER_DAY))
+        .min(GANTT_MAX_MILLISECOND)
+}
+
+/// Consume working time, including partial first and last days. The existing day scheduler
+/// skips whole weeks and explicit holidays, so a large millisecond duration stays bounded.
+fn advance_gantt_end_time(
+    start: i64,
+    duration: i64,
+    excluded_weekdays: u8,
+    excluded_dates: &BTreeSet<i32>,
+) -> i64 {
+    if duration <= 0 {
+        return start;
+    }
+    if excluded_weekdays == 0 && excluded_dates.is_empty() {
+        return start.saturating_add(duration).min(GANTT_MAX_MILLISECOND);
+    }
+    let mut day = gantt_day_from_millisecond(start);
+    let mut remaining = duration;
+    let offset = start.rem_euclid(GANTT_MILLISECONDS_PER_DAY);
+    if offset != 0 {
+        let available = GANTT_MILLISECONDS_PER_DAY - offset;
+        if remaining <= available {
+            return start.saturating_add(remaining).min(GANTT_MAX_MILLISECOND);
+        }
+        remaining -= available;
+        day = day.saturating_add(1);
+    }
+    day = advance_gantt_start_day(day, excluded_weekdays, excluded_dates);
+    let whole_days = remaining / GANTT_MILLISECONDS_PER_DAY;
+    let tail = remaining % GANTT_MILLISECONDS_PER_DAY;
+    day = advance_gantt_end_day(day, whole_days, excluded_weekdays, excluded_dates);
+    if tail != 0 {
+        day = advance_gantt_start_day(day, excluded_weekdays, excluded_dates);
+    }
+    (i64::from(day) * GANTT_MILLISECONDS_PER_DAY + tail).min(GANTT_MAX_MILLISECOND)
 }
 
 /// Resolve a month/year duration only after its start is known. Calendar addition clamps at
@@ -14852,8 +15001,8 @@ fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
     for exclude in &gantt_meta.excludes {
         if let GanttExclude::Dates(values) = exclude {
             for value in values {
-                if let Some(day) = parse_iso_day_number(value) {
-                    excluded.insert(day);
+                if let Some(time) = parse_iso_millisecond_number(value) {
+                    excluded.insert(gantt_day_from_millisecond(time));
                 }
             }
         }
@@ -14968,6 +15117,29 @@ fn gantt_weekday(days_since_epoch: i32) -> u8 {
     (days_since_epoch.rem_euclid(7) + 4).rem_euclid(7) as u8
 }
 
+const fn gantt_fixed_tick_milliseconds(interval: GanttTickInterval) -> Option<i64> {
+    match interval {
+        GanttTickInterval::Millisecond => Some(1),
+        GanttTickInterval::Second => Some(1_000),
+        GanttTickInterval::Minute => Some(60_000),
+        GanttTickInterval::Hour => Some(3_600_000),
+        GanttTickInterval::Day => Some(GANTT_MILLISECONDS_PER_DAY),
+        _ => None,
+    }
+}
+
+fn next_gantt_tick_time(time: i64, interval: GanttTickInterval, weekday_start: u8) -> Option<i64> {
+    let next = if let Some(step) = gantt_fixed_tick_milliseconds(interval) {
+        let boundary = time.div_euclid(step) * step;
+        boundary.checked_add(if time.rem_euclid(step) == 0 { 0 } else { step })?
+    } else {
+        let day = gantt_day_from_millisecond(time);
+        let day = day.checked_add(i32::from(time.rem_euclid(GANTT_MILLISECONDS_PER_DAY) != 0))?;
+        i64::from(next_gantt_tick_day(day, interval, weekday_start)?) * GANTT_MILLISECONDS_PER_DAY
+    };
+    (next <= GANTT_MAX_MILLISECOND).then_some(next)
+}
+
 /// First interval boundary on or after a date, without walking through intervening days.
 fn next_gantt_tick_day(
     days_since_epoch: i32,
@@ -14976,7 +15148,11 @@ fn next_gantt_tick_day(
 ) -> Option<i32> {
     let (mut year, month, day) = gantt_civil_from_days(days_since_epoch);
     let mut month = match interval {
-        GanttTickInterval::Day => return Some(days_since_epoch),
+        GanttTickInterval::Millisecond
+        | GanttTickInterval::Second
+        | GanttTickInterval::Minute
+        | GanttTickInterval::Hour
+        | GanttTickInterval::Day => return Some(days_since_epoch),
         GanttTickInterval::Week => {
             let offset = (i32::from(weekday_start % 7)
                 - i32::from(gantt_weekday(days_since_epoch)))
@@ -15032,14 +15208,13 @@ const GANTT_DAY_NAMES: [(&str, &str); 7] = [
 
 /// Render one axis tick, honouring `axisFormat` when the document declared one.
 ///
-/// mermaid formats gantt axis labels with d3's `timeFormat`, so the directive is a strftime-style
-/// template. Only the date specifiers can mean anything here — the IR carries whole days with no
-/// time-of-day — so `%H`/`%M`/`%S` render as `00` rather than being dropped, which keeps a template
-/// like `%d/%m %H:%M` structurally intact instead of collapsing it into something unreadable.
+/// Mermaid formats Gantt axis labels with d3's `timeFormat`, so the directive is a
+/// strftime-style template. Date and time fields read the same exact instant as the bar mapping.
 ///
 /// An UNKNOWN specifier is emitted verbatim, percent included. Silently swallowing it would turn a
 /// typo into a mysteriously missing piece of every label; leaving it visible points at the typo.
-fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> String {
+fn format_gantt_time_axis_label(time: i64, axis_format: Option<&str>) -> String {
+    let days_since_epoch = gantt_day_from_millisecond(time);
     let Some(format) = axis_format.filter(|format| !format.is_empty()) else {
         return format_gantt_axis_tick(days_since_epoch);
     };
@@ -15047,6 +15222,11 @@ fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> 
     let month_names = GANTT_MONTH_NAMES[(month.clamp(1, 12) - 1) as usize];
     let day_names = GANTT_DAY_NAMES[gantt_weekday(days_since_epoch) as usize];
     let day_of_year = i64::from(days_since_epoch) - gantt_days_from_civil(year, 1, 1) + 1;
+    let time_of_day = time.rem_euclid(GANTT_MILLISECONDS_PER_DAY);
+    let hour = time_of_day / 3_600_000;
+    let minute = time_of_day / 60_000 % 60;
+    let second = time_of_day / 1_000 % 60;
+    let millisecond = time_of_day % 1_000;
 
     let mut out = String::with_capacity(format.len() + 8);
     let mut chars = format.chars();
@@ -15084,7 +15264,19 @@ fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> 
             'a' => out.push_str(day_names.0),
             'A' => out.push_str(day_names.1),
             'j' => out.push_str(&format!("{day_of_year:03}")),
-            'H' | 'M' | 'S' => out.push_str("00"),
+            'H' if unpadded => out.push_str(&hour.to_string()),
+            'H' => out.push_str(&format!("{hour:02}")),
+            'I' if unpadded => out.push_str(&((hour + 11) % 12 + 1).to_string()),
+            'I' => out.push_str(&format!("{:02}", (hour + 11) % 12 + 1)),
+            'M' if unpadded => out.push_str(&minute.to_string()),
+            'M' => out.push_str(&format!("{minute:02}")),
+            'S' if unpadded => out.push_str(&second.to_string()),
+            'S' => out.push_str(&format!("{second:02}")),
+            'L' => out.push_str(&format!("{millisecond:03}")),
+            'f' => out.push_str(&format!("{:06}", millisecond * 1_000)),
+            'p' => out.push_str(if hour < 12 { "AM" } else { "PM" }),
+            'Q' => out.push_str(&time.to_string()),
+            's' => out.push_str(&time.div_euclid(1_000).to_string()),
             '%' => out.push('%'),
             other => {
                 out.push('%');
@@ -34535,8 +34727,20 @@ mod tests {
         }
         assert_eq!(super::gantt_weekday(i32::MAX), 5);
         assert_eq!(super::gantt_weekday(i32::MIN), 2);
-        assert!(super::format_gantt_axis_label(i32::MAX, Some("%Y-%m-%d %j")).contains('-'));
-        assert!(super::format_gantt_axis_label(i32::MIN, Some("%Y-%m-%d %j")).contains('-'));
+        assert!(
+            super::format_gantt_time_axis_label(
+                i64::from(i32::MAX) * super::GANTT_MILLISECONDS_PER_DAY,
+                Some("%Y-%m-%d %j")
+            )
+            .contains('-')
+        );
+        assert!(
+            super::format_gantt_time_axis_label(
+                i64::from(i32::MIN) * super::GANTT_MILLISECONDS_PER_DAY,
+                Some("%Y-%m-%d %j")
+            )
+            .contains('-')
+        );
     }
 
     #[test]

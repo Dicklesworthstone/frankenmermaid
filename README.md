@@ -1668,13 +1668,26 @@ The sequence parser is the most syntactically dense and supports:
 
 The gantt parser handles:
 
-- **Date/duration parsing** — absolute dates (`2026-01-15`) and durations (`5d`, `2w`).
+- **Date/duration parsing** — absolute dates and times (`2026-01-15 09:30:00.125`), fixed durations (`500ms`, `30s`, `45m`, `4h`, `1.5d`, `2w`), and whole calendar months/years (`1M`, `2y`). Scheduling retains integer-millisecond precision; `M` means months and `m` means minutes.
 - **Section grouping** — `section Backend` creates a swimlane that groups subsequent tasks.
-- **Dependencies** — `after taskA`, `after taskA, taskB` produces edges into the dependency graph.
+- **Dependencies** — `after taskA taskB` waits for the latest predecessor end; `until taskA taskB` uses the earliest target start, including forward references and time-of-day boundaries.
 - **Task types** — `done`, `active`, `crit`, `milestone` change the visual styling (color, border, marker).
 - **Calendar validation** — invalid dates are caught early and surfaced as parse diagnostics rather than producing a malformed layout.
 
-The gantt layout dispatcher emits a time-axis bar layout where each task's `x` is determined by its start date and width by its duration, with sections producing horizontal bands.
+The gantt layout dispatcher emits a time-axis bar layout where each task's `x` is determined by its start time and width by its duration, with sections producing horizontal bands. Sub-day schedules use a readable time scale shared by every renderer. `tickInterval 1hour` (or `1minute`, `1second`, `1millisecond`) and axis formats such as `%H:%M:%S.%L` expose the same precise boundaries as the bars. Excluded weekdays and dates extend working durations, including partial days; explicitly authored deadlines retain their exact boundaries.
+
+Time-only formats such as `dateFormat HH:mm` use **1970-01-01** as a deterministic anchor. Wall-clock inputs do not depend on the host timezone; `dateFormat X` and `x` accept Unix seconds and milliseconds. Calendar month/year durations remain whole numbers, with month-end clamping. Invalid scheduling tokens produce warnings and an invalid end becomes a zero-duration marker.
+
+```mermaid
+gantt
+    dateFormat YYYY-MM-DD HH:mm
+    axisFormat %H:%M
+    tickInterval 1hour
+    section Release
+    Build  :build, 2026-11-22 09:00, 90m
+    Verify :verify, after build, 30m
+    Ship   :milestone, after verify, 0ms
+```
 
 ### Kanban — metadata
 
