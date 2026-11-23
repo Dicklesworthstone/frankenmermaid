@@ -125,7 +125,11 @@ fn zero_width_formatting_code_points_add_no_width() {
     let metrics = FontMetrics::default_metrics();
 
     for (name, plain, decorated) in [
-        ("variation selector 16", "☀", "☀\u{FE0F}"),
+        (
+            "variation selector 16 without emoji presentation",
+            "W",
+            "W\u{FE0F}",
+        ),
         ("variation selector 15", "☀", "☀\u{FE0E}"),
         ("skin tone", "👋", "👋\u{1F3FD}"),
         (
@@ -143,6 +147,19 @@ fn zero_width_formatting_code_points_add_no_width() {
             "{name}: {decorated:?} measured {width_decorated} against {width_plain} for {plain:?}. \
              This code point draws nothing and must not advance the pen."
         );
+    }
+}
+
+#[test]
+fn emoji_presentation_selectors_change_the_complete_glyph_width() {
+    for metrics in [FontMetrics::default_metrics(), FontMetrics::monospace(15.0)] {
+        // The selector itself has no advance, but it selects a wide emoji presentation for
+        // a text-default symbol. Measuring only the constituent scalar widths misses this.
+        let text_width = metrics.estimate_width("☀");
+        let emoji_width = metrics.estimate_width("☀\u{FE0F}");
+        assert_eq!(text_width, metrics.estimate_width("☀\u{FE0E}"));
+        assert_eq!(emoji_width, metrics.avg_char_width() * 2.0);
+        assert!(emoji_width > text_width);
     }
 }
 
@@ -258,7 +275,10 @@ fn diagram_paragraphs_and_cards_preserve_complete_multilingual_graphemes() {
                     );
                 }
             }
-            assert_eq!(ir.labels[0].text, source, "layout must preserve authored IR");
+            assert_eq!(
+                ir.labels[0].text, source,
+                "layout must preserve authored IR"
+            );
 
             let glyph_width = metrics.estimate_preserved_width(
                 glyph,

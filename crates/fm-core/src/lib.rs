@@ -11990,6 +11990,66 @@ mod tests {
     }
 
     #[test]
+    fn ir_labels_and_authored_monospace_nodes_preserve_unicode_glyphs() {
+        use super::*;
+
+        let base = FontMetrics::default_metrics();
+        for glyph in ["א\u{5c7}", "क्ष", "\u{1100}\u{1161}\u{11a8}", "👩‍❤️‍💋‍👨", "🇺🇸"]
+        {
+            let authored = glyph.repeat(48);
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            let label = IrLabelId(0);
+            ir.labels.push(IrLabel {
+                text: authored.clone(),
+                ..Default::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "A".into(),
+                label: Some(label),
+                inline_style: Some(Box::new(IrInlineStyle {
+                    properties: [
+                        ("font-family".into(), "monospace".into()),
+                        ("font-size".into(), "20px".into()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                })),
+                ..Default::default()
+            });
+
+            let metrics = ir.effective_node_font_metrics(0, &base);
+            let width = metrics.estimate_width(glyph) + 0.01;
+            assert_eq!(
+                ir.wrap_label_to_width(label, &metrics, width),
+                Some(vec![glyph.to_string(); 48])
+            );
+            let truncated = format!("{glyph}...");
+            assert_eq!(
+                ir.truncate_label_to_width(label, &metrics, metrics.estimate_width(&truncated)),
+                Some(truncated)
+            );
+
+            let composed = ir.node_layout_text(&ir.nodes[0], &metrics);
+            assert!(composed.lines().count() > 1, "long captions must wrap");
+            assert_eq!(composed.replace('\n', ""), authored);
+            for line in composed.lines() {
+                assert_eq!(line, glyph.repeat(line.matches(glyph).count()));
+                assert!(
+                    metrics.estimate_preserved_width(
+                        line,
+                        metrics.font_size(),
+                        metrics.avg_char_width()
+                    ) <= metrics.font_size() * 18.0 + 0.01
+                );
+            }
+            assert_eq!(
+                ir.labels[0].text, authored,
+                "composition cannot mutate source labels"
+            );
+        }
+    }
+
+    #[test]
     fn kanban_cards_measure_every_authored_field_without_losing_text() {
         let metrics = FontMetrics::default_metrics();
         let title = "Review  Unicode 👩‍💻 changes and coordinate the complete release";
