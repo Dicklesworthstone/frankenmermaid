@@ -4,7 +4,9 @@ use fm_core::{
     ArrowType, GanttTaskType, GraphDirection, MermaidDiagramIr, MermaidRenderMode, MermaidTier,
     NodeShape,
 };
-use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
+use fm_layout::{
+    DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, MarkerKind, layout_diagram,
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -383,56 +385,54 @@ fn sequence_layout_at_origin(layout: &DiagramLayout) -> Option<DiagramLayout> {
     Some(shifted)
 }
 
-const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeStroke {
+    Solid,
+    Dotted,
+    Thick,
+}
+
+const fn arrow_stroke(arrow: ArrowType) -> EdgeStroke {
     match arrow {
-        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
-            (false, false)
-        }
-        ArrowType::DoubleArrow
-        | ArrowType::DoubleThickArrow
-        | ArrowType::DoubleDottedArrow
-        // `o--o` / `x--x` are double-ended too (bd-zdpwd).
-        | ArrowType::CircleBoth
-        | ArrowType::CrossBoth
-        | ArrowType::ThickCircleBoth
-        | ArrowType::ThickCrossBoth
-        | ArrowType::DottedCircleBoth
-        | ArrowType::DottedCrossBoth => (true, true),
-        ArrowType::HalfArrowTopReverse
-        | ArrowType::HalfArrowBottomReverse
-        | ArrowType::StickArrowTopReverse
-        | ArrowType::StickArrowBottomReverse
-        | ArrowType::HalfArrowTopReverseDotted
-        | ArrowType::HalfArrowBottomReverseDotted
-        | ArrowType::StickArrowTopReverseDotted
-        | ArrowType::StickArrowBottomReverseDotted
-        | ArrowType::Aggregation
-        | ArrowType::Composition
-        | ArrowType::Inheritance
-        | ArrowType::Lollipop => (true, false),
-        ArrowType::Arrow
-        | ArrowType::OpenArrow
-        | ArrowType::HalfArrowTop
-        | ArrowType::HalfArrowBottom
-        | ArrowType::StickArrowTop
-        | ArrowType::StickArrowBottom
+        ArrowType::ThickLine
         | ArrowType::ThickArrow
-        | ArrowType::DottedArrow
-        | ArrowType::DottedOpenArrow
-        | ArrowType::DottedCross
-        | ArrowType::HalfArrowTopDotted
-        | ArrowType::HalfArrowBottomDotted
-        | ArrowType::StickArrowTopDotted
-        | ArrowType::StickArrowBottomDotted
-        | ArrowType::Circle
-        | ArrowType::Cross
+        | ArrowType::DoubleThickArrow
         | ArrowType::ThickCircle
         | ArrowType::ThickCross
+        | ArrowType::ThickCircleBoth
+        | ArrowType::ThickCrossBoth => EdgeStroke::Thick,
+        ArrowType::DottedLine
+        | ArrowType::DottedArrow
+        | ArrowType::DottedOpenArrow
+        | ArrowType::DoubleDottedArrow
         | ArrowType::DottedCircle
-        | ArrowType::AggregationReverse
-        | ArrowType::CompositionReverse
-        | ArrowType::InheritanceReverse
-        | ArrowType::LollipopReverse => (false, true),
+        | ArrowType::DottedCross
+        | ArrowType::DottedCircleBoth
+        | ArrowType::DottedCrossBoth
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::HalfArrowTopReverseDotted
+        | ArrowType::HalfArrowBottomReverseDotted
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::StickArrowTopReverseDotted
+        | ArrowType::StickArrowBottomReverseDotted => EdgeStroke::Dotted,
+        _ => EdgeStroke::Solid,
+    }
+}
+
+fn edge_stroke(edge: &fm_core::IrEdge, reversed: bool) -> EdgeStroke {
+    if let Some(notation) = edge.er_notation() {
+        return if notation.contains("..") {
+            EdgeStroke::Dotted
+        } else {
+            EdgeStroke::Solid
+        };
+    }
+    if fm_layout::edge_uses_feedback_marker(edge, reversed) {
+        EdgeStroke::Dotted
+    } else {
+        arrow_stroke(edge.arrow)
     }
 }
 
@@ -1137,14 +1137,29 @@ impl TermRenderer {
             }
         }
         let mut protected = cell_label_rects(&text_labels);
+        let mut central_cells = std::collections::BTreeSet::new();
         if let Some(metrics) = &central_metrics {
             for edge in &layout.edges {
                 for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
-                    let (x, y) = self.point_to_cells(&marker.center, scale_x, scale_y);
-                    protected.push((x, y, x.saturating_add(1), y.saturating_add(1)));
+                    central_cells.insert(self.point_to_cells(&marker.center, scale_x, scale_y));
                 }
             }
         }
+        let edge_foreground = self.overlay_edge_markers(
+            &mut grid,
+            ir,
+            layout,
+            scale_x,
+            scale_y,
+            &protected,
+            &central_cells,
+        );
+        protected.extend(
+            central_cells
+                .into_iter()
+                .chain(edge_foreground.into_iter().map(|(x, y, _)| (x, y)))
+                .map(|(x, y)| (x, y, x.saturating_add(1), y.saturating_add(1))),
+        );
         self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
         let (mut edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
@@ -1538,6 +1553,7 @@ impl TermRenderer {
             }
             self.render_edge_canvas(
                 &mut canvas,
+                ir,
                 edge_path,
                 pixel_scale_x,
                 pixel_scale_y,
@@ -1600,7 +1616,7 @@ impl TermRenderer {
 
         // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
         // and overlay labels.
-        let base_grid = canvas.render_char_grid();
+        let mut base_grid = canvas.render_char_grid();
         let mut central_foreground = Vec::new();
         if let Some(mask) = central_mask {
             for (y, row) in mask.render_char_grid().into_iter().enumerate() {
@@ -1611,6 +1627,16 @@ impl TermRenderer {
                 }
             }
         }
+        let central_cells = central_foreground.iter().map(|&(x, y, _)| (x, y)).collect();
+        central_foreground.extend(self.overlay_edge_markers(
+            &mut base_grid,
+            ir,
+            layout,
+            scale_x,
+            scale_y,
+            &[],
+            &central_cells,
+        ));
         let (mut output, occluded_edge_label_count) = self.overlay_labels(
             base_grid,
             ir,
@@ -1812,63 +1838,36 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) {
-        if edge_path.points.len() < 2 {
+        if edge_path.points.len() < 2 || edge_path.bundled || is_invisible_edge(ir, edge_path) {
             return;
         }
 
         let glyphs = &self.edge_glyphs;
-
-        // Get arrow type for this edge.
-        let arrow = ir
+        let stroke = ir
             .edges
             .get(edge_path.edge_index)
-            .map(|e| e.arrow)
-            .unwrap_or(ArrowType::Arrow);
+            .map_or(EdgeStroke::Solid, |edge| {
+                edge_stroke(edge, edge_path.reversed)
+            });
+        let arrow = match stroke {
+            EdgeStroke::Solid => ArrowType::Line,
+            EdgeStroke::Dotted => ArrowType::DottedLine,
+            EdgeStroke::Thick => ArrowType::ThickLine,
+        };
 
         // Draw line segments.
         for window in edge_path.points.windows(2) {
             let (x0, y0) = self.point_to_cells(&window[0], scale_x, scale_y);
             let (x1, y1) = self.point_to_cells(&window[1], scale_x, scale_y);
-            self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, edge_path.reversed, arrow);
+            self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, false, arrow);
         }
 
-        // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second `ArrowType`
-        // (bd-f9t0r), so the SAME `edge_marker_ends` mapping decides that end too and the two
-        // answers are OR-ed. Reusing the mapping rather than restating it is what keeps the
-        // terminal's idea of "which end is marked" from drifting away from SVG's and canvas's.
-        let co_arrow = ir
-            .edges
-            .get(edge_path.edge_index)
-            .and_then(fm_core::IrEdge::co_arrow);
-        let (marker_at_start, marker_at_end) = {
-            let (start, end) = edge_marker_ends(arrow);
-            let (co_start, co_end) = co_arrow.map_or((false, false), edge_marker_ends);
-            (start || co_start, end || co_end)
-        };
-
-        // The operator determines the semantic endpoint. In particular, UML ownership and
-        // inheritance operators place their marker at the source for `o--`, `*--`, and `<|--`,
-        // while their reverse spellings place it at the target.
-        if marker_at_start && let Some(first) = edge_path.points.first() {
-            let (x, y) = self.point_to_cells(first, scale_x, scale_y);
-            if edge_path.points.len() >= 2 {
-                let next = &edge_path.points[1];
-                let (nx, ny) = self.point_to_cells(next, scale_x, scale_y);
-                let arrow_char = self.arrowhead_for_direction(nx, ny, x, y, glyphs, arrow);
-                buffer.set(x, y, arrow_char);
-            }
-        }
-
-        if marker_at_end && let Some(last) = edge_path.points.last() {
-            let (x, y) = self.point_to_cells(last, scale_x, scale_y);
-            let arrow_char = if edge_path.points.len() >= 2 {
-                let prev = &edge_path.points[edge_path.points.len() - 2];
-                let (px, py) = self.point_to_cells(prev, scale_x, scale_y);
-                self.arrowhead_for_direction(px, py, x, y, glyphs, arrow)
-            } else {
-                glyphs.arrow_right
-            };
-            buffer.set(x, y, arrow_char);
+        for (x, y, glyph) in self
+            .edge_marker_cells(ir, edge_path, scale_x, scale_y)
+            .into_iter()
+            .flatten()
+        {
+            buffer.set(x, y, glyph);
         }
     }
 
@@ -1880,70 +1879,34 @@ impl TermRenderer {
         metrics: &fm_core::FontMetrics,
         (scale_x, scale_y): (f32, f32),
     ) {
-        let markers: Vec<_> =
+        let markers: std::collections::BTreeSet<_> =
             fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge_path, metrics)
                 .map(|marker| self.point_to_cells(&marker.center, scale_x, scale_y))
                 .collect();
         if markers.is_empty() {
             return;
         }
-        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
-            return;
-        };
-        let (start, end) = edge_marker_ends(edge.arrow);
-        let (co_start, co_end) = edge.co_arrow().map_or((false, false), edge_marker_ends);
-        for (at_start, has_arrow) in [(true, start || co_start), (false, end || co_end)] {
-            if !has_arrow {
-                continue;
-            }
-            let endpoint = if at_start {
-                edge_path.points.first()
-            } else {
-                edge_path.points.last()
-            };
-            let Some(endpoint) = endpoint else {
+        for (index, endpoint) in self
+            .edge_marker_cells(ir, edge_path, scale_x, scale_y)
+            .into_iter()
+            .enumerate()
+        {
+            let Some((x, y, glyph)) = endpoint else {
                 continue;
             };
-            let (x, y) = self.point_to_cells(endpoint, scale_x, scale_y);
             if !markers.contains(&(x, y)) {
                 continue;
             }
-            let inner = if at_start {
-                edge_path
-                    .points
-                    .iter()
-                    .map(|point| self.point_to_cells(point, scale_x, scale_y))
-                    .find(|point| *point != (x, y))
-            } else {
-                edge_path
-                    .points
-                    .iter()
-                    .rev()
-                    .map(|point| self.point_to_cells(point, scale_x, scale_y))
-                    .find(|point| *point != (x, y))
-            };
-            let Some((inner_x, inner_y)) = inner else {
-                continue;
-            };
             // A circle and an arrowhead cannot share a character. Keep the circle on the
-            // lifeline and move the arrow one cell inward along its own message shaft.
-            let dx = inner_x as isize - x as isize;
-            let dy = inner_y as isize - y as isize;
-            let (arrow_x, arrow_y) = if dx.abs() >= dy.abs() {
-                ((x as isize + dx.signum()) as usize, y)
-            } else {
-                (x, (y as isize + dy.signum()) as usize)
-            };
-            if !markers.contains(&(arrow_x, arrow_y)) {
-                let arrow = self.arrowhead_for_direction(
-                    inner_x,
-                    inner_y,
-                    x,
-                    y,
-                    &self.edge_glyphs,
-                    edge.arrow,
-                );
-                buffer.set(arrow_x, arrow_y, arrow);
+            // lifeline and retain the semantic glyph on the adjacent message segment.
+            if let Some((arrow_x, arrow_y)) = self.edge_marker_inward_cell(
+                edge_path,
+                index == 0,
+                (x, y),
+                (scale_x, scale_y),
+                &markers,
+            ) {
+                buffer.set(arrow_x, arrow_y, glyph);
             }
         }
         let glyph = if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
@@ -1970,26 +1933,19 @@ impl TermRenderer {
         reversed: bool,
         arrow: ArrowType,
     ) {
-        let line_char = if reversed
-            || matches!(
-                arrow,
-                ArrowType::DottedArrow
-                    | ArrowType::DottedOpenArrow
-                    | ArrowType::HalfArrowTopDotted
-                    | ArrowType::HalfArrowBottomDotted
-                    | ArrowType::HalfArrowTopReverseDotted
-                    | ArrowType::HalfArrowBottomReverseDotted
-                    | ArrowType::StickArrowTopDotted
-                    | ArrowType::StickArrowBottomDotted
-                    | ArrowType::StickArrowTopReverseDotted
-                    | ArrowType::StickArrowBottomReverseDotted
-                    | ArrowType::DottedLine
-                    | ArrowType::DoubleDottedArrow
-            ) {
+        let stroke = arrow_stroke(arrow);
+        let line_char = if reversed || stroke == EdgeStroke::Dotted {
             if x0 == x1 {
                 glyphs.dotted_v
             } else {
                 glyphs.dotted_h
+            }
+        } else if stroke == EdgeStroke::Thick {
+            match (self.config.glyph_mode, x0 == x1) {
+                (fm_core::MermaidGlyphMode::Ascii, true) => '#',
+                (fm_core::MermaidGlyphMode::Ascii, false) => '=',
+                (_, true) => '┃',
+                (_, false) => '━',
             }
         } else if x0 == x1 {
             glyphs.line_v
@@ -2043,35 +1999,244 @@ impl TermRenderer {
         }
     }
 
-    fn arrowhead_for_direction(
+    /// Use the same f32 grid projection as shafts and central dots, with checked padding for
+    /// extreme supplied routes. Truncating an f64 product instead moves 10 * 0.7 to cell 6, not 7.
+    fn marker_point_to_cells(
         &self,
-        from_x: usize,
-        from_y: usize,
-        to_x: usize,
-        to_y: usize,
-        glyphs: &EdgeGlyphs,
-        arrow: ArrowType,
-    ) -> char {
-        let dx = to_x as isize - from_x as isize;
-        let dy = to_y as isize - from_y as isize;
+        point: &fm_layout::LayoutPoint,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Option<(usize, usize)> {
+        let (x, y) = TermTransform::new(scale_x, scale_y).map_or_else(
+            || (point.x * scale_x, point.y * scale_y),
+            |transform| transform.apply(point.x, point.y),
+        );
+        if !x.is_finite()
+            || !y.is_finite()
+            || f64::from(x) + (self.config.padding as f64) < 0.0
+            || f64::from(y) + (self.config.padding as f64) < 0.0
+        {
+            return None;
+        }
+        Some((
+            (x as usize).checked_add(self.config.padding)?,
+            (y as usize).checked_add(self.config.padding)?,
+        ))
+    }
 
-        match arrow {
-            ArrowType::Circle => glyphs.circle_head,
-            ArrowType::Cross | ArrowType::DottedCross => glyphs.cross_head,
-            _ => {
-                if dx.abs() > dy.abs() {
-                    if dx > 0 {
-                        glyphs.arrow_right
-                    } else {
-                        glyphs.arrow_left
-                    }
-                } else if dy > 0 {
-                    glyphs.arrow_down
+    /// Share semantic endpoint resolution with the vector renderers, including a distinct
+    /// co-arrow at the other end. Use the unquantized tangent so short segments keep direction.
+    fn edge_marker_cells(
+        &self,
+        ir: &MermaidDiagramIr,
+        path: &LayoutEdgePath,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> [Option<(usize, usize, char)>; 2] {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            return [None; 2];
+        };
+        if path.bundled || edge.arrow == ArrowType::Invisible {
+            return [None; 2];
+        }
+        let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
+            ir,
+            path.edge_index,
+            &path.points,
+            |_| {},
+        ) else {
+            return [None; 2];
+        };
+        let (start, end) = fm_layout::edge_marker_kinds(edge, path.reversed);
+        [(start, endpoints.start, -1.0), (end, endpoints.end, 1.0)].map(|(kind, endpoint, sign)| {
+            let (x, y) = self.marker_point_to_cells(&endpoint.point, scale_x, scale_y)?;
+            let dx = f64::from(endpoint.tangent.x) * f64::from(scale_x) * sign;
+            let dy = f64::from(endpoint.tangent.y) * f64::from(scale_y) * sign;
+            if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+                return None;
+            }
+            Some((x, y, self.marker_glyph(kind, dx, dy)?))
+        })
+    }
+
+    fn marker_glyph(&self, kind: MarkerKind, dx: f64, dy: f64) -> Option<char> {
+        if kind == MarkerKind::None || kind.is_er_cardinality() {
+            // Cell output retains exact cardinality captions; subcell output also draws the
+            // shared ER geometry. An unavailable crow's foot must never become an arrow.
+            return None;
+        }
+        let ascii = self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii;
+        let direction = if dx.abs() > dy.abs() {
+            if dx > 0.0 { 0 } else { 1 }
+        } else if dy > 0.0 {
+            2
+        } else {
+            3
+        };
+        let arrow = [
+            self.edge_glyphs.arrow_right,
+            self.edge_glyphs.arrow_left,
+            self.edge_glyphs.arrow_down,
+            self.edge_glyphs.arrow_up,
+        ][direction];
+        Some(match kind {
+            MarkerKind::Circle => self.edge_glyphs.circle_head,
+            MarkerKind::Cross => self.edge_glyphs.cross_head,
+            MarkerKind::Diamond => {
+                if ascii {
+                    '*'
                 } else {
-                    glyphs.arrow_up
+                    '◆'
+                }
+            }
+            MarkerKind::DiamondOpen => {
+                if ascii {
+                    'o'
+                } else {
+                    '◇'
+                }
+            }
+            MarkerKind::Lollipop | MarkerKind::LollipopStart => {
+                if ascii {
+                    'o'
+                } else {
+                    '○'
+                }
+            }
+            MarkerKind::TriangleOpen | MarkerKind::TriangleOpenStart if !ascii => {
+                ['▷', '◁', '▽', '△'][direction]
+            }
+            MarkerKind::Open if !ascii => ['→', '←', '↓', '↑'][direction],
+            MarkerKind::HalfArrowTop | MarkerKind::StickArrowTop if !ascii => {
+                ['⇀', '↽', '⇂', '↿'][direction]
+            }
+            MarkerKind::HalfArrowBottom | MarkerKind::StickArrowBottom if !ascii => {
+                ['⇁', '↼', '⇃', '↾'][direction]
+            }
+            _ => arrow,
+        })
+    }
+
+    /// Find room on the adjacent segment, strictly before its bend/opposite endpoint. Walk
+    /// both coordinates so diagonal arrows remain on their shaft after clearing a dot's mask.
+    fn edge_marker_inward_cell(
+        &self,
+        path: &LayoutEdgePath,
+        at_start: bool,
+        anchor: (usize, usize),
+        (scale_x, scale_y): (f32, f32),
+        occupied: &std::collections::BTreeSet<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        let project = |point| self.marker_point_to_cells(point, scale_x, scale_y);
+        let inner = if at_start {
+            path.points
+                .iter()
+                .filter_map(project)
+                .find(|point| *point != anchor)
+        } else {
+            path.points
+                .iter()
+                .rev()
+                .filter_map(project)
+                .find(|point| *point != anchor)
+        }?;
+        // Wide signed accumulators keep differences and doubled error safe for usize inputs.
+        let (mut x, mut y) = (anchor.0 as i128, anchor.1 as i128);
+        let (to_x, to_y) = (inner.0 as i128, inner.1 as i128);
+        let dx = (to_x - x).abs();
+        let dy = -(to_y - y).abs();
+        let sx = if x < to_x { 1 } else { -1 };
+        let sy = if y < to_y { 1 } else { -1 };
+        let mut error = dx + dy;
+        while (x, y) != (to_x, to_y) {
+            let twice = error * 2;
+            if twice >= dy {
+                error += dy;
+                x += sx;
+            }
+            if twice <= dx {
+                error += dx;
+                y += sy;
+            }
+            let cell = (x as usize, y as usize);
+            if cell == inner {
+                return None;
+            }
+            if !occupied.contains(&cell) {
+                return Some(cell);
+            }
+        }
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_edge_markers(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+        protected: &[(usize, usize, usize, usize)],
+        central_cells: &std::collections::BTreeSet<(usize, usize)>,
+    ) -> Vec<(usize, usize, char)> {
+        // State and lifecycle marks retain priority over a coincident connector endpoint.
+        let semantic_cells: std::collections::BTreeSet<_> = layout
+            .nodes
+            .iter()
+            .filter(|node| self.state_marker_cell_glyph(ir, node.node_index).is_some())
+            .map(|node| self.point_to_cells(&node.bounds.center(), scale_x, scale_y))
+            .chain(
+                layout
+                    .extensions
+                    .sequence_lifecycle_markers
+                    .iter()
+                    .map(|marker| self.point_to_cells(&marker.center, scale_x, scale_y)),
+            )
+            .collect();
+        let mut foreground = Vec::new();
+        for path in &layout.edges {
+            for (index, endpoint) in self
+                .edge_marker_cells(ir, path, scale_x, scale_y)
+                .into_iter()
+                .enumerate()
+            {
+                let Some((mut x, mut y, glyph)) = endpoint else {
+                    continue;
+                };
+                if semantic_cells.contains(&(x, y)) {
+                    continue;
+                }
+                let displaced = central_cells.contains(&(x, y));
+                if displaced {
+                    let Some(cell) = self.edge_marker_inward_cell(
+                        path,
+                        index == 0,
+                        (x, y),
+                        (scale_x, scale_y),
+                        central_cells,
+                    ) else {
+                        continue;
+                    };
+                    (x, y) = cell;
+                }
+                if semantic_cells.contains(&(x, y))
+                    || protected.iter().any(|&(left, top, right, bottom)| {
+                        x >= left && x < right && y >= top && y < bottom
+                    })
+                {
+                    continue;
+                }
+                if let Some(cell) = grid.get_mut(y).and_then(|row| row.get_mut(x)) {
+                    *cell = glyph;
+                    if displaced {
+                        // Created participant headers must not erase the arrow beside their dot.
+                        foreground.push((x, y, glyph));
+                    }
                 }
             }
         }
+        foreground
     }
 
     fn state_marker_cell_glyph(&self, ir: &MermaidDiagramIr, node_index: usize) -> Option<char> {
@@ -2462,21 +2627,143 @@ impl TermRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_edge_canvas(
         &self,
         canvas: &mut Canvas,
+        ir: &MermaidDiagramIr,
         edge_path: &LayoutEdgePath,
         scale_x: f32,
         scale_y: f32,
         padding_x: usize,
         padding_y: usize,
     ) {
+        if edge_path.bundled || is_invisible_edge(ir, edge_path) {
+            return;
+        }
+        let stroke = ir
+            .edges
+            .get(edge_path.edge_index)
+            .map_or(EdgeStroke::Solid, |edge| {
+                edge_stroke(edge, edge_path.reversed)
+            });
         for window in edge_path.points.windows(2) {
             let x0 = (window[0].x * scale_x) as isize + padding_x as isize;
             let y0 = (window[0].y * scale_y) as isize + padding_y as isize;
             let x1 = (window[1].x * scale_x) as isize + padding_x as isize;
             let y1 = (window[1].y * scale_y) as isize + padding_y as isize;
+            match stroke {
+                EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
+                EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
+                EdgeStroke::Thick => {
+                    let (ox, oy) = if (x1 - x0).abs() >= (y1 - y0).abs() {
+                        (0, 1)
+                    } else {
+                        (1, 0)
+                    };
+                    for offset in -1..=1 {
+                        canvas.draw_line(
+                            x0 + ox * offset,
+                            y0 + oy * offset,
+                            x1 + ox * offset,
+                            y1 + oy * offset,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(edge) = ir.edges.get(edge_path.edge_index)
+            && let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
+                ir,
+                edge_path.edge_index,
+                &edge_path.points,
+                |_| {},
+            )
+        {
+            let (start, end) = fm_layout::edge_marker_kinds(edge, edge_path.reversed);
+            for (kind, endpoint) in [(start, endpoints.start), (end, endpoints.end)] {
+                Self::draw_er_marker_canvas(
+                    canvas, kind, endpoint, scale_x, scale_y, padding_x, padding_y,
+                );
+            }
+        }
+    }
+
+    /// Consume shared ER geometry in forward tangent space: source and target variants have
+    /// different local offsets. A hollow zero marker clears the connector underneath its ring.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_er_marker_canvas(
+        canvas: &mut Canvas,
+        kind: MarkerKind,
+        endpoint: fm_layout::edge_paths::PathEndpoint,
+        scale_x: f32,
+        scale_y: f32,
+        padding_x: usize,
+        padding_y: usize,
+    ) {
+        let Some(glyph) = kind.er_glyph() else {
+            return;
+        };
+        let (dx, dy) = (f64::from(endpoint.tangent.x), f64::from(endpoint.tangent.y));
+        let length = dx.hypot(dy);
+        if !length.is_finite() || length == 0.0 || !scale_x.is_finite() || !scale_y.is_finite() {
+            return;
+        }
+        let (ux, uy) = (dx / length, dy / length);
+        let (width, height) = canvas.pixel_dimensions();
+        let center_x = f64::from(endpoint.point.x) * f64::from(scale_x) + padding_x as f64;
+        let center_y = f64::from(endpoint.point.y) * f64::from(scale_y) + padding_y as f64;
+        let extent_x = 45.0 * f64::from(scale_x.abs());
+        let extent_y = 45.0 * f64::from(scale_y.abs());
+        if !center_x.is_finite()
+            || !center_y.is_finite()
+            || center_x + extent_x < 0.0
+            || center_y + extent_y < 0.0
+            || center_x - extent_x >= width as f64
+            || center_y - extent_y >= height as f64
+        {
+            return;
+        }
+        let project = |x: f32, y: f32| {
+            let wx = f64::from(endpoint.point.x) + ux * f64::from(x) - uy * f64::from(y);
+            let wy = f64::from(endpoint.point.y) + uy * f64::from(x) + ux * f64::from(y);
+            (
+                (wx * f64::from(scale_x) + padding_x as f64) as isize,
+                (wy * f64::from(scale_y) + padding_y as f64) as isize,
+            )
+        };
+        for x in glyph.bars {
+            let (x0, y0) = project(x, -fm_layout::ErMarkerGlyph::BAR_HALF_HEIGHT);
+            let (x1, y1) = project(x, fm_layout::ErMarkerGlyph::BAR_HALF_HEIGHT);
             canvas.draw_line(x0, y0, x1, y1);
+        }
+        if glyph.foot {
+            let points = fm_layout::ErMarkerGlyph::foot_polyline(12);
+            for (index, &(x, y)) in points.iter().enumerate() {
+                let (x0, y0) = project(x, y);
+                let next = points[(index + 1) % points.len()];
+                let (x1, y1) = project(next.0, next.1);
+                canvas.draw_line(x0, y0, x1, y1);
+            }
+        }
+        if let Some(x) = glyph.bubble {
+            let (cx, cy) = project(x, 0.0);
+            let rx = (fm_layout::ErMarkerGlyph::BUBBLE_RADIUS * scale_x.abs())
+                .round()
+                .max(1.0) as isize;
+            let ry = (fm_layout::ErMarkerGlyph::BUBBLE_RADIUS * scale_y.abs())
+                .round()
+                .max(1.0) as isize;
+            for py in (cy - ry).max(0)..=(cy + ry).min(height as isize - 1) {
+                for px in (cx - rx).max(0)..=(cx + rx).min(width as isize - 1) {
+                    let nx = (px - cx) as f64 / rx as f64;
+                    let ny = (py - cy) as f64 / ry as f64;
+                    if nx * nx + ny * ny < 1.0 {
+                        canvas.unset_pixel(px as usize, py as usize);
+                    }
+                }
+            }
+            canvas.draw_ellipse(cx, cy, rx, ry);
         }
     }
 
@@ -6905,56 +7192,12 @@ impl TermRenderer {
         // Cycles and self-flows need their direction even on a monochrome raster. Derive
         // each marker from the shared curve's endpoint tangent, never from a control polygon.
         for edge in &layout.edges {
-            if edge.bundled || is_invisible_edge(ir, edge) {
-                continue;
-            }
-            let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
-                ir,
-                edge.edge_index,
-                &edge.points,
-                |_| {},
-            ) else {
-                continue;
-            };
-            let Some(source) = ir.edges.get(edge.edge_index) else {
-                continue;
-            };
-            let (start, end) = edge_marker_ends(source.arrow);
-            let (co_start, co_end) = source.co_arrow().map_or((false, false), edge_marker_ends);
-            for (enabled, endpoint, sign) in [
-                (start || co_start, endpoints.start, 1.0),
-                (end || co_end, endpoints.end, -1.0),
-            ] {
-                if !enabled {
-                    continue;
-                }
-                let dx = -f64::from(endpoint.tangent.x) * sign * f64::from(scale_x);
-                let dy = -f64::from(endpoint.tangent.y) * sign * f64::from(scale_y);
-                if !endpoint.point.x.is_finite()
-                    || !endpoint.point.y.is_finite()
-                    || !dx.is_finite()
-                    || !dy.is_finite()
-                    || (dx == 0.0 && dy == 0.0)
-                {
-                    continue;
-                }
-                let x =
-                    f64::from(endpoint.point.x) * f64::from(scale_x) + self.config.padding as f64;
-                let y =
-                    f64::from(endpoint.point.y) * f64::from(scale_y) + self.config.padding as f64;
-                if x < 0.0 || y < 0.0 || x >= width as f64 || y >= height as f64 {
-                    continue;
-                }
-                // Quantizing two nearby endpoints can erase a valid tangent. Pick its
-                // projected direction first, then reuse the configured marker vocabulary.
-                let (to_x, to_y) = if dx.abs() > dy.abs() {
-                    (if dx > 0.0 { 2 } else { 0 }, 1)
-                } else {
-                    (1, if dy > 0.0 { 2 } else { 0 })
-                };
-                let marker =
-                    self.arrowhead_for_direction(1, 1, to_x, to_y, &self.edge_glyphs, source.arrow);
-                buffer.set(x as usize, y as usize, marker);
+            for (x, y, glyph) in self
+                .edge_marker_cells(ir, edge, scale_x, scale_y)
+                .into_iter()
+                .flatten()
+            {
+                buffer.set(x, y, glyph);
             }
         }
 
@@ -8942,29 +9185,28 @@ mod tests {
             bundled: false,
         };
 
-        for arrow in [
-            ArrowType::Aggregation,
-            ArrowType::Composition,
-            ArrowType::Inheritance,
+        for (arrow, marker) in [
+            (ArrowType::Aggregation, '◇'),
+            (ArrowType::Composition, '◆'),
+            (ArrowType::Inheritance, '◁'),
+            (ArrowType::Lollipop, '○'),
         ] {
             let mut ir = sample_ir();
             ir.edges[0].arrow = arrow;
             let mut buffer = CellBuffer::new(8, 1);
             renderer.render_edge_cell(&mut buffer, &ir, &edge_path, 1.0, 1.0);
-            assert_eq!(
-                buffer.cells[1], renderer.edge_glyphs.arrow_left,
-                "{arrow:?} must mark the source"
-            );
+            assert_eq!(buffer.cells[1], marker, "{arrow:?} must mark the source");
             assert_eq!(
                 buffer.cells[6], renderer.edge_glyphs.line_h,
                 "{arrow:?} must not mark the target"
             );
         }
 
-        for arrow in [
-            ArrowType::AggregationReverse,
-            ArrowType::CompositionReverse,
-            ArrowType::InheritanceReverse,
+        for (arrow, marker) in [
+            (ArrowType::AggregationReverse, '◇'),
+            (ArrowType::CompositionReverse, '◆'),
+            (ArrowType::InheritanceReverse, '▷'),
+            (ArrowType::LollipopReverse, '○'),
         ] {
             let mut ir = sample_ir();
             ir.edges[0].arrow = arrow;
@@ -8974,10 +9216,329 @@ mod tests {
                 buffer.cells[1], renderer.edge_glyphs.line_h,
                 "{arrow:?} must not mark the source"
             );
-            assert_eq!(
-                buffer.cells[6], renderer.edge_glyphs.arrow_right,
-                "{arrow:?} must mark the target"
+            assert_eq!(buffer.cells[6], marker, "{arrow:?} must mark the target");
+        }
+    }
+
+    #[test]
+    fn terminal_edges_keep_direction_in_every_raster_mode_and_graph_direction() {
+        for (direction, arrow) in [("LR", '▶'), ("RL", '◀'), ("TD", '▼'), ("BT", '▲')] {
+            let mut ir = fm_parser::parse(&format!("flowchart {direction}\nAlpha --> Bravo\n")).ir;
+            let layout = layout_diagram(&ir);
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    padding: 2,
+                    ..TermRenderConfig::rich()
+                };
+                ir.edges[0].arrow = ArrowType::Arrow;
+                let directed =
+                    render_diagram_with_layout_and_config(&ir, &layout, &config, 160, 60);
+                assert!(directed.output.contains("Alpha") && directed.output.contains("Bravo"));
+                assert!(
+                    directed.output.contains(arrow),
+                    "{mode:?}/{direction}: {}",
+                    directed.output
+                );
+                ir.edges[0].arrow = ArrowType::Line;
+                let plain = render_diagram_with_layout_and_config(&ir, &layout, &config, 160, 60);
+                assert!(
+                    !plain
+                        .output
+                        .chars()
+                        .any(|ch| matches!(ch, '▶' | '◀' | '▼' | '▲'))
+                );
+                assert_ne!(directed.output, plain.output);
+                let mut feedback = layout.clone();
+                feedback.edges[0].reversed = true;
+                assert_eq!(
+                    plain.output,
+                    render_diagram_with_layout_and_config(&ir, &feedback, &config, 160, 60).output,
+                    "cycle removal must not restyle an undirected relation"
+                );
+            }
+        }
+        let ir = fm_parser::parse("flowchart LR\nAlpha --> Bravo\n").ir;
+        let outline = render_diagram_with_config(&ir, &TermRenderConfig::outline(), 120, 40);
+        assert!(outline.output.contains('▶'));
+        assert!(!outline.output.contains("Alpha") && !outline.output.contains("Bravo"));
+    }
+
+    #[test]
+    fn terminal_edges_preserve_mixed_uml_and_double_ended_markers() {
+        let ir = fm_parser::parse("classDiagram\ndirection LR\nWhole o--* Part\n").ir;
+        assert_eq!(ir.edges[0].co_arrow(), Some(ArrowType::CompositionReverse));
+        let layout = layout_diagram(&ir);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::rich()
+            };
+            let out = render_diagram_with_layout_and_config(&ir, &layout, &config, 160, 60).output;
+            assert!(out.contains("Whole") && out.contains("Part"));
+            assert_eq!(out.matches('◇').count(), 1, "{mode:?}: {out}");
+            assert_eq!(out.matches('◆').count(), 1, "{mode:?}: {out}");
+            let mut flow = fm_parser::parse("flowchart LR\nAlpha --> Bravo\n").ir;
+            let mut path = layout_diagram(&flow);
+            path.edges[0].reversed = true;
+            for (arrow, glyph) in [
+                (ArrowType::CircleBoth, '●'),
+                (ArrowType::ThickCircleBoth, '●'),
+                (ArrowType::CrossBoth, '✕'),
+                (ArrowType::DottedCrossBoth, '✕'),
+            ] {
+                flow.edges[0].arrow = arrow;
+                let out =
+                    render_diagram_with_layout_and_config(&flow, &path, &config, 160, 60).output;
+                assert_eq!(out.matches(glyph).count(), 2, "{mode:?}/{arrow:?}: {out}");
+            }
+            flow.edges[0].arrow = ArrowType::DoubleArrow;
+            let out = render_diagram_with_layout_and_config(&flow, &path, &config, 160, 60).output;
+            assert!(out.contains('◀') && out.contains('▶'), "{mode:?}: {out}");
+        }
+        let ascii = TermRenderConfig {
+            glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+            show_labels: false,
+            ..TermRenderConfig::compact()
+        };
+        let out = render_diagram_with_layout_and_config(&ir, &layout, &ascii, 160, 60).output;
+        assert!(
+            out.is_ascii() && out.contains('o') && out.contains('*'),
+            "{out}"
+        );
+    }
+
+    fn terminal_edge_test_path(points: &[(f32, f32)]) -> LayoutEdgePath {
+        LayoutEdgePath {
+            edge_index: 0,
+            span: Default::default(),
+            points: points
+                .iter()
+                .map(|&(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        }
+    }
+
+    #[test]
+    fn terminal_edge_strokes_and_hidden_edges_remain_distinct() {
+        let mut ir = sample_ir();
+        let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0)]);
+        let config = TermRenderConfig {
+            padding: 0,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        for (arrow, glyph) in [
+            (ArrowType::Line, '─'),
+            (ArrowType::DottedLine, '┄'),
+            (ArrowType::ThickLine, '━'),
+        ] {
+            ir.edges[0].arrow = arrow;
+            let mut buffer = CellBuffer::new(60, 16);
+            renderer.render_edge_cell(&mut buffer, &ir, &path, 1.0, 1.0);
+            assert_eq!(buffer.cells[12 * 60 + 20], glyph);
+        }
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut counts = Vec::new();
+            for arrow in [
+                ArrowType::DottedLine,
+                ArrowType::Line,
+                ArrowType::ThickLine,
+                ArrowType::Invisible,
+            ] {
+                ir.edges[0].arrow = arrow;
+                let mut canvas = Canvas::new(60, 16, mode);
+                renderer.render_edge_canvas(&mut canvas, &ir, &path, 1.0, 1.0, 0, 0);
+                let (width, height) = canvas.pixel_dimensions();
+                counts.push(
+                    (0..height)
+                        .map(|y| (0..width).filter(|&x| canvas.get_pixel(x, y)).count())
+                        .sum::<usize>(),
+                );
+            }
+            assert!(
+                counts[0] > 0 && counts[0] < counts[1] && counts[1] < counts[2],
+                "{mode:?}: {counts:?}"
             );
+            assert_eq!(counts[3], 0);
+        }
+        ir.edges[0].arrow = ArrowType::Invisible;
+        let mut buffer = CellBuffer::new(60, 16);
+        renderer.render_edge_cell(&mut buffer, &ir, &path, 1.0, 1.0);
+        assert!(buffer.cells.iter().all(|ch| *ch == ' '));
+        ir.edges[0].arrow = ArrowType::Arrow;
+        let mut bundled = path;
+        bundled.bundled = true;
+        renderer.render_edge_cell(&mut buffer, &ir, &bundled, 1.0, 1.0);
+        assert!(buffer.cells.iter().all(|ch| *ch == ' '));
+    }
+
+    #[test]
+    fn terminal_marker_tangents_survive_quantization_and_repeated_points() {
+        let ir = sample_ir();
+        let config = TermRenderConfig {
+            padding: 0,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let path = terminal_edge_test_path(&[(1.01, 1.0), (1.01, 1.0), (1.02, 1.0), (1.02, 1.0)]);
+        assert_eq!(
+            renderer.edge_marker_cells(&ir, &path, 0.1, 0.1),
+            [None, Some((0, 0, '▶'))]
+        );
+        let degenerate = terminal_edge_test_path(&[(2.0, 2.0), (2.0, 2.0)]);
+        assert_eq!(
+            renderer.edge_marker_cells(&ir, &degenerate, 1.0, 1.0),
+            [None, None]
+        );
+        let padded = TermRenderer::new(ResolvedConfig::resolve(&TermRenderConfig::rich(), 80, 24));
+        for value in [f32::MAX, -f32::MAX, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                padded.marker_point_to_cells(
+                    &fm_layout::LayoutPoint { x: value, y: 1.0 },
+                    2.0,
+                    1.0
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_edge_overlays_preserve_lifecycle_and_state_markers() {
+        let ir = fm_parser::parse("sequenceDiagram\nparticipant Alice\nparticipant Bob\ndestroy Bob\nAlice->>Bob: Finish\n").ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(
+            layout.edges[0].points.last(),
+            Some(&layout.extensions.sequence_lifecycle_markers[0].center)
+        );
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::rich()
+            };
+            let out = render_diagram_with_layout_and_config(&ir, &layout, &config, 160, 60).output;
+            assert!(out.contains("Alice") && out.contains("Bob") && out.contains("Finish"));
+            assert!(
+                !out.contains('▶'),
+                "destruction must not become a message arrow: {out}"
+            );
+            if mode == MermaidRenderMode::CellOnly {
+                assert!(out.contains('X'));
+            }
+        }
+        let ir = fm_parser::parse("stateDiagram-v2\n[*] --> Idle\nIdle --> [*]\n").ir;
+        let mut layout = layout_diagram(&ir);
+        for path in &mut layout.edges {
+            let edge = &ir.edges[path.edge_index];
+            for (endpoint, first) in [(edge.from, true), (edge.to, false)] {
+                let id = ir.resolve_endpoint_node(endpoint).unwrap();
+                if ir.is_textless_ornament_node(&ir.nodes[id.0]) {
+                    let center = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == id.0)
+                        .unwrap()
+                        .bounds
+                        .center();
+                    let point = if first {
+                        path.points.first_mut()
+                    } else {
+                        path.points.last_mut()
+                    };
+                    *point.unwrap() = center;
+                }
+            }
+        }
+        for (glyph_mode, start, end) in [
+            (fm_core::MermaidGlyphMode::Unicode, '●', '◉'),
+            (fm_core::MermaidGlyphMode::Ascii, '*', '@'),
+        ] {
+            let config = TermRenderConfig {
+                glyph_mode,
+                ..TermRenderConfig::compact()
+            };
+            let out = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24).output;
+            assert!(out.contains("Idle"));
+            assert_eq!(out.matches(start).count(), 1, "{out}");
+            assert_eq!(out.matches(end).count(), 1, "{out}");
+        }
+    }
+
+    #[test]
+    fn terminal_er_cardinality_keeps_hollow_zero_markers_and_never_becomes_arrows() {
+        let ir = fm_parser::parse("erDiagram\nCUSTOMER ||--o{ ORDER : places\n").ir;
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::rich()
+            };
+            let out = render_diagram_with_config(&ir, &config, 160, 60).output;
+            assert!(
+                out.contains("CUSTOMER") && out.contains("ORDER") && out.contains("0..*"),
+                "{mode:?}: {out}"
+            );
+            assert!(
+                !out.chars().any(|ch| matches!(ch, '▶' | '◀' | '▲' | '▼')),
+                "{out}"
+            );
+        }
+        for (kind, endpoint_x, bar_x, bubble_x) in [
+            (MarkerKind::ErZeroOrOneStart, 5.0, 14, 26),
+            (MarkerKind::ErZeroOrOneEnd, 90.0, 81, 69),
+        ] {
+            let mut canvas = Canvas::new(60, 12, MermaidRenderMode::Braille);
+            canvas.draw_line(5, 20, 90, 20);
+            TermRenderer::draw_er_marker_canvas(
+                &mut canvas,
+                kind,
+                fm_layout::edge_paths::PathEndpoint {
+                    point: fm_layout::LayoutPoint {
+                        x: endpoint_x,
+                        y: 20.0,
+                    },
+                    tangent: fm_layout::LayoutPoint { x: 1.0, y: 0.0 },
+                },
+                1.0,
+                1.0,
+                0,
+                0,
+            );
+            assert!(canvas.get_pixel(bar_x, 11), "{kind:?}");
+            assert!(
+                !canvas.get_pixel(bubble_x, 20),
+                "{kind:?} filled its zero marker"
+            );
+            assert!(canvas.get_pixel(bubble_x + 6, 20), "{kind:?} lost its ring");
         }
     }
 
@@ -10705,10 +11266,9 @@ mod tests {
 
     #[test]
     fn sequence_central_connections_survive_tight_cell_compression() {
+        use fm_core::SequenceCentralConnection::{Both, Source, Target};
         let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 8.0), (11.0, 8.0)]);
         ir.edges[0].arrow = ArrowType::DoubleArrow;
-        ir.edges[0].extras_mut().sequence_central_connection =
-            Some(fm_core::SequenceCentralConnection::Both);
         let config = TermRenderConfig {
             render_mode: MermaidRenderMode::CellOnly,
             show_labels: false,
@@ -10716,8 +11276,83 @@ mod tests {
             ..Default::default()
         };
         let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
-        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
-        assert!(result.output.contains("●●"), "{}", result.output);
+        for (connection, expected) in [(Both, "●●"), (Source, "●▶"), (Target, "◀●")] {
+            ir.edges[0].extras_mut().sequence_central_connection = Some(connection);
+            let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+            assert!(
+                result.output.contains(expected),
+                "{connection:?} changed the opposite endpoint: {}",
+                result.output
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_central_connection_arrows_stay_on_diagonal_shafts() {
+        let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 4.0), (26.0, 20.0)]);
+        ir.edges[0].arrow = ArrowType::DoubleArrow;
+        ir.edges[0].extras_mut().sequence_central_connection =
+            Some(fm_core::SequenceCentralConnection::Both);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                show_labels: false,
+                padding: 0,
+                ..TermRenderConfig::rich()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let result = if mode == MermaidRenderMode::CellOnly {
+                renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0)
+            } else {
+                renderer.render_subcell_mode(&ir, &layout, 80, 24, 1.0, 1.0)
+            };
+            let mut arrows = 0;
+            for (y, row) in result.output.lines().enumerate() {
+                for (x, glyph) in row.chars().enumerate() {
+                    if matches!(glyph, '▲' | '▼') {
+                        arrows += 1;
+                        assert_eq!(
+                            x,
+                            y + 6,
+                            "{mode:?} moved an arrow off its shaft: {}",
+                            result.output
+                        );
+                        assert!((11..26).contains(&x));
+                    }
+                }
+            }
+            assert_eq!(arrows, 2, "{mode:?}: {}", result.output);
+        }
+    }
+
+    #[test]
+    fn sequence_central_connection_arrows_share_fractional_scale_rounding() {
+        let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 8.0), (50.0, 8.0)]);
+        ir.edges[0].arrow = ArrowType::DoubleArrow;
+        ir.edges[0].extras_mut().sequence_central_connection =
+            Some(fm_core::SequenceCentralConnection::Both);
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            show_labels: false,
+            padding: 0,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 0.7, 1.0);
+        let row: Vec<_> = result.output.lines().nth(8).unwrap().chars().collect();
+        assert_eq!((row[7], row[8]), ('●', '◀'), "{}", result.output);
+        assert_eq!((row[34], row[35]), ('▶', '●'), "{}", result.output);
+        assert_eq!(result.output.matches('◀').count(), 1);
+        assert_eq!(result.output.matches('▶').count(), 1);
+        ir.edges[0].extras_mut().sequence_central_connection = None;
+        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 0.7, 1.0);
+        let row: Vec<_> = result.output.lines().nth(8).unwrap().chars().collect();
+        assert_eq!((row[7], row[35]), ('◀', '▶'), "{}", result.output);
     }
 
     #[test]
@@ -10746,6 +11381,11 @@ mod tests {
                     ir.edges[0].extras_mut().sequence_central_connection = Some(connection);
                     let result = renderer.render_subcell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
                     assert_ne!(result.output, ordinary.output, "{mode:?}/{connection:?}");
+                    assert!(
+                        result.output.contains(if reverse { '◀' } else { '▶' }),
+                        "{mode:?}/{connection:?} lost its message arrow: {}",
+                        result.output
+                    );
                     // The row above the message is empty for a plain stroke. A filled circle
                     // extends into it only at the endpoint(s) requested by the source.
                     let row: Vec<_> = result.output.lines().nth(7).unwrap().chars().collect();
