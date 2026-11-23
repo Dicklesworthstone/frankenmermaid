@@ -331,7 +331,14 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # since v0.5.0: full Kanban card measurement/rendering, f64 Sankey CSV/typography, sequence
 # fragment captions & activations, Gantt calendars, Scene paint cascade, deck export, and
 # refreshed dependencies). Smallest whole-KiB ceiling fitting 1170278 (154 bytes headroom).
-MAX_GZIP_BYTES=$((1143 * 1024))
+# Raised 1143K -> 1177K for v0.6.1 (measured: 1204707 gzip / 3030203 raw, +34429 gzip / +60259 raw
+# across the 16 commits since v0.6.0: unicode-width & unicode-segmentation UCD tables in fm-core,
+# cross-backend node-icon vector geometry & slots, sequence central connections across SVG/Canvas/GPU,
+# intraday Gantt parsing/formatting, accessibility prose isolation, authored DOT IDs, and semantic
+# layout budget retention). wasm-opt still runs -Oz --strip-producers --converge with LTO, single
+# codegen unit, opt-level=z, and immediate-abort std. Smallest whole-KiB ceiling fitting 1204707
+# (541 bytes headroom).
+MAX_GZIP_BYTES=$((1177 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

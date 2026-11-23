@@ -4,6 +4,18 @@ All notable changes to **frankenmermaid** are documented here.
 
 Historical scope: project inception through 2026-08-19; the v0.3.0 release section below extends that record through 2026-09-26 and the release fixes.
 
+## v0.6.1 — 2026-11-23
+
+Fidelity, Unicode, intraday scheduling, and directed-graph correctness release covering 16 commits since `v0.6.0` plus release-qualification fixes.
+
+- **Precise intraday Gantt schedules:** Added millisecond, second, minute, hour, and fractional fixed-duration units without floating-point rounding, deterministic clock and Unix timestamp (`%Q`/`%s`) formatting, intraday axis ticks, and exact SVG accessibility durations.
+- **Sequence central connections & implied activations:** Preserved source, target, and dual central-connection endpoints independently of message arrow styles across parser IR, layout, standalone scenes, SVG, Canvas2D, WebGPU foreground submission, and terminal rendering (including created-participant headers and large numbered markers).
+- **Authored node icons across all backends:** Rendered architecture, mindmap, and extracted Unicode icons through shared named-icon geometry and measured Above/Left slots across Scene, SVG, Canvas2D, GPU plans, and terminal fallbacks, with custom SVG icon replacement support and IEEE-754 bounds clamping so icon-adjacent label boxes stay strictly within inscribed shape regions.
+- **Unicode grapheme display-width & terminal fidelity:** Measured complete extended grapheme clusters via `UnicodeWidthStr` for CJK, flags, keycaps, variation selectors, and joined emoji sequences; preserved grapheme boundaries in wrapping/truncation and `MermaidDiagramIr` label helpers; preserved display columns and typed class/ER/requirement/C4 node compartments across all terminal render modes.
+- **Parser robustness & DOT topology preservation:** Isolated accessibility prose before family and shared directive passes to preserve source navigation spans; routed declared diagram families through canonical support-contract parsing; preserved authored DOT quoted/Unicode/punctuation identifiers, escapes, concatenation, ports, and edge-group topology without collapsing distinct nodes.
+- **Layout guardrails & directed FNX canary backend:** Retained semantic family geometry when estimated layout budgets are exceeded while reporting limits explicitly; honored projection policies across disconnected components; executed and validated the directed FNX SCC canary backend (`fnx-experimental-directed`) with full partition, connectivity, and projection-count checks.
+- **Goldens & WebAssembly (`pkg/`):** Re-blessed `architecture_basic` (layout + SVG) for the unified node-icon slot reservation and `info_basic.svg` for `v0.6.1`, and rebuilt `pkg/` (`@frankenmermaid/core` 0.6.1) via `build-wasm.sh` with re-pinned source and cross-target digests.
+
 ## v0.6.0 — 2026-11-21
 
 Fidelity, precision, and performance release covering 46 commits since `v0.5.0` plus release-gate hardening and dependency updates.
@@ -71,6 +83,9 @@ Known limits: explicitly permissive custom layout budgets can authorize excessiv
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
+| [`v0.6.1`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.6.1) | Release | 2026-11-23 | Intraday Gantt, sequence central connections, cross-backend icons, Unicode graphemes, DOT IDs, directed FNX canary |
+| [`v0.6.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.6.0) | Release | 2026-11-21 | Scene paint cascade, nested LR subgraphs, full Kanban cards, f64 Sankey/Pie, opt-level=3 native builds |
+| [`v0.5.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.5.0) | Release | 2026-11-06 | Measured rendering across SVG/Canvas/terminal, refreshed layout defaults |
 | [`v0.4.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.4.0) | Release | 2026-10-08 | New diagram families (wardley, venn, ishikawa, treeView, eventmodeling), compound layout, review fixes |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.3.0) | Release | 2026-10-03 | Batch/deck correctness, packet guardrails, native archives |
 | Historical Unreleased | commits on `main` | 2026-07-11 → 2026-08-19 | Equivalence-clean corpora, concurrent CLI, GPU plan, janitor docs-reorg |

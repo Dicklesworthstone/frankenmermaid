@@ -6337,7 +6337,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xb5a3_fd06_2a5a_5085;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xfdcb_001c_be5d_7403;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -6385,7 +6385,7 @@ mod tests {
             (
                 "sankey",
                 "sankey-beta\nSolar,Grid,60\nWind,Grid,40\nGas,Grid,30\nGrid,Homes,65\nGrid,Industry,45\nGrid,Transport,20\n",
-                0xa172_9195_4a12_9c9b,
+                0x2234_ea7f_995c_fd42,
             ),
             (
                 "gantt",

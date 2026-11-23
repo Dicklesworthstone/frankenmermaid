@@ -232,7 +232,7 @@ The authoritative parity matrix against the FrankenTUI reference implementation 
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh" | bash
 ```
 
-The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.6.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
+The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.6.1` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
 
 Use `--from-source` to build with `cargo install --locked`; this path installs a minimal Rust toolchain via `rustup` if needed. Explicit `FM_INSTALL_PATH` or `FM_INSTALL_GIT_*` selectors also choose source installation. Source builds require a C/C++ toolchain and CMake. Existing source-selector precedence is preserved.
 
@@ -296,7 +296,7 @@ available without a C++ toolchain. Enable `highs` on either library or on
 
 ### Crates.io status
 
-The workspace is at version `0.6.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.6.1`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -912,7 +912,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.6.0)
+├── Cargo.toml                 # Workspace root (version 0.6.1)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
@@ -1363,7 +1363,13 @@ The SVG renderer turns a `DiagramLayout` into a complete SVG document with visua
 | Note | | Folded-corner rectangle |
 | Horizontal Bar | | Divider / separator |
 
-Node icons are extractable from `{ icon: "..." }` metadata and from `::icon(name)` directives on mindmaps; custom SVG icons can be supplied via `SvgRenderConfig::custom_icons: BTreeMap<String, CustomSvgIcon>` (keyed by icon name).
+### Node icons
+
+Node icons come from `{ icon: "..." }` metadata and mindmap `::icon(name)` directives. For ordinary graph nodes, including flowcharts, mindmaps, and architecture services, SVG (both Legacy and Scene), Canvas2D, and GPU plans render named icons and Unicode icons. Scene, Canvas2D, and GPU rendering share vector geometry for built-in names such as `server`, `database`, `cloud`, and `mobile`. Font Awesome names and aliases are normalized, and unknown names remain visible as initials. Shared render scenes retain the icon geometry and its authored colors and opacity even after the semantic IR is discarded.
+
+Set `SvgRenderConfig::node_icon_position` or `CanvasRenderConfig::node_icon_position` to `fm_layout::shapes::NodeIconPosition::Above` (the default) or `Left`; GPU plans use the Canvas configuration. Shared Scene, Canvas2D, and GPU placement reserves measured space for icons and captions, including the width of Unicode sequences. For standalone scenes, `fm_layout::build_render_scene_with_icon_position` accepts the same placement and font metrics. `SvgRenderConfig::custom_icons` maps normalized icon names to `CustomSvgIcon` definitions; both SVG backends support these overrides, including Scene SVG exported without semantic IR.
+
+When terminal labels are shown, named icons become readable tokens such as `[server]`, while Unicode icons retain their glyph text; ASCII mode substitutes `[icon]`. SVG and Canvas Unicode appearance depends on the available fonts. The GPU text atlas currently renders individual character glyphs: it retains joined emoji sequences, but does not provide emoji shaping or color emoji rendering.
 
 ### Visual effects
 
@@ -1668,13 +1674,26 @@ The sequence parser is the most syntactically dense and supports:
 
 The gantt parser handles:
 
-- **Date/duration parsing** — absolute dates (`2026-01-15`) and durations (`5d`, `2w`).
+- **Date/duration parsing** — absolute dates and times (`2026-01-15 09:30:00.125`), fixed durations (`500ms`, `30s`, `45m`, `4h`, `1.5d`, `2w`), and whole calendar months/years (`1M`, `2y`). Scheduling retains integer-millisecond precision; `M` means months and `m` means minutes.
 - **Section grouping** — `section Backend` creates a swimlane that groups subsequent tasks.
-- **Dependencies** — `after taskA`, `after taskA, taskB` produces edges into the dependency graph.
+- **Dependencies** — `after taskA taskB` waits for the latest predecessor end; `until taskA taskB` uses the earliest target start, including forward references and time-of-day boundaries.
 - **Task types** — `done`, `active`, `crit`, `milestone` change the visual styling (color, border, marker).
 - **Calendar validation** — invalid dates are caught early and surfaced as parse diagnostics rather than producing a malformed layout.
 
-The gantt layout dispatcher emits a time-axis bar layout where each task's `x` is determined by its start date and width by its duration, with sections producing horizontal bands.
+The gantt layout dispatcher emits a time-axis bar layout where each task's `x` is determined by its start time and width by its duration, with sections producing horizontal bands. Sub-day schedules use a readable time scale shared by every renderer. `tickInterval 1hour` (or `1minute`, `1second`, `1millisecond`) and axis formats such as `%H:%M:%S.%L` expose the same precise boundaries as the bars. Excluded weekdays and dates extend working durations, including partial days; explicitly authored deadlines retain their exact boundaries.
+
+Time-only formats such as `dateFormat HH:mm` use **1970-01-01** as a deterministic anchor. Wall-clock inputs do not depend on the host timezone; `dateFormat X` and `x` accept Unix seconds and milliseconds. Calendar month/year durations remain whole numbers, with month-end clamping. Invalid scheduling tokens produce warnings and an invalid end becomes a zero-duration marker.
+
+```mermaid
+gantt
+    dateFormat YYYY-MM-DD HH:mm
+    axisFormat %H:%M
+    tickInterval 1hour
+    section Release
+    Build  :build, 2026-11-22 09:00, 90m
+    Verify :verify, after build, 30m
+    Ship   :milestone, after verify, 0ms
+```
 
 ### Kanban — metadata
 
