@@ -241,27 +241,24 @@ pub fn ir_to_graph_with_policy(
         );
         let _ = graph.add_edge_with_attrs(&source_fnx, &target_fnx, attrs);
 
-        let label_text = ir
-            .edges
-            .get(edge_idx)
-            .and_then(|e| resolve_label(ir, e.label));
-        let arrow_str = ir
-            .edges
-            .get(edge_idx)
-            .map(|e| e.arrow.as_str().to_string())
-            .unwrap_or_default();
-
-        let meta = ProjectedEdgeMeta {
-            ir_edge_index: edge_idx,
-            source_index: *source_idx,
-            target_index: *target_idx,
-            label: label_text,
-            arrow: arrow_str,
-            weight: final_weight,
-            reversed: false,
-            is_long_edge: false,
-        };
-        table.add_edge_meta(&source_fnx, &target_fnx, meta);
+        // Collapsing the topology must not discard the contributing IR edges or their
+        // original direction. Diagnostics and cycle scoring need the complete provenance.
+        for &(ir_edge_index, _) in edges {
+            let edge = &ir.edges[ir_edge_index];
+            let meta = ProjectedEdgeMeta {
+                ir_edge_index,
+                source_index: endpoint_node_index(ir, edge.from)
+                    .expect("projected source was validated"),
+                target_index: endpoint_node_index(ir, edge.to)
+                    .expect("projected target was validated"),
+                label: resolve_label(ir, edge.label),
+                arrow: edge.arrow.as_str().to_string(),
+                weight: final_weight,
+                reversed: false,
+                is_long_edge: false,
+            };
+            table.add_edge_meta(&source_fnx, &target_fnx, meta);
+        }
 
         trace.undirected_edge_count += 1;
     }
@@ -481,6 +478,11 @@ impl ProjectionTable {
     #[must_use]
     pub fn get_edge_meta_by_index(&self, ir_edge_index: usize) -> Option<&ProjectedEdgeMeta> {
         self.edge_meta_by_index.get(&ir_edge_index)
+    }
+
+    /// Iterate the retained IR edges in stable index order.
+    pub(crate) fn edge_metadata(&self) -> impl Iterator<Item = &ProjectedEdgeMeta> {
+        self.edge_meta_by_index.values()
     }
 
     /// Verify the source IR counts, before projection removes or merges edges.
@@ -949,6 +951,20 @@ mod tests {
                 assert_eq!(meta.ir_edge_index, 0);
                 assert_eq!(meta.label.as_deref(), Some("edge 1"));
                 assert_eq!(meta.weight, expected_weight);
+                let contributors = table.get_edge_meta_all("n0", "n1");
+                assert_eq!(
+                    contributors
+                        .iter()
+                        .map(|meta| meta.ir_edge_index)
+                        .collect::<Vec<_>>(),
+                    vec![0, 2, 3]
+                );
+                assert!(contributors.iter().all(|meta| meta.weight == expected_weight));
+                assert_eq!(contributors[2].source_index, 1);
+                assert_eq!(contributors[2].target_index, 0);
+                assert_eq!(contributors[1].label.as_deref(), Some("edge 1"));
+                assert!(table.get_edge_meta_by_index(4).is_none());
+                assert_eq!(table.edge_metadata().count(), 4);
                 assert_eq!(
                     graph
                         .edge_attrs("n0", "n1")

@@ -90,6 +90,24 @@ impl CacheKey {
         Self(hasher.finish())
     }
 
+    /// Diagnostics carry source locations, unlike topology-only criticality scores.
+    fn for_diagnostics(ir: &MermaidDiagramIr, config: &ProjectionConfig) -> Self {
+        let mut hasher = FnvHasher::new();
+        b"diagnostics".hash(&mut hasher);
+        hash_ir_and_config(ir, config, &mut hasher);
+        for span in ir
+            .nodes
+            .iter()
+            .map(|node| node.span_primary)
+            .chain(ir.edges.iter().map(|edge| edge.span))
+        {
+            for position in [span.start, span.end] {
+                [position.line, position.col, position.byte].hash(&mut hasher);
+            }
+        }
+        Self(hasher.finish())
+    }
+
     /// Get the raw hash value.
     #[must_use]
     pub const fn as_u64(&self) -> u64 {
@@ -266,7 +284,7 @@ impl AnalysisCache {
             return None;
         }
 
-        let key = CacheKey::from_ir_and_config(ir, config);
+        let key = CacheKey::for_diagnostics(ir, config);
         if let Some(entry) = self.get_and_touch(key)
             && let Some(result) = entry.diagnostics.clone()
         {
@@ -310,7 +328,7 @@ impl AnalysisCache {
             return;
         }
 
-        let key = CacheKey::from_ir_and_config(ir, config);
+        let key = CacheKey::for_diagnostics(ir, config);
         self.put(key, |entry| {
             entry.diagnostics = Some(diagnostics);
         });
@@ -470,6 +488,67 @@ mod tests {
             ports,
             edges,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn diagnostics_cache_tracks_source_spans_without_invalidating_criticality() {
+        let ir = make_test_ir(3, 2);
+        let projection = ProjectionConfig::default();
+        let scoring = CriticalityScoringConfig::default();
+        let mut cache = AnalysisCache::default();
+        let original = crate::fnx_diagnostics::analyze_structure_cached(&ir, &projection, &mut cache);
+        crate::fnx_cycle_scorer::compute_criticality_scores_cached(
+            &ir,
+            &projection,
+            &scoring,
+            &mut cache,
+        );
+
+        let mut moved_node = ir.clone();
+        moved_node.nodes[1].span_primary.start.line = 41;
+        moved_node.nodes[1].span_primary.start.col = 3;
+        moved_node.nodes[1].span_primary.start.byte = 128;
+        moved_node.nodes[1].span_primary.end = moved_node.nodes[1].span_primary.start;
+        assert!(cache.get_diagnostics(&moved_node, &projection).is_none());
+        assert!(cache.get_criticality(&moved_node, &projection, &scoring).is_some());
+
+        let mut moved_edge = ir.clone();
+        moved_edge.edges[0].span.start.line = 72;
+        moved_edge.edges[0].span.start.col = 5;
+        moved_edge.edges[0].span.start.byte = 256;
+        moved_edge.edges[0].span.end = moved_edge.edges[0].span.start;
+        assert!(cache.get_diagnostics(&moved_edge, &projection).is_none());
+        assert!(cache.get_criticality(&moved_edge, &projection, &scoring).is_some());
+        assert_eq!(
+            CacheKey::from_ir_and_config(&ir, &projection),
+            CacheKey::from_ir_and_config(&moved_edge, &projection)
+        );
+
+        let node_results =
+            crate::fnx_diagnostics::analyze_structure_cached(&moved_node, &projection, &mut cache);
+        let articulation = node_results
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == crate::fnx_diagnostics::FnxDiagnosticCode::ARTICULATION_POINT
+            })
+            .expect("chain articulation diagnostic");
+        assert_eq!(articulation.span, Some(moved_node.nodes[1].span_primary));
+        let edge_results =
+            crate::fnx_diagnostics::analyze_structure_cached(&moved_edge, &projection, &mut cache);
+        let bridge = edge_results
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.related_edges == vec![(0, 1)])
+            .expect("first bridge diagnostic");
+        assert_eq!(bridge.span, Some(moved_edge.edges[0].span));
+        let cached_original = cache.get_diagnostics(&ir, &projection).unwrap();
+        assert_eq!(cached_original.diagnostics.len(), original.diagnostics.len());
+        for (cached, expected) in cached_original.diagnostics.iter().zip(&original.diagnostics) {
+            assert_eq!(cached.code, expected.code);
+            assert_eq!(cached.span, expected.span);
+            assert_eq!(cached.message, expected.message);
         }
     }
 

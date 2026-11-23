@@ -24,7 +24,7 @@ use fnx_algorithms::{
     articulation_points, bridges, connected_components, cycle_basis,
 };
 
-use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
+use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph_with_policy};
 use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
 
 // ============================================================================
@@ -438,7 +438,10 @@ pub fn analyze_structure_cached(
     if let Some(cached) = cache.get_diagnostics(ir, config) {
         return cached;
     }
-    let results = analyze_structure(ir);
+    let results =
+        analyze_structure_with_projection_and_budget(ir, config, AnalysisBudget::default())
+            .into_value()
+            .unwrap_or_default();
     // A transient timeout must not turn an incomplete analysis into the permanent cached answer.
     if results.budget_exceeded.is_none() {
         cache.put_diagnostics(ir, config, results.clone());
@@ -456,6 +459,14 @@ pub fn analyze_structure_with_budget(
     ir: &MermaidDiagramIr,
     budget: AnalysisBudget,
 ) -> BudgetResult<FnxAnalysisResults> {
+    analyze_structure_with_projection_and_budget(ir, &ProjectionConfig::default(), budget)
+}
+
+fn analyze_structure_with_projection_and_budget(
+    ir: &MermaidDiagramIr,
+    projection: &ProjectionConfig,
+    budget: AnalysisBudget,
+) -> BudgetResult<FnxAnalysisResults> {
     let mut executor = BudgetExecutor::new(budget);
     let mut outcome = executor.execute_with_progress(|exec| {
         if ir.nodes.is_empty() {
@@ -463,7 +474,7 @@ pub fn analyze_structure_with_budget(
         }
 
         let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
-        let (graph, table) = ir_to_graph(ir);
+        let (graph, table, _) = ir_to_graph_with_policy(ir, projection);
         exec.record_work(base_work);
         let mut results = FnxAnalysisResults::default();
         if exec.is_exceeded() {
@@ -481,25 +492,23 @@ pub fn analyze_structure_with_budget(
             return results;
         }
 
-        // Run articulation points analysis (only meaningful for connected graphs)
-        if results.is_connected {
-            let art_result = articulation_points(&graph);
-            analyze_articulation_points(ir, &table, &art_result, &mut results);
-            results
-                .completed_passes
-                .push(FnxAnalysisPass::ArticulationPoints);
-            exec.record_work(base_work);
-            if exec.is_exceeded() {
-                return results;
-            }
+        // Articulation points and bridges remain meaningful within disconnected components.
+        let art_result = articulation_points(&graph);
+        analyze_articulation_points(ir, &table, &art_result, &mut results);
+        results
+            .completed_passes
+            .push(FnxAnalysisPass::ArticulationPoints);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return results;
+        }
 
-            let bridge_result = bridges(&graph);
-            analyze_bridges(ir, &table, &bridge_result, &mut results);
-            results.completed_passes.push(FnxAnalysisPass::Bridges);
-            exec.record_work(base_work);
-            if exec.is_exceeded() {
-                return results;
-            }
+        let bridge_result = bridges(&graph);
+        analyze_bridges(ir, &table, &bridge_result, &mut results);
+        results.completed_passes.push(FnxAnalysisPass::Bridges);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return results;
         }
 
         // Run cycle analysis
@@ -613,7 +622,7 @@ fn analyze_bridges(
     result: &BridgesResult,
     out: &mut FnxAnalysisResults,
 ) {
-    out.bridge_count = result.edges.len();
+    out.bridge_count = 0;
 
     for (source_fnx, target_fnx) in &result.edges {
         let Some(source_idx) = table.get_ir_node_index(source_fnx) else {
@@ -622,6 +631,18 @@ fn analyze_bridges(
         let Some(target_idx) = table.get_ir_node_index(target_fnx) else {
             continue;
         };
+        let (first, second) = if source_idx <= target_idx {
+            (source_fnx, target_fnx)
+        } else {
+            (target_fnx, source_fnx)
+        };
+        let contributors = table.get_edge_meta_all(first, second);
+        let [meta] = contributors.as_slice() else {
+            // Removing one of several parallel or opposing IR edges leaves this connection.
+            continue;
+        };
+        let source_idx = meta.source_index;
+        let target_idx = meta.target_index;
         let source_node = ir.nodes.get(source_idx);
         let target_node = ir.nodes.get(target_idx);
 
@@ -630,22 +651,9 @@ fn analyze_bridges(
             _ => continue,
         };
 
-        // Find the edge span if available
-        let edge_span = ir
-            .edges
-            .iter()
-            .find(|e| {
-                let from_idx = e.from.resolved_node_id(&ir.ports).map(|id| id.0);
-                let to_idx = e.to.resolved_node_id(&ir.ports).map(|id| id.0);
-                match (from_idx, to_idx) {
-                    (Some(f), Some(t)) => {
-                        (f == source_idx && t == target_idx) || (f == target_idx && t == source_idx)
-                    }
-                    _ => false,
-                }
-            })
-            .map(|e| e.span);
+        let edge_span = ir.edges.get(meta.ir_edge_index).map(|edge| edge.span);
 
+        out.bridge_count += 1;
         let recommendation = StructuredRecommendation::for_bridge_edge(source_name, target_name);
         out.diagnostics.push(FnxDiagnostic {
             code: FnxDiagnosticCode::BRIDGE_EDGE,
@@ -968,6 +976,110 @@ mod tests {
             .filter(|d| d.code == FnxDiagnosticCode::BRIDGE_EDGE)
             .count();
         assert_eq!(bridge_diags, 2);
+    }
+
+    #[test]
+    fn disconnected_graph_keeps_component_articulation_and_bridge_findings() {
+        let mut ir = make_simple_chain();
+        ir.nodes.push(IrNode {
+            id: "Island".to_string(),
+            ..Default::default()
+        });
+        let results = analyze_structure(&ir);
+        assert!(!results.is_connected);
+        assert_eq!(results.component_count, 2);
+        assert_eq!(results.articulation_point_count, 1);
+        assert_eq!(results.bridge_count, 2);
+        assert!(results.completed(FnxAnalysisPass::ArticulationPoints));
+        assert!(results.completed(FnxAnalysisPass::Bridges));
+        assert!(results.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == FnxDiagnosticCode::ARTICULATION_POINT
+                && diagnostic.related_nodes == vec![IrNodeId(1)]
+        }));
+        assert_eq!(
+            results
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == FnxDiagnosticCode::BRIDGE_EDGE)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn parallel_and_opposing_edges_are_not_individual_bridges() {
+        let mut ir = make_simple_chain();
+        ir.edges.push(ir.edges[0].clone());
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+        for collapse_parallel_edges in [false, true] {
+            let projection = ProjectionConfig {
+                collapse_parallel_edges,
+                ..Default::default()
+            };
+            let mut cache = crate::fnx_cache::AnalysisCache::default();
+            let results = analyze_structure_cached(&ir, &projection, &mut cache);
+            assert_eq!(results.bridge_count, 1);
+            let bridges: Vec<_> = results
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == FnxDiagnosticCode::BRIDGE_EDGE)
+                .collect();
+            assert_eq!(bridges.len(), 1);
+            assert_eq!(bridges[0].related_edges, vec![(1, 2)]);
+            assert_eq!(bridges[0].span, Some(ir.edges[1].span));
+        }
+    }
+
+    #[test]
+    fn bridge_diagnostic_preserves_original_direction_and_source_span() {
+        let mut ir = make_simple_chain();
+        ir.edges[0].from = IrEndpoint::Node(IrNodeId(1));
+        ir.edges[0].to = IrEndpoint::Node(IrNodeId(0));
+        ir.edges[0].span.start.line = 17;
+        ir.edges[0].span.start.col = 4;
+        ir.edges[0].span.start.byte = 120;
+        ir.edges[0].span.end = ir.edges[0].span.start;
+        let results = analyze_structure(&ir);
+        let bridge = results
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.related_edges == vec![(1, 0)])
+            .expect("B to A bridge");
+        assert_eq!(bridge.code, FnxDiagnosticCode::BRIDGE_EDGE);
+        assert_eq!(bridge.related_nodes, vec![IrNodeId(1), IrNodeId(0)]);
+        assert_eq!(bridge.span, Some(ir.edges[0].span));
+        assert!(bridge.message.contains("'B' → 'A'"));
+        assert_eq!(results.bridge_count, 2);
+    }
+
+    #[test]
+    fn cached_diagnostics_apply_self_loop_projection_policy() {
+        let mut ir = make_simple_chain();
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            ..Default::default()
+        });
+        let mut cache = crate::fnx_cache::AnalysisCache::default();
+        let keep = ProjectionConfig::default();
+        let remove = ProjectionConfig {
+            preserve_self_loops: false,
+            ..Default::default()
+        };
+        let preserved = analyze_structure_cached(&ir, &keep, &mut cache);
+        let removed = analyze_structure_cached(&ir, &remove, &mut cache);
+        assert_eq!(preserved.cycle_count, 1);
+        assert_eq!(removed.cycle_count, 0);
+        assert_eq!(removed.bridge_count, 2);
+        let hits = cache.stats().hits;
+        let cached = analyze_structure_cached(&ir, &remove, &mut cache);
+        assert_eq!(cached.cycle_count, 0);
+        assert_eq!(cache.stats().hits, hits + 1);
+        assert!(cached.budget_exceeded.is_none());
     }
 
     #[test]

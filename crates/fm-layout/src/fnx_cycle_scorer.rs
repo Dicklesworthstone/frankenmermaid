@@ -13,13 +13,13 @@
 
 use std::collections::BTreeMap;
 
-use fm_core::{IrEndpoint, IrPort, MermaidDiagramIr};
+use fm_core::MermaidDiagramIr;
 use fnx_algorithms::{
     ArticulationPointsResult, BridgesResult, DegreeCentralityResult, articulation_points, bridges,
     degree_centrality,
 };
 
-use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
+use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph_with_policy};
 use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
 
 // ============================================================================
@@ -147,7 +147,14 @@ pub fn compute_criticality_scores_cached(
     if let Some(cached) = cache.get_criticality(ir, proj_config, scoring_config) {
         return cached;
     }
-    let results = compute_criticality_scores(ir, scoring_config);
+    let results = compute_criticality_scores_with_projection_and_budget(
+        ir,
+        proj_config,
+        scoring_config,
+        AnalysisBudget::default(),
+    )
+    .into_value()
+    .unwrap_or_default();
     if results.budget_exceeded.is_none() {
         cache.put_criticality(ir, proj_config, scoring_config, results.clone());
     }
@@ -175,6 +182,20 @@ pub fn compute_criticality_scores_with_budget(
     config: &CriticalityScoringConfig,
     budget: AnalysisBudget,
 ) -> BudgetResult<CriticalityScoringResults> {
+    compute_criticality_scores_with_projection_and_budget(
+        ir,
+        &ProjectionConfig::default(),
+        config,
+        budget,
+    )
+}
+
+fn compute_criticality_scores_with_projection_and_budget(
+    ir: &MermaidDiagramIr,
+    projection: &ProjectionConfig,
+    config: &CriticalityScoringConfig,
+    budget: AnalysisBudget,
+) -> BudgetResult<CriticalityScoringResults> {
     let mut executor = BudgetExecutor::new(budget);
     let mut outcome = executor.execute_with_progress(|exec| {
         if ir.nodes.is_empty() || ir.edges.is_empty() {
@@ -182,7 +203,7 @@ pub fn compute_criticality_scores_with_budget(
         }
 
         let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
-        let (graph, table) = ir_to_graph(ir);
+        let (graph, table, _) = ir_to_graph_with_policy(ir, projection);
         exec.record_work(base_work);
         if exec.is_exceeded() {
             return CriticalityScoringResults::default();
@@ -215,22 +236,19 @@ pub fn compute_criticality_scores_with_budget(
         let bridge_set = build_bridge_set(&bridges_result, &table);
         let articulation_set = build_articulation_set(&articulation_result, &table);
         let centrality_map = build_centrality_map(&centrality_result, &table);
-        let pair_counts = build_edge_pair_counts(ir);
+        let pair_counts = build_edge_pair_counts(&table);
 
-        // Score each edge
-        for (edge_idx, edge) in ir.edges.iter().enumerate() {
+        // Score only the edges retained by the projection, preserving every parallel
+        // contributor while excluding invalid endpoints and policy-removed self-loops.
+        for edge in table.edge_metadata() {
             if exec.is_exceeded() {
                 break;
             }
             exec.record_work(1);
 
-            let source_idx = endpoint_node_index(edge.from, &ir.ports);
-            let target_idx = endpoint_node_index(edge.to, &ir.ports);
-
-            let (source_idx, target_idx) = match (source_idx, target_idx) {
-                (Some(s), Some(t)) => (s, t),
-                _ => continue, // Skip unresolved edges
-            };
+            let edge_idx = edge.ir_edge_index;
+            let source_idx = edge.source_index;
+            let target_idx = edge.target_index;
 
             let pair = (source_idx.min(target_idx), source_idx.max(target_idx));
             let multiplicity = pair_counts.get(&pair).copied().unwrap_or(1);
@@ -283,10 +301,6 @@ pub fn compute_criticality_scores_with_budget(
     outcome
 }
 
-fn endpoint_node_index(endpoint: IrEndpoint, ports: &[IrPort]) -> Option<usize> {
-    endpoint.resolved_node_id(ports).map(|id| id.0)
-}
-
 fn build_bridge_set(
     result: &BridgesResult,
     table: &ProjectionTable,
@@ -327,16 +341,13 @@ fn build_centrality_map(
         .collect()
 }
 
-fn build_edge_pair_counts(ir: &MermaidDiagramIr) -> BTreeMap<(usize, usize), usize> {
+fn build_edge_pair_counts(table: &ProjectionTable) -> BTreeMap<(usize, usize), usize> {
     let mut counts = BTreeMap::new();
-    for edge in &ir.edges {
-        let Some(source_idx) = endpoint_node_index(edge.from, &ir.ports) else {
-            continue;
-        };
-        let Some(target_idx) = endpoint_node_index(edge.to, &ir.ports) else {
-            continue;
-        };
-        let pair = (source_idx.min(target_idx), source_idx.max(target_idx));
+    for edge in table.edge_metadata() {
+        let pair = (
+            edge.source_index.min(edge.target_index),
+            edge.source_index.max(edge.target_index),
+        );
         *counts.entry(pair).or_insert(0) += 1;
     }
     counts
@@ -349,7 +360,7 @@ fn build_edge_pair_counts(ir: &MermaidDiagramIr) -> BTreeMap<(usize, usize), usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{IrEdge, IrNode, IrNodeId, IrPort, IrPortId, NodeShape};
+    use fm_core::{IrEdge, IrEndpoint, IrNode, IrNodeId, IrPort, IrPortId, NodeShape};
 
     fn make_chain_ir() -> MermaidDiagramIr {
         // A -> B -> C (chain, both edges are bridges)
@@ -606,6 +617,95 @@ mod tests {
                 "bridge edge should have score > base"
             );
         }
+    }
+
+    #[test]
+    fn cached_criticality_obeys_projection_and_preserves_parallel_contributors() {
+        let mut ir = make_chain_ir();
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+        let scoring = CriticalityScoringConfig::default();
+        let mut cache = crate::fnx_cache::AnalysisCache::default();
+        let mut projection = ProjectionConfig::default();
+        let preserved =
+            compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+        assert_eq!(preserved.scores.len(), 4);
+        assert_eq!(preserved.bridge_count, 1);
+        assert!(!preserved.scores[&0].is_bridge);
+        assert!(!preserved.scores[&2].is_bridge);
+        assert!(preserved.scores[&1].is_bridge);
+        assert_eq!(preserved.scores[&0].source_centrality, 1.5);
+
+        projection.preserve_self_loops = false;
+        for collapse_parallel_edges in [false, true] {
+            projection.collapse_parallel_edges = collapse_parallel_edges;
+            let removed =
+                compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+            assert_eq!(removed.scores.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+            assert_eq!(removed.bridge_count, 1);
+            assert!(!removed.scores[&0].is_bridge);
+            assert!(!removed.scores[&2].is_bridge);
+            assert!(removed.scores[&1].is_bridge);
+            assert_eq!(removed.scores[&0].source_centrality, 0.5);
+            let hits = cache.stats().hits;
+            let cached =
+                compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+            assert_eq!(cache.stats().hits, hits + 1);
+            assert_eq!(cached.get_score(0), removed.get_score(0));
+            assert_eq!(cached.scores.len(), 3);
+        }
+    }
+
+    #[test]
+    fn criticality_omits_invalid_node_and_port_endpoints() {
+        let mut ir = make_chain_ir();
+        ir.ports.push(IrPort {
+            node: IrNodeId(2),
+            name: "valid".to_string(),
+            ..Default::default()
+        });
+        ir.ports.push(IrPort {
+            node: IrNodeId(99),
+            name: "invalid".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Port(IrPortId(0)),
+            ..Default::default()
+        });
+        for invalid in [
+            IrEndpoint::Node(IrNodeId(99)),
+            IrEndpoint::Port(IrPortId(1)),
+            IrEndpoint::Port(IrPortId(99)),
+            IrEndpoint::Unresolved,
+        ] {
+            for (from, to) in [
+                (invalid, IrEndpoint::Node(IrNodeId(1))),
+                (IrEndpoint::Node(IrNodeId(1)), invalid),
+            ] {
+                ir.edges.push(IrEdge {
+                    from,
+                    to,
+                    ..Default::default()
+                });
+            }
+        }
+        let results = compute_criticality_scores(&ir, &CriticalityScoringConfig::default());
+        assert_eq!(results.scores.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(results.bridge_count, 1);
+        assert!(!results.scores[&1].is_bridge);
+        assert!(!results.scores[&2].is_bridge);
+        assert!(results.scores[&2].source_is_articulation);
+        assert_eq!(results.scores[&2].target_centrality, 0.5);
     }
 
     #[test]
