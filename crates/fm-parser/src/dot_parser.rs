@@ -3456,18 +3456,20 @@ mod tests {
     fn quoted_node_ids_with_brackets_do_not_start_attribute_blocks() {
         let parsed = parse_dot("digraph G { \"node[a]\" -> b; }");
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"node_a"));
+        assert_eq!(ids, vec!["node[a]", "b"]);
+        assert_eq!(parsed.ir.edges.len(), 1);
     }
 
     #[test]
-    fn symbol_only_node_ids_fall_back_to_hashed_ids() {
+    fn symbol_only_node_ids_preserve_distinct_authored_ids() {
         let parsed = parse_dot("digraph G { \"***\" -> \"$$$\"; }");
         assert_eq!(parsed.ir.nodes.len(), 2);
         let first = parsed.ir.nodes[0].id.as_str();
         let second = parsed.ir.nodes[1].id.as_str();
-        assert!(first.starts_with("id_"));
-        assert!(second.starts_with("id_"));
+        assert_eq!(first, "***");
+        assert_eq!(second, "$$$");
         assert_ne!(first, second);
+        assert_eq!(parsed.ir.edges.len(), 1);
     }
 
     #[test]

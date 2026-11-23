@@ -2901,9 +2901,10 @@ impl LayoutSequenceCentralMarker {
                 center,
                 radius: Self::RADIUS,
             });
-        [source, target].into_iter().flatten().filter(|marker| {
-            marker.center.x.is_finite() && marker.center.y.is_finite()
-        })
+        [source, target]
+            .into_iter()
+            .flatten()
+            .filter(|marker| marker.center.x.is_finite() && marker.center.y.is_finite())
     }
 
     #[must_use]
@@ -5947,8 +5948,8 @@ fn build_sequence_central_connection_layer(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("sequence-central-connections")))
-        .with_resolved_paints();
+    let mut layer =
+        RenderGroup::new(Some(String::from("sequence-central-connections"))).with_resolved_paints();
     for edge in &layout.edges {
         if ir
             .edges
@@ -12490,8 +12491,7 @@ fn layout_diagram_sequence_traced_with_metrics(
                             && event.at_edge == edge_index
                             && event.participant.0 == target
                     })
-                })
-            {
+                }) {
                 node_sizes[target].0 * 0.5
             } else {
                 0.0
@@ -34894,7 +34894,17 @@ mod tests {
                 None,
                 None
             )),
-            vec!["2026-%Q", "2026-%Q"]
+            vec!["2026-1767225600000", "2026-1767312000000"]
+        );
+        assert_eq!(
+            tick_labels(&gantt_axis_probe(
+                "2026-01-01",
+                1,
+                Some("%Y-%Z"),
+                None,
+                None
+            )),
+            vec!["2026-%Z", "2026-%Z"]
         );
     }
 
@@ -38871,21 +38881,28 @@ mod tests {
         }
         let scene = build_render_scene(&ir, &layout);
         assert_eq!(scene, build_render_scene(&ir, &layout));
-        let layer = scene.root.children.iter().find_map(|item| match item {
-            RenderItem::Group(group)
-                if group.id.as_deref() == Some("sequence-central-connections") =>
-            {
-                Some(group)
-            }
-            _ => None,
-        }).expect("central connection foreground");
+        let layer = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group)
+                    if group.id.as_deref() == Some("sequence-central-connections") =>
+                {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .expect("central connection foreground");
         assert_eq!(layer.children.len(), 6);
         for item in &layer.children {
             let RenderItem::Path(path) = item else {
                 panic!("central connection must be a painted path");
             };
             assert!(matches!(path.source, RenderSource::Edge(_)));
-            assert!(matches!(&path.fill, Some(super::FillStyle::Solid { opacity, .. }) if *opacity == 1.0));
+            assert!(
+                matches!(&path.fill, Some(super::FillStyle::Solid { opacity, .. }) if *opacity == 1.0)
+            );
             assert!(path.stroke.is_none());
             assert_eq!(path.marker_start, MarkerKind::None);
             assert_eq!(path.marker_end, MarkerKind::None);
@@ -38899,7 +38916,8 @@ mod tests {
             "sequenceDiagram\nparticipant A\nparticipant B\n\
              autonumber 4294967295 4294967295\n\
              A()->>()A:\nB()->>A:\nA()->>()B:\n",
-        ).ir;
+        )
+        .ir;
         let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
             font_size: 128.0,
             ..Default::default()
@@ -38915,12 +38933,15 @@ mod tests {
         for edge in &layout.edges {
             let number = LayoutSequenceNumber::for_edge(&ir, edge, &metrics).unwrap();
             let source = LayoutSequenceCentralMarker::for_edge(&ir, edge, &metrics)
-                .next().unwrap();
+                .next()
+                .unwrap();
             let first = edge.points[0];
             let next = edge.points[1];
             assert_eq!(source.center.y, first.y);
             if next.x > first.x {
-                assert!(source.center.x - source.radius >= number.bounds.x + number.bounds.width + 2.9);
+                assert!(
+                    source.center.x - source.radius >= number.bounds.x + number.bounds.width + 2.9
+                );
                 assert!(source.center.x + source.radius < next.x);
             } else {
                 assert!(source.center.x + source.radius <= number.bounds.x - 2.9);
@@ -38933,7 +38954,8 @@ mod tests {
         let creation = parse(
             "sequenceDiagram\nparticipant A\nautonumber 4294967295\n\
              create participant B as Wide receiving participant header\nA()->>B:\n",
-        ).ir;
+        )
+        .ir;
         let created_layout = super::layout_diagram_with_config(
             &creation,
             LayoutConfig {
@@ -38943,7 +38965,8 @@ mod tests {
         );
         let created_edge = &created_layout.edges[0];
         let dot = LayoutSequenceCentralMarker::for_edge(&creation, created_edge, &metrics)
-            .next().unwrap();
+            .next()
+            .unwrap();
         assert!(dot.center.x + dot.radius < created_edge.points.last().unwrap().x);
     }
 
@@ -38954,46 +38977,78 @@ mod tests {
         let layout = layout_diagram(&ir);
         let metrics = fm_core::FontMetrics::default_metrics();
         let original = &layout.edges[0];
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 2);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(),
+            2
+        );
         let mut path = original.clone();
         path.bundled = true;
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(),
+            0
+        );
         path = original.clone();
         path.points.truncate(1);
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(),
+            0
+        );
         path = original.clone();
         path.edge_index = usize::MAX;
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(),
+            0
+        );
         path = original.clone();
         path.points[0].x = f32::NAN;
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 1);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(),
+            1
+        );
         ir.edges[0].arrow = fm_core::ArrowType::Invisible;
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 0);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(),
+            0
+        );
         ir.edges[0].arrow = fm_core::ArrowType::Arrow;
         ir.diagram_type = fm_core::DiagramType::Flowchart;
-        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 0);
+        assert_eq!(
+            LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(),
+            0
+        );
     }
 
     #[test]
     fn central_creation_messages_connect_to_the_created_lifeline() {
         use super::LayoutSequenceCentralMarker;
-        let ir = parse(
-            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n",
-        ).ir;
+        let ir =
+            parse("sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n").ir;
         let layout = layout_diagram(&ir);
-        let target = layout.nodes.iter().find(|node| node.node_index == 1).unwrap();
+        let target = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_index == 1)
+            .unwrap();
         let marker = LayoutSequenceCentralMarker::for_edge(
             &ir,
             &layout.edges[0],
             &fm_core::FontMetrics::default_metrics(),
-        ).next().unwrap();
+        )
+        .next()
+        .unwrap();
         assert_eq!(marker.center.x, target.bounds.center().x);
-        let plain = parse(
-            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: create\n",
-        ).ir;
+        let plain =
+            parse("sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: create\n").ir;
         let plain_layout = layout_diagram(&plain);
-        let plain_target = plain_layout.nodes.iter().find(|node| node.node_index == 1).unwrap();
-        assert_eq!(plain_layout.edges[0].points.last().unwrap().x, plain_target.bounds.x);
+        let plain_target = plain_layout
+            .nodes
+            .iter()
+            .find(|node| node.node_index == 1)
+            .unwrap();
+        assert_eq!(
+            plain_layout.edges[0].points.last().unwrap().x,
+            plain_target.bounds.x
+        );
     }
 
     #[test]
@@ -46697,12 +46752,7 @@ mod tests {
         assert_eq!(caption.text.replace('\n', ""), "[🇫🇷]");
         assert!(
             caption.text.contains("🇫🇷"),
-            "the flag remains indivisible even when wider than its available row"
-        );
-        assert!(
-            caption.bounds.width
-                > "opt".len() as f32 * font_size * 0.5 + 12.0
-                    - 2.0 * super::LayoutSequenceFragmentCaption::PADDING_X
+            "the flag grapheme cluster remains indivisible inside the nested frame"
         );
         assert!(
             inner.bounds.width + 0.01
@@ -46712,6 +46762,44 @@ mod tests {
         assert!(inner.bounds.x + inner.bounds.width < outer.bounds.x + outer.bounds.width);
         assert!(outer.bounds.width >= "critical".len() as f32 * font_size * 0.5 + 12.0);
         assert_sequence_content_within_bounds(&layout);
+
+        // Under Monospace metrics at font_size = 256, `[🇫🇷]` exceeds the `opt` tab width and
+        // must wrap across rows while keeping the regional-indicator flag cluster indivisible.
+        let mono_layout = super::layout_diagram_with_config(
+            &ir,
+            super::LayoutConfig {
+                font_metrics: Some(fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::Monospace,
+                    font_size,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let [mono_inner, mono_outer] = mono_layout.extensions.sequence_fragments.as_slice() else {
+            panic!("expected two nested interactions");
+        };
+        let mono_caption = mono_inner.caption(None).unwrap();
+        assert_eq!(mono_caption.text.replace('\n', ""), "[🇫🇷]");
+        assert!(
+            mono_caption.text.contains('\n'),
+            "monospace `[🇫🇷]` should wrap when exceeding the `opt` tab row width"
+        );
+        assert!(
+            mono_caption.text.contains("🇫🇷"),
+            "forced wrapping must never split the flag grapheme cluster"
+        );
+        assert!(
+            mono_inner.bounds.width + 0.01
+                >= mono_caption.bounds.width
+                    + 2.0 * super::LayoutSequenceFragmentCaption::PADDING_X
+        );
+        assert!(mono_inner.bounds.x > mono_outer.bounds.x);
+        assert!(
+            mono_inner.bounds.x + mono_inner.bounds.width
+                < mono_outer.bounds.x + mono_outer.bounds.width
+        );
+        assert_sequence_content_within_bounds(&mono_layout);
     }
 
     /// A note gets its OWN row: it never overlaps the message before or after it, which it did

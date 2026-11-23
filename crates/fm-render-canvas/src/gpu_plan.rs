@@ -9806,7 +9806,13 @@ mod tests {
         assert_eq!(start, ordinary.arrowheads.len());
         assert_eq!(&direct.arrowheads[..start], ordinary.arrowheads.as_slice());
 
-        let edge = |index| layout.edges.iter().find(|edge| edge.edge_index == index).unwrap();
+        let edge = |index| {
+            layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == index)
+                .unwrap()
+        };
         let expected = [
             (0, edge(0).points[0]),
             (1, *edge(1).points.last().unwrap()),
@@ -9872,8 +9878,7 @@ mod tests {
                     .unwrap();
                 let radius = source.size * 0.4;
                 assert!(
-                    source.position[0] - radius
-                        >= badge.center[0] + badge.half_extent[0] + 2.99
+                    source.position[0] - radius >= badge.center[0] + badge.half_extent[0] + 2.99
                 );
                 assert!(
                     source.position[0] + radius <= edge.points[1].x + 0.01,
@@ -11468,6 +11473,9 @@ mod tests {
             "draw_edge_pass", // Routes, markers, and measured labels already represented above.
             "draw_nodes",
             "draw_sequence_numbers",
+            // Sequence central-connection dots submit via PrimitiveFamily::SequenceCentralConnection
+            // in the foreground marker pass (verified by gpu_pipeline_layout.rs).
+            "draw_sequence_central_connections",
         ];
 
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds

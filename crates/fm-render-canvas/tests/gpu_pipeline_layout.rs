@@ -504,7 +504,10 @@ fn sequence_central_connections_submit_after_created_headers_before_number_badge
 
         let batches = draw_batches(&plan);
         let at = |family| {
-            batches.iter().position(|batch| batch.family == family).unwrap()
+            batches
+                .iter()
+                .position(|batch| batch.family == family)
+                .unwrap()
         };
         let ordinary = at(PrimitiveFamily::Arrowhead);
         let nodes = at(PrimitiveFamily::Node);
@@ -524,7 +527,7 @@ fn sequence_central_connections_submit_after_created_headers_before_number_badge
             .find(|pipeline| pipeline.family == PrimitiveFamily::SequenceCentralConnection)
             .unwrap();
         assert_layout_matches_shader(&pipeline, "Arrowhead");
-        assert_eq!(pipeline.wgsl, fm_render_canvas::gpu_plan::ARROWHEAD_WGSL);
+        assert_eq!(pipeline.wgsl, fm_render_canvas::ARROWHEAD_WGSL);
     }
 }
 

@@ -2829,8 +2829,7 @@ impl Canvas2dRenderer {
             if !sequence_central_stroke_visible(ir, edge.edge_index, &self.config) {
                 continue;
             }
-            let (stroke, _) =
-                resolve_edge_style_with_defaults(ir, edge.edge_index, &self.config);
+            let (stroke, _) = resolve_edge_style_with_defaults(ir, edge.edge_index, &self.config);
             let stroke = stroke.as_deref().unwrap_or(&self.config.edge_stroke);
             let opacity = resolve_edge_opacity(ir, edge.edge_index).unwrap_or(1.0)
                 * resolve_edge_stroke_opacity(ir, edge.edge_index).unwrap_or(1.0);
@@ -5033,7 +5032,14 @@ pub(crate) fn sequence_central_stroke_visible(
     let style = merged_edge_style(ir, edge_index);
     !style
         .get("stroke-width")
-        .and_then(|width| width.trim().trim_end_matches("px").trim().parse::<f64>().ok())
+        .and_then(|width| {
+            width
+                .trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
         .is_some_and(|width| width == 0.0)
 }
 
@@ -9791,7 +9797,13 @@ mod tests {
         let result = Canvas2dRenderer::new(config).render(&layout, &ir, &mut ctx);
         assert_eq!(result.edges_drawn, 4);
         let circles = recorded_central_circles(ctx.operations());
-        let edge = |index| layout.edges.iter().find(|edge| edge.edge_index == index).unwrap();
+        let edge = |index| {
+            layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == index)
+                .unwrap()
+        };
         let expected = [
             edge(0).points[0],
             *edge(1).points.last().unwrap(),
@@ -9800,7 +9812,11 @@ mod tests {
             edge(3).points[0],
             *edge(3).points.last().unwrap(),
         ];
-        assert_eq!(circles.len(), expected.len(), "each authored end draws once");
+        assert_eq!(
+            circles.len(),
+            expected.len(),
+            "each authored end draws once"
+        );
         for (circle, point) in circles.iter().zip(expected) {
             assert_eq!(
                 circle.center,
@@ -9810,7 +9826,10 @@ mod tests {
                 ]
             );
             assert_eq!(circle.radius, 5.0);
-            assert_eq!(circle.color, "#264a6c80", "intrinsic paint alpha is retained");
+            assert_eq!(
+                circle.color, "#264a6c80",
+                "intrinsic paint alpha is retained"
+            );
             assert!((circle.opacity - 0.2).abs() < 1e-6);
         }
         let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
@@ -9818,8 +9837,16 @@ mod tests {
             .iter()
             .filter(|fill| fill.paint.fill == "#264a6c80")
             .collect();
-        assert_eq!(arrows.len(), 4, "central dots do not replace primary arrows");
-        assert!(arrows.iter().all(|fill| (fill.paint.alpha - 0.2).abs() < 1e-6));
+        assert_eq!(
+            arrows.len(),
+            4,
+            "central dots do not replace primary arrows"
+        );
+        assert!(
+            arrows
+                .iter()
+                .all(|fill| (fill.paint.alpha - 0.2).abs() < 1e-6)
+        );
         for label in ["source", "target", "both", "self"] {
             let text = texts.iter().find(|text| text.text == label).unwrap();
             assert!((text.paint.alpha - 0.5).abs() < 1e-6);
@@ -9909,9 +9936,9 @@ mod tests {
         let header_label = ctx
             .operations()
             .iter()
-            .rposition(|operation| {
-                matches!(operation, DrawOperation::FillText(text, _, _) if text == "B")
-            })
+            .rposition(
+                |operation| matches!(operation, DrawOperation::FillText(text, _, _) if text == "B"),
+            )
             .expect("created participant header must actually be painted");
         assert!(circles[0].operation > header_label);
     }
@@ -9949,7 +9976,9 @@ mod tests {
                     &ir, &layout, &scene, &config,
                 ),
             ] {
-                let start = plan.sequence_central_connection_start.unwrap_or(plan.arrowheads.len());
+                let start = plan
+                    .sequence_central_connection_start
+                    .unwrap_or(plan.arrowheads.len());
                 assert_eq!(plan.arrowheads.len() - start, if visible { 2 } else { 0 });
                 assert_eq!(plan.sequence_central_connection_start.is_some(), visible);
             }

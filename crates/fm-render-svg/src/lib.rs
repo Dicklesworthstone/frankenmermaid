@@ -2668,9 +2668,8 @@ fn render_scene_group(
     .then(|| resolve_theme(ir, config));
     let sequence_number_theme =
         (group.id.as_deref() == Some("sequence-numbers")).then(|| resolve_theme(ir, config));
-    let sequence_connection_theme =
-        (group.id.as_deref() == Some("sequence-central-connections"))
-            .then(|| resolve_theme(ir, config));
+    let sequence_connection_theme = (group.id.as_deref() == Some("sequence-central-connections"))
+        .then(|| resolve_theme(ir, config));
     let packet_bit_theme =
         (group.id.as_deref() == Some("packet-bit-labels")).then(|| resolve_theme(ir, config));
     let packet_layer = ir.is_some_and(|ir| ir.diagram_type == DiagramType::PacketBeta)
@@ -17578,7 +17577,9 @@ fn write_sequence_central_connections_into(
     {
         return;
     }
-    let color = style.get("stroke").and_then(|value| fm_layout::scene_paint(value));
+    let color = style
+        .get("stroke")
+        .and_then(|value| fm_layout::scene_paint(value));
     let color = color.as_deref().unwrap_or(&context.colors.edge);
     let opacity = fm_layout::scene_style_opacity(&style, "opacity")
         * fm_layout::scene_style_opacity(&style, "stroke-opacity");
@@ -17593,7 +17594,10 @@ fn write_sequence_central_connections_into(
             .r(marker.radius)
             .fill(color)
             .fill_opacity(opacity)
-            .attr("style", &format!("fill:{color};fill-opacity:{opacity};stroke:none"))
+            .attr(
+                "style",
+                &format!("fill:{color};fill-opacity:{opacity};stroke:none"),
+            )
             .class("fm-sequence-central-connection")
             .attr("aria-hidden", "true");
         let mut circle = apply_source_metadata(
@@ -28590,7 +28594,8 @@ marker#arrow-open path {
     fn created_participant_headers_do_not_cover_central_connections() {
         let ir = fm_parser::parse(
             "sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n",
-        ).ir;
+        )
+        .ir;
         for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
             for force_slow_path in [false, true] {
                 let mut layout = fm_layout::layout_diagram(&ir);
@@ -28605,10 +28610,14 @@ marker#arrow-open path {
                         ..Default::default()
                     },
                 );
-                let dot = svg.find("class=\"fm-sequence-central-connection\"")
+                let dot = svg
+                    .find("class=\"fm-sequence-central-connection\"")
                     .expect("central target circle");
                 let header = svg.rfind(">B</text>").expect("created participant label");
-                assert!(dot > header, "paint the connection after the created header");
+                assert!(
+                    dot > header,
+                    "paint the connection after the created header"
+                );
             }
         }
     }
@@ -28636,9 +28645,14 @@ marker#arrow-open path {
             for dot in dots {
                 assert!(dot.contains("fill=\"#123456\""), "{dot}");
                 let opacity: f32 = dot
-                    .split_once("fill-opacity=\"").unwrap().1
-                    .split('"').next().unwrap()
-                    .parse().unwrap();
+                    .split_once("fill-opacity=\"")
+                    .unwrap()
+                    .1
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 assert!((opacity - 0.2).abs() < 0.001, "{dot}");
             }
         }
@@ -28646,7 +28660,9 @@ marker#arrow-open path {
         let scene = fm_layout::build_render_scene(&ir, &layout);
         let standalone = render_scene_to_svg(&scene, &SvgRenderConfig::default());
         assert_eq!(
-            standalone.matches("class=\"fm-sequence-central-connection\"").count(),
+            standalone
+                .matches("class=\"fm-sequence-central-connection\"")
+                .count(),
             2
         );
         assert!(standalone.contains("fill=\"#123456\""));

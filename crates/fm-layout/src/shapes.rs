@@ -370,6 +370,8 @@ pub fn node_icon_layout(
         width: region.width,
         height: region.height,
     };
+    let right = label_bounds.x + region.width;
+    let bottom = label_bounds.y + region.height;
     let center = match position {
         NodeIconPosition::Above => {
             let reserved = (size + 10.0).min(region.height);
@@ -378,7 +380,10 @@ pub fn node_icon_layout(
                 y: label_bounds.y + reserved / 2.0 + 2.0,
             };
             label_bounds.y += reserved;
-            label_bounds.height -= reserved;
+            label_bounds.height = (bottom - label_bounds.y).max(0.0);
+            if label_bounds.y + label_bounds.height > bottom {
+                label_bounds.height = label_bounds.height.next_down().max(0.0);
+            }
             center
         }
         NodeIconPosition::Left => {
@@ -388,7 +393,10 @@ pub fn node_icon_layout(
                 y: label_bounds.y + region.height / 2.0,
             };
             label_bounds.x += reserved;
-            label_bounds.width -= reserved;
+            label_bounds.width = (right - label_bounds.x).max(0.0);
+            if label_bounds.x + label_bounds.width > right {
+                label_bounds.width = label_bounds.width.next_down().max(0.0);
+            }
             center
         }
     };
@@ -439,12 +447,16 @@ pub fn node_icon_layout_with_metrics(
             // Normally compute_node_size has already allocated this width. Keep a small caption
             // region even for manually supplied undersized boxes; GPU text uses this same finite
             // footprint instead of overflowing into the caption when its atlas lacks shaping.
+            let right = placed.label_bounds.x + placed.label_bounds.width;
             let extra = (width - placed.size)
                 .min((placed.label_bounds.width - metrics.font_size()).max(0.0));
             placed.width += extra;
             placed.center.x += extra / 2.0;
             placed.label_bounds.x += extra;
-            placed.label_bounds.width -= extra;
+            placed.label_bounds.width = (right - placed.label_bounds.x).max(0.0);
+            if placed.label_bounds.x + placed.label_bounds.width > right {
+                placed.label_bounds.width = placed.label_bounds.width.next_down().max(0.0);
+            }
             if width > placed.width {
                 placed.size *= placed.width / width;
             }
