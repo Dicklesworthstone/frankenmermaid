@@ -4,7 +4,6 @@ use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrConstraint, IrStyleTarget, NodeShape, Span,
 };
 use memchr::memchr2;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
@@ -1178,13 +1177,13 @@ fn parse_dot_edge_statement(
         let endpoint_shape = |declared: Option<NodeShape>| {
             declared.or(defaults.node_shape).unwrap_or(NodeShape::Rect)
         };
-        let from = builder.intern_node(
+        let from = builder.intern_node_exact(
             &from_node.id,
             from_node.label.as_deref(),
             endpoint_shape(from_node.shape),
             span,
         );
-        let to = builder.intern_node(
+        let to = builder.intern_node_exact(
             &to_node.id,
             to_node.label.as_deref(),
             endpoint_shape(to_node.shape),
@@ -1308,7 +1307,7 @@ fn parse_dot_node_statement(
         .shape
         .or(defaults.node_shape)
         .unwrap_or(NodeShape::Rect);
-    let node_id = builder.intern_node(&node.id, node.label.as_deref(), shape, span);
+    let node_id = builder.intern_node_exact(&node.id, node.label.as_deref(), shape, span);
     if let Some(node_id) = node_id {
         add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
         // Colors become an `IrStyleRef` on the node, the same shape `style A fill:#f9f` produces in
@@ -1355,10 +1354,9 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     }
 
     let (id_part, attrs) = split_endpoint_and_attrs(trimmed);
-    // Strip DOT port/compass suffixes: "node:port:n" → "node".
-    // Ports use colon syntax: id:port or id:port:compass.
-    let id_without_port = id_part.split(':').next().unwrap_or(id_part);
-    let id = normalize_identifier(id_without_port);
+    // A colon starts a port only outside a quoted or HTML identifier. In particular,
+    // `"service:read":out` and `"service:write":in` are distinct nodes, not `service`.
+    let id = normalize_identifier(dot_id_without_port(id_part))?;
     if id.is_empty() {
         return None;
     }
@@ -1366,6 +1364,32 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     let (label, shape) = attrs.map_or((None, None), parse_dot_node_attributes);
 
     Some(DotNode { id, label, shape })
+}
+
+fn dot_id_without_port(raw: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut html_depth = 0_usize;
+    for (index, ch) in raw.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' | '`' => quote = Some(ch),
+            '<' => html_depth += 1,
+            '>' => html_depth = html_depth.saturating_sub(1),
+            ':' if html_depth == 0 => return &raw[..index],
+            _ => {}
+        }
+    }
+    raw
 }
 
 struct DotAttributeIter<'a> {
@@ -1720,97 +1744,48 @@ fn find_unescaped_quote_end(input: &str) -> Option<usize> {
     None
 }
 
-fn normalize_identifier(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::new();
+/// Decode DOT identity without turning punctuation, spaces or Unicode into another node.
+/// DOT IDs are strings, not output-format identifiers; SVG escaping happens downstream.
+fn normalize_identifier(raw: &str) -> Option<String> {
+    let mut rest = raw.trim();
+    if !rest.starts_with(['"', '\'', '`']) {
+        return Some(crate::normalize_identifier(rest));
     }
 
-    let (cleaned, was_quoted) = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        || (trimmed.starts_with('`') && trimmed.ends_with('`'))
-    {
-        if trimmed.len() < 2 {
-            (trimmed, false)
-        } else {
-            (&trimmed[1..trimmed.len() - 1], true)
+    let mut id = String::with_capacity(rest.len());
+    loop {
+        let quote = rest.chars().next()?;
+        if !matches!(quote, '"' | '\'' | '`') {
+            return None;
         }
-    } else {
-        (trimmed, false)
-    };
-
-    if cleaned.is_empty() {
-        return String::new();
-    }
-
-    // Fast path (parity with the canonical `lib.rs::normalize_identifier`): an identifier already made
-    // up entirely of the bytes the loop below keeps verbatim (ASCII alphanumerics + `_ - . /`) with no
-    // trailing `_` (so `trim_end_matches('_')` is a no-op) normalizes to ITSELF — the overwhelmingly
-    // common case for generated/most DOT node ids. Return one owned copy and skip the char-by-char
-    // rebuild. Byte-identical: the loop pushes each such char unchanged and the trim/fallback leave it
-    // as-is; a non-ASCII byte fails `is_ascii_alphanumeric`, correctly deferring to the slow path.
-    let cleaned_bytes = cleaned.as_bytes();
-    if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
-        && cleaned_bytes
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
-    {
-        return cleaned.to_owned();
-    }
-
-    let mut out = String::with_capacity(cleaned.len());
-    for ch in cleaned.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
-            out.push(ch);
-        } else if ch.is_whitespace() {
-            if !out.is_empty() {
-                out.push('_');
-            }
-        } else if matches!(ch, ':' | ';' | ',') {
-            if !out.is_empty() {
+        let mut chars = rest.char_indices();
+        chars.next();
+        let mut end = None;
+        while let Some((index, ch)) = chars.next() {
+            if ch == '\\' {
+                let (_, escaped) = chars.next()?;
+                if escaped == quote {
+                    id.push(quote);
+                } else if escaped != '\n' {
+                    // DOT unquotes only \"; label escapes such as \n and \t are not
+                    // interpreted in an identifier, and even \\ remains two backslashes.
+                    id.push('\\');
+                    id.push(escaped);
+                }
+            } else if ch == quote {
+                end = Some(index + ch.len_utf8());
                 break;
-            }
-        } else if was_quoted {
-            out.push('_');
-        } else if !out.is_empty() {
-            break;
-        }
-    }
-
-    // Drop trailing `_` in place instead of `out.trim_end_matches('_').to_string()`, which
-    // allocates a second String and copies the whole id. `_` is single-byte ASCII, so the trimmed
-    // byte length is a valid truncation boundary — byte-identical, and a no-op when there is no
-    // trailing `_` (the common case for well-formed DOT ids), reusing `out`'s allocation.
-    let trimmed_len = out.trim_end_matches('_').len();
-    out.truncate(trimmed_len);
-    let mut result = out;
-    if result.is_empty() {
-        let mut fallback = String::with_capacity(cleaned.len());
-        for grapheme in cleaned.graphemes(true) {
-            if grapheme
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-            {
-                fallback.push_str(grapheme);
             } else {
-                fallback.push('_');
+                id.push(ch);
             }
         }
-        result = fallback.trim_matches('_').to_string();
+        rest = rest[end?..].trim_start();
+        if rest.is_empty() {
+            return Some(id);
+        }
+        // Concatenated quoted IDs have the same identity as a single quoted string.
+        rest = rest.strip_prefix('+')?.trim_start();
     }
-    if result.is_empty() {
-        result = format!("id_{:x}", fnv1a_hash(cleaned.as_bytes()));
-    }
-    result
-}
-
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 fn is_directed_graph_cleaned(cleaned_input: &str) -> bool {
@@ -1940,7 +1915,7 @@ fn parse_subgraph_start(
     let key = if body.is_empty() {
         format!("cluster_anon_line_{line_number}")
     } else {
-        normalize_identifier(body)
+        normalize_identifier(body)?
     };
 
     if key.is_empty() {
@@ -1993,14 +1968,15 @@ fn normalize_dot_body(body: &str) -> String {
     output
 }
 
-/// Split a string on whitespace while respecting quoted sections.
+/// Split simple DOT edge-group members on whitespace, semicolons, or commas.
 ///
 /// Handles both double and single quotes. Quoted strings are preserved intact.
 /// For example: `"node 1" B 'node 2'` → `["\"node 1\"", "B", "'node 2'"]`
-fn split_whitespace_respecting_quotes(input: &str) -> Vec<&str> {
+fn split_dot_group_members(input: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut start = 0;
     let mut in_quote: Option<char> = None;
+    let mut escaped = false;
     let bytes = input.as_bytes();
 
     for (i, &b) in bytes.iter().enumerate() {
@@ -2008,14 +1984,24 @@ fn split_whitespace_respecting_quotes(input: &str) -> Vec<&str> {
 
         match in_quote {
             Some(quote_char) => {
-                if ch == quote_char {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote_char {
                     in_quote = None;
                 }
             }
             None => {
                 if ch == '"' || ch == '\'' {
                     in_quote = Some(ch);
-                } else if ch.is_ascii_whitespace() {
+                } else if ch.is_ascii_whitespace() || matches!(ch, ';' | ',') {
+                    if ch.is_ascii_whitespace()
+                        && (input[start..i].trim_end().ends_with('+')
+                            || input[i..].trim_start().starts_with('+'))
+                    {
+                        continue;
+                    }
                     if i > start {
                         let token = &input[start..i];
                         if !token.trim().is_empty() {
@@ -2039,13 +2025,49 @@ fn split_whitespace_respecting_quotes(input: &str) -> Vec<&str> {
     result
 }
 
+/// Structural characters outside opaque DOT strings. Byte positions still refer to the
+/// original source, so braces and edge operators inside a node name cannot split a group.
+fn dot_syntax_chars(input: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut html_depth = 0_usize;
+    input.char_indices().filter_map(move |(index, ch)| {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            return None;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                None
+            }
+            '<' => {
+                html_depth += 1;
+                None
+            }
+            '>' => {
+                html_depth = html_depth.saturating_sub(1);
+                None
+            }
+            _ if html_depth == 0 => Some((index, ch)),
+            _ => None,
+        }
+    })
+}
+
 /// Pre-expand DOT edge group syntax: `A -> {B C D}` → `A -> B; A -> C; A -> D`.
 /// This must run BEFORE `normalize_dot_body` which inserts semicolons around braces.
 fn expand_edge_groups(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
 
-    while let Some(brace_start) = rest.find('{') {
+    while let Some((brace_start, _)) = dot_syntax_chars(rest).find(|(_, ch)| *ch == '{') {
         // Check if this brace is preceded by an edge operator (-> or --)
         let before = &rest[..brace_start];
         let is_edge_group = before.trim_end().ends_with("->") || before.trim_end().ends_with("--");
@@ -2057,12 +2079,14 @@ fn expand_edge_groups(input: &str) -> String {
             continue;
         }
 
-        let Some(brace_end) = rest[brace_start..].find('}') else {
+        let Some((brace_end, _)) =
+            dot_syntax_chars(&rest[brace_start + 1..]).find(|(_, ch)| *ch == '}')
+        else {
             // Unclosed brace — pass through rest.
             output.push_str(rest);
             return output;
         };
-        let brace_end = brace_start + brace_end;
+        let brace_end = brace_start + 1 + brace_end;
 
         // Extract source node (everything before the operator).
         let operator_end = before.trim_end().len();
@@ -2070,14 +2094,17 @@ fn expand_edge_groups(input: &str) -> String {
         let operator = &before.trim_end()[operator_end - op_len..operator_end];
 
         let mut last_idx = 0;
-        let bytes = &before.as_bytes()[..operator_end - op_len];
-        for i in 0..bytes.len() {
-            let is_sep =
-                bytes[i] == b';' || bytes[i] == b'\n' || bytes[i] == b'{' || bytes[i] == b'}';
-            let is_edge_op =
-                i > 0 && bytes[i - 1] == b'-' && (bytes[i] == b'>' || bytes[i] == b'-');
-            if is_sep || is_edge_op {
-                last_idx = i + 1;
+        let source_prefix = &before[..operator_end - op_len];
+        for (index, ch) in dot_syntax_chars(source_prefix) {
+            if matches!(ch, ';' | '\n' | '{' | '}') {
+                last_idx = index + ch.len_utf8();
+            } else if ch == '-'
+                && source_prefix
+                    .as_bytes()
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next, b'>' | b'-'))
+            {
+                last_idx = index + 2;
             }
         }
 
@@ -2088,7 +2115,7 @@ fn expand_edge_groups(input: &str) -> String {
 
         // Extract group members (respecting quotes).
         let inner = rest[brace_start + 1..brace_end].trim();
-        let members = split_whitespace_respecting_quotes(inner);
+        let members = split_dot_group_members(inner);
 
         // Expand: emit "source -> member" for each member.
         if members.is_empty() {
@@ -3514,7 +3541,6 @@ fn dot_edge_group_expands_to_multiple_edges() {
 #[test]
 fn dot_edge_group_with_quoted_nodes() {
     // Quoted nodes with spaces in edge groups
-    // Spaces are normalized to underscores by normalize_identifier()
     let input = r#"digraph G { A -> {"node 1" "node 2"}; }"#;
     let result = parse_dot(input);
     let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -3530,15 +3556,15 @@ fn dot_edge_group_with_quoted_nodes() {
         "Missing source node A, got: {:?}",
         node_ids
     );
-    // Spaces in quoted IDs are normalized to underscores
+    // Spaces are part of the authored identity, not interchangeable with underscores.
     assert!(
-        node_ids.contains(&"node_1"),
-        "Missing 'node_1', got: {:?}",
+        node_ids.contains(&"node 1"),
+        "Missing 'node 1', got: {:?}",
         node_ids
     );
     assert!(
-        node_ids.contains(&"node_2"),
-        "Missing 'node_2', got: {:?}",
+        node_ids.contains(&"node 2"),
+        "Missing 'node 2', got: {:?}",
         node_ids
     );
 }
@@ -3557,13 +3583,13 @@ fn dot_edge_group_with_single_quoted_nodes() {
         node_ids
     );
     assert!(
-        node_ids.contains(&"node_1"),
-        "Missing 'node_1', got: {:?}",
+        node_ids.contains(&"node 1"),
+        "Missing 'node 1', got: {:?}",
         node_ids
     );
     assert!(
-        node_ids.contains(&"node_2"),
-        "Missing 'node_2', got: {:?}",
+        node_ids.contains(&"node 2"),
+        "Missing 'node 2', got: {:?}",
         node_ids
     );
 }
@@ -3626,4 +3652,167 @@ fn single_quoted_identifiers_with_semicolons() {
         result.ir.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
     );
     assert_eq!(result.ir.edges.len(), 1, "expected 1 edge");
+    assert!(result.ir.nodes.iter().any(|node| node.id == "foo;bar"));
+}
+
+#[test]
+fn dot_quoted_identifiers_preserve_distinct_topology_and_ports() {
+    let source = r#"digraph G {
+        "service:read" [label="Read service", shape=diamond];
+        "service:read":out:n -> "service:write":in:s;
+        "service:write" -> "node 1" -> node_1 -> "node;1" -> "node,1";
+        "service:read" -> service;
+        " node " -> node -> node_;
+    }"#;
+    let result = crate::parse(source);
+    let ids = result
+        .ir
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([
+            "service:read",
+            "service:write",
+            "node 1",
+            "node_1",
+            "node;1",
+            "node,1",
+            "service",
+            " node ",
+            "node",
+            "node_",
+        ])
+    );
+    let endpoints = result
+        .ir
+        .edges
+        .iter()
+        .map(|edge| {
+            let fm_core::IrEndpoint::Node(from) = edge.from else {
+                panic!("DOT source must resolve to its node");
+            };
+            let fm_core::IrEndpoint::Node(to) = edge.to else {
+                panic!("DOT target must resolve to its node");
+            };
+            (
+                result.ir.nodes[from.0].id.as_str(),
+                result.ir.nodes[to.0].id.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        endpoints,
+        [
+            ("service:read", "service:write"),
+            ("service:write", "node 1"),
+            ("node 1", "node_1"),
+            ("node_1", "node;1"),
+            ("node;1", "node,1"),
+            ("service:read", "service"),
+            (" node ", "node"),
+            ("node", "node_"),
+        ]
+    );
+    let read = result
+        .ir
+        .nodes
+        .iter()
+        .find(|node| node.id == "service:read")
+        .unwrap();
+    assert_eq!(read.shape, NodeShape::Diamond);
+    assert_eq!(result.ir.labels[read.label.unwrap().0].text, "Read service");
+}
+
+#[test]
+fn dot_unicode_identifiers_and_quoted_aliases_keep_their_identity() {
+    let result = parse_dot(
+        r#"digraph G {
+        Café -> Cafè -> 中文 -> "中文" -> "Café" -> Caf_;
+        "日本語" -> 日本語;
+        "é" -> "é";
+    }"#,
+    );
+    let ids = result
+        .ir
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["Café", "Cafè", "中文", "Caf_", "日本語", "é", "é"]);
+    assert_eq!(result.ir.edges.len(), 7);
+}
+
+#[test]
+fn dot_quoted_id_escapes_and_concatenation_do_not_become_label_escapes() {
+    let result = parse_dot(
+        r#"digraph G {
+        "say \"hi\" now" -> {"literal\n" "literal\\n" "service:" + "write"};
+        "service:write" -> "say \"hi\" now";
+    }"#,
+    );
+    let ids = result
+        .ir
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "say \"hi\" now",
+            r"literal\n",
+            r"literal\\n",
+            "service:write"
+        ]
+    );
+    assert_eq!(result.ir.edges.len(), 4);
+}
+
+#[test]
+fn malformed_dot_quoted_ids_are_diagnosed_without_creating_partial_nodes() {
+    let result = parse_dot(r#"digraph G { A -> "unterminated; }"#);
+    assert!(result.ir.edges.is_empty());
+    assert!(result.ir.nodes.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("invalid DOT edge target"))
+    );
+}
+
+#[test]
+fn dot_edge_groups_keep_quoted_syntax_opaque_and_accept_statement_separators() {
+    let result = parse_dot(
+        r#"digraph G {
+        "source; -> { literal" -> {"target }"; "target,2", "//not a comment" "/*literal*/"};
+        "target }" -> "node" -> "edge" -> "subgraph";
+    }"#,
+    );
+    let ids = result
+        .ir
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "source; -> { literal",
+            "target }",
+            "target,2",
+            "//not a comment",
+            "/*literal*/",
+            "node",
+            "edge",
+            "subgraph"
+        ]
+    );
+    assert_eq!(result.ir.edges.len(), 7, "{:?}", result.warnings);
+    for edge in &result.ir.edges[..4] {
+        assert_eq!(edge.from, fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)));
+    }
 }

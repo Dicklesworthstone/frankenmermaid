@@ -2528,6 +2528,18 @@ impl IrBuilder {
         self.intern_node_auto(id, label.map(NodeLabelInput::Plain), shape, span, false)
     }
 
+    /// Intern an already-decoded identifier whose whitespace belongs to its identity.
+    /// DOT quoted IDs, for example, distinguish `" a "` from `"a"`.
+    pub(crate) fn intern_node_exact(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto_normalized(id, label.map(NodeLabelInput::Plain), shape, span, false)
+    }
+
     /// Intern a generated node whose id is known fresh by the caller, consuming the
     /// owned id and plain label instead of cloning them through the generic path.
     pub(crate) fn intern_fresh_node_owned_label(

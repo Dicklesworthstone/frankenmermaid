@@ -615,3 +615,54 @@ fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     assert_eq!(members, ["a", "b", "c", "d"]);
     assert_eq!(parsed.ir.constraints.len(), 1);
 }
+
+#[test]
+fn dot_authored_identifiers_survive_layout_constraints_and_safe_svg_output() {
+    let source = r#"digraph G {
+        rankdir=LR;
+        "service:read" [label="Reader"];
+        "service:write" [label="Writer"];
+        "service:read":out -> "service:write":in [minlen=3];
+        "node 1" -> node_1;
+        "Café" -> Cafè;
+        "say \"hi\" & <safe>" -> "service:read";
+    }"#;
+    let parsed = parse(source);
+    assert_eq!(parsed.ir.nodes.len(), 7, "{:?}", parsed.warnings);
+    assert!(parsed.ir.constraints.iter().any(|constraint| matches!(
+        constraint,
+        IrConstraint::MinLength { from_id, to_id, min_len: 3, .. }
+            if from_id == "service:read" && to_id == "service:write"
+    )));
+    let layout = layout_diagram(&parsed.ir);
+    let expected = parsed
+        .ir
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let laid_out = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        laid_out, expected,
+        "layout must not normalize authored identities again"
+    );
+    assert_eq!(layout.edges.len(), parsed.ir.edges.len());
+    let svg = fm_render_svg::render_svg(&parsed.ir);
+    assert_eq!(svg, fm_render_svg::render_svg(&parse(source).ir));
+    for (index, node) in parsed.ir.nodes.iter().enumerate() {
+        let element_id = fm_core::mermaid_node_element_id(&node.id, index);
+        assert!(
+            svg.contains(&format!("id=\"{element_id}\"")),
+            "missing SVG node {node:?}"
+        );
+    }
+    assert!(svg.contains("say &quot;hi&quot; &amp; &lt;safe&gt;"));
+    assert!(
+        !svg.contains("<safe>"),
+        "authored IDs must remain escaped in SVG"
+    );
+}
