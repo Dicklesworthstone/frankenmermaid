@@ -2324,8 +2324,8 @@ fn class_colon_shorthand_renders_as_member_rows() {
     }
 }
 
-/// A sequence diagram's messages must run between the lifelines they were declared between, in the
-/// direction they were declared, down the page in declaration order (bd-iicc).
+/// A sequence diagram's messages must run between their declared participants, meeting an active
+/// bar's facing edge or an idle lifeline, in the declared direction and order (bd-iicc).
 ///
 /// sequenceDiagram was the last of the 21 golden diagram types with NO semantic guard, despite
 /// having two fixtures. A byte golden proves the picture has not changed; it cannot prove the
@@ -2333,8 +2333,9 @@ fn class_colon_shorthand_renders_as_member_rows() {
 /// onto one x, leaves every coordinate in the file looking perfectly reasonable.
 ///
 /// Everything is read from the FIXTURE — participants, their aliases, and each message's sender,
-/// receiver and order — so none of it can be satisfied by re-blessing, and geometry is recovered
-/// from the rendered path endpoints rather than from anything the renderer says about itself.
+/// receiver, activation ownership and order — so none of it can be satisfied by re-blessing.
+/// Expected x coordinates come from rendered participant boxes and activation rectangles, not
+/// from the routed message endpoints under test.
 #[test]
 fn sequence_messages_run_between_their_declared_lifelines() {
     let read = fs::read_to_string(golden_dir().join("sequence_advanced.mmd"));
@@ -2349,6 +2350,9 @@ fn sequence_messages_run_between_their_declared_lifelines() {
     let mut participants: Vec<(String, String)> = Vec::new();
     // Declared messages in order, as (from_id, to_id, is_reply).
     let mut messages: Vec<(String, String, bool)> = Vec::new();
+    // Activation rectangles are emitted in closing order, including each declared nesting depth.
+    let mut open_activations: Vec<(String, usize)> = Vec::new();
+    let mut activation_owners: Vec<(String, usize)> = Vec::new();
     for line in source.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("participant ") {
@@ -2356,6 +2360,20 @@ fn sequence_messages_run_between_their_declared_lifelines() {
                 .split_once(" as ")
                 .map_or((rest, rest), |(i, d)| (i.trim(), d.trim()));
             participants.push((id.to_string(), display.to_string()));
+            continue;
+        }
+        if let Some(who) = line.strip_prefix("activate ") {
+            let who = who.trim();
+            let depth = open_activations.iter().filter(|(id, _)| id == who).count();
+            open_activations.push((who.to_string(), depth));
+            continue;
+        }
+        if let Some(who) = line.strip_prefix("deactivate ") {
+            let index = open_activations
+                .iter()
+                .rposition(|(id, _)| id == who.trim())
+                .expect("fixture deactivation must close a declared activation");
+            activation_owners.push(open_activations.remove(index));
             continue;
         }
         if line.starts_with("Note") || line.starts_with("alt ") || line.starts_with("else") {
@@ -2386,6 +2404,10 @@ fn sequence_messages_run_between_their_declared_lifelines() {
         "the fixture must declare BOTH request and reply messages, or the direction assertion \
          below is vacuous"
     );
+    assert!(
+        !activation_owners.is_empty() && open_activations.is_empty(),
+        "the fixture must declare closed activation blocks for the docking guard"
+    );
 
     let svg = render_fixture("sequence_advanced");
     assert!(
@@ -2411,6 +2433,66 @@ fn sequence_messages_run_between_their_declared_lifelines() {
             lifeline_x(right)
         );
     }
+
+    // SVG coordinates are printed to two decimal places. Require the actual facing edge rather
+    // than admitting the entire bar width as endpoint tolerance; centerline docking must fail.
+    const SVG_COORDINATE_TOLERANCE: f32 = 0.02;
+    let activation_bars: Vec<(f32, f32, f32, f32)> = svg
+        .split("<rect")
+        .skip(1)
+        .filter_map(|segment| segment.split_once('>').map(|(tag, _)| tag))
+        .filter(|tag| tag.contains("class=\"fm-activation-bar\""))
+        .map(|tag| {
+            let number = |key: &str| -> f32 {
+                let attribute = format!(" {key}=\"");
+                let rest = tag
+                    .split_once(attribute.as_str())
+                    .map(|(_, rest)| rest)
+                    .expect("activation rectangle must have every geometry attribute");
+                let value = rest
+                    .split_once('"')
+                    .map(|(value, _)| value)
+                    .expect("activation geometry attribute must be closed")
+                    .parse::<f32>()
+                    .expect("activation geometry must be numeric");
+                assert!(value.is_finite(), "activation geometry must be finite");
+                value
+            };
+            let (x, y, width, height) =
+                (number("x"), number("y"), number("width"), number("height"));
+            assert!(width > 0.0 && height > 0.0);
+            (x, y, width, height)
+        })
+        .collect();
+    assert_eq!(
+        activation_bars.len(),
+        activation_owners.len(),
+        "every declared activation must provide a rendered docking surface"
+    );
+    for ((who, depth), (x, _, width, _)) in activation_owners.iter().zip(&activation_bars) {
+        let expected_center = lifeline_x(who) + *depth as f32 * 4.0;
+        assert!(
+            (x + width * 0.5 - expected_center).abs() < SVG_COORDINATE_TOLERANCE,
+            "activation for {who} at depth {depth} must belong to its declared lifeline"
+        );
+    }
+    let attachment_x = |who: &str, y: f32, right: bool| -> f32 {
+        activation_owners
+            .iter()
+            .zip(&activation_bars)
+            .filter(|((owner, _), (_, top, _, height))| {
+                owner == who
+                    && y >= top - SVG_COORDINATE_TOLERANCE
+                    && y <= top + height + SVG_COORDINATE_TOLERANCE
+            })
+            .fold(lifeline_x(who), |face, (_, (x, _, width, _))| {
+                if right {
+                    face.max(x + width)
+                } else {
+                    face.min(*x)
+                }
+            })
+    };
 
     // Rendered message arrows, ordered down the page.
     let mut arrows: Vec<(f32, f32, f32)> = Vec::new(); // (y, start_x, end_x)
@@ -2438,23 +2520,37 @@ fn sequence_messages_run_between_their_declared_lifelines() {
         arrows.len()
     );
 
-    // Each message connects its declared pair, in its declared direction.
+    // Each message connects its declared pair, in its declared direction. Active endpoints
+    // must meet the exposed face, while every idle endpoint must still meet its centerline.
+    let (mut active_endpoints, mut idle_endpoints) = (0_usize, 0_usize);
     for ((from, to, is_reply), (y, start_x, end_x)) in messages.iter().zip(&arrows) {
-        let (want_start, want_end) = (lifeline_x(from), lifeline_x(to));
+        let (source_lifeline, target_lifeline) = (lifeline_x(from), lifeline_x(to));
+        let rightward = source_lifeline < target_lifeline;
+        let (want_start, want_end) = (
+            attachment_x(from, *y, rightward),
+            attachment_x(to, *y, !rightward),
+        );
+        for (attachment, center) in [(want_start, source_lifeline), (want_end, target_lifeline)] {
+            if (attachment - center).abs() > SVG_COORDINATE_TOLERANCE {
+                active_endpoints += 1;
+            } else {
+                idle_endpoints += 1;
+            }
+        }
         assert!(
-            (start_x - want_start).abs() < 1.0,
+            (start_x - want_start).abs() < SVG_COORDINATE_TOLERANCE,
             "{from} -> {to} (reply={is_reply}) at y {y} starts at x {start_x}, but {from}'s \
-             lifeline is at {want_start}"
+             attachment surface is at {want_start} (lifeline {source_lifeline})"
         );
         assert!(
-            (end_x - want_end).abs() < 1.0,
-            "{from} -> {to} (reply={is_reply}) at y {y} ends at x {end_x}, but {to}'s lifeline \
-             is at {want_end}"
+            (end_x - want_end).abs() < SVG_COORDINATE_TOLERANCE,
+            "{from} -> {to} (reply={is_reply}) at y {y} ends at x {end_x}, but {to}'s attachment \
+             surface is at {want_end} (lifeline {target_lifeline})"
         );
         // The sharpest of the three: an implementation that drew every arrow left-to-right, or
         // that swapped sender and receiver on replies, still produces plausible coordinates on
         // the right lifelines — and fails here, because the SIGN must match the declaration.
-        let declared_sign = (want_end - want_start).signum();
+        let declared_sign = (target_lifeline - source_lifeline).signum();
         let rendered_sign = (end_x - start_x).signum();
         assert!(
             (declared_sign - rendered_sign).abs() < f32::EPSILON,
@@ -2462,6 +2558,10 @@ fn sequence_messages_run_between_their_declared_lifelines() {
              {want_start} -> {want_end}, rendered {start_x} -> {end_x}"
         );
     }
+    assert!(
+        active_endpoints > 0 && idle_endpoints > 0,
+        "the fixture must exercise both activation faces and idle centerlines"
+    );
 
     // And messages descend the page in declaration order.
     assert!(

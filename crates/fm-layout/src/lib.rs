@@ -12416,57 +12416,24 @@ fn layout_diagram_sequence_traced_with_metrics(
             .as_ref()
             .is_some_and(|meta| meta.hide_footbox);
 
-    let mut sequence_messages = measure_sequence_messages(ir, metrics);
-    let mut message_spans: Vec<Vec<(usize, f32)>> = vec![Vec::new(); node_count];
-    let mut self_loop_widths = vec![spacing.sequence_self_loop_width; node_count];
-    for message in &sequence_messages {
-        let edge = &ir.edges[message.edge_index];
-        let (Some(source), Some(target)) = (
-            endpoint_node_index(ir, edge.from),
-            endpoint_node_index(ir, edge.to),
-        ) else {
-            continue;
-        };
-        if source >= node_count || target >= node_count {
-            continue;
-        }
-        if source == target {
-            self_loop_widths[source] = self_loop_widths[source].max(message.bounds.width + 16.0);
-        } else {
-            let creation_inset = ir.sequence_meta.as_ref().map_or(0.0, |meta| {
-                if meta.lifecycle_events.iter().any(|event| {
-                    event.kind == fm_core::LifecycleEventKind::Create
-                        && event.at_edge == message.edge_index
-                        && event.participant.0 == target
-                }) {
-                    node_sizes[target].0 * 0.5
-                } else {
-                    0.0
-                }
-            });
-            message_spans[source.max(target)].push((
-                source.min(target),
-                message.bounds.width + 24.0 + creation_inset,
-            ));
+    // Nested activations extend to the right of a lifeline. Reserve their envelope before
+    // placing participants so docking an arrow to a bar does not consume its caption or badge.
+    let mut activation_outsets = vec![(0.0_f32, 0.0_f32); node_count];
+    if let Some(meta) = &ir.sequence_meta {
+        for activation in &meta.activations {
+            if let Some((left, right)) = activation_outsets.get_mut(activation.participant.0) {
+                let offset = activation.depth as f32 * 4.0;
+                let half_width = spacing.sequence_activation_width * 0.5;
+                *left = left.max(half_width - offset);
+                *right = right.max(half_width + offset);
+            }
         }
     }
 
-    // A numbered source connection needs its own stretch of message shaft beyond the
-    // badge. Reserve it before placing participants, including unlabeled self messages.
+    let mut sequence_messages = measure_sequence_messages(ir, metrics);
+    let mut message_spans: Vec<Vec<(usize, f32)>> = vec![Vec::new(); node_count];
+    let mut self_loop_widths = vec![spacing.sequence_self_loop_width; node_count];
     for (edge_index, edge) in ir.edges.iter().enumerate() {
-        if !edge
-            .sequence_central_connection()
-            .is_some_and(fm_core::SequenceCentralConnection::has_source)
-        {
-            continue;
-        }
-        let Some(number) = ir
-            .sequence_meta
-            .as_ref()
-            .and_then(|meta| meta.autonumber_value(edge_index))
-        else {
-            continue;
-        };
         let (Some(source), Some(target)) = (
             endpoint_node_index(ir, edge.from),
             endpoint_node_index(ir, edge.to),
@@ -12476,27 +12443,63 @@ fn layout_diagram_sequence_traced_with_metrics(
         if source >= node_count || target >= node_count {
             continue;
         }
-        let width = LayoutSequenceNumber::badge_width(&number.to_string(), metrics) * 0.5
-            + LayoutSequenceCentralMarker::RADIUS * 3.0
-            + 16.0;
+        let caption_width = sequence_messages
+            .binary_search_by_key(&edge_index, |message| message.edge_index)
+            .ok()
+            .map_or(0.0, |index| sequence_messages[index].bounds.width);
+        let mut shaft_width = caption_width + if source == target { 16.0 } else { 24.0 };
+        let connection = edge.sequence_central_connection();
+        if let Some(number) = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.autonumber_value(edge_index))
+        {
+            // Central source dots sit beyond the number badge; ordinary numbered messages
+            // also need enough shaft to keep a wide exact-integer badge off the arrowhead.
+            let connection_width =
+                if connection.is_some_and(fm_core::SequenceCentralConnection::has_source) {
+                    LayoutSequenceCentralMarker::RADIUS * 3.0
+                } else {
+                    0.0
+                };
+            shaft_width = shaft_width.max(
+                LayoutSequenceNumber::badge_width(&number.to_string(), metrics) * 0.5
+                    + connection_width
+                    + 16.0,
+            );
+        }
         if source == target {
-            self_loop_widths[source] = self_loop_widths[source].max(width);
+            self_loop_widths[source] = self_loop_widths[source].max(shaft_width);
         } else {
-            let creation_inset = if !edge
-                .sequence_central_connection()
-                .is_some_and(fm_core::SequenceCentralConnection::has_target)
-                && ir.sequence_meta.as_ref().is_some_and(|meta| {
+            let (source_outset, target_outset) = if source < target {
+                (activation_outsets[source].1, activation_outsets[target].0)
+            } else {
+                (activation_outsets[source].0, activation_outsets[target].1)
+            };
+            let source_outset =
+                if connection.is_some_and(fm_core::SequenceCentralConnection::has_source) {
+                    0.0
+                } else {
+                    source_outset
+                };
+            let target_outset =
+                if connection.is_some_and(fm_core::SequenceCentralConnection::has_target) {
+                    0.0
+                } else if ir.sequence_meta.as_ref().is_some_and(|meta| {
                     meta.lifecycle_events.iter().any(|event| {
                         event.kind == fm_core::LifecycleEventKind::Create
                             && event.at_edge == edge_index
                             && event.participant.0 == target
                     })
                 }) {
-                node_sizes[target].0 * 0.5
-            } else {
-                0.0
-            };
-            message_spans[source.max(target)].push((source.min(target), width + creation_inset));
+                    node_sizes[target].0 * 0.5
+                } else {
+                    target_outset
+                };
+            message_spans[source.max(target)].push((
+                source.min(target),
+                shaft_width + source_outset + target_outset,
+            ));
         }
     }
 
@@ -12519,7 +12522,8 @@ fn layout_diagram_sequence_traced_with_metrics(
             cx = cx.max(
                 participant_x_centers[participant_order - 1]
                     + self_loop_widths[participant_order - 1]
-                    + half_width
+                    + activation_outsets[participant_order - 1].1
+                    + half_width.max(activation_outsets[participant_order].0)
                     + 24.0,
             );
         }
@@ -12546,13 +12550,22 @@ fn layout_diagram_sequence_traced_with_metrics(
     let mut sequence_notes =
         build_sequence_note_geometry(ir, &participant_x_centers, &node_sizes, metrics);
     let total_width = participant_x_centers[node_count - 1] + node_sizes[node_count - 1].0 * 0.5;
+    let total_width = participant_x_centers
+        .iter()
+        .zip(&activation_outsets)
+        .map(|(center, (_, right))| center + right)
+        .fold(total_width, f32::max);
     let total_width = ir
         .edges
         .iter()
         .filter(|edge| is_self_message(ir, edge))
         .filter_map(|edge| endpoint_node_index(ir, edge.from))
         .filter_map(|index| {
-            Some(*participant_x_centers.get(index)? + *self_loop_widths.get(index)?)
+            Some(
+                *participant_x_centers.get(index)?
+                    + activation_outsets.get(index)?.1
+                    + *self_loop_widths.get(index)?,
+            )
         })
         .fold(total_width, f32::max);
     let fragment_order = ir
@@ -12643,9 +12656,41 @@ fn layout_diagram_sequence_traced_with_metrics(
         })
         .collect();
 
+    let activation_bars = build_sequence_activation_geometry(
+        ir,
+        &participant_x_centers,
+        &message_y_positions,
+        timeline_rows.as_ref(),
+        first_message_y,
+        lifeline_bottom,
+        spacing,
+    );
+    let mut activation_bounds_by_participant = vec![Vec::new(); node_count];
+    for bar in &activation_bars {
+        activation_bounds_by_participant[bar.participant_index].push(bar.bounds);
+    }
+    let attachment_x = |participant: usize, center: f32, y: f32, right: bool| {
+        activation_bounds_by_participant
+            .get(participant)
+            .into_iter()
+            .flatten()
+            .filter(|bounds| {
+                // Opening and closing messages attach to the bar too. One ULP covers the
+                // rounding in reconstructing its closing anchor from y + height.
+                bounds.y <= y && y <= (bounds.y + bounds.height).next_up()
+            })
+            .fold(center, |face, bounds| {
+                if right {
+                    face.max(bounds.x + bounds.width)
+                } else {
+                    face.min(bounds.x)
+                }
+            })
+    };
+
     // ── Phase 4: build edge paths ──────────────────────────────────────
-    // Each message is a horizontal arrow from sender lifeline to receiver
-    // lifeline at the corresponding y-position.
+    // Messages dock to the visible face of the active envelope at each endpoint. An explicit
+    // central connection remains on the lifeline; creation messages meet the participant box.
     let edges: Vec<LayoutEdgePath> = ir
         .edges
         .iter()
@@ -12654,23 +12699,41 @@ fn layout_diagram_sequence_traced_with_metrics(
             let y = message_y_positions[edge_index];
             let source_index = endpoint_node_index(ir, edge.from).unwrap_or(0);
             let target_index = endpoint_node_index(ir, edge.to).unwrap_or(0);
-            let source_x = participant_x_centers
+            let source_center = participant_x_centers
                 .get(source_index)
                 .copied()
                 .unwrap_or(0.0);
-            let mut target_x = participant_x_centers
+            let target_center = participant_x_centers
                 .get(target_index)
                 .copied()
                 .unwrap_or(0.0);
             let is_self_loop = source_index == target_index;
+            let loop_height = message_gap * 0.6;
+            let connection = edge.sequence_central_connection();
+            let rightward = source_center <= target_center;
+            let source_x = if connection.is_some_and(fm_core::SequenceCentralConnection::has_source)
+            {
+                source_center
+            } else {
+                attachment_x(source_index, source_center, y, rightward)
+            };
+            let mut target_x =
+                if connection.is_some_and(fm_core::SequenceCentralConnection::has_target) {
+                    target_center
+                } else {
+                    attachment_x(
+                        target_index,
+                        target_center,
+                        if is_self_loop { y + loop_height } else { y },
+                        is_self_loop || !rightward,
+                    )
+                };
             if !is_self_loop
                 && creation_edge.get(target_index) == Some(&Some(edge_index))
-                && !edge
-                    .sequence_central_connection()
-                    .is_some_and(fm_core::SequenceCentralConnection::has_target)
+                && !connection.is_some_and(fm_core::SequenceCentralConnection::has_target)
             {
                 let half_width = node_sizes[target_index].0 / 2.0;
-                target_x -= half_width.copysign(target_x - source_x);
+                target_x = target_center - half_width.copysign(target_center - source_center);
             }
 
             let points = if is_self_loop {
@@ -12679,19 +12742,16 @@ fn layout_diagram_sequence_traced_with_metrics(
                     .get(source_index)
                     .copied()
                     .unwrap_or(spacing.sequence_self_loop_width);
-                let loop_height = message_gap * 0.6;
+                let loop_right = source_x.max(target_x) + loop_width;
                 smallvec![
                     LayoutPoint { x: source_x, y },
+                    LayoutPoint { x: loop_right, y },
                     LayoutPoint {
-                        x: source_x + loop_width,
-                        y,
-                    },
-                    LayoutPoint {
-                        x: source_x + loop_width,
+                        x: loop_right,
                         y: y + loop_height,
                     },
                     LayoutPoint {
-                        x: source_x,
+                        x: target_x,
                         y: y + loop_height,
                     },
                 ]
@@ -12856,63 +12916,6 @@ fn layout_diagram_sequence_traced_with_metrics(
             }
         })
         .collect();
-
-    // Build activation bars from sequence metadata.
-    let activation_bars: Vec<LayoutActivationBar> = ir
-        .sequence_meta
-        .as_ref()
-        .map(|meta| {
-            meta.activations
-                .iter()
-                .filter_map(|activation| {
-                    let participant_index = activation.participant.0;
-                    let cx = participant_x_centers.get(participant_index).copied()?;
-                    let timeline_span = activation
-                        .timeline_range
-                        .as_ref()
-                        .filter(|range| range.start <= range.end)
-                        .and_then(|range| {
-                            let rows = timeline_rows.as_ref()?;
-                            Some((
-                                *rows.boundary_y.get(range.start)?,
-                                *rows.boundary_y.get(range.end)?,
-                            ))
-                        });
-                    let (start_y, end_y) = timeline_span.unwrap_or_else(|| {
-                        (
-                            message_y_positions
-                                .get(activation.start_edge)
-                                .copied()
-                                .unwrap_or(first_message_y),
-                            message_y_positions
-                                .get(activation.end_edge)
-                                .copied()
-                                .unwrap_or(lifeline_bottom),
-                        )
-                    });
-                    let bar_width = spacing.sequence_activation_width;
-                    let depth_offset = activation.depth as f32 * 4.0;
-                    // A short authored span still ends at its closing directive. Keep the
-                    // legacy visible minimum only when there is no positive timeline span.
-                    let height = if timeline_span.is_some() && end_y > start_y {
-                        end_y - start_y
-                    } else {
-                        (end_y - start_y).max(message_gap * 0.3)
-                    };
-                    Some(LayoutActivationBar {
-                        participant_index,
-                        depth: activation.depth,
-                        bounds: LayoutRect {
-                            x: cx - bar_width / 2.0 + depth_offset,
-                            y: start_y,
-                            width: bar_width,
-                            height,
-                        },
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
 
     let participant_group_clusters: Vec<LayoutClusterBox> = ir
         .sequence_meta
@@ -13355,6 +13358,75 @@ struct SequenceTimelineRows {
     fragments: Vec<(f32, f32, Vec<f32>)>,
     /// Where the lifelines end.
     end: f32,
+}
+
+/// Resolve activation rectangles before routing messages so every renderer receives endpoints
+/// on the same visible geometry. Timeline boundaries retain note-only and fragment-only spans;
+/// programmatic or invalid ranges keep their message-anchor fallback.
+fn build_sequence_activation_geometry(
+    ir: &MermaidDiagramIr,
+    participant_x_centers: &[f32],
+    message_y_positions: &[f32],
+    timeline_rows: Option<&SequenceTimelineRows>,
+    first_message_y: f32,
+    lifeline_bottom: f32,
+    spacing: LayoutSpacing,
+) -> Vec<LayoutActivationBar> {
+    let message_gap = spacing.rank_spacing.max(spacing.sequence_min_message_gap);
+    ir.sequence_meta
+        .as_ref()
+        .map(|meta| {
+            meta.activations
+                .iter()
+                .filter_map(|activation| {
+                    let participant_index = activation.participant.0;
+                    let cx = participant_x_centers.get(participant_index).copied()?;
+                    let timeline_span = activation
+                        .timeline_range
+                        .as_ref()
+                        .filter(|range| range.start <= range.end)
+                        .and_then(|range| {
+                            let rows = timeline_rows?;
+                            Some((
+                                *rows.boundary_y.get(range.start)?,
+                                *rows.boundary_y.get(range.end)?,
+                            ))
+                        });
+                    let (start_y, end_y) = timeline_span.unwrap_or_else(|| {
+                        (
+                            message_y_positions
+                                .get(activation.start_edge)
+                                .copied()
+                                .unwrap_or(first_message_y),
+                            message_y_positions
+                                .get(activation.end_edge)
+                                .copied()
+                                .unwrap_or(lifeline_bottom),
+                        )
+                    });
+                    let bar_width = spacing.sequence_activation_width;
+                    let depth_offset = activation.depth as f32 * 4.0;
+                    // A short authored span still ends at its closing directive. Keep the
+                    // legacy visible minimum only when there is no positive timeline span.
+                    let height = if timeline_span.is_some() && end_y > start_y {
+                        end_y - start_y
+                    } else {
+                        (end_y - start_y).max(message_gap * 0.3)
+                    };
+                    Some(LayoutActivationBar {
+                        participant_index,
+                        depth: activation.depth,
+                        bounds: LayoutRect {
+                            x: cx - bar_width / 2.0 + depth_offset,
+                            y: start_y,
+                            width: bar_width,
+                            height,
+                        },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve the close-order fragment storage once, before measuring or positioning any rows.
@@ -46910,6 +46982,193 @@ mod tests {
     }
 
     #[test]
+    fn sequence_activation_docking_tracks_call_return_and_idle_boundaries() {
+        for participants in [
+            "participant A\nparticipant B",
+            "participant B\nparticipant A",
+        ] {
+            let layout = sequence_layout_of(&format!(
+                "sequenceDiagram\n{participants}\nA->>+B: Request\n\
+                 B-->>-A: Response\nA->>B: Idle\n"
+            ));
+            let a = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "A")
+                .unwrap();
+            let b = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "B")
+                .unwrap();
+            let (a_center, b_center) = (a.bounds.center().x, b.bounds.center().x);
+            let bar = layout.extensions.activation_bars[0].bounds;
+            let face = if a_center < b_center {
+                bar.x
+            } else {
+                bar.x + bar.width
+            };
+            assert_eq!(layout.edges[0].points[0].x, a_center);
+            assert_eq!(
+                layout.edges[0].points[1].x, face,
+                "call reaches opening bar"
+            );
+            assert_eq!(
+                layout.edges[1].points[0].x, face,
+                "reply leaves closing bar"
+            );
+            assert_eq!(layout.edges[1].points[1].x, a_center);
+            assert_eq!(
+                layout.edges[2].points[1].x, b_center,
+                "closed bar is inactive"
+            );
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    #[test]
+    fn sequence_nested_activation_docking_uses_the_exposed_envelope() {
+        let parsed = parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\n\
+             A->>+B: Request\nA->>+B: Nested request\nB<<->>C: Duplex\n\
+             C<<-->>B: Reverse duplex\nB->>A: Progress\nB-->>-A: Nested reply\n\
+             B->>C: Outer work\nB-->>-A: Done\nC->>B: Idle\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let layout = layout_diagram_sequence(&parsed.ir);
+        let b_center = layout.nodes[1].bounds.center().x;
+        let bars = &layout.extensions.activation_bars;
+        let outer = bars.iter().find(|bar| bar.depth == 0).unwrap().bounds;
+        let inner = bars.iter().find(|bar| bar.depth == 1).unwrap().bounds;
+        assert_eq!(inner.x, outer.x + 4.0);
+        assert_eq!(layout.edges[2].points[0].x, inner.x + inner.width);
+        assert_eq!(layout.edges[3].points[1].x, inner.x + inner.width);
+        assert_eq!(layout.edges[4].points[0].x, outer.x);
+        assert_eq!(layout.edges[5].points[0].x, outer.x);
+        assert_eq!(layout.edges[6].points[0].x, outer.x + outer.width);
+        assert_eq!(layout.edges[8].points[1].x, b_center);
+        assert_eq!(layout, layout_diagram_sequence(&parsed.ir));
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_self_activation_docking_resolves_both_legs_at_their_own_rows() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\nparticipant A\nactivate A\nA->>A: Working\n\
+             Note right of A: Still active\nA->>A: Closing\ndeactivate A\nA->>A: Idle\n",
+        );
+        let center = layout.nodes[0].bounds.center().x;
+        let bar = layout.extensions.activation_bars[0].bounds;
+        let face = bar.x + bar.width;
+        let first = &layout.edges[0].points;
+        assert_eq!(first[0].x, face);
+        assert_eq!(first[3].x, face);
+        assert!(first[1].x > face);
+        assert_eq!(first[1].x, first[2].x);
+        let closing = &layout.edges[1].points;
+        assert_eq!(closing[0].x, face);
+        assert!(closing[3].y > bar.y + bar.height);
+        assert_eq!(
+            closing[3].x, center,
+            "the return leg is below the closed bar"
+        );
+        assert_eq!(layout.edges[2].points[0].x, center);
+        assert_eq!(layout.edges[2].points[3].x, center);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_activation_docking_respects_note_timeline_boundaries() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\nA->>B: Before\nNote over A,B: Boundary\nactivate B\n\
+             A->>B: Active\nNote right of B: Finish\ndeactivate B\nA->>B: After\n",
+        );
+        let center = layout.nodes[1].bounds.center().x;
+        let bar = layout.extensions.activation_bars[0].bounds;
+        assert!(layout.edges[0].points[1].y < bar.y);
+        assert_eq!(layout.edges[0].points[1].x, center);
+        assert_eq!(layout.edges[1].points[1].x, bar.x);
+        assert!(layout.edges[2].points[1].y > bar.y + bar.height);
+        assert_eq!(layout.edges[2].points[1].x, center);
+    }
+
+    #[test]
+    fn sequence_activation_docking_preserves_central_and_creation_endpoints() {
+        let parsed = parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\nactivate A\nactivate B\n\
+             A()->>B: Source center\nA->>()B: Target center\nB()->>()A: Both centers\n\
+             A->>B: Ordinary\ncreate participant C\nB->>+C: Created\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let layout = layout_diagram_sequence(&parsed.ir);
+        let a = layout.nodes[0].bounds.center().x;
+        let b = layout.nodes[1].bounds.center().x;
+        assert_eq!(layout.edges[0].points[0].x, a);
+        assert!(layout.edges[0].points[1].x < b);
+        assert!(layout.edges[1].points[0].x > a);
+        assert_eq!(layout.edges[1].points[1].x, b);
+        assert_eq!(layout.edges[2].points[0].x, b);
+        assert_eq!(layout.edges[2].points[1].x, a);
+        assert!(layout.edges[3].points[0].x > a);
+        assert!(layout.edges[3].points[1].x < b);
+        assert!(layout.edges[4].points[0].x > b);
+        assert_eq!(layout.edges[4].points[1].x, layout.nodes[2].bounds.x);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_activation_docking_reserves_captions_large_numbers_and_self_loops() {
+        let source = format!(
+            "sequenceDiagram\nparticipant A\nparticipant B\n{}{}\
+             autonumber 4294967295 4294967295\nloop Work\n\
+             A->>B: A long request caption that needs the complete horizontal message shaft\n\
+             B<<-->>A: A long reply caption across the deeply nested activation envelopes\n\
+             A->>A: Self\nB->>A:\nend\n",
+            "activate A\n".repeat(40),
+            "activate B\n".repeat(40),
+        );
+        let parsed = parse(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 128.0,
+            ..Default::default()
+        });
+        let config = super::LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let layout = super::layout_diagram_with_config(&parsed.ir, config);
+        let frame = layout.extensions.sequence_fragments[0].bounds;
+        for edge in &layout.edges {
+            let from = edge.points[0];
+            let to = edge.points[1];
+            let number = super::LayoutSequenceNumber::for_edge(&parsed.ir, edge, &metrics).unwrap();
+            if from.x < to.x {
+                assert!(number.bounds.x + number.bounds.width + 15.9 < to.x);
+            } else {
+                assert!(number.bounds.x - 15.9 > to.x);
+            }
+            if let Some(caption) = layout
+                .extensions
+                .sequence_messages
+                .iter()
+                .find(|message| message.edge_index == edge.edge_index)
+            {
+                assert!(caption.bounds.x > from.x.min(to.x));
+                assert!(caption.bounds.x + caption.bounds.width < from.x.max(to.x));
+            }
+            for point in &edge.points {
+                assert!(point.x > frame.x && point.x < frame.x + frame.width);
+                assert!(point.y > frame.y && point.y < frame.y + frame.height);
+            }
+        }
+        let self_message = &layout.edges[2];
+        assert!(self_message.is_self_loop);
+        assert!(self_message.points[1].x > self_message.points[0].x);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
     fn sequence_activation_invalid_or_absent_ranges_fall_back_to_message_anchors() {
         let mut ir = fm_parser::parse(
             "sequenceDiagram\nA->>+B: Start\nNote right of B: Working\nB-->>-A: Complete\n",
@@ -46925,6 +47184,8 @@ mod tests {
             let bar = layout.extensions.activation_bars[0].bounds;
             assert_eq!(bar.y, layout.edges[0].points[0].y);
             assert!((bar.y + bar.height - layout.edges[1].points[0].y).abs() < 0.01);
+            assert_eq!(layout.edges[0].points[1].x, bar.x);
+            assert_eq!(layout.edges[1].points[0].x, bar.x);
         }
         let meta = ir.sequence_meta.as_mut().unwrap();
         meta.activations[0].timeline_range = Some(0..1);
