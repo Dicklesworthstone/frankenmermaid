@@ -6009,4 +6009,219 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         );
         assert_eq!(unsupported_recover.ir.nodes.len(), 2);
     }
+
+    #[test]
+    fn support_contract_sequence_keeps_messages_and_timeline_without_a_header() {
+        let source = concat!(
+            "participant Alice as Client\nparticipant Bob as Service\n",
+            "autonumber 10 2\nloop Retry\nAlice->>+Bob: request\n",
+            "Note over Bob: working\nBob-->>-Alice: response\nend\n",
+        );
+        for mode in [
+            fm_core::MermaidParseMode::Strict,
+            fm_core::MermaidParseMode::Compat,
+            fm_core::MermaidParseMode::Recover,
+        ] {
+            let parsed =
+                super::parse_with_support_contract(source, fm_core::DiagramType::Sequence, mode);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.parse_mode(), mode);
+            assert_eq!(parsed.ir.diagram_type, fm_core::DiagramType::Sequence);
+            assert_eq!(
+                parsed
+                    .ir
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["Alice", "Bob"]
+            );
+            assert_eq!(parsed.ir.edges.len(), 2);
+            assert_eq!(parsed.ir.edges[0].arrow, fm_core::ArrowType::Arrow);
+            assert_eq!(parsed.ir.edges[1].arrow, fm_core::ArrowType::DottedArrow);
+            let meta = parsed.ir.sequence_meta.as_ref().expect("sequence metadata");
+            assert_eq!(meta.autonumber_value(0), Some(10));
+            assert_eq!(meta.autonumber_value(1), Some(12));
+            assert_eq!(meta.activations.len(), 1);
+            assert_eq!(meta.notes.len(), 1);
+            assert_eq!(meta.notes[0].text, "working");
+            assert_eq!(meta.fragments.len(), 1);
+            assert_eq!(meta.fragments[0].label, "Retry");
+            assert_eq!(
+                meta.timeline,
+                [
+                    fm_core::IrSequenceStep::Open,
+                    fm_core::IrSequenceStep::Message,
+                    fm_core::IrSequenceStep::Note,
+                    fm_core::IrSequenceStep::Message,
+                    fm_core::IrSequenceStep::Close,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn support_contract_class_keeps_compartments_and_inheritance() {
+        let parsed = super::parse_with_support_contract(
+            "classDiagram\nclass List~T~ {\n+T value\n+get() T\n}\nList <|-- Stack\n",
+            fm_core::DiagramType::Class,
+            fm_core::MermaidParseMode::Strict,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, fm_core::ArrowType::Inheritance);
+        let list = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "List")
+            .unwrap();
+        let meta = list.class_meta.as_ref().expect("class compartments");
+        assert_eq!(meta.generics, ["T"]);
+        assert_eq!(meta.attributes.len(), 1);
+        assert_eq!(meta.methods.len(), 1);
+        assert_eq!(meta.methods[0].name, "get()");
+    }
+
+    #[test]
+    fn support_contract_er_keeps_entity_keys_and_cardinality() {
+        let parsed = super::parse_with_support_contract(
+            "erDiagram\nCUSTOMER {\nint id PK\nstring email UK\n}\nCUSTOMER ||--o{ ORDER : places\n",
+            fm_core::DiagramType::Er,
+            fm_core::MermaidParseMode::Compat,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, fm_core::ArrowType::Line);
+        assert_eq!(parsed.ir.edges[0].er_notation(), Some("||--o{"));
+        let customer = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "CUSTOMER")
+            .unwrap();
+        assert_eq!(customer.members.len(), 2);
+        assert_eq!(customer.members[0].name, "id");
+        assert_eq!(customer.members[0].keys, [fm_core::IrAttributeKey::Pk]);
+        assert_eq!(customer.members[1].keys, [fm_core::IrAttributeKey::Uk]);
+    }
+
+    #[test]
+    fn support_contract_charts_keep_quantities_and_schedule_dependencies() {
+        let pie = super::parse_with_support_contract(
+            "pie showData\ntitle Traffic\n\"Read\": 75\n\"Write\": 25\n",
+            fm_core::DiagramType::Pie,
+            fm_core::MermaidParseMode::Strict,
+        );
+        assert!(pie.warnings.is_empty(), "{:?}", pie.warnings);
+        let meta = pie.ir.pie_meta.as_ref().expect("pie quantities");
+        assert_eq!(meta.title.as_deref(), Some("Traffic"));
+        assert!(meta.show_data);
+        assert_eq!(meta.slices.len(), 2);
+        assert_eq!(meta.slices[0].label, "Read");
+        assert_eq!(meta.slices[0].value, 75.0);
+        assert_eq!(meta.slices[1].label, "Write");
+        assert_eq!(meta.slices[1].value, 25.0);
+
+        let gantt = super::parse_with_support_contract(
+            "gantt\ndateFormat YYYY-MM-DD\nsection Release\nBuild :build, 2026-01-01, 2d\nShip :ship, after build, 1d\n",
+            fm_core::DiagramType::Gantt,
+            fm_core::MermaidParseMode::Recover,
+        );
+        assert!(gantt.warnings.is_empty(), "{:?}", gantt.warnings);
+        assert_eq!(gantt.ir.nodes.len(), 2);
+        let meta = gantt.ir.gantt_meta.as_ref().expect("schedule metadata");
+        assert_eq!(meta.sections.len(), 1);
+        assert_eq!(meta.tasks.len(), 2);
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("build"));
+        assert_eq!(meta.tasks[1].task_id.as_deref(), Some("ship"));
+        assert_eq!(meta.tasks[1].depends_on, ["build"]);
+    }
+
+    #[test]
+    fn support_contract_runs_shared_metadata_passes_once() {
+        let source = concat!(
+            "---\ntitle: Release map\n---\n",
+            "%%{init: {theme: 'dark', flowchart: {nodeSpacing: 80}}}%%\n",
+            "flowchart LR\naccTitle: Release flow\naccDescr: Build and publish\n",
+            "A[Build] --> B[Publish]\nstyle A fill:#123456\n",
+            "%%{deck: {slides: [{id: 'build', nodes: ['A']}]}}%%\n",
+        );
+        let parsed = super::parse_with_support_contract(
+            source,
+            fm_core::DiagramType::Flowchart,
+            fm_core::MermaidParseMode::Compat,
+        );
+        // The ordinary front-matter path also validates its keys as configuration. Preserve
+        // that existing warning exactly once while retaining the separately extracted title.
+        assert_eq!(
+            parsed.warnings,
+            ["Front matter: Unsupported Mermaid config key 'title' ignored"]
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].span_primary.start.line, 8);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Release map"));
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Release flow"));
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("Build and publish")
+        );
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert_eq!(parsed.ir.meta.node_spacing, Some(80));
+        assert_eq!(parsed.ir.style_refs.len(), 1);
+        let deck = parsed.ir.deck.as_ref().expect("deck metadata");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].id, "build");
+        assert_eq!(
+            parsed
+                .ir
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("parsed with declared support level")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn support_contract_unsupported_modes_preserve_refusal_and_salvage() {
+        for mode in [
+            fm_core::MermaidParseMode::Strict,
+            fm_core::MermaidParseMode::Compat,
+            fm_core::MermaidParseMode::Recover,
+        ] {
+            let parsed =
+                super::parse_with_support_contract("A --> B", fm_core::DiagramType::Unknown, mode);
+            assert_eq!(parsed.ir.diagram_type, fm_core::DiagramType::Unknown);
+            assert_eq!(parsed.parse_mode(), mode);
+            if mode == fm_core::MermaidParseMode::Strict {
+                assert!(parsed.ir.nodes.is_empty());
+                assert!(parsed.ir.edges.is_empty());
+                assert!(parsed.ir.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == fm_core::DiagnosticSeverity::Error
+                        && diagnostic.message.contains("unsupported in strict mode")
+                }));
+            } else {
+                assert_eq!(parsed.ir.nodes.len(), 2);
+                assert_eq!(parsed.ir.edges.len(), 1);
+                assert!(
+                    parsed
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("salvage"))
+                );
+                assert!(parsed.ir.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == fm_core::DiagnosticSeverity::Warning
+                        && diagnostic.message.contains("unsupported")
+                }));
+            }
+        }
+    }
 }

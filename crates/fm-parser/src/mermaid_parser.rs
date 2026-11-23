@@ -774,6 +774,10 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
 }
 
 /// Parse Mermaid content against the declared support-level contract for `diagram_type` (`bd-hcg6p`).
+///
+/// The caller supplies the diagram family, so a header is optional. Supported families use the
+/// same body parser and metadata passes as the ordinary Mermaid entry points. Only unsupported
+/// families use flowchart salvage, and strict mode refuses that salvage entirely.
 #[inline]
 #[must_use]
 pub fn parse_with_support_contract(
@@ -781,21 +785,16 @@ pub fn parse_with_support_contract(
     diagram_type: DiagramType,
     parse_mode: MermaidParseMode,
 ) -> ParseResult {
-    let mut builder = IrBuilder::new(diagram_type);
-    builder.set_parse_mode(parse_mode);
-    apply_support_contract(content, &mut builder, diagram_type, parse_mode);
-    builder.finish(1.0, crate::DetectionMethod::ExactKeyword)
-}
-
-fn apply_support_contract(
-    content: &str,
-    builder: &mut IrBuilder,
-    diagram_type: DiagramType,
-    parse_mode: MermaidParseMode,
-) {
     let support_level = diagram_type.support_level();
     if support_level != MermaidSupportLevel::Unsupported {
-        builder.add_diagnostic(
+        let detection = DetectedType {
+            diagram_type,
+            confidence: 1.0,
+            method: crate::DetectionMethod::ExactKeyword,
+            warnings: Vec::new(),
+        };
+        let mut result = parse_mermaid_with_detection(content, detection, parse_mode);
+        result.ir.diagnostics.push(
             Diagnostic::info(format!(
                 "Diagram family '{}' is parsed with declared support level '{}'",
                 diagram_type.as_str(),
@@ -803,10 +802,11 @@ fn apply_support_contract(
             ))
             .with_category(DiagnosticCategory::Compatibility),
         );
-        parse_flowchart(content, builder);
-        return;
+        return result;
     }
 
+    let mut builder = IrBuilder::new(diagram_type);
+    builder.set_parse_mode(parse_mode);
     match parse_mode {
         MermaidParseMode::Strict => {
             builder.add_diagnostic(
@@ -837,7 +837,7 @@ fn apply_support_contract(
                 "Diagram type '{}' is unsupported; using compatibility-mode flowchart salvage",
                 diagram_type.as_str()
             ));
-            parse_flowchart(content, builder);
+            parse_flowchart(content, &mut builder);
         }
         MermaidParseMode::Recover => {
             builder.add_diagnostic(
@@ -855,9 +855,10 @@ fn apply_support_contract(
                 "Diagram type '{}' is unsupported; using recovery-mode flowchart salvage",
                 diagram_type.as_str()
             ));
-            parse_flowchart(content, builder);
+            parse_flowchart(content, &mut builder);
         }
     }
+    builder.finish(1.0, crate::DetectionMethod::ExactKeyword)
 }
 
 // ---------------------------------------------------------------------------
