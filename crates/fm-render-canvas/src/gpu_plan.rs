@@ -1918,6 +1918,10 @@ pub enum GpuTextSource {
     XyAxisTitle,
     /// The diagram's declared title.
     DiagramTitle,
+    /// The `info` diagram's version banner. `node_index` is zero, not an IR node.
+    InfoVersion,
+    /// A requested C4 legend: zero is the heading, subsequent indices are its role entries.
+    C4Legend,
     /// A label attached to a non-sequence layout band.
     ///
     /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
@@ -2032,7 +2036,7 @@ pub struct GpuRenderPlan {
     /// Graticule rings, spokes and series outlines of a `radar-beta` wheel, as line segments
     /// (bd-dw450). Rings are sampled polylines — the segment pipeline has no arc primitive.
     pub radar_segments: Vec<GpuEdgeSegment>,
-    /// Gantt and xychart axis tick marks, as non-edge line segments (bd-adabx).
+    /// Gantt and xychart axis tick marks and a supplied Gantt today marker, as non-edge lines.
     ///
     /// The Canvas2D pass draws these after bands and before the other extension furniture. They
     /// use [`NO_EDGE_INDEX`] because a tick marks a layout coordinate rather than an IR edge.
@@ -2439,6 +2443,17 @@ impl GpuRenderPlan {
                     width: AXIS_TICK_STROKE_WIDTH,
                 });
             }
+        }
+        // The marker shares the axis pass: after section backgrounds, before task bars.
+        // Both Canvas backends use the same date parser, chart projection and `off` gate.
+        if let Some((start, end)) = crate::renderer::gantt_today_marker(layout, ir, config) {
+            axis_tick_segments.push(xy_segment(
+                [start.x, start.y],
+                [end.x, end.y],
+                [1.0, 0.0, 0.0, 1.0],
+                2.0,
+                [0.0, 0.0],
+            ));
         }
 
         // SUBGRAPH DIVIDERS (bd-adabx). One dashed segment each, in the cluster stroke.
@@ -3727,6 +3742,21 @@ impl GpuRenderPlan {
                 )
             })
             .collect();
+        // Specialized compositions already own their title. Generic authored titles and C4
+        // legends are diagram furniture on the GPU, so their bounds travel with the camera.
+        let generic_title = if layout.extensions.journey.is_none()
+            && pie_layout.is_none()
+            && radar_chart.is_none()
+            && treemap_chart.is_none()
+        {
+            crate::renderer::generic_canvas_diagram_title(ir)
+        } else {
+            None
+        };
+        let c4_legend = crate::renderer::canvas_c4_legend_enabled(ir)
+            .then(|| crate::renderer::canvas_c4_legend_entries(ir));
+        let info_version = (ir.diagram_type == fm_core::DiagramType::Info)
+            .then_some(crate::renderer::INFO_VERSION_TEXT);
 
         // ⚠️ THE ATLAS MUST GROW WITH THE LARGEST LABEL, or this renders BLURRY rather than wrong --
         // a failure that survives review because the geometry is right and only the raster is soft.
@@ -3798,17 +3828,25 @@ impl GpuRenderPlan {
                     .iter()
                     .flat_map(|chart| chart.text.iter().map(|block| block.font_size)),
             )
+            .chain(info_version.iter().map(|_| 32.0))
             .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
         let default_face = GlyphFace::new(&config.font_family);
+        let legend_heading_face = GlyphFace {
+            weight: "600".to_string(),
+            ..default_face.clone()
+        };
         // Merge the cascade once per node, not once per attribute row in each atlas/text pass.
         let node_fonts: Vec<_> = (0..ir.nodes.len())
             .map(|index| crate::renderer::resolve_declared_node_font(ir, index))
             .collect();
         let mut styled_texts = Vec::new();
+        if c4_legend.is_some() {
+            styled_texts.push((legend_heading_face.clone(), "C4 Legend"));
+        }
         for (index, text, _, _) in &icon_texts {
             styled_texts.push((
                 GlyphFace::for_icon(&node_fonts, *index, &default_face, text),
@@ -3990,7 +4028,10 @@ impl GpuRenderPlan {
                     .text
                     .iter()
                     .flat_map(|block| block.lines.iter().map(String::as_str))
-            }));
+            }))
+            .chain(generic_title)
+            .chain(info_version)
+            .chain(c4_legend.iter().flatten().copied());
         let glyph_atlas = GlyphAtlasPlan::for_styled_texts(
             styled_texts
                 .into_iter()
@@ -4626,20 +4667,15 @@ impl GpuRenderPlan {
             }
         }
 
-        // Keep existing ordinary-text offsets stable. The device submits this tail only after
-        // all ordinary labels and the counter capsules, with lifecycle crosses above both.
-        let sequence_number_quad_start = sink.quads.len();
-        let number_text_color =
-            parse_paint_rgba(config.background.as_deref().unwrap_or(&config.node_fill))
-                .unwrap_or(DEFAULT_NODE_FILL_RGBA);
-        for number in &sequence_numbers {
+        let annotation_color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+        if let Some(version) = info_version {
             sink.push_centred_with_font(
-                &number.text,
-                (number.bounds.center().x, number.bounds.center().y),
-                number.font_size,
-                number_text_color,
-                GpuTextSource::SequenceNumber,
-                number.edge_index,
+                version,
+                (100.0, 40.0),
+                32.0,
+                annotation_color,
+                GpuTextSource::InfoVersion,
+                0,
             );
         }
 
@@ -4657,6 +4693,99 @@ impl GpuRenderPlan {
                     |pie| pie.bounds,
                 )
             });
+        include_text_quad_bounds(&mut bounds, sink.quads);
+
+        if let Some(title) = generic_title.filter(|title| !title.is_empty()) {
+            let line_height = font_px * metrics.config().line_height;
+            let title_height =
+                font_px + title.lines().count().saturating_sub(1) as f32 * line_height;
+            sink.push_centred_with_font(
+                title,
+                (
+                    bounds.x + bounds.width * 0.5,
+                    bounds.y - font_px.max(12.0) - title_height * 0.5,
+                ),
+                font_px,
+                annotation_color,
+                GpuTextSource::DiagramTitle,
+                0,
+            );
+            include_text_quad_bounds(&mut bounds, sink.quads);
+        }
+
+        if let Some(entries) = &c4_legend {
+            // Unlike the fixed Canvas viewport overlay, this panel is part of the GPU's
+            // exported diagram. Measure both columns so large configured fonts remain legible
+            // and auto-fit includes the complete legend without obscuring graph content.
+            let heading_size = font_px * 0.82;
+            let entry_size = font_px * 0.72;
+            let inset_x = (font_px * 0.5).max(14.0);
+            let inset_y = (font_px * 0.4).max(12.0);
+            let row_height = (entry_size * metrics.config().line_height).max(18.0);
+            let column_width = entries
+                .iter()
+                .map(|entry| metrics.estimate_width(entry) * 0.72)
+                .fold(0.0_f32, f32::max);
+            let body_top = (inset_y + heading_size * metrics.config().line_height + 8.0).max(36.0);
+            let panel = LayoutRect {
+                x: bounds.x,
+                y: bounds.y + bounds.height + font_px.max(12.0),
+                width: (column_width * 2.0 + inset_x * 3.0)
+                    .max(metrics.estimate_width("C4 Legend") * 0.82 + inset_x * 2.0)
+                    .max(320.0),
+                height: body_top + entries.len().div_ceil(2) as f32 * row_height + inset_y,
+            };
+            let mut fill = parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+            fill[3] *= 0.96;
+            node_instances.push(xy_node(
+                panel,
+                GpuNodeShape::Rect,
+                fill,
+                parse_paint_rgba(&config.cluster_stroke).unwrap_or(DEFAULT_CLUSTER_STROKE_RGBA),
+                1.0,
+            ));
+            sink.with_face(&legend_heading_face, &metrics).push_left(
+                "C4 Legend",
+                (panel.x + inset_x, panel.y + inset_y + heading_size * 0.5),
+                heading_size,
+                annotation_color,
+                GpuTextSource::C4Legend,
+                0,
+            );
+            for (index, entry) in entries.iter().enumerate() {
+                sink.push_left(
+                    entry,
+                    (
+                        panel.x + inset_x + (index % 2) as f32 * panel.width * 0.5,
+                        panel.y + body_top + (index / 2) as f32 * row_height + entry_size * 0.5,
+                    ),
+                    entry_size,
+                    annotation_color,
+                    GpuTextSource::C4Legend,
+                    index + 1,
+                );
+            }
+            bounds.width = bounds.width.max(panel.width);
+            bounds.height = panel.y + panel.height - bounds.y;
+        }
+
+        // Keep existing ordinary-text offsets stable. The device submits this tail only after
+        // all ordinary labels and the counter capsules, with lifecycle crosses above both.
+        let sequence_number_quad_start = sink.quads.len();
+        let number_text_color =
+            parse_paint_rgba(config.background.as_deref().unwrap_or(&config.node_fill))
+                .unwrap_or(DEFAULT_NODE_FILL_RGBA);
+        for number in &sequence_numbers {
+            sink.push_centred_with_font(
+                &number.text,
+                (number.bounds.center().x, number.bounds.center().y),
+                number.font_size,
+                number_text_color,
+                GpuTextSource::SequenceNumber,
+                number.edge_index,
+            );
+        }
+
         if !graph_label_plates.is_empty() {
             edge_segments = clip_segments_around_labels(&edge_segments, &graph_label_plates);
         }
@@ -11439,6 +11568,10 @@ mod tests {
         const PLANNED: &[&str] = &[
             "draw_xychart_axes",
             "draw_xychart_series",
+            "draw_generic_diagram_title",
+            "draw_c4_legend",
+            "draw_gantt_today_marker",
+            "draw_info_version",
             "draw_activation_bars",
             "draw_sequence_mirror_headers",
             "draw_cluster_dividers",
@@ -11481,7 +11614,6 @@ mod tests {
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
-            ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
             (
                 "draw_path_markers",
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",
@@ -11490,11 +11622,6 @@ mod tests {
                 "draw_marker",
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",
             ),
-            ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
-            (
-                "draw_c4_legend",
-                "bd-adabx (source added by the bd-5k51.1 C4-legend cell): legend text",
-            ),
             (
                 "draw_debug_overlay_world",
                 "bd-0l1x2: opt-in diagnostic debug overlay bounding boxes",
@@ -11502,10 +11629,6 @@ mod tests {
             (
                 "draw_debug_overlay_hud",
                 "bd-0l1x2: opt-in diagnostic debug overlay stats HUD",
-            ),
-            (
-                "draw_info_version",
-                "bd-cfigc: DiagramType::Info static version banner",
             ),
         ];
 

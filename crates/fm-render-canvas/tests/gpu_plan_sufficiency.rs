@@ -962,6 +962,344 @@ fn the_plan_carries_one_text_run_per_drawn_label() {
     );
 }
 
+mod annotations {
+    use super::*;
+    use fm_render_canvas::gpu_pipeline::{PrimitiveFamily, draw_batches};
+    use fm_render_canvas::{DrawOperation, GpuTextSource, render_to_canvas_with_layout};
+
+    fn rows(plan: &GpuRenderPlan, source: GpuTextSource) -> Vec<String> {
+        treemap_gpu_rows(plan)
+            .into_iter()
+            .filter_map(|(kind, _, text)| (kind == source).then_some(text))
+            .collect()
+    }
+
+    fn assert_text_fits(plan: &GpuRenderPlan) {
+        assert!(!plan.text_quads.is_empty());
+        for quad in &plan.text_quads {
+            assert!(quad.center.iter().all(|value| value.is_finite()));
+            assert!(quad.center[0] - quad.half_extent[0] >= plan.bounds.x - 0.001);
+            assert!(quad.center[1] - quad.half_extent[1] >= plan.bounds.y - 0.001);
+            assert!(
+                quad.center[0] + quad.half_extent[0] <= plan.bounds.x + plan.bounds.width + 0.001
+            );
+            assert!(
+                quad.center[1] + quad.half_extent[1] <= plan.bounds.y + plan.bounds.height + 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn generic_titles_reach_gpu_and_expand_the_camera_above_content() {
+        for source in [
+            "---\ntitle: Release η\n---\nflowchart LR\nA --> B\n",
+            "sequenceDiagram\ntitle Release η\nAlice->>Bob: Hello\n",
+            "stateDiagram-v2\ntitle Release η\nIdle --> Ready\n",
+            "C4Context\ntitle Release η\nPerson(user, \"Customer\")\n",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.meta.title.as_deref(), Some("Release η"));
+            let config = CanvasRenderConfig {
+                font_size: 48.0,
+                font_family: "monospace".to_owned(),
+                label_color: "#123456".to_owned(),
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(rows(&plan, GpuTextSource::DiagramTitle), ["Release η"]);
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| run.source == GpuTextSource::DiagramTitle)
+                .unwrap();
+            assert_eq!(
+                plan.glyph_atlas.faces[run.face_index as usize].family,
+                "monospace"
+            );
+            for quad in &plan.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+            {
+                assert_eq!(quad.half_extent[1], 24.0);
+                assert_eq!(
+                    quad.color,
+                    fm_render_canvas::parse_paint_rgba("#123456").unwrap()
+                );
+                assert!(quad.center[1] + quad.half_extent[1] < layout.bounds.y);
+            }
+            assert!(plan.bounds.y < layout.bounds.y);
+            assert_text_fits(&plan);
+            let scene = fm_layout::build_render_scene(&ir, &layout);
+            let scene_plan =
+                GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config);
+            assert_eq!(
+                rows(&scene_plan, GpuTextSource::DiagramTitle),
+                ["Release η"]
+            );
+            assert_eq!(scene_plan.bounds, plan.bounds);
+            let mut canvas = MockCanvas2dContext::new(1200.0, 900.0);
+            render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
+            assert!(canvas.operations().iter().any(|op| {
+                matches!(op, DrawOperation::FillText(text, _, _) if text == "Release η")
+            }));
+        }
+    }
+
+    #[test]
+    fn title_family_rules_and_specialized_title_ownership_are_preserved() {
+        for source in [
+            "flowchart LR\ntitle Hidden\nA --> B\n",
+            "---\ntitle: Hidden\n---\nC4Context\nPerson(user, \"Customer\")\n",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.meta.title.as_deref(), Some("Hidden"));
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert!(rows(&plan, GpuTextSource::DiagramTitle).is_empty());
+        }
+        for source in [
+            "pie title Exactly once\n\"A\": 1\n",
+            "radar-beta\ntitle Exactly once\naxis a[\"A\"], b[\"B\"], c[\"C\"]\ncurve current{1,2,3}\n",
+            "treemap\ntitle Exactly once\n\"Root\"\n  \"A\": 1\n",
+            "journey\ntitle Exactly once\nsection Morning\nWake: 5: Me\n",
+            "xychart-beta\ntitle Exactly once\nx-axis [A, B]\nbar [1,2]\n",
+            "quadrantChart\ntitle Exactly once\nA: [0.3, 0.6]\n",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            let titles: Vec<_> = treemap_gpu_rows(&plan)
+                .into_iter()
+                .filter(|(kind, _, _)| {
+                    matches!(
+                        kind,
+                        GpuTextSource::DiagramTitle | GpuTextSource::JourneyTitle
+                    )
+                })
+                .map(|(_, _, text)| text)
+                .collect();
+            assert_eq!(titles, ["Exactly once"], "{source}");
+        }
+    }
+
+    #[test]
+    fn c4_gpu_legend_keeps_roles_boundaries_fonts_and_themed_panel() {
+        let source = "C4Context\nSHOW_LEGEND()\nPerson(person, \"Customer\")\nSystem(store, \"Store\")\nContainer(web, \"Web\", \"Rust\")\nComponent(core, \"Core\", \"Rust\")\nContainerDb(db, \"Data\", \"SQL\")\nContainerQueue(queue, \"Jobs\", \"AMQP\")\nSystem_Ext(bank, \"Bank\")\nSystem_Boundary(payments, \"Payments\") {\nSystem(api, \"API\")\n}\n";
+        let ir = fm_parser::parse(source).ir;
+        let expected = [
+            "C4 Legend",
+            "◉ Person",
+            "▭ System",
+            "▣ Container",
+            "◫ Component",
+            "◌ Database",
+            "▱ Queue",
+            "╌ External",
+            "⬚ Boundary",
+        ];
+        assert_eq!(ir.clusters[0].c4_boundary_type.as_deref(), Some("SYSTEM"));
+        for font_size in [14.0, 64.0] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: "monospace".to_owned(),
+                node_fill: "#0f172a".to_owned(),
+                label_color: "#f8fafc".to_owned(),
+                cluster_stroke: "#64748b".to_owned(),
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(rows(&plan, GpuTextSource::C4Legend), expected);
+            let panel = plan
+                .node_instances
+                .iter()
+                .find(|node| {
+                    node.node_index == u32::MAX
+                        && node.center[1] - node.half_extent[1]
+                            > layout.bounds.y + layout.bounds.height
+                })
+                .expect("the complete legend needs a background below the diagram");
+            let mut fill = fm_render_canvas::parse_paint_rgba(&config.node_fill).unwrap();
+            fill[3] *= 0.96;
+            assert_eq!(panel.fill, fill);
+            assert_eq!(
+                panel.stroke,
+                fm_render_canvas::parse_paint_rgba(&config.cluster_stroke).unwrap()
+            );
+            for run in plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::C4Legend)
+            {
+                let face = &plan.glyph_atlas.faces[run.face_index as usize];
+                assert_eq!(face.family, "monospace");
+                assert_eq!(
+                    face.weight,
+                    if run.node_index == 0 { "600" } else { "normal" }
+                );
+                for quad in &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                {
+                    assert!(
+                        quad.center[0] - quad.half_extent[0]
+                            >= panel.center[0] - panel.half_extent[0] - 0.001
+                    );
+                    assert!(
+                        quad.center[0] + quad.half_extent[0]
+                            <= panel.center[0] + panel.half_extent[0] + 0.001
+                    );
+                    assert!(
+                        quad.center[1] - quad.half_extent[1]
+                            >= panel.center[1] - panel.half_extent[1] - 0.001
+                    );
+                    assert!(
+                        quad.center[1] + quad.half_extent[1]
+                            <= panel.center[1] + panel.half_extent[1] + 0.001
+                    );
+                }
+            }
+            assert_text_fits(&plan);
+            let mut canvas = MockCanvas2dContext::new(1400.0, 1000.0);
+            render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
+            for expected in expected {
+                assert!(
+                    canvas.operations().iter().any(|operation| {
+                        matches!(operation, DrawOperation::FillText(text, _, _) if text == expected)
+                    }),
+                    "missing Canvas legend row {expected}"
+                );
+            }
+        }
+
+        let hidden = fm_parser::parse(&source.replace("SHOW_LEGEND()", "HIDE_LEGEND()")).ir;
+        let layout = fm_layout::layout_diagram(&hidden);
+        let plan = GpuRenderPlan::from_layout(&hidden, &layout, 1.5);
+        assert!(rows(&plan, GpuTextSource::C4Legend).is_empty());
+        assert!(
+            plan.node_instances
+                .iter()
+                .all(|node| node.node_index != u32::MAX)
+        );
+    }
+
+    #[test]
+    fn info_gpu_banner_matches_canvas_and_submits_real_text() {
+        let ir = fm_parser::parse("info\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = CanvasRenderConfig {
+            font_family: "monospace".to_owned(),
+            label_color: "#228844".to_owned(),
+            ..Default::default()
+        };
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let expected = concat!("v", env!("CARGO_PKG_VERSION"));
+        assert_eq!(rows(&plan, GpuTextSource::InfoVersion), [expected]);
+        assert!(plan.node_instances.is_empty());
+        assert!(plan.edge_segments.is_empty());
+        assert!(
+            plan.text_quads
+                .iter()
+                .all(|quad| quad.center[1] == 40.0 && quad.half_extent[1] == 16.0)
+        );
+        let batches = draw_batches(&plan);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].family, PrimitiveFamily::Text);
+        assert_eq!(batches[0].instance_count as usize, expected.chars().count());
+        assert_text_fits(&plan);
+        let mut canvas = MockCanvas2dContext::new(800.0, 600.0);
+        render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
+        assert!(canvas.operations().iter().any(|operation| {
+            matches!(operation, DrawOperation::FillText(text, _, _) if text == expected)
+        }));
+    }
+
+    #[test]
+    fn gantt_gpu_today_marker_uses_the_calendar_axis_and_under_bar_pass() {
+        let source = "gantt\ntitle Roadmap\ndateFormat YYYY-MM-DD\nsection Core\nDesign :a1, 2026-01-01, 3d\nBuild :a2, after a1, 4d\n";
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let axis = layout.extensions.gantt_day_axis.unwrap();
+        let baseline = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        for date in ["2026-01-02", "2026-01-03"] {
+            let config = CanvasRenderConfig {
+                gantt_today: Some(date.to_owned()),
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(
+                plan.axis_tick_segments.len(),
+                baseline.axis_tick_segments.len() + 1
+            );
+            let marker = plan.axis_tick_segments.last().unwrap();
+            let x = axis
+                .x_for_day(fm_layout::parse_iso_day_number(date).unwrap())
+                .unwrap();
+            assert_eq!(marker.from, [x, layout.bounds.y + 12.0]);
+            assert_eq!(marker.to, [x, layout.bounds.y + layout.bounds.height]);
+            assert_eq!(marker.color, [1.0, 0.0, 0.0, 1.0]);
+            assert_eq!(marker.width, 2.0);
+            assert_eq!(marker.dash, [0.0; 2]);
+            assert_eq!(marker.edge_index, u32::MAX);
+            let batches = draw_batches(&plan);
+            let axis_pass = batches
+                .iter()
+                .position(|batch| batch.family == PrimitiveFamily::AxisTick)
+                .unwrap();
+            let task_pass = batches
+                .iter()
+                .position(|batch| batch.family == PrimitiveFamily::Node)
+                .unwrap();
+            assert!(axis_pass < task_pass);
+            assert_eq!(
+                batches[axis_pass].instance_count as usize,
+                plan.axis_tick_segments.len()
+            );
+
+            let mut canvas = MockCanvas2dContext::new(1400.0, 800.0);
+            let result = render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
+            assert!(canvas.operations().windows(2).any(|pair| {
+                match (&pair[0], &pair[1]) {
+                    (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1)) => {
+                        (*x0 - f64::from(marker.from[0]) - result.viewport.offset_x).abs() < 0.001
+                            && (*x1 - f64::from(marker.to[0]) - result.viewport.offset_x).abs()
+                                < 0.001
+                            && (*y0 - f64::from(marker.from[1]) - result.viewport.offset_y).abs()
+                                < 0.001
+                            && (*y1 - f64::from(marker.to[1]) - result.viewport.offset_y).abs()
+                                < 0.001
+                    }
+                    _ => false,
+                }
+            }));
+        }
+        for date in ["invalid", "2026-02-30", "2025-12-31", "2027-01-01"] {
+            let config = CanvasRenderConfig {
+                gantt_today: Some(date.to_owned()),
+                ..Default::default()
+            };
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(
+                plan.axis_tick_segments, baseline.axis_tick_segments,
+                "{date}"
+            );
+        }
+        let suppressed =
+            fm_parser::parse(&source.replace("gantt\n", "gantt\ntodayMarker off\n")).ir;
+        let layout = fm_layout::layout_diagram(&suppressed);
+        let config = CanvasRenderConfig {
+            gantt_today: Some("2026-01-03".to_owned()),
+            ..Default::default()
+        };
+        let plan = GpuRenderPlan::from_layout_with_config(&suppressed, &layout, &config);
+        assert_eq!(
+            plan.axis_tick_segments,
+            GpuRenderPlan::from_layout(&suppressed, &layout, 1.5).axis_tick_segments
+        );
+    }
+}
+
 mod xychart {
     use super::*;
     use fm_core::IrXySeriesKind;

@@ -15799,14 +15799,10 @@ fn c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<(&'static str, &'static str)>
             .flat_map(|node| node.classes.iter())
             .any(|class_name| class_name == needle)
     };
-    let has_boundary = ir.clusters.iter().any(|cluster| {
-        cluster
-            .title
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .is_some_and(|label| {
-                label.text.contains("Boundary") || label.text.contains("Deployment_Node")
-            })
-    });
+    let has_boundary = ir
+        .clusters
+        .iter()
+        .any(|cluster| cluster.c4_boundary_type.is_some());
 
     let mut entries = Vec::new();
     if has_class("c4-person") {
@@ -24606,6 +24602,27 @@ mod tests {
         assert!(svg.contains("fm-node-border-dashed"));
         assert!(svg.contains("fm-c4-legend"));
         assert!(svg.contains("C4 Legend"));
+    }
+
+    #[test]
+    fn c4_legend_identifies_boundaries_from_semantics_not_caption_spelling() {
+        let source = "C4Context\nSHOW_LEGEND()\nSystem_Boundary(payments, \"Payments\") {\nSystem(api, \"API\")\n}\n";
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.clusters.len(), 1);
+        assert_eq!(ir.clusters[0].c4_boundary_type.as_deref(), Some("SYSTEM"));
+        let svg = render_svg(&ir);
+        assert!(svg.contains("Payments"));
+        assert!(svg.contains("⬚ Boundary"));
+
+        let mut ordinary_cluster = ir.clone();
+        ordinary_cluster.clusters[0].c4_boundary_type = None;
+        let label = ordinary_cluster.clusters[0].title.unwrap();
+        ordinary_cluster.labels[label.0].text = "Boundary comparison".to_owned();
+        assert!(render_svg(&ordinary_cluster).contains("Boundary comparison"));
+        assert!(!render_svg(&ordinary_cluster).contains("⬚ Boundary"));
+
+        let hidden = fm_parser::parse(&source.replace("SHOW_LEGEND()", "HIDE_LEGEND()")).ir;
+        assert!(!render_svg(&hidden).contains("fm-c4-legend-entry"));
     }
 
     #[test]

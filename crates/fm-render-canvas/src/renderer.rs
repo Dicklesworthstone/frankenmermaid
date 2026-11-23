@@ -16,6 +16,8 @@ use fm_layout::{
 };
 use std::collections::BTreeSet;
 
+pub(crate) const INFO_VERSION_TEXT: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 /// Apply a geometry channel's alpha without rewriting its CSS color or fading adjacent text.
 /// The color keeps its intrinsic alpha, which Canvas multiplies by this global alpha once.
 fn with_paint_opacity<C: Canvas2dContext>(
@@ -994,8 +996,11 @@ impl Canvas2dRenderer {
         let x = padding;
         let y = canvas_height - padding - box_height;
 
-        ctx.set_fill_style("rgba(248,249,250,0.96)");
+        ctx.save();
+        ctx.set_global_alpha(0.96);
+        ctx.set_fill_style(&self.config.node_fill);
         ctx.fill_rect(x, y, box_width, box_height);
+        ctx.restore();
         ctx.set_stroke_style(&self.config.cluster_stroke);
         ctx.set_line_width(1.0);
         ctx.stroke_rect(x, y, box_width, box_height);
@@ -1884,11 +1889,7 @@ impl Canvas2dRenderer {
         ctx.set_fill_style(&self.config.label_color);
         ctx.set_text_align(TextAlign::Center);
         ctx.set_text_baseline(TextBaseline::Middle);
-        ctx.fill_text(
-            concat!("v", env!("CARGO_PKG_VERSION")),
-            100.0 + offset_x,
-            40.0 + offset_y,
-        );
+        ctx.fill_text(INFO_VERSION_TEXT, 100.0 + offset_x, 40.0 + offset_y);
         self.draw_calls += 1;
         *labels_drawn += 1;
     }
@@ -2553,30 +2554,9 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
     ) {
-        let (Some(today), Some(axis)) = (
-            self.config.gantt_today.as_deref(),
-            layout.extensions.gantt_day_axis,
-        ) else {
+        let Some((start, end)) = gantt_today_marker(layout, ir, &self.config) else {
             return;
         };
-        let style = ir
-            .gantt_meta
-            .as_ref()
-            .and_then(|meta| meta.today_marker_style.as_deref())
-            .unwrap_or("");
-        if style.trim().eq_ignore_ascii_case("off") {
-            return;
-        }
-        let Some(day) = fm_layout::parse_iso_day_number(today) else {
-            return;
-        };
-        let Some(x) = axis.x_for_day(day) else {
-            return;
-        };
-
-        let x = f64::from(x) + offset_x;
-        let top = f64::from(layout.bounds.y) + offset_y + 12.0;
-        let bottom = f64::from(layout.bounds.y + layout.bounds.height) + offset_y;
 
         // mermaid's own red today line, matching the SVG arm's fallback. A declared style string is
         // CSS and has no canvas equivalent, so it is not half-applied here: honouring `off` and
@@ -2584,8 +2564,8 @@ impl Canvas2dRenderer {
         ctx.set_stroke_style("#ff0000");
         ctx.set_line_width(2.0);
         ctx.begin_path();
-        ctx.move_to(x, top);
-        ctx.line_to(x, bottom);
+        ctx.move_to(f64::from(start.x) + offset_x, f64::from(start.y) + offset_y);
+        ctx.line_to(f64::from(end.x) + offset_x, f64::from(end.y) + offset_y);
         ctx.stroke();
         self.draw_calls += 1;
     }
@@ -5641,7 +5621,7 @@ fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
     format!("bold {}px {}", config.font_size * 0.75, config.font_family)
 }
 
-fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
+pub(crate) fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // XY charts draw their title in the plot's reserved margin and return before this
     // screen-space overlay. Other families keep the shared title fallback.
     //
@@ -5653,7 +5633,7 @@ fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     ir.declared_title_if_drawn()
 }
 
-fn canvas_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
+pub(crate) fn canvas_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
     matches!(
         ir.diagram_type,
         DiagramType::C4Context
@@ -5664,21 +5644,17 @@ fn canvas_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
     ) && ir.meta.c4_show_legend
 }
 
-fn canvas_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static str> {
+pub(crate) fn canvas_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static str> {
     let has_class = |needle: &str| {
         ir.nodes
             .iter()
             .flat_map(|node| node.classes.iter())
             .any(|class_name| class_name == needle)
     };
-    let has_boundary = ir.clusters.iter().any(|cluster| {
-        cluster
-            .title
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .is_some_and(|label| {
-                label.text.contains("Boundary") || label.text.contains("Deployment_Node")
-            })
-    });
+    let has_boundary = ir
+        .clusters
+        .iter()
+        .any(|cluster| cluster.c4_boundary_type.is_some());
 
     let mut entries = Vec::new();
     if has_class("c4-person") {
@@ -5706,6 +5682,36 @@ fn canvas_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static str> {
         entries.push("⬚ Boundary");
     }
     entries
+}
+
+/// A supplied date is projected through the layout's own day axis on every Canvas backend.
+/// Invalid dates, out-of-range dates and authored `todayMarker off` produce no marker.
+pub(crate) fn gantt_today_marker(
+    layout: &DiagramLayout,
+    ir: &MermaidDiagramIr,
+    config: &CanvasRenderConfig,
+) -> Option<(fm_layout::LayoutPoint, fm_layout::LayoutPoint)> {
+    let today = config.gantt_today.as_deref()?;
+    let axis = layout.extensions.gantt_day_axis?;
+    if ir
+        .gantt_meta
+        .as_ref()
+        .and_then(|meta| meta.today_marker_style.as_deref())
+        .is_some_and(|style| style.trim().eq_ignore_ascii_case("off"))
+    {
+        return None;
+    }
+    let x = axis.x_for_day(fm_layout::parse_iso_day_number(today)?)?;
+    Some((
+        fm_layout::LayoutPoint {
+            x,
+            y: layout.bounds.y + 12.0,
+        },
+        fm_layout::LayoutPoint {
+            x,
+            y: layout.bounds.y + layout.bounds.height,
+        },
+    ))
 }
 
 #[cfg(test)]

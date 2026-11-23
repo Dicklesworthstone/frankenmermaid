@@ -120,7 +120,7 @@ pub enum PrimitiveFamily {
     TreemapTile,
     /// Radar rings, spokes, and series outlines.
     Radar,
-    /// Layout-provided axis ticks.
+    /// Layout-provided axis ticks and a supplied Gantt today marker, beneath task bars.
     AxisTick,
     /// Dashed dividers inside composite states and subgraphs.
     ClusterDivider,
