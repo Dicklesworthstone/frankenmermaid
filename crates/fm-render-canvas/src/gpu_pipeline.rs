@@ -162,6 +162,8 @@ pub enum PrimitiveFamily {
     SequenceFragmentBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
+    /// Filled central-connection circles, above participant headers and ordinary labels.
+    SequenceCentralConnection,
     /// Sequence-counter capsules, above ordinary labels.
     SequenceNumber,
     /// Exact counter digits, drawn above their capsules and below destruction crosses.
@@ -195,6 +197,10 @@ impl PrimitiveInstances<'_> {
 
 impl PrimitiveFamily {
     pub(crate) fn instances(self, plan: &GpuRenderPlan) -> PrimitiveInstances<'_> {
+        let central_start = plan
+            .sequence_central_connection_start
+            .unwrap_or(plan.arrowheads.len())
+            .min(plan.arrowheads.len());
         match self {
             Self::XyPlot => PrimitiveInstances::Nodes(&plan.xy_plot_instances),
             Self::XyAxis => PrimitiveInstances::Edges(&plan.xy_axis_segments),
@@ -225,7 +231,10 @@ impl PrimitiveFamily {
             }
             Self::SequenceNote => PrimitiveInstances::Nodes(&plan.sequence_note_instances),
             Self::Edge => PrimitiveInstances::Edges(&plan.edge_segments),
-            Self::Arrowhead => PrimitiveInstances::Arrowheads(&plan.arrowheads),
+            Self::Arrowhead => PrimitiveInstances::Arrowheads(&plan.arrowheads[..central_start]),
+            Self::SequenceCentralConnection => {
+                PrimitiveInstances::Arrowheads(&plan.arrowheads[central_start..])
+            }
             Self::ErMarker => PrimitiveInstances::Edges(&plan.er_marker_segments),
             Self::Pie => PrimitiveInstances::Pies(&plan.pie_wedges),
             Self::Node => PrimitiveInstances::Nodes(&plan.node_instances),
@@ -542,7 +551,7 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 32] {
+pub const fn pipelines() -> [PipelineDescriptor; 33] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
@@ -579,6 +588,11 @@ pub const fn pipelines() -> [PipelineDescriptor; 32] {
         node_fill_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
+        PipelineDescriptor {
+            family: PrimitiveFamily::SequenceCentralConnection,
+            label: "fm-sequence-central-connection",
+            ..arrowhead_pipeline()
+        },
         node_family(PrimitiveFamily::SequenceNumber, "fm-sequence-number"),
         PipelineDescriptor {
             family: PrimitiveFamily::SequenceNumberText,

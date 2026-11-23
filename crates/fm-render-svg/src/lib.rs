@@ -2668,6 +2668,9 @@ fn render_scene_group(
     .then(|| resolve_theme(ir, config));
     let sequence_number_theme =
         (group.id.as_deref() == Some("sequence-numbers")).then(|| resolve_theme(ir, config));
+    let sequence_connection_theme =
+        (group.id.as_deref() == Some("sequence-central-connections"))
+            .then(|| resolve_theme(ir, config));
     let packet_bit_theme =
         (group.id.as_deref() == Some("packet-bit-labels")).then(|| resolve_theme(ir, config));
     let packet_layer = ir.is_some_and(|ir| ir.diagram_type == DiagramType::PacketBeta)
@@ -2702,6 +2705,26 @@ fn render_scene_group(
                     .class("fm-sequence-number"),
                 RenderItem::Group(_) => rendered,
             };
+        }
+        if let Some(theme) = &sequence_connection_theme
+            && let RenderItem::Path(path) = child
+        {
+            // The message already owns accessibility and interaction. The dot retains its
+            // source metadata without creating a second announcement or focus target.
+            rendered = render_scene_path(path, config.include_source_spans, ir, false, true)
+                .class("fm-sequence-central-connection")
+                .attr("aria-hidden", "true");
+            if path.fill.is_some()
+                && let Some(ir) = ir
+                && !scene_has_authored_paint(ir, path.source, "stroke")
+            {
+                rendered = rendered.fill(&theme.colors.edge);
+            }
+            if config.include_deck_owners
+                && let RenderSource::Edge(index) = path.source
+            {
+                rendered = rendered.attr("data-fm-deck-owner", &mermaid_edge_element_id(index));
+            }
         }
         if packet_layer {
             // A field retains one semantic identity across every wrapped row. Its first path
@@ -7095,6 +7118,11 @@ fn render_layout_to_svg(
                 .class("fm-sequence-mirror-header")
                 .write_to_string(out);
             }
+            if ir.diagram_type == DiagramType::Sequence {
+                for edge in &layout.edges {
+                    write_sequence_central_connections_into(out, edge, &edge_context);
+                }
+            }
             for marker in &sequence_foreground {
                 marker.write_to_string(out);
             }
@@ -7338,6 +7366,15 @@ fn render_layout_to_svg(
         doc = doc.child(node_elem.class("fm-sequence-mirror-header"));
     }
 
+    if ir.diagram_type == DiagramType::Sequence {
+        let mut connections = String::new();
+        for edge in &layout.edges {
+            write_sequence_central_connections_into(&mut connections, edge, &edge_context);
+        }
+        if !connections.is_empty() {
+            doc = doc.child(Element::raw_svg(connections));
+        }
+    }
     doc = doc.children(sequence_foreground);
 
     if legend_enabled {
@@ -17514,6 +17551,66 @@ fn write_sequence_number_into(
 fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) {
     render_edge_body_into(out, edge_path, context);
     write_sequence_number_into(out, edge_path, context);
+}
+
+fn write_sequence_central_connections_into(
+    out: &mut String,
+    edge_path: &LayoutEdgePath,
+    context: &EdgeRenderContext<'_>,
+) {
+    if context.ir.diagram_type != DiagramType::Sequence
+        || context
+            .ir
+            .edges
+            .get(edge_path.edge_index)
+            .and_then(fm_core::IrEdge::sequence_central_connection)
+            .is_none()
+    {
+        return;
+    }
+    let style = fm_layout::edge_labels::edge_label_style(context.ir, edge_path.edge_index);
+    if style
+        .get("stroke")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("none"))
+        || style.get("stroke-width").is_some_and(|value| {
+            value.trim().trim_end_matches("px").trim().parse::<f32>() == Ok(0.0)
+        })
+    {
+        return;
+    }
+    let color = style.get("stroke").and_then(|value| fm_layout::scene_paint(value));
+    let color = color.as_deref().unwrap_or(&context.colors.edge);
+    let opacity = fm_layout::scene_style_opacity(&style, "opacity")
+        * fm_layout::scene_style_opacity(&style, "stroke-opacity");
+    for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(
+        context.ir,
+        edge_path,
+        &context.config.font_metrics(),
+    ) {
+        let circle = Element::circle()
+            .cx(marker.center.x + context.offset_x)
+            .cy(marker.center.y + context.offset_y)
+            .r(marker.radius)
+            .fill(color)
+            .fill_opacity(opacity)
+            .attr("style", &format!("fill:{color};fill-opacity:{opacity};stroke:none"))
+            .class("fm-sequence-central-connection")
+            .attr("aria-hidden", "true");
+        let mut circle = apply_source_metadata(
+            circle,
+            RenderSource::Edge(edge_path.edge_index),
+            context.config.include_source_spans,
+            Some(context.ir),
+            false,
+        );
+        if context.config.include_deck_owners {
+            circle = circle.attr(
+                "data-fm-deck-owner",
+                &mermaid_edge_element_id(edge_path.edge_index),
+            );
+        }
+        circle.write_to_string(out);
+    }
 }
 
 fn render_edge_body_into(
@@ -28442,6 +28539,131 @@ marker#arrow-open path {
             .find(|group| group.contains(">Web</text>") && group.contains("fm-node"))
             .expect("participant group");
         assert!(!participant.contains("fm-sequence-actor-figure"));
+    }
+
+    #[test]
+    fn sequence_central_connections_render_on_both_svg_backends() {
+        let parsed = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             A()->>B: source\nB->>()A: target\nA()->>()B: both\n\
+             B-->>A: ordinary\nautonumber 4294967295 4294967295\n\
+             B()->>()B: self\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                let config = SvgRenderConfig {
+                    backend,
+                    theme,
+                    include_deck_owners: true,
+                    ..Default::default()
+                };
+                let svg = render_svg_with_config(&parsed.ir, &config);
+                let dots: Vec<_> = svg
+                    .split('<')
+                    .filter_map(|element| element.split_once('>').map(|(tag, _)| tag))
+                    .filter(|tag| tag.contains("class=\"fm-sequence-central-connection\""))
+                    .collect();
+                assert_eq!(dots.len(), 6, "{backend:?}/{theme:?}");
+                let color = resolve_theme(Some(&parsed.ir), &config).colors.edge;
+                for dot in dots {
+                    assert!(dot.contains(&format!("fill=\"{color}\"")), "{dot}");
+                    assert!(dot.contains("aria-hidden=\"true\""), "{dot}");
+                    assert!(!dot.contains("tabindex="), "{dot}");
+                    assert!(!dot.contains("aria-label="), "{dot}");
+                    assert!(dot.contains("data-fm-deck-owner="), "{dot}");
+                    assert!(dot.contains("data-fm-source-kind=\"edge\""), "{dot}");
+                }
+                assert!(svg.contains("marker-end="), "primary arrows must remain");
+                let activation_class = match backend {
+                    SvgBackend::LegacyLayout => "fm-activation-bar",
+                    SvgBackend::Scene => "sequence-activations",
+                };
+                assert!(svg.contains(activation_class), "implicit activations");
+                assert_eq!(issue14_drawn_text(&svg).get("4294967295"), Some(&1));
+                assert_eq!(svg, render_svg_with_config(&parsed.ir, &config));
+            }
+        }
+    }
+
+    #[test]
+    fn created_participant_headers_do_not_cover_central_connections() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n",
+        ).ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for force_slow_path in [false, true] {
+                let mut layout = fm_layout::layout_diagram(&ir);
+                if force_slow_path {
+                    layout.edges[0].bundle_count = 2;
+                }
+                let svg = render_svg_with_layout(
+                    &ir,
+                    &layout,
+                    &SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    },
+                );
+                let dot = svg.find("class=\"fm-sequence-central-connection\"")
+                    .expect("central target circle");
+                let header = svg.rfind(">B</text>").expect("created participant label");
+                assert!(dot > header, "paint the connection after the created header");
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_central_connections_share_stroke_paint_and_visibility() {
+        let mut ir = fm_parser::parse("sequenceDiagram\nA()->>()B: styled\n").ir;
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Link(0),
+            style: "stroke:#123456;opacity:50%;stroke-opacity:40%;fill-opacity:0%".into(),
+            span: Span::default(),
+        });
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            let dots: Vec<_> = svg
+                .split('<')
+                .filter_map(|element| element.split_once('>').map(|(tag, _)| tag))
+                .filter(|tag| tag.contains("class=\"fm-sequence-central-connection\""))
+                .collect();
+            assert_eq!(dots.len(), 2);
+            for dot in dots {
+                assert!(dot.contains("fill=\"#123456\""), "{dot}");
+                let opacity: f32 = dot
+                    .split_once("fill-opacity=\"").unwrap().1
+                    .split('"').next().unwrap()
+                    .parse().unwrap();
+                assert!((opacity - 0.2).abs() < 0.001, "{dot}");
+            }
+        }
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let standalone = render_scene_to_svg(&scene, &SvgRenderConfig::default());
+        assert_eq!(
+            standalone.matches("class=\"fm-sequence-central-connection\"").count(),
+            2
+        );
+        assert!(standalone.contains("fill=\"#123456\""));
+
+        for hidden_style in ["stroke:none", "stroke-width:0px"] {
+            ir.style_refs[0].style = hidden_style.into();
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let svg = render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    },
+                );
+                assert!(!svg.contains("fm-sequence-central-connection"));
+            }
+        }
     }
 
     #[test]

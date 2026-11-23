@@ -2080,8 +2080,11 @@ pub struct GpuRenderPlan {
     /// is planned too, tagged `GpuTextSource::SequenceNote`.
     pub sequence_note_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
-    /// Triangle instances for edge arrowheads.
+    /// Ordinary endpoint markers followed by optional filled sequence central connections.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// Start of the foreground central-connection tail; ordinary markers remain below nodes.
+    /// None means the entire buffer uses the ordinary marker pass.
+    pub sequence_central_connection_start: Option<usize>,
     /// ER crow's-foot cardinality glyphs, as line segments (bd-hh0o7).
     ///
     /// SEGMENTS RATHER THAN MARKER INSTANCES, deliberately. The arrowhead shader carries six SDF
@@ -3136,6 +3139,8 @@ impl GpuRenderPlan {
                 }
             }
         }
+        let sequence_central_connection_start =
+            append_sequence_central_markers(ir, layout, config, &metrics, &mut arrowheads);
 
         // Preserve the same measured pie composition as Canvas2D: its legend and title are
         // already included in the frame, so deriving a radius from that frame would enlarge
@@ -4710,6 +4715,7 @@ impl GpuRenderPlan {
             sequence_note_instances,
             edge_segments,
             arrowheads,
+            sequence_central_connection_start,
             pie_wedges,
             node_instances,
             node_fill_triangles,
@@ -4772,9 +4778,51 @@ impl GpuRenderPlan {
                     apply_edge_marker_paint(marker, ir, &effective_config);
                 }
             }
+            // Central connections are filled scene paths, not endpoint-marker attributes.
+            // Rebuild them after replacing and repainting the ordinary scene markers so
+            // they are neither lost nor painted as hollow circle terminators.
+            plan.sequence_central_connection_start = append_sequence_central_markers(
+                ir,
+                layout,
+                &effective_config,
+                &effective_config.font_metrics(),
+                &mut plan.arrowheads,
+            );
         }
         plan
     }
+}
+
+fn append_sequence_central_markers(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &crate::CanvasRenderConfig,
+    metrics: &fm_core::FontMetrics,
+    arrowheads: &mut Vec<GpuArrowheadInstance>,
+) -> Option<usize> {
+    if ir.diagram_type != fm_core::DiagramType::Sequence {
+        return None;
+    }
+    let start = arrowheads.len();
+    for edge in &layout.edges {
+        if !crate::renderer::sequence_central_stroke_visible(ir, edge.edge_index, config) {
+            continue;
+        }
+        let color = resolved_edge_color(ir, edge.edge_index, config);
+        for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
+            arrowheads.push(GpuArrowheadInstance {
+                position: [marker.center.x, marker.center.y],
+                angle: 0.0,
+                // The circle SDF has a radius of 0.4 in marker-local coordinates.
+                size: marker.radius / 0.4,
+                edge_index: edge.edge_index.try_into().unwrap_or(u32::MAX),
+                kind: GpuMarkerKind::Circle as u32,
+                color,
+                fill: color,
+            });
+        }
+    }
+    (arrowheads.len() > start).then_some(start)
 }
 
 struct XyChartLabel {
@@ -5037,6 +5085,7 @@ impl GpuRenderPlan {
             sequence_note_instances: Vec::new(),
             edge_segments: Vec::new(),
             arrowheads: Vec::new(),
+            sequence_central_connection_start: None,
             er_marker_segments: Vec::new(),
             pie_wedges: Vec::new(),
             node_instances,
@@ -5388,6 +5437,7 @@ impl GpuRenderPlan {
             sequence_note_instances: Vec::new(),
             edge_segments,
             arrowheads: Vec::new(),
+            sequence_central_connection_start: None,
             er_marker_segments: Vec::new(),
             pie_wedges: Vec::new(),
             node_instances,
@@ -9712,6 +9762,150 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn sequence_central_connections_keep_filled_geometry_paint_and_primary_arrows() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\nA()->>B: source\nB-->>()A: target\n\
+             A()->>()B: both\nB()->>()B: self\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 4);
+        for edge in &mut ir.edges {
+            edge.inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+                ("stroke".to_string(), "#264a6c80".to_string()),
+                ("opacity".to_string(), "0.5".to_string()),
+                ("stroke-opacity".to_string(), "40%".to_string()),
+            ])));
+        }
+        let config = crate::CanvasRenderConfig {
+            node_fill: "#ffffff".to_string(),
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let direct = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let from_scene =
+            GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config);
+        assert_eq!(direct.arrowheads, from_scene.arrowheads);
+        assert_eq!(
+            direct.sequence_central_connection_start,
+            from_scene.sequence_central_connection_start
+        );
+
+        let mut ordinary_ir = ir.clone();
+        for edge in &mut ordinary_ir.edges {
+            edge.extras_mut().sequence_central_connection = None;
+        }
+        let ordinary = GpuRenderPlan::from_layout_with_config(&ordinary_ir, &layout, &config);
+        assert!(ordinary.sequence_central_connection_start.is_none());
+        assert_eq!(ordinary.arrowheads.len(), 4);
+        let start = direct.sequence_central_connection_start.unwrap();
+        assert_eq!(start, ordinary.arrowheads.len());
+        assert_eq!(&direct.arrowheads[..start], ordinary.arrowheads.as_slice());
+
+        let edge = |index| layout.edges.iter().find(|edge| edge.edge_index == index).unwrap();
+        let expected = [
+            (0, edge(0).points[0]),
+            (1, *edge(1).points.last().unwrap()),
+            (2, edge(2).points[0]),
+            (2, *edge(2).points.last().unwrap()),
+            (3, edge(3).points[0]),
+            (3, *edge(3).points.last().unwrap()),
+        ];
+        assert_eq!(direct.arrowheads.len() - start, expected.len());
+        for (marker, (edge_index, point)) in direct.arrowheads[start..].iter().zip(expected) {
+            assert_eq!(marker.kind, super::GpuMarkerKind::Circle as u32);
+            assert_eq!(marker.edge_index, edge_index);
+            assert_eq!(marker.position, [point.x, point.y]);
+            assert_eq!(marker.size * 0.4, 5.0);
+            assert_eq!(marker.fill, marker.color, "central connections are filled");
+            for (actual, expected) in marker.color.iter().zip([
+                38.0 / 255.0,
+                74.0 / 255.0,
+                108.0 / 255.0,
+                (128.0 / 255.0) * 0.5 * 0.4,
+            ]) {
+                assert!((*actual - expected).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_central_connections_clear_numbers_and_skip_hidden_messages() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\nautonumber 4294967295 4294967295\n\
+             A()->>()B: first\nB()->>()B: self\n",
+        )
+        .ir;
+        let config = crate::CanvasRenderConfig {
+            font_size: 42.0,
+            font_family: "monospace".to_string(),
+            ..Default::default()
+        };
+        let metrics = config.font_metrics();
+        let mut layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        for plan in [
+            GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+            GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config),
+        ] {
+            let start = plan.sequence_central_connection_start.unwrap();
+            assert_eq!(start, 2);
+            assert_eq!(plan.arrowheads.len() - start, 4);
+            assert_eq!(plan.sequence_number_instances.len(), 2);
+            for (index, edge) in layout.edges.iter().enumerate() {
+                let source = &plan.arrowheads[start + index * 2];
+                let target = &plan.arrowheads[start + index * 2 + 1];
+                let badge = plan
+                    .sequence_number_instances
+                    .iter()
+                    .find(|badge| badge.node_index as usize == edge.edge_index)
+                    .unwrap();
+                let radius = source.size * 0.4;
+                assert!(
+                    source.position[0] - radius
+                        >= badge.center[0] + badge.half_extent[0] + 2.99
+                );
+                assert!(
+                    source.position[0] + radius <= edge.points[1].x + 0.01,
+                    "the source connection remains on the extended self-message shaft"
+                );
+                let endpoint = edge.points.last().unwrap();
+                assert_eq!(target.position, [endpoint.x, endpoint.y]);
+            }
+            let numbers: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::SequenceNumber)
+                .map(|run| text_for_run(&plan, run))
+                .collect();
+            assert_eq!(numbers, ["4294967295", "8589934590"]);
+        }
+
+        ir.edges[1].arrow = fm_core::ArrowType::Invisible;
+        layout
+            .edges
+            .iter_mut()
+            .find(|edge| edge.edge_index == 0)
+            .unwrap()
+            .bundled = true;
+        let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        for plan in [
+            GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+            GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config),
+        ] {
+            assert!(plan.sequence_central_connection_start.is_none());
+            assert!(plan.arrowheads.is_empty());
+            assert!(plan.sequence_number_instances.is_empty());
         }
     }
 

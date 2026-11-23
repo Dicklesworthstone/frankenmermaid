@@ -463,6 +463,7 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::NodeFill,
             PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text,
+            PrimitiveFamily::SequenceCentralConnection,
             PrimitiveFamily::SequenceNumber,
             PrimitiveFamily::SequenceNumberText,
             PrimitiveFamily::LifecycleMarker,
@@ -470,6 +471,61 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
          edges, boxes over both, dashed borders over boxes, and destruction crosses above labels"
     );
+}
+
+#[test]
+fn sequence_central_connections_submit_after_created_headers_before_number_badges() {
+    let ir = fm_parser::parse(
+        "sequenceDiagram\nautonumber 7\nparticipant A\n\
+         create participant B\nA->>()B: create\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let scene = fm_layout::build_render_scene(&ir, &layout);
+    let config = CanvasRenderConfig::default();
+    for plan in [
+        GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+        GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config),
+    ] {
+        assert_eq!(plan.sequence_central_connection_start, Some(1));
+        assert_eq!(plan.arrowheads.len(), 2);
+        let target = ir.nodes.iter().position(|node| node.id == "B").unwrap();
+        let header = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_index == target)
+            .unwrap()
+            .bounds;
+        let connection = &plan.arrowheads[1];
+        assert!(connection.position[0] >= header.x);
+        assert!(connection.position[0] <= header.x + header.width);
+        assert!(connection.position[1] >= header.y);
+        assert!(connection.position[1] <= header.y + header.height);
+
+        let batches = draw_batches(&plan);
+        let at = |family| {
+            batches.iter().position(|batch| batch.family == family).unwrap()
+        };
+        let ordinary = at(PrimitiveFamily::Arrowhead);
+        let nodes = at(PrimitiveFamily::Node);
+        let labels = at(PrimitiveFamily::Text);
+        let central = at(PrimitiveFamily::SequenceCentralConnection);
+        let numbers = at(PrimitiveFamily::SequenceNumber);
+        assert!(ordinary < nodes && nodes < labels && labels < central && central < numbers);
+        assert_eq!(batches[ordinary].instance_count, 1);
+        assert_eq!(batches[central].instance_count, 1);
+        assert_eq!(
+            batches[ordinary].instance_count + batches[central].instance_count,
+            plan.arrowheads.len() as u32,
+            "split submission must not duplicate or lose marker instances"
+        );
+        let pipeline = pipelines()
+            .into_iter()
+            .find(|pipeline| pipeline.family == PrimitiveFamily::SequenceCentralConnection)
+            .unwrap();
+        assert_layout_matches_shader(&pipeline, "Arrowhead");
+        assert_eq!(pipeline.wgsl, fm_render_canvas::gpu_plan::ARROWHEAD_WGSL);
+    }
 }
 
 #[test]

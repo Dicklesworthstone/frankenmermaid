@@ -836,6 +836,9 @@ impl Canvas2dRenderer {
         self.draw_packet_bits(&packet_bits, ctx, offset_x, offset_y);
         labels_drawn += packet_bits.len();
 
+        // Created participants can cover the message endpoint with their header. Central
+        // connections remain visible in the foreground, below sequence-number badges.
+        self.draw_sequence_central_connections(layout, ir, ctx, offset_x, offset_y);
         labels_drawn += self.draw_sequence_numbers(layout, ir, ctx, offset_x, offset_y);
 
         // A destruction cross terminates the lifeline and must remain visible above the last
@@ -2801,6 +2804,52 @@ impl Canvas2dRenderer {
                 }
             }
         }
+    }
+
+    /// Draw filled endpoint connections over participant headers and their labels.
+    fn draw_sequence_central_connections<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if ir.diagram_type != DiagramType::Sequence
+            || !ir
+                .edges
+                .iter()
+                .any(|edge| edge.sequence_central_connection().is_some())
+        {
+            return;
+        }
+        let metrics = self.config.font_metrics();
+        ctx.save();
+        for edge in &layout.edges {
+            if !sequence_central_stroke_visible(ir, edge.edge_index, &self.config) {
+                continue;
+            }
+            let (stroke, _) =
+                resolve_edge_style_with_defaults(ir, edge.edge_index, &self.config);
+            let stroke = stroke.as_deref().unwrap_or(&self.config.edge_stroke);
+            let opacity = resolve_edge_opacity(ir, edge.edge_index).unwrap_or(1.0)
+                * resolve_edge_stroke_opacity(ir, edge.edge_index).unwrap_or(1.0);
+            ctx.set_global_alpha(opacity);
+            ctx.set_fill_style(stroke);
+            for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, &metrics) {
+                ctx.begin_path();
+                ctx.arc(
+                    f64::from(marker.center.x) + offset_x,
+                    f64::from(marker.center.y) + offset_y,
+                    f64::from(marker.radius),
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                ctx.fill();
+                self.draw_calls += 1;
+            }
+        }
+        ctx.restore();
     }
 
     /// Draw exact counters independently of message captions, including self messages.
@@ -4963,6 +5012,29 @@ pub(crate) fn resolve_edge_style_with_defaults(
         })
         .or_else(|| fm_core::sankey_edge_color(ir, edge_index, &config.accents).map(str::to_owned));
     (stroke, width)
+}
+
+/// A central connection inherits the connector's stroke channel, including its absence.
+/// The legacy width resolver keeps a fallback for zero, so inspect the authored value here.
+pub(crate) fn sequence_central_stroke_visible(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    config: &CanvasRenderConfig,
+) -> bool {
+    let (stroke, _) = resolve_edge_style_with_defaults(ir, edge_index, config);
+    if stroke
+        .as_deref()
+        .unwrap_or(&config.edge_stroke)
+        .trim()
+        .eq_ignore_ascii_case("none")
+    {
+        return false;
+    }
+    let style = merged_edge_style(ir, edge_index);
+    !style
+        .get("stroke-width")
+        .and_then(|width| width.trim().trim_end_matches("px").trim().parse::<f64>().ok())
+        .is_some_and(|width| width == 0.0)
 }
 
 /// Parse a CSS `stroke-width` declaration into a device width.
@@ -9647,6 +9719,266 @@ mod tests {
         assert_eq!(result.nodes_drawn, ir.nodes.len());
         assert_eq!(result.edges_drawn, ir.edges.len());
         assert_eq!(result.clusters_drawn, 1);
+    }
+
+    #[derive(Debug)]
+    struct CanvasCentralCircle {
+        center: [f64; 2],
+        radius: f64,
+        color: String,
+        opacity: f64,
+        operation: usize,
+    }
+
+    fn recorded_central_circles(operations: &[DrawOperation]) -> Vec<CanvasCentralCircle> {
+        let mut paint = (String::new(), 1.0);
+        let mut stack = Vec::new();
+        let mut circle = None;
+        let mut circles = Vec::new();
+        for (index, operation) in operations.iter().enumerate() {
+            match operation {
+                DrawOperation::Save => stack.push(paint.clone()),
+                DrawOperation::Restore => paint = stack.pop().expect("balanced canvas state"),
+                DrawOperation::SetFillStyle(color) => paint.0.clone_from(color),
+                DrawOperation::SetGlobalAlpha(opacity) => paint.1 = *opacity,
+                DrawOperation::BeginPath => circle = None,
+                DrawOperation::Arc(x, y, radius, start, end)
+                    if (*end - *start - std::f64::consts::TAU).abs() < 1e-9 =>
+                {
+                    circle = Some(([*x, *y], *radius));
+                }
+                DrawOperation::Fill => {
+                    if let Some((center, radius)) = circle.take() {
+                        circles.push(CanvasCentralCircle {
+                            center,
+                            radius,
+                            color: paint.0.clone(),
+                            opacity: paint.1,
+                            operation: index,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(stack.is_empty());
+        circles
+    }
+
+    #[test]
+    fn canvas_sequence_central_connections_keep_primary_arrows_and_edge_paint() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\nA()->>B: source\nB-->>()A: target\n\
+             A()->>()B: both\nB()->>()B: self\n",
+        )
+        .ir;
+        assert_eq!(ir.edges.len(), 4);
+        for edge in &mut ir.edges {
+            edge.inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+                ("stroke".to_string(), "#264a6c80".to_string()),
+                ("opacity".to_string(), "0.5".to_string()),
+                ("stroke-opacity".to_string(), "40%".to_string()),
+            ])));
+        }
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            node_fill: "#ffffff".to_string(),
+            ..Default::default()
+        };
+        let layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+        let result = Canvas2dRenderer::new(config).render(&layout, &ir, &mut ctx);
+        assert_eq!(result.edges_drawn, 4);
+        let circles = recorded_central_circles(ctx.operations());
+        let edge = |index| layout.edges.iter().find(|edge| edge.edge_index == index).unwrap();
+        let expected = [
+            edge(0).points[0],
+            *edge(1).points.last().unwrap(),
+            edge(2).points[0],
+            *edge(2).points.last().unwrap(),
+            edge(3).points[0],
+            *edge(3).points.last().unwrap(),
+        ];
+        assert_eq!(circles.len(), expected.len(), "each authored end draws once");
+        for (circle, point) in circles.iter().zip(expected) {
+            assert_eq!(
+                circle.center,
+                [
+                    f64::from(point.x) - f64::from(layout.bounds.x),
+                    f64::from(point.y) - f64::from(layout.bounds.y),
+                ]
+            );
+            assert_eq!(circle.radius, 5.0);
+            assert_eq!(circle.color, "#264a6c80", "intrinsic paint alpha is retained");
+            assert!((circle.opacity - 0.2).abs() < 1e-6);
+        }
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        let arrows: Vec<_> = fills
+            .iter()
+            .filter(|fill| fill.paint.fill == "#264a6c80")
+            .collect();
+        assert_eq!(arrows.len(), 4, "central dots do not replace primary arrows");
+        assert!(arrows.iter().all(|fill| (fill.paint.alpha - 0.2).abs() < 1e-6));
+        for label in ["source", "target", "both", "self"] {
+            let text = texts.iter().find(|text| text.text == label).unwrap();
+            assert!((text.paint.alpha - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn canvas_sequence_central_connections_clear_large_number_badges() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nautonumber 4294967295 4294967295\n\
+             A()->>()B: first\nB()->>()B: self\n",
+        )
+        .ir;
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            font_size: 42.0,
+            font_family: "monospace".to_string(),
+            edge_stroke: "#102030".to_string(),
+            ..Default::default()
+        };
+        let metrics = config.font_metrics();
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        let mut ctx = MockCanvas2dContext::new(4000.0, 4000.0);
+        Canvas2dRenderer::new(config).render(&layout, &ir, &mut ctx);
+        let circles = recorded_central_circles(ctx.operations());
+        assert_eq!(circles.len(), 4);
+        for (index, edge) in layout.edges.iter().enumerate() {
+            let number = fm_layout::LayoutSequenceNumber::for_edge(&ir, edge, &metrics).unwrap();
+            let source = &circles[index * 2];
+            let target = &circles[index * 2 + 1];
+            let badge_right =
+                f64::from(number.bounds.x + number.bounds.width) - f64::from(layout.bounds.x);
+            assert!(source.center[0] - source.radius >= badge_right + 2.99);
+            assert!(
+                source.center[0] + source.radius
+                    <= f64::from(edge.points[1].x) - f64::from(layout.bounds.x) + 0.01,
+                "the displaced source dot stays on its outgoing shaft"
+            );
+            let endpoint = edge.points.last().unwrap();
+            assert_eq!(
+                target.center,
+                [
+                    f64::from(endpoint.x) - f64::from(layout.bounds.x),
+                    f64::from(endpoint.y) - f64::from(layout.bounds.y),
+                ]
+            );
+        }
+        for exact in ["4294967295", "8589934590"] {
+            assert!(ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::FillText(text, _, _) if text == exact)
+            }));
+        }
+    }
+
+    #[test]
+    fn canvas_sequence_central_creation_target_is_above_its_participant_header() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1600.0, 1600.0);
+        let result = Canvas2dRenderer::new(config).render(&layout, &ir, &mut ctx);
+        assert_eq!(result.nodes_drawn, 2);
+        let circles = recorded_central_circles(ctx.operations());
+        assert_eq!(circles.len(), 1);
+        let endpoint = layout.edges[0].points.last().unwrap();
+        assert_eq!(
+            circles[0].center,
+            [
+                f64::from(endpoint.x) - f64::from(layout.bounds.x),
+                f64::from(endpoint.y) - f64::from(layout.bounds.y),
+            ]
+        );
+        let header_label = ctx
+            .operations()
+            .iter()
+            .rposition(|operation| {
+                matches!(operation, DrawOperation::FillText(text, _, _) if text == "B")
+            })
+            .expect("created participant header must actually be painted");
+        assert!(circles[0].operation > header_label);
+    }
+
+    #[test]
+    fn sequence_central_connections_respect_disabled_strokes_on_canvas_and_gpu() {
+        let original = fm_parser::parse("sequenceDiagram\nA()->>()B: connect\n").ir;
+        for (property, value, visible) in [
+            ("stroke", "none", false),
+            ("stroke", " NONE ", false),
+            ("stroke-width", "0", false),
+            ("stroke-width", "0px", false),
+            ("stroke-width", "-0.0", false),
+            ("stroke-width", "-1", true),
+            ("stroke-width", "NaN", true),
+        ] {
+            let mut ir = original.clone();
+            ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                property.to_string(),
+                value.to_string(),
+            )])));
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let config = CanvasRenderConfig::default();
+            let mut ctx = MockCanvas2dContext::new(1200.0, 1200.0);
+            Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+            assert_eq!(
+                recorded_central_circles(ctx.operations()).len(),
+                if visible { 2 } else { 0 },
+                "{property}:{value}"
+            );
+            for plan in [
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                crate::gpu_plan::GpuRenderPlan::from_layout_and_scene_with_config(
+                    &ir, &layout, &scene, &config,
+                ),
+            ] {
+                let start = plan.sequence_central_connection_start.unwrap_or(plan.arrowheads.len());
+                assert_eq!(plan.arrowheads.len() - start, if visible { 2 } else { 0 });
+                assert_eq!(plan.sequence_central_connection_start.is_some(), visible);
+            }
+        }
+        for themed in [false, true] {
+            let mut ir = original.clone();
+            let mut config = CanvasRenderConfig::default();
+            if themed {
+                ir.meta
+                    .theme_overrides
+                    .theme_variables
+                    .insert("lineColor".to_string(), "none".to_string());
+            } else {
+                config.edge_stroke = "none".to_string();
+            }
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let mut ctx = MockCanvas2dContext::new(1200.0, 1200.0);
+            Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+            assert!(recorded_central_circles(ctx.operations()).is_empty());
+            for plan in [
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                crate::gpu_plan::GpuRenderPlan::from_layout_and_scene_with_config(
+                    &ir, &layout, &scene, &config,
+                ),
+            ] {
+                assert!(plan.sequence_central_connection_start.is_none());
+            }
+        }
     }
 
     #[test]

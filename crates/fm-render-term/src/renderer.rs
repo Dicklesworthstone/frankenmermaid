@@ -862,6 +862,8 @@ impl TermRenderer {
             .filter(|node| self.state_marker_cell_glyph(ir, node.node_index).is_some())
             .map(|node| (node.node_index, node.bounds.center()))
             .collect();
+        let central_metrics = (ir.diagram_type == fm_core::DiagramType::Sequence)
+            .then(fm_core::FontMetrics::default_metrics);
 
         // Render edges.
         for edge_path in &layout.edges {
@@ -895,7 +897,6 @@ impl TermRenderer {
                 scale_y,
             );
         }
-
         for marker in &layout.extensions.sequence_lifecycle_markers {
             match marker.kind {
                 fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy => {
@@ -1095,6 +1096,19 @@ impl TermRenderer {
             }
         }
 
+        if let Some(metrics) = &central_metrics {
+            // Creation headers can occupy a message endpoint. Put explicit connections above
+            // their geometry and staged names; sequence captions and counters are placed later.
+            for edge_path in &layout.edges {
+                self.render_sequence_central_markers_cell(
+                    &mut buffer,
+                    ir,
+                    edge_path,
+                    metrics,
+                    (scale_x, scale_y),
+                );
+            }
+        }
         if self.config.show_labels {
             self.render_generic_diagram_title(&mut buffer, ir);
         }
@@ -1122,7 +1136,15 @@ impl TermRenderer {
                 );
             }
         }
-        let protected = cell_label_rects(&text_labels);
+        let mut protected = cell_label_rects(&text_labels);
+        if let Some(metrics) = &central_metrics {
+            for edge in &layout.edges {
+                for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
+                    let (x, y) = self.point_to_cells(&marker.center, scale_x, scale_y);
+                    protected.push((x, y, x.saturating_add(1), y.saturating_add(1)));
+                }
+            }
+        }
         self.overlay_packet_bit_labels(&mut grid, ir, layout, scale_x, scale_y);
         let (mut edge_labels, occluded_edge_label_count) =
             if ir.diagram_type == fm_core::DiagramType::Sequence {
@@ -1504,6 +1526,11 @@ impl TermRenderer {
             }
         }
 
+        // Connection dots are independent of the message stroke and use the same measured
+        // positions as the vector renderers, including counter clearance and self messages.
+        let central_metrics = (ir.diagram_type == fm_core::DiagramType::Sequence)
+            .then(fm_core::FontMetrics::default_metrics);
+
         // Render edges.
         for edge_path in &layout.edges {
             if is_invisible_edge(ir, edge_path) {
@@ -1549,9 +1576,41 @@ impl TermRenderer {
             );
         }
 
+        // A creation header shares its center with the first target connection. Paint dots
+        // above all node geometry and retain their occupied cells across the text overlay.
+        // The mask is allocated only when a visible central connection is actually emitted.
+        let mut central_mask = None;
+        if let Some(metrics) = &central_metrics {
+            for edge in &layout.edges {
+                for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
+                    let x = (marker.center.x * pixel_scale_x) as isize + padding_x as isize;
+                    let y = (marker.center.y * pixel_scale_y) as isize + padding_y as isize;
+                    let radius =
+                        ((marker.radius * pixel_scale_x.min(pixel_scale_y)).round() as isize)
+                            .max(1);
+                    canvas.fill_circle(x, y, radius);
+                    central_mask
+                        .get_or_insert_with(|| {
+                            Canvas::new(cell_width, cell_height, self.config.render_mode)
+                        })
+                        .fill_circle(x, y, radius);
+                }
+            }
+        }
+
         // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
         // and overlay labels.
         let base_grid = canvas.render_char_grid();
+        let mut central_foreground = Vec::new();
+        if let Some(mask) = central_mask {
+            for (y, row) in mask.render_char_grid().into_iter().enumerate() {
+                for (x, glyph) in row.into_iter().enumerate() {
+                    if !blank_terminal_cell(glyph) {
+                        central_foreground.push((x, y, base_grid[y][x]));
+                    }
+                }
+            }
+        }
         let (mut output, occluded_edge_label_count) = self.overlay_labels(
             base_grid,
             ir,
@@ -1560,6 +1619,7 @@ impl TermRenderer {
             cell_height,
             scale_x,
             scale_y,
+            &central_foreground,
         );
         let debug_metrics = self
             .config
@@ -1809,6 +1869,92 @@ impl TermRenderer {
                 glyphs.arrow_right
             };
             buffer.set(x, y, arrow_char);
+        }
+    }
+
+    fn render_sequence_central_markers_cell(
+        &self,
+        buffer: &mut CellBuffer,
+        ir: &MermaidDiagramIr,
+        edge_path: &LayoutEdgePath,
+        metrics: &fm_core::FontMetrics,
+        (scale_x, scale_y): (f32, f32),
+    ) {
+        let markers: Vec<_> =
+            fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge_path, metrics)
+                .map(|marker| self.point_to_cells(&marker.center, scale_x, scale_y))
+                .collect();
+        if markers.is_empty() {
+            return;
+        }
+        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+            return;
+        };
+        let (start, end) = edge_marker_ends(edge.arrow);
+        let (co_start, co_end) = edge.co_arrow().map_or((false, false), edge_marker_ends);
+        for (at_start, has_arrow) in [(true, start || co_start), (false, end || co_end)] {
+            if !has_arrow {
+                continue;
+            }
+            let endpoint = if at_start {
+                edge_path.points.first()
+            } else {
+                edge_path.points.last()
+            };
+            let Some(endpoint) = endpoint else {
+                continue;
+            };
+            let (x, y) = self.point_to_cells(endpoint, scale_x, scale_y);
+            if !markers.contains(&(x, y)) {
+                continue;
+            }
+            let inner = if at_start {
+                edge_path
+                    .points
+                    .iter()
+                    .map(|point| self.point_to_cells(point, scale_x, scale_y))
+                    .find(|point| *point != (x, y))
+            } else {
+                edge_path
+                    .points
+                    .iter()
+                    .rev()
+                    .map(|point| self.point_to_cells(point, scale_x, scale_y))
+                    .find(|point| *point != (x, y))
+            };
+            let Some((inner_x, inner_y)) = inner else {
+                continue;
+            };
+            // A circle and an arrowhead cannot share a character. Keep the circle on the
+            // lifeline and move the arrow one cell inward along its own message shaft.
+            let dx = inner_x as isize - x as isize;
+            let dy = inner_y as isize - y as isize;
+            let (arrow_x, arrow_y) = if dx.abs() >= dy.abs() {
+                ((x as isize + dx.signum()) as usize, y)
+            } else {
+                (x, (y as isize + dy.signum()) as usize)
+            };
+            if !markers.contains(&(arrow_x, arrow_y)) {
+                let arrow = self.arrowhead_for_direction(
+                    inner_x,
+                    inner_y,
+                    x,
+                    y,
+                    &self.edge_glyphs,
+                    edge.arrow,
+                );
+                buffer.set(arrow_x, arrow_y, arrow);
+            }
+        }
+        let glyph = if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+            'o'
+        } else {
+            '●'
+        };
+        // Under extreme compression two endpoints can occupy one cell; preserve the explicit
+        // connection symbol rather than allowing a later arrowhead to erase it.
+        for (x, y) in markers {
+            buffer.set(x, y, glyph);
         }
     }
 
@@ -2565,6 +2711,7 @@ impl TermRenderer {
         cell_height: usize,
         scale_x: f32,
         scale_y: f32,
+        foreground: &[(usize, usize, char)],
     ) -> (String, usize) {
         // `lines` arrives as the canvas's char grid (`Canvas::render_char_grid`) — one row per cell
         // row — instead of a rendered `String` this fn used to re-parse with `lines().chars().collect()`.
@@ -3229,12 +3376,23 @@ impl TermRenderer {
             }
         }
 
+        // Central connections are foreground geometry even when a newly created participant
+        // has its name at that point. Existing staged labels yield to occupied geometry cells.
+        for &(x, y, glyph) in foreground {
+            if let Some(cell) = lines.get_mut(y).and_then(|row| row.get_mut(x)) {
+                *cell = glyph;
+            }
+        }
+
         // Overlay edge labels.
         //
         // Edges in opposite directions often share a geometric midpoint. Keep a separate record
         // of label rectangles so the later relationship does not overwrite an earlier one (for
         // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
-        let mut edge_label_rects = Vec::new();
+        let mut edge_label_rects: Vec<_> = foreground
+            .iter()
+            .map(|&(x, y, _)| (x, y, x.saturating_add(1), y.saturating_add(1)))
+            .collect();
         // Protect the actual node and annotation boxes, not just text already stamped into them.
         // A label in a blank node interior reads as content of that node. Composite-state boxes
         // are containers: only their border is protected, so internal transitions can be named.
@@ -9779,7 +9937,7 @@ mod tests {
         ]
         .into();
         let grid = buffer.cells.chunks(60).map(<[char]>::to_vec).collect();
-        let (output, _) = renderer.overlay_labels(grid, &ir, &layout, 60, 20, 1.0, 1.0);
+        let (output, _) = renderer.overlay_labels(grid, &ir, &layout, 60, 20, 1.0, 1.0, &[]);
         let row = output.lines().nth(5).expect("attribute row");
         assert!(
             row.contains("+String field"),
@@ -10412,6 +10570,278 @@ mod tests {
                         .contains(BoxGlyphs::for_mode(glyph_mode).block_full)
                 );
             }
+        }
+    }
+
+    fn sequence_central_marker_fixture(
+        points: &[(f32, f32)],
+    ) -> (MermaidDiagramIr, DiagramLayout) {
+        let ir = fm_parser::parse("sequenceDiagram\nAlice-->>Bob:").ir;
+        let mut layout = layout_diagram(&ir);
+        // Isolate message geometry: activation bars and headers must not make a missing dot
+        // look present, and fitting must not hide a misplaced endpoint at this known scale.
+        layout.nodes.clear();
+        layout.extensions = LayoutExtensions::default();
+        layout.edges[0].points = points
+            .iter()
+            .map(|&(x, y)| fm_layout::LayoutPoint { x, y })
+            .collect();
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 24.0,
+        };
+        (ir, layout)
+    }
+
+    #[test]
+    fn sequence_central_connections_preserve_direction_and_arrows_in_cell_mode() {
+        use fm_core::SequenceCentralConnection::{Both, Source, Target};
+
+        for glyph_mode in [
+            fm_core::MermaidGlyphMode::Unicode,
+            fm_core::MermaidGlyphMode::Ascii,
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Normal,
+                render_mode: MermaidRenderMode::CellOnly,
+                glyph_mode,
+                show_labels: false,
+                padding: 0,
+                ..Default::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let glyph = if glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                'o'
+            } else {
+                '●'
+            };
+            for reverse in [false, true] {
+                let (from, to) = if reverse { (50, 10) } else { (10, 50) };
+                let (mut ir, layout) = sequence_central_marker_fixture(&[
+                    (from as f32, 8.0),
+                    (to as f32, 8.0),
+                ]);
+                for connection in [None, Some(Source), Some(Target), Some(Both)] {
+                    ir.edges[0].extras_mut().sequence_central_connection = connection;
+                    for arrow in [ArrowType::DottedArrow, ArrowType::DoubleDottedArrow] {
+                        ir.edges[0].arrow = arrow;
+                        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+                        let row: Vec<_> =
+                            result.output.lines().nth(8).unwrap().chars().collect();
+                        let source =
+                            connection.is_some_and(|connection| connection.has_source());
+                        let target =
+                            connection.is_some_and(|connection| connection.has_target());
+                        assert_eq!(
+                            result.output.matches(glyph).count(),
+                            usize::from(source) + usize::from(target),
+                            "{glyph_mode:?}/{connection:?}/{arrow:?}/reverse={reverse}: {}",
+                            result.output,
+                        );
+                        if source {
+                            assert_eq!(row[from], glyph);
+                        }
+                        if target {
+                            assert_eq!(row[to], glyph);
+                        }
+                        let inward_target = if reverse { to + 1 } else { to - 1 };
+                        let target_col = if target { inward_target } else { to };
+                        assert_eq!(
+                            row[target_col],
+                            if reverse {
+                                renderer.edge_glyphs.arrow_left
+                            } else {
+                                renderer.edge_glyphs.arrow_right
+                            },
+                            "{}",
+                            result.output,
+                        );
+                        if arrow == ArrowType::DoubleDottedArrow {
+                            let inward_source = if reverse { from - 1 } else { from + 1 };
+                            let source_col = if source { inward_source } else { from };
+                            assert_eq!(
+                                row[source_col],
+                                if reverse {
+                                    renderer.edge_glyphs.arrow_right
+                                } else {
+                                    renderer.edge_glyphs.arrow_left
+                                },
+                                "{}",
+                                result.output,
+                            );
+                        }
+                        if glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                            assert!(result.output.is_ascii());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_dual_central_self_connections_keep_both_legs_and_return_arrow() {
+        let (mut ir, layout) = sequence_central_marker_fixture(&[
+            (10.0, 6.0),
+            (50.0, 6.0),
+            (50.0, 10.0),
+            (10.0, 10.0),
+        ]);
+        ir.edges[0].extras_mut().sequence_central_connection =
+            Some(fm_core::SequenceCentralConnection::Both);
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            show_labels: false,
+            padding: 2,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+        let rows: Vec<Vec<_>> = result
+            .output
+            .lines()
+            .map(|line| line.chars().collect())
+            .collect();
+        assert_eq!(result.output.matches('●').count(), 2, "{}", result.output);
+        assert_eq!(rows[8][12], '●');
+        assert_eq!(rows[12][12], '●');
+        assert_eq!(rows[12][13], renderer.edge_glyphs.arrow_left);
+    }
+
+    #[test]
+    fn sequence_central_connections_survive_tight_cell_compression() {
+        let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 8.0), (11.0, 8.0)]);
+        ir.edges[0].arrow = ArrowType::DoubleArrow;
+        ir.edges[0].extras_mut().sequence_central_connection =
+            Some(fm_core::SequenceCentralConnection::Both);
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            show_labels: false,
+            padding: 0,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+        assert!(result.output.contains("●●"), "{}", result.output);
+    }
+
+    #[test]
+    fn sequence_central_connections_fill_visible_dots_in_every_subcell_mode() {
+        use fm_core::SequenceCentralConnection::{Both, Source, Target};
+
+        for mode in [
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Braille,
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Rich,
+                render_mode: mode,
+                show_labels: false,
+                padding: 0,
+                ..Default::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            for reverse in [false, true] {
+                let (from, to) = if reverse { (50, 10) } else { (10, 50) };
+                let (mut ir, layout) = sequence_central_marker_fixture(&[
+                    (from as f32, 8.0),
+                    (to as f32, 8.0),
+                ]);
+                let ordinary = renderer.render_subcell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+                for connection in [Source, Target, Both] {
+                    ir.edges[0].extras_mut().sequence_central_connection = Some(connection);
+                    let result = renderer.render_subcell_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+                    assert_ne!(result.output, ordinary.output, "{mode:?}/{connection:?}");
+                    // The row above the message is empty for a plain stroke. A filled circle
+                    // extends into it only at the endpoint(s) requested by the source.
+                    let row: Vec<_> = result.output.lines().nth(7).unwrap().chars().collect();
+                    for (col, marked) in [
+                        (from, connection.has_source()),
+                        (to, connection.has_target()),
+                    ] {
+                        let filled = row.get(col).is_some_and(|ch| !blank_terminal_cell(*ch));
+                        assert_eq!(
+                            filled, marked,
+                            "{mode:?}/{connection:?}/reverse={reverse}: {}",
+                            result.output,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_created_target_connections_survive_headers_and_labels_in_actual_rendering() {
+        let parsed = fm_parser::parse(
+            "sequenceDiagram\nhideFootbox\nautonumber\nparticipant Alice\n\
+             Alice->>Alice: Prepare\ncreate participant Bob as BBB<br/>BBB<br/>BBB\n\
+             Alice->>()Bob: Start\nBob-->>Alice: Ready\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        let layout = layout_diagram(&ir);
+        let path = layout
+            .edges
+            .iter()
+            .find(|edge| edge.edge_index == 1)
+            .unwrap();
+        let marker = fm_layout::LayoutSequenceCentralMarker::for_edge(
+            &ir,
+            path,
+            &fm_core::FontMetrics::default_metrics(),
+        )
+        .next()
+        .unwrap();
+        let created = layout.nodes.iter().find(|node| node.node_index == 1).unwrap();
+        assert!((marker.center.x - created.bounds.center().x).abs() < 0.01);
+        assert!((marker.center.y - created.bounds.center().y).abs() < 0.01);
+
+        for (mode, glyph_mode) in [
+            (MermaidRenderMode::CellOnly, fm_core::MermaidGlyphMode::Unicode),
+            (MermaidRenderMode::CellOnly, fm_core::MermaidGlyphMode::Ascii),
+            (MermaidRenderMode::Block, fm_core::MermaidGlyphMode::Unicode),
+            (MermaidRenderMode::HalfBlock, fm_core::MermaidGlyphMode::Unicode),
+            (MermaidRenderMode::Braille, fm_core::MermaidGlyphMode::Unicode),
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Normal,
+                render_mode: mode,
+                glyph_mode,
+                max_width: 240,
+                max_height: 160,
+                padding: 2,
+                ..Default::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 240, 160));
+            let result = renderer.render_layout(&ir, &layout);
+            let (x, y) =
+                renderer.map_layout_point_to_cells(&layout, ir.direction, marker.center);
+            let glyph = result
+                .output
+                .lines()
+                .nth(y)
+                .and_then(|row| row.chars().nth(x))
+                .unwrap();
+            if mode == MermaidRenderMode::CellOnly {
+                assert_eq!(
+                    glyph,
+                    if glyph_mode == fm_core::MermaidGlyphMode::Ascii { 'o' } else { '●' },
+                    "{mode:?}/{glyph_mode:?}: {}",
+                    result.output,
+                );
+            } else {
+                assert!(
+                    matches!(glyph, '\u{2580}'..='\u{259f}' | '\u{2800}'..='\u{28ff}')
+                        && !blank_terminal_cell(glyph),
+                    "the marker was replaced by its participant label in {mode:?}: {}",
+                    result.output,
+                );
+            }
+            assert!(result.output.contains("2 Start"), "{mode:?}: {}", result.output);
         }
     }
 

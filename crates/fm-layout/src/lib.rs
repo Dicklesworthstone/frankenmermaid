@@ -2798,6 +2798,11 @@ pub struct LayoutSequenceNumber {
 impl LayoutSequenceNumber {
     pub const FONT_SCALE: f32 = 0.8;
 
+    fn badge_width(text: &str, metrics: &fm_core::FontMetrics) -> f32 {
+        let height = (metrics.font_size() * Self::FONT_SCALE).max(12.0);
+        (metrics.estimate_width(text) * Self::FONT_SCALE + 4.0).max(height)
+    }
+
     /// Resolve directive-scoped numbering for a visible message at its actual source endpoint.
     #[must_use]
     pub fn for_edge(
@@ -2823,7 +2828,7 @@ impl LayoutSequenceNumber {
         let text = number.to_string();
         let font_size = metrics.font_size() * Self::FONT_SCALE;
         let height = font_size.max(12.0);
-        let width = (metrics.estimate_width(&text) * Self::FONT_SCALE + 4.0).max(height);
+        let width = Self::badge_width(&text, metrics);
         Some(Self {
             edge_index: edge.edge_index,
             text,
@@ -2835,6 +2840,80 @@ impl LayoutSequenceNumber {
             },
             font_size,
         })
+    }
+}
+
+/// A filled connection dot authored with `()` on a sequence message endpoint.
+/// The arrowhead remains independent: a central connection does not replace the message type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutSequenceCentralMarker {
+    pub center: LayoutPoint,
+    pub radius: f32,
+}
+
+impl LayoutSequenceCentralMarker {
+    pub const RADIUS: f32 = 5.0;
+
+    /// Resolve both dots from the actual message path, including self-message return legs.
+    /// Numbered source dots sit beyond the measured counter so both symbols stay visible.
+    pub fn for_edge(
+        ir: &MermaidDiagramIr,
+        edge: &LayoutEdgePath,
+        metrics: &fm_core::FontMetrics,
+    ) -> impl Iterator<Item = Self> {
+        let connection = if ir.diagram_type == DiagramType::Sequence
+            && !edge.bundled
+            && edge.points.len() >= 2
+        {
+            ir.edges.get(edge.edge_index).and_then(|message| {
+                (message.arrow != fm_core::ArrowType::Invisible)
+                    .then_some(message.sequence_central_connection())
+                    .flatten()
+            })
+        } else {
+            None
+        };
+        let source = connection
+            .filter(|connection| connection.has_source())
+            .and_then(|_| edge.points.first().copied())
+            .map(|mut center| {
+                if let Some(number) = LayoutSequenceNumber::for_edge(ir, edge, metrics)
+                    && let Some(next) = edge.points.iter().find(|point| **point != center)
+                {
+                    let dx = next.x - center.x;
+                    let dy = next.y - center.y;
+                    let length = dx.hypot(dy);
+                    if length.is_finite() && length > 0.0 {
+                        let clearance = number.bounds.width * 0.5 + Self::RADIUS + 3.0;
+                        center.x += dx / length * clearance;
+                        center.y += dy / length * clearance;
+                    }
+                }
+                Self {
+                    center,
+                    radius: Self::RADIUS,
+                }
+            });
+        let target = connection
+            .filter(|connection| connection.has_target())
+            .and_then(|_| edge.points.last().copied())
+            .map(|center| Self {
+                center,
+                radius: Self::RADIUS,
+            });
+        [source, target].into_iter().flatten().filter(|marker| {
+            marker.center.x.is_finite() && marker.center.y.is_finite()
+        })
+    }
+
+    #[must_use]
+    pub fn bounds(self) -> LayoutRect {
+        LayoutRect {
+            x: self.center.x - self.radius,
+            y: self.center.y - self.radius,
+            width: self.radius * 2.0,
+            height: self.radius * 2.0,
+        }
     }
 }
 
@@ -4340,6 +4419,11 @@ pub fn build_render_scene_with_icon_position(
         {
             include_packing_bounds(&mut content_bounds, number.bounds);
         }
+        for edge in &layout.edges {
+            for marker in LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
+                include_packing_bounds(&mut content_bounds, marker.bounds());
+            }
+        }
     }
     let (bands, band_labels) =
         build_layout_band_scene_layers(ir, layout, metrics, &mut content_bounds);
@@ -4386,6 +4470,10 @@ pub fn build_render_scene_with_icon_position(
         root.children.push(RenderItem::Group(band_labels));
     }
     if ir.diagram_type == DiagramType::Sequence {
+        let connections = build_sequence_central_connection_layer(ir, layout, metrics);
+        if !connections.children.is_empty() {
+            root.children.push(RenderItem::Group(connections));
+        }
         let numbers = build_sequence_number_layer(ir, layout, metrics);
         if !numbers.children.is_empty() {
             root.children.push(RenderItem::Group(numbers));
@@ -5854,6 +5942,56 @@ fn build_sequence_note_layer(
     layer
 }
 
+fn build_sequence_central_connection_layer(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("sequence-central-connections")))
+        .with_resolved_paints();
+    for edge in &layout.edges {
+        if ir
+            .edges
+            .get(edge.edge_index)
+            .and_then(fm_core::IrEdge::sequence_central_connection)
+            .is_none()
+        {
+            continue;
+        }
+        // Resolve the same stroke channels as the message, including disabled strokes.
+        // The connection is filled with that paint; the author's node fill is irrelevant.
+        let mut paint = RenderPath {
+            source: RenderSource::Edge(edge.edge_index),
+            commands: Vec::new(),
+            fill: None,
+            stroke: Some(StrokeStyle::solid("#475569", 1.5)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        };
+        apply_scene_path_style(
+            &mut paint,
+            &edge_labels::edge_label_style(ir, edge.edge_index),
+        );
+        let Some(stroke) = paint.stroke else {
+            continue;
+        };
+        for marker in LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
+            layer.children.push(RenderItem::Path(RenderPath {
+                source: RenderSource::Edge(edge.edge_index),
+                commands: node_path(marker.bounds(), fm_core::NodeShape::Circle),
+                fill: Some(FillStyle::Solid {
+                    color: stroke.color.clone(),
+                    opacity: stroke.opacity,
+                }),
+                stroke: None,
+                marker_start: MarkerKind::None,
+                marker_end: MarkerKind::None,
+            }));
+        }
+    }
+    layer
+}
+
 fn build_sequence_lifecycle_layer(layout: &DiagramLayout) -> RenderGroup {
     let mut layer = RenderGroup::new(Some(String::from("sequence-lifecycle")));
     for marker in &layout.extensions.sequence_lifecycle_markers {
@@ -6011,7 +6149,9 @@ fn scene_color_arguments(arguments: &str, hsl: bool) -> bool {
 
 /// Resolve paint declarations before the IR is discarded. A scene consumer has no CSS cascade
 /// or semantic IR to recover them from; the primitive's paint is the complete drawing contract.
-fn scene_style_opacity(style: &BTreeMap<String, String>, property: &str) -> f32 {
+/// Shared adornments use the same finite numeric or percentage opacity as their edge.
+#[must_use]
+pub fn scene_style_opacity(style: &BTreeMap<String, String>, property: &str) -> f32 {
     style
         .get(property)
         .and_then(|value| scene_opacity(value))
@@ -12310,6 +12450,56 @@ fn layout_diagram_sequence_traced_with_metrics(
         }
     }
 
+    // A numbered source connection needs its own stretch of message shaft beyond the
+    // badge. Reserve it before placing participants, including unlabeled self messages.
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        if !edge
+            .sequence_central_connection()
+            .is_some_and(fm_core::SequenceCentralConnection::has_source)
+        {
+            continue;
+        }
+        let Some(number) = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.autonumber_value(edge_index))
+        else {
+            continue;
+        };
+        let (Some(source), Some(target)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            continue;
+        };
+        if source >= node_count || target >= node_count {
+            continue;
+        }
+        let width = LayoutSequenceNumber::badge_width(&number.to_string(), metrics) * 0.5
+            + LayoutSequenceCentralMarker::RADIUS * 3.0
+            + 16.0;
+        if source == target {
+            self_loop_widths[source] = self_loop_widths[source].max(width);
+        } else {
+            let creation_inset = if !edge
+                .sequence_central_connection()
+                .is_some_and(fm_core::SequenceCentralConnection::has_target)
+                && ir.sequence_meta.as_ref().is_some_and(|meta| {
+                    meta.lifecycle_events.iter().any(|event| {
+                        event.kind == fm_core::LifecycleEventKind::Create
+                            && event.at_edge == edge_index
+                            && event.participant.0 == target
+                    })
+                })
+            {
+                node_sizes[target].0 * 0.5
+            } else {
+                0.0
+            };
+            message_spans[source.max(target)].push((source.min(target), width + creation_inset));
+        }
+    }
+
     // Build participant index → horizontal position mapping.
     // Each participant is centered at (participant_order * gap, header_y).
     let mut rank_by_node = vec![0_usize; node_count];
@@ -12473,7 +12663,12 @@ fn layout_diagram_sequence_traced_with_metrics(
                 .copied()
                 .unwrap_or(0.0);
             let is_self_loop = source_index == target_index;
-            if !is_self_loop && creation_edge.get(target_index) == Some(&Some(edge_index)) {
+            if !is_self_loop
+                && creation_edge.get(target_index) == Some(&Some(edge_index))
+                && !edge
+                    .sequence_central_connection()
+                    .is_some_and(fm_core::SequenceCentralConnection::has_target)
+            {
                 let half_width = node_sizes[target_index].0 / 2.0;
                 target_x -= half_width.copysign(target_x - source_x);
             }
@@ -12809,6 +13004,10 @@ fn layout_diagram_sequence_traced_with_metrics(
         .chain(activation_bars.iter().map(|activation| activation.bounds))
         .chain(edges.iter().filter_map(|edge| {
             LayoutSequenceNumber::for_edge(ir, edge, metrics).map(|number| number.bounds)
+        }))
+        .chain(edges.iter().flat_map(|edge| {
+            LayoutSequenceCentralMarker::for_edge(ir, edge, metrics)
+                .map(LayoutSequenceCentralMarker::bounds)
         }))
         .chain(edges.iter().flat_map(|edge| {
             edge.points.iter().map(|point| LayoutRect {
@@ -38607,6 +38806,170 @@ mod tests {
                 .iter()
                 .any(|item| { matches!(item, RenderItem::Text(text) if text.text == "[busy]") })
         );
+    }
+
+    #[test]
+    fn sequence_central_connections_preserve_endpoints_and_scene_paint() {
+        use super::{LayoutSequenceCentralMarker, MarkerKind, RenderSource};
+        let parsed = parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             A()->>B: source\nB->>()A: target\nA()->>()B: both\n\
+             B-->>A: ordinary\nB()->>()B: self\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        let layout = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        assert_eq!(layout.extensions.activation_bars.len(), 6);
+        for (edge, expected_count) in layout.edges.iter().zip([1, 1, 2, 0, 2]) {
+            let markers: Vec<_> =
+                LayoutSequenceCentralMarker::for_edge(&ir, edge, &metrics).collect();
+            assert_eq!(markers.len(), expected_count);
+            let connection = ir.edges[edge.edge_index].sequence_central_connection();
+            if connection.is_some_and(fm_core::SequenceCentralConnection::has_source) {
+                assert_eq!(markers[0].center, edge.points[0]);
+            }
+            if connection.is_some_and(fm_core::SequenceCentralConnection::has_target) {
+                assert_eq!(markers.last().unwrap().center, *edge.points.last().unwrap());
+            }
+            assert_ne!(
+                super::edge_marker_kinds(&ir.edges[edge.edge_index], false).1,
+                MarkerKind::None,
+                "connection dots must not replace the message arrow"
+            );
+            for marker in markers {
+                let bounds = marker.bounds();
+                assert!(bounds.x >= layout.bounds.x);
+                assert!(bounds.y >= layout.bounds.y);
+                assert!(bounds.x + bounds.width <= layout.bounds.x + layout.bounds.width);
+                assert!(bounds.y + bounds.height <= layout.bounds.y + layout.bounds.height);
+            }
+        }
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let layer = scene.root.children.iter().find_map(|item| match item {
+            RenderItem::Group(group)
+                if group.id.as_deref() == Some("sequence-central-connections") =>
+            {
+                Some(group)
+            }
+            _ => None,
+        }).expect("central connection foreground");
+        assert_eq!(layer.children.len(), 6);
+        for item in &layer.children {
+            let RenderItem::Path(path) = item else {
+                panic!("central connection must be a painted path");
+            };
+            assert!(matches!(path.source, RenderSource::Edge(_)));
+            assert!(matches!(&path.fill, Some(super::FillStyle::Solid { opacity, .. }) if *opacity == 1.0));
+            assert!(path.stroke.is_none());
+            assert_eq!(path.marker_start, MarkerKind::None);
+            assert_eq!(path.marker_end, MarkerKind::None);
+        }
+    }
+
+    #[test]
+    fn numbered_central_sources_keep_large_badges_and_dots_on_the_message_shaft() {
+        use super::{LayoutConfig, LayoutSequenceCentralMarker, LayoutSequenceNumber};
+        let ir = parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             autonumber 4294967295 4294967295\n\
+             A()->>()A:\nB()->>A:\nA()->>()B:\n",
+        ).ir;
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 128.0,
+            ..Default::default()
+        });
+        let layout = super::layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(layout.edges.len(), 3);
+        for edge in &layout.edges {
+            let number = LayoutSequenceNumber::for_edge(&ir, edge, &metrics).unwrap();
+            let source = LayoutSequenceCentralMarker::for_edge(&ir, edge, &metrics)
+                .next().unwrap();
+            let first = edge.points[0];
+            let next = edge.points[1];
+            assert_eq!(source.center.y, first.y);
+            if next.x > first.x {
+                assert!(source.center.x - source.radius >= number.bounds.x + number.bounds.width + 2.9);
+                assert!(source.center.x + source.radius < next.x);
+            } else {
+                assert!(source.center.x + source.radius <= number.bounds.x - 2.9);
+                assert!(source.center.x - source.radius > next.x);
+            }
+        }
+        assert!(layout.edges[0].is_self_loop);
+        assert!(layout.edges[1].points[1].x < layout.edges[1].points[0].x);
+
+        let creation = parse(
+            "sequenceDiagram\nparticipant A\nautonumber 4294967295\n\
+             create participant B as Wide receiving participant header\nA()->>B:\n",
+        ).ir;
+        let created_layout = super::layout_diagram_with_config(
+            &creation,
+            LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        let created_edge = &created_layout.edges[0];
+        let dot = LayoutSequenceCentralMarker::for_edge(&creation, created_edge, &metrics)
+            .next().unwrap();
+        assert!(dot.center.x + dot.radius < created_edge.points.last().unwrap().x);
+    }
+
+    #[test]
+    fn central_connections_skip_hidden_absorbed_and_invalid_paths() {
+        use super::LayoutSequenceCentralMarker;
+        let mut ir = parse("sequenceDiagram\nA()->>()B: connected\n").ir;
+        let layout = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let original = &layout.edges[0];
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 2);
+        let mut path = original.clone();
+        path.bundled = true;
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        path = original.clone();
+        path.points.truncate(1);
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        path = original.clone();
+        path.edge_index = usize::MAX;
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 0);
+        path = original.clone();
+        path.points[0].x = f32::NAN;
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, &path, &metrics).count(), 1);
+        ir.edges[0].arrow = fm_core::ArrowType::Invisible;
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 0);
+        ir.edges[0].arrow = fm_core::ArrowType::Arrow;
+        ir.diagram_type = fm_core::DiagramType::Flowchart;
+        assert_eq!(LayoutSequenceCentralMarker::for_edge(&ir, original, &metrics).count(), 0);
+    }
+
+    #[test]
+    fn central_creation_messages_connect_to_the_created_lifeline() {
+        use super::LayoutSequenceCentralMarker;
+        let ir = parse(
+            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>()B: create\n",
+        ).ir;
+        let layout = layout_diagram(&ir);
+        let target = layout.nodes.iter().find(|node| node.node_index == 1).unwrap();
+        let marker = LayoutSequenceCentralMarker::for_edge(
+            &ir,
+            &layout.edges[0],
+            &fm_core::FontMetrics::default_metrics(),
+        ).next().unwrap();
+        assert_eq!(marker.center.x, target.bounds.center().x);
+        let plain = parse(
+            "sequenceDiagram\nparticipant A\ncreate participant B\nA->>B: create\n",
+        ).ir;
+        let plain_layout = layout_diagram(&plain);
+        let plain_target = plain_layout.nodes.iter().find(|node| node.node_index == 1).unwrap();
+        assert_eq!(plain_layout.edges[0].points.last().unwrap().x, plain_target.bounds.x);
     }
 
     #[test]
