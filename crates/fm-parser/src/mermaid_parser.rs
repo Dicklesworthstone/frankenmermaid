@@ -15685,6 +15685,7 @@ struct SequenceMessageData {
     left_label: Option<ParsedLabel>,
     right_label: Option<ParsedLabel>,
     message_label: Option<String>,
+    central_connection: Option<fm_core::SequenceCentralConnection>,
     activate: bool,
     deactivate: bool,
 }
@@ -15744,8 +15745,19 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
         (right, None)
     };
 
+    // Keep central connections separate from arrow shape: `()` adds a lifeline circle and
+    // an activation without replacing the message's ordinary arrowhead. Strip only outside
+    // quoted participant names, so `"Worker()"` remains an ordinary participant identifier.
+    let central_source = left.ends_with("()");
+    let central_target = target_raw.starts_with("()");
     let left = strip_sequence_central_suffix(left);
     let target_raw = strip_sequence_central_prefix(target_raw);
+    let central_connection = match (central_source, central_target) {
+        (true, true) => Some(fm_core::SequenceCentralConnection::Both),
+        (true, false) => Some(fm_core::SequenceCentralConnection::Source),
+        (false, true) => Some(fm_core::SequenceCentralConnection::Target),
+        (false, false) => None,
+    };
 
     // Both modifiers follow the arrow, but + activates the receiver while -
     // deactivates the sender after its message has been delivered.
@@ -15785,6 +15797,7 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
         left_label,
         right_label,
         message_label,
+        central_connection,
         activate,
         deactivate,
     })
@@ -15822,8 +15835,22 @@ fn lower_sequence_message(
                 data.message_label.as_deref(),
                 span,
             );
-            if data.activate {
+            if let Some(connection) = data.central_connection
+                && let Some(edge) = builder.ir_mut().edges.last_mut()
+            {
+                edge.extras_mut().sequence_central_connection = Some(connection);
+            }
+            let central_target = data
+                .central_connection
+                .is_some_and(fm_core::SequenceCentralConnection::has_target);
+            if data.activate || central_target {
                 builder.activate_participant(&data.to_id);
+            }
+            if data
+                .central_connection
+                .is_some_and(fm_core::SequenceCentralConnection::has_source)
+            {
+                builder.activate_participant(&data.from_id);
             }
             if data.deactivate {
                 builder.deactivate_participant(&data.from_id);
@@ -23475,20 +23502,209 @@ mod tests {
 
     #[test]
     fn sequence_supports_central_connection_syntax() {
-        let right = parse_mermaid("sequenceDiagram\nAlice->>()John: Hello");
-        assert_eq!(right.ir.edges.len(), 1);
-        assert_eq!(right.ir.edges[0].arrow, ArrowType::Arrow);
-        assert!(right.warnings.is_empty());
+        use fm_core::SequenceCentralConnection::{Both, Source, Target};
 
-        let left = parse_mermaid("sequenceDiagram\nAlice()->>John: How are you?");
-        assert_eq!(left.ir.edges.len(), 1);
-        assert_eq!(left.ir.edges[0].arrow, ArrowType::Arrow);
-        assert!(left.warnings.is_empty());
+        for (message, expected, participants) in [
+            ("Alice->>()John: Hello", Target, vec![1]),
+            ("Alice()->>John: How are you?", Source, vec![0]),
+            ("Alice()->>()John: Great!", Both, vec![0, 1]),
+            ("Alice () ->> () John: Spaced", Both, vec![0, 1]),
+        ] {
+            let parsed = parse_mermaid(&format!("sequenceDiagram\n{message}"));
+            assert!(
+                parsed.warnings.is_empty(),
+                "{message}: {:?}",
+                parsed.warnings
+            );
+            assert_eq!(parsed.ir.nodes.len(), 2, "{message}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{message}");
+            let edge = &parsed.ir.edges[0];
+            assert_eq!(edge.arrow, ArrowType::Arrow, "{message}");
+            assert_eq!(
+                edge.sequence_central_connection(),
+                Some(expected),
+                "{message}"
+            );
+            let meta = parsed.ir.sequence_meta.as_ref().unwrap();
+            let mut activated: Vec<_> = meta
+                .activations
+                .iter()
+                .map(|activation| {
+                    assert_eq!(activation.start_edge, 0);
+                    assert_eq!(activation.end_edge, 0);
+                    assert_eq!(activation.depth, 0);
+                    activation.participant.0
+                })
+                .collect();
+            activated.sort_unstable();
+            assert_eq!(activated, participants, "{message}");
 
-        let dual = parse_mermaid("sequenceDiagram\nJohn()->>()Alice: Great!");
-        assert_eq!(dual.ir.edges.len(), 1);
-        assert_eq!(dual.ir.edges[0].arrow, ArrowType::Arrow);
-        assert!(dual.warnings.is_empty());
+            let encoded = serde_json::to_string(&parsed.ir).unwrap();
+            let decoded: fm_core::MermaidDiagramIr = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                decoded.edges[0].sequence_central_connection(),
+                Some(expected)
+            );
+            assert_eq!(decoded.sequence_meta, parsed.ir.sequence_meta);
+        }
+    }
+
+    #[test]
+    fn sequence_central_connections_keep_every_primary_arrow_and_stroke_style() {
+        for (operator, arrow) in SEQUENCE_OPERATORS {
+            let parsed = parse_mermaid(&format!(
+                "sequenceDiagram\nparticipant Alice\nparticipant John\nAlice(){operator}()John: Signal"
+            ));
+            assert!(
+                parsed.warnings.is_empty(),
+                "{operator}: {:?}",
+                parsed.warnings
+            );
+            assert_eq!(parsed.ir.nodes.len(), 2, "{operator}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{operator}");
+            assert_eq!(parsed.ir.edges[0].arrow, arrow, "{operator}");
+            assert_eq!(
+                parsed.ir.edges[0].sequence_central_connection(),
+                Some(fm_core::SequenceCentralConnection::Both),
+                "{operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_central_activations_close_with_shorthand_on_compact_quoted_messages() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram; participant \"Client UI\"; participant \"API Service\"; \
+             \"Client UI\"()->>()\"API Service\": call; \
+             \"API Service\"-->>-\"Client UI\": reply; \
+             \"Client UI\"-->>-\"API Service\": done; \
+             \"Client UI\"->>\"API Service\": later %% complete",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 4);
+        assert_eq!(
+            parsed.ir.edges[0].sequence_central_connection(),
+            Some(fm_core::SequenceCentralConnection::Both)
+        );
+        assert!(
+            parsed.ir.edges[1..]
+                .iter()
+                .all(|edge| edge.extras.is_none())
+        );
+        let meta = parsed.ir.sequence_meta.as_ref().unwrap();
+        assert_eq!(
+            meta.activations,
+            vec![
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(1),
+                    start_edge: 0,
+                    end_edge: 1,
+                    depth: 0,
+                    timeline_range: None,
+                },
+                fm_core::IrActivation {
+                    participant: fm_core::IrNodeId(0),
+                    start_edge: 0,
+                    end_edge: 2,
+                    depth: 0,
+                    timeline_range: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_central_target_and_activation_modifier_start_one_activation() {
+        let parsed = parse_mermaid("sequenceDiagram\nA->>()+B: Start\nB-->>-A: End\nA->>B: Later");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(
+            parsed.ir.edges[0].sequence_central_connection(),
+            Some(fm_core::SequenceCentralConnection::Target)
+        );
+        let activations = &parsed.ir.sequence_meta.as_ref().unwrap().activations;
+        assert_eq!(activations.len(), 1);
+        assert_eq!(activations[0].participant, fm_core::IrNodeId(1));
+        assert_eq!(activations[0].start_edge, 0);
+        assert_eq!(activations[0].end_edge, 1);
+        assert_eq!(activations[0].depth, 0);
+    }
+
+    #[test]
+    fn sequence_dual_central_self_message_retains_both_nested_activations() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nWorker()->>()Worker: Begin\n\
+             Worker-->>-Worker: Inner\nWorker-->>-Worker: Outer",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(
+            parsed.ir.edges[0].sequence_central_connection(),
+            Some(fm_core::SequenceCentralConnection::Both)
+        );
+        let activations = &parsed.ir.sequence_meta.as_ref().unwrap().activations;
+        assert_eq!(activations.len(), 2);
+        assert_eq!(
+            (
+                activations[0].start_edge,
+                activations[0].end_edge,
+                activations[0].depth
+            ),
+            (0, 1, 1)
+        );
+        assert_eq!(
+            (
+                activations[1].start_edge,
+                activations[1].end_edge,
+                activations[1].depth
+            ),
+            (0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn sequence_central_markers_do_not_leak_from_labels_or_quoted_participant_names() {
+        let parsed = parse_mermaid(
+            "sequenceDiagram\nparticipant \"Worker()\"\nparticipant \"()Observer\"\n\
+             \"Worker()\"->>\"()Observer\": callback() and ()\n\
+             \"()Observer\"-->>\"Worker()\": response",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.ir.edges.iter().all(|edge| edge.extras.is_none()));
+        assert!(
+            parsed
+                .ir
+                .sequence_meta
+                .as_ref()
+                .is_none_or(|meta| meta.activations.is_empty())
+        );
+        assert_eq!(
+            parsed.ir.labels[parsed.ir.edges[0].label.unwrap().0].text,
+            "callback() and ()"
+        );
+    }
+
+    #[test]
+    fn sequence_central_connections_require_real_participant_endpoints() {
+        for message in [
+            "()->>B: No sender",
+            "A->>(): No receiver",
+            "()->>(): Neither",
+        ] {
+            let parsed = parse_mermaid(&format!("sequenceDiagram\n{message}"));
+            assert!(parsed.ir.edges.is_empty(), "{message}");
+            assert!(parsed.ir.nodes.is_empty(), "{message}");
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("unsupported sequence syntax")),
+                "{message}"
+            );
+        }
     }
 
     #[test]

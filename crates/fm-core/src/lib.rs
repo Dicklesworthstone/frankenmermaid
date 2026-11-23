@@ -3982,6 +3982,10 @@ pub struct IrEdgeExtras {
     /// [`IrEdge::min_length`] to apply that bound to deserialized IR as well.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u8>,
+    /// Lifeline end(s) marked with `()` in a sequence message. These are additional
+    /// connection circles; the primary arrow and its direction remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_central_connection: Option<SequenceCentralConnection>,
     /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_notation: Option<Box<str>>,
@@ -4060,6 +4064,32 @@ pub struct IrEdgeExtras {
     /// The subgraph the target end named. See [`Self::from_subgraph`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_subgraph: Option<IrSubgraphId>,
+}
+
+/// A sequence message's explicitly marked central lifeline connections.
+///
+/// `Alice()->>Bob` marks the source, `Alice->>()Bob` the target, and
+/// `Alice()->>()Bob` both ends. The marked participants also begin activations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum SequenceCentralConnection {
+    Source,
+    Target,
+    Both,
+}
+
+impl SequenceCentralConnection {
+    /// Whether the sending participant's lifeline has a connection circle.
+    #[must_use]
+    pub const fn has_source(self) -> bool {
+        matches!(self, Self::Source | Self::Both)
+    }
+
+    /// Whether the receiving participant's lifeline has a connection circle.
+    #[must_use]
+    pub const fn has_target(self) -> bool {
+        matches!(self, Self::Target | Self::Both)
+    }
 }
 
 /// How fast an opted-in edge marches, from mermaid 11's `edgeId@{ animate: … }` statement.
@@ -4186,6 +4216,15 @@ impl IrEdge {
                 .unwrap_or(1)
                 .clamp(1, 10),
         )
+    }
+
+    /// Additional connection circles explicitly authored on a sequence message.
+    #[must_use]
+    pub const fn sequence_central_connection(&self) -> Option<SequenceCentralConnection> {
+        match &self.extras {
+            Some(extras) => extras.sequence_central_connection,
+            None => None,
+        }
     }
 
     /// Raw ER cardinality operator, if any.
@@ -17209,6 +17248,46 @@ mod tests {
         assert_eq!(edge.min_length(), 10);
         edge.extras_mut().min_length = None;
         assert_eq!(edge.min_length(), 1);
+    }
+
+    #[test]
+    fn sequence_central_connections_roundtrip_without_changing_arrow_semantics() {
+        use super::SequenceCentralConnection::{Both, Source, Target};
+
+        let mut edge = IrEdge {
+            arrow: ArrowType::DoubleDottedArrow,
+            ..IrEdge::default()
+        };
+        assert_eq!(edge.sequence_central_connection(), None);
+        assert!(edge.extras.is_none());
+        let ordinary = serde_json::to_string(&edge).unwrap();
+        assert!(!ordinary.contains("sequence_central_connection"));
+        assert_eq!(serde_json::from_str::<IrEdge>(&ordinary).unwrap(), edge);
+
+        for (connection, encoded_name, source, target) in [
+            (Source, "source", true, false),
+            (Target, "target", false, true),
+            (Both, "both", true, true),
+        ] {
+            edge.extras_mut().sequence_central_connection = Some(connection);
+            assert_eq!(connection.has_source(), source);
+            assert_eq!(connection.has_target(), target);
+            let encoded = serde_json::to_value(&edge).unwrap();
+            assert_eq!(
+                encoded["extras"]["sequence_central_connection"],
+                encoded_name
+            );
+            let decoded: IrEdge = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, edge);
+            assert_eq!(decoded.sequence_central_connection(), Some(connection));
+            assert_eq!(decoded.arrow, ArrowType::DoubleDottedArrow);
+        }
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&ordinary).unwrap();
+        legacy["extras"] = serde_json::json!({"min_length": 3});
+        let decoded: IrEdge = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.sequence_central_connection(), None);
+        assert_eq!(decoded.min_length(), 3);
     }
 
     #[test]
