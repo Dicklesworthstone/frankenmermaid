@@ -9746,13 +9746,48 @@ fn directed_path_order(ir: &MermaidDiagramIr) -> Option<Vec<usize>> {
     None
 }
 
+/// Whether coordinates carry diagram meaning that a generic graph layout cannot preserve.
+///
+/// Calendar positions, chart values, sequence order, branch lanes, and grid spans are data.
+/// A cheaper Tree or Sugiyama estimate cannot make replacing those coordinates a valid fallback.
+/// There are no cheaper within-family alternatives yet, so keep the selected geometry and report
+/// the exceeded budgets. Explicit generic requests still use their ordinary fallback policy.
+///
+/// Packet and Venn retain their resource admission policy. One packet field can expand into
+/// millions of row pieces. Venn allocates quadratic matrices and enumerates pairwise placement
+/// candidates with potentially quartic total work; retaining that solver would bypass a real
+/// resource bound. Neither family has a bounded within-family approximation yet.
+const fn layout_requires_semantic_geometry(selected: LayoutAlgorithm) -> bool {
+    match selected {
+        LayoutAlgorithm::Auto
+        | LayoutAlgorithm::Sugiyama
+        | LayoutAlgorithm::Force
+        | LayoutAlgorithm::Tree
+        | LayoutAlgorithm::Packet
+        | LayoutAlgorithm::Venn => false,
+        LayoutAlgorithm::Radial
+        | LayoutAlgorithm::Timeline
+        | LayoutAlgorithm::Gantt
+        | LayoutAlgorithm::XyChart
+        | LayoutAlgorithm::Sankey
+        | LayoutAlgorithm::Kanban
+        | LayoutAlgorithm::Grid
+        | LayoutAlgorithm::Sequence
+        | LayoutAlgorithm::Pie
+        | LayoutAlgorithm::Quadrant
+        | LayoutAlgorithm::GitGraph
+        | LayoutAlgorithm::Architecture
+        | LayoutAlgorithm::Treemap
+        | LayoutAlgorithm::Radar
+        | LayoutAlgorithm::Ishikawa
+        | LayoutAlgorithm::TreeView
+        | LayoutAlgorithm::Wardley
+        | LayoutAlgorithm::EventModeling => true,
+    }
+}
+
 fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<LayoutAlgorithm> {
-    // A ranked graph layout does not preserve a mindmap's radial organization. The cost curves
-    // cross for medium-size maps, so a time estimate could otherwise change a 65-branch mindmap
-    // into a Sugiyama graph while keeping both smaller and larger maps radial. There is currently
-    // no cheaper radial strategy: retain this geometry and report the exceeded budget honestly.
-    // General algorithms explicitly selected for a mindmap still use the ordinary fallback list.
-    if ir.diagram_type == DiagramType::Mindmap && selected == LayoutAlgorithm::Radial {
+    if layout_requires_semantic_geometry(selected) {
         return vec![selected];
     }
     let mut candidates = vec![selected];
@@ -9941,13 +9976,17 @@ fn evaluate_layout_guardrails(
         iteration_budget_exceeded,
         route_budget_exceeded,
         fallback_applied: selected_algorithm != selected,
-        reason: guardrail_reason(
-            time_budget_exceeded,
-            iteration_budget_exceeded,
-            route_budget_exceeded,
-            selected_algorithm != selected,
-            within_budget_candidate_found,
-        ),
+        reason: if layout_requires_semantic_geometry(selected) {
+            "guardrail_retained_semantic_layout"
+        } else {
+            guardrail_reason(
+                time_budget_exceeded,
+                iteration_budget_exceeded,
+                route_budget_exceeded,
+                selected_algorithm != selected,
+                within_budget_candidate_found,
+            )
+        },
     };
 
     if guard.fallback_applied {
@@ -9957,6 +9996,16 @@ fn evaluate_layout_guardrails(
             estimated_time_ms = guard.estimated_layout_time_ms,
             reason = guard.reason,
             "layout.guardrail.fallback"
+        );
+    } else if layout_requires_semantic_geometry(selected) {
+        warn!(
+            algorithm = guard.selected_algorithm.as_str(),
+            estimated_time_ms = guard.estimated_layout_time_ms,
+            time_budget_exceeded,
+            iteration_budget_exceeded,
+            route_budget_exceeded,
+            reason = guard.reason,
+            "layout.guardrail.semantic_layout_retained"
         );
     } else {
         debug!(
@@ -42441,7 +42490,7 @@ mod tests {
     }
 
     #[test]
-    fn large_mindmap_guardrail_keeps_radial_as_lowest_cost_fallback() {
+    fn large_mindmap_guardrail_retains_radial_semantics_and_reports_exceeded_budgets() {
         let edges: Vec<(usize, usize)> = (1..800).map(|node| (0, node)).collect();
         let ir = graph_ir(DiagramType::Mindmap, 800, &edges);
         let guard =
@@ -42452,7 +42501,285 @@ mod tests {
         assert!(!guard.fallback_applied);
         assert!(guard.time_budget_exceeded);
         assert!(guard.iteration_budget_exceeded);
-        assert_eq!(guard.reason, "guardrail_forced_multi_budget");
+        assert_eq!(guard.reason, "guardrail_retained_semantic_layout");
+    }
+
+    #[test]
+    fn semantic_layout_guardrails_report_each_exceeded_budget_without_changing_families() {
+        // Coordinates, ordering, grouping, and scale are data in these families.
+        for (diagram_type, algorithm) in [
+            (DiagramType::Mindmap, LayoutAlgorithm::Radial),
+            (DiagramType::Timeline, LayoutAlgorithm::Timeline),
+            (DiagramType::Gantt, LayoutAlgorithm::Gantt),
+            (DiagramType::XyChart, LayoutAlgorithm::XyChart),
+            (DiagramType::Sankey, LayoutAlgorithm::Sankey),
+            (DiagramType::Journey, LayoutAlgorithm::Kanban),
+            (DiagramType::Kanban, LayoutAlgorithm::Kanban),
+            (DiagramType::BlockBeta, LayoutAlgorithm::Grid),
+            (DiagramType::Sequence, LayoutAlgorithm::Sequence),
+            (DiagramType::Pie, LayoutAlgorithm::Pie),
+            (DiagramType::QuadrantChart, LayoutAlgorithm::Quadrant),
+            (DiagramType::GitGraph, LayoutAlgorithm::GitGraph),
+            (DiagramType::ArchitectureBeta, LayoutAlgorithm::Architecture),
+            (DiagramType::Treemap, LayoutAlgorithm::Treemap),
+            (DiagramType::Radar, LayoutAlgorithm::Radar),
+            (DiagramType::Ishikawa, LayoutAlgorithm::Ishikawa),
+            (DiagramType::TreeView, LayoutAlgorithm::TreeView),
+            (DiagramType::Wardley, LayoutAlgorithm::Wardley),
+            (DiagramType::EventModeling, LayoutAlgorithm::EventModeling),
+        ] {
+            let ir = graph_ir(diagram_type, 8, &[(0, 1), (1, 2), (2, 3)]);
+            for (guardrails, expected_flags) in [
+                (
+                    LayoutGuardrails {
+                        max_layout_time_ms: 0,
+                        max_layout_iterations: usize::MAX,
+                        max_route_ops: usize::MAX,
+                    },
+                    (true, false, false),
+                ),
+                (
+                    LayoutGuardrails {
+                        max_layout_time_ms: usize::MAX,
+                        max_layout_iterations: 0,
+                        max_route_ops: usize::MAX,
+                    },
+                    (false, true, false),
+                ),
+                (
+                    LayoutGuardrails {
+                        max_layout_time_ms: usize::MAX,
+                        max_layout_iterations: usize::MAX,
+                        max_route_ops: 0,
+                    },
+                    (false, false, true),
+                ),
+            ] {
+                let guard = evaluate_layout_guardrails(&ir, algorithm, guardrails);
+                assert_eq!(guard.initial_algorithm, algorithm);
+                assert_eq!(guard.selected_algorithm, algorithm);
+                assert!(!guard.fallback_applied);
+                assert_eq!(guard.reason, "guardrail_retained_semantic_layout");
+                assert_eq!(
+                    (
+                        guard.time_budget_exceeded,
+                        guard.iteration_budget_exceeded,
+                        guard.route_budget_exceeded,
+                    ),
+                    expected_flags,
+                    "{diagram_type:?}/{algorithm:?}: retained geometry must not conceal limits",
+                );
+                assert_eq!(
+                    guard.selected_estimated_layout_time_ms,
+                    guard.estimated_layout_time_ms
+                );
+                assert_eq!(
+                    guard.selected_estimated_layout_iterations,
+                    guard.estimated_layout_iterations
+                );
+                assert_eq!(
+                    guard.selected_estimated_route_ops,
+                    guard.estimated_route_ops
+                );
+            }
+        }
+    }
+
+    fn assert_specialized_geometry_unchanged(actual: &DiagramLayout, direct: &DiagramLayout) {
+        // Dispatch adds one trace phase; compare every painted geometry channel rather than
+        // requiring the direct entry point to manufacture that orchestration statistic.
+        assert_eq!(actual.nodes, direct.nodes);
+        assert_eq!(actual.edges, direct.edges);
+        assert_eq!(actual.clusters, direct.clusters);
+        assert_eq!(actual.extensions, direct.extensions);
+        assert_eq!(actual.bounds, direct.bounds);
+    }
+
+    #[test]
+    fn gantt_guardrails_preserve_calendar_bars_and_axis_for_an_ordinary_large_schedule() {
+        let tasks: String = (0..90)
+            .map(|index| {
+                let duration = if index % 2 == 0 { 1 } else { 10 };
+                format!("Task {index} :t{index}, 2026-01-01, {duration}d\n")
+            })
+            .collect();
+        let parsed = parse(&format!("gantt\ndateFormat YYYY-MM-DD\n{tasks}"));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 90);
+        let traced = layout_diagram_traced(&parsed.ir);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Gantt);
+        assert!(traced.trace.guard.time_budget_exceeded);
+        assert!(!traced.trace.guard.fallback_applied);
+        let report = build_layout_guard_report(&parsed.ir, &traced);
+        assert!(report.budget_exceeded && report.layout_budget_exceeded);
+        assert_eq!(
+            report.guard_reason.as_deref(),
+            Some("guardrail_retained_semantic_layout")
+        );
+
+        let layout = &traced.layout;
+        assert_eq!(layout.nodes.len(), 90);
+        assert!(layout.extensions.gantt_day_axis.is_some());
+        assert!(!layout.extensions.axis_ticks.is_empty());
+        assert!(!layout.extensions.gantt_axis_rows.is_empty());
+        assert_eq!(layout.extensions.gantt_task_labels.len(), 90);
+        let one_day = layout.nodes[0].bounds;
+        let ten_days = layout.nodes[1].bounds;
+        assert!(
+            (one_day.x - ten_days.x).abs() < 0.01,
+            "equal start dates must align"
+        );
+        assert!((ten_days.width / one_day.width - 10.0).abs() < 0.01);
+        assert_specialized_geometry_unchanged(layout, &layout_diagram_gantt(&parsed.ir));
+        assert_eq!(layout, &layout_diagram_traced(&parsed.ir).layout);
+    }
+
+    #[test]
+    fn sequence_guardrails_preserve_message_chronology_notes_and_activations() {
+        let messages: String = (0..140)
+            .map(|index| format!("Client->>Service: Request {index}\n"))
+            .collect();
+        let parsed = parse(&format!(
+            "sequenceDiagram\nparticipant Client\nparticipant Service\nactivate Service\n\
+             loop Requests\n{messages}end\ndeactivate Service\nNote over Client,Service: Finished\n"
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.edges.len(), 140);
+        let traced = layout_diagram_traced(&parsed.ir);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sequence);
+        assert!(traced.trace.guard.time_budget_exceeded);
+        assert!(!traced.trace.guard.fallback_applied);
+        let layout = &traced.layout;
+        assert_eq!(layout.nodes.len(), 2);
+        assert_eq!(layout.edges.len(), 140);
+        assert_eq!(layout.extensions.sequence_messages.len(), 140);
+        assert_eq!(layout.extensions.sequence_notes.len(), 1);
+        assert_eq!(layout.extensions.sequence_fragments.len(), 1);
+        assert_eq!(layout.extensions.activation_bars.len(), 1);
+        for pair in layout.edges.windows(2) {
+            assert!(
+                pair[0].points[0].y < pair[1].points[0].y,
+                "message order is chronological"
+            );
+        }
+        assert_specialized_geometry_unchanged(layout, &layout_diagram_sequence(&parsed.ir));
+    }
+
+    #[test]
+    fn xychart_guardrails_preserve_data_scale_beyond_the_default_cost_threshold() {
+        let categories = (1..=100)
+            .map(|index| format!("P{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = (1..=100)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let parsed = parse(&format!(
+            "xychart-beta\nx-axis [{categories}]\ny-axis 0 --> 100\nbar [{values}]\n"
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 100);
+        let traced = layout_diagram_traced(&parsed.ir);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::XyChart);
+        assert!(traced.trace.guard.time_budget_exceeded);
+        assert!(!traced.trace.guard.fallback_applied);
+        let layout = &traced.layout;
+        assert_eq!(layout.nodes.len(), 100);
+        let first = layout.nodes[0].bounds;
+        let last = layout.nodes[99].bounds;
+        assert!((last.height / first.height - 100.0).abs() < 0.01);
+        for pair in layout.nodes.windows(2) {
+            assert!(
+                pair[0].bounds.x < pair[1].bounds.x,
+                "category order must survive"
+            );
+            assert!(
+                (pair[0].bounds.y + pair[0].bounds.height - first.y - first.height).abs() < 0.01
+            );
+        }
+        assert_specialized_geometry_unchanged(layout, &layout_diagram_xychart(&parsed.ir));
+    }
+
+    #[test]
+    fn sankey_guardrails_preserve_quantity_sized_columns_instead_of_a_spanning_tree() {
+        let flows: String = (0..29)
+            .map(|index| format!("Stage {index},Stage {},100\n", index + 1))
+            .collect();
+        let parsed = parse(&format!("sankey-beta\n{flows}"));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let traced = layout_diagram_traced(&parsed.ir);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sankey);
+        assert!(traced.trace.guard.time_budget_exceeded);
+        assert!(!traced.trace.guard.fallback_applied);
+        let layout = &traced.layout;
+        assert_eq!(layout.nodes.len(), 30);
+        assert_eq!(layout.edges.len(), 29);
+        assert_eq!(layout.extensions.bands.len(), 30);
+        for node in &layout.nodes {
+            assert!(
+                node.bounds.height >= 160.0,
+                "throughput sizes the flow column"
+            );
+        }
+        for edge in &layout.edges {
+            assert!(edge.points.first().unwrap().x < edge.points.last().unwrap().x);
+        }
+        assert_specialized_geometry_unchanged(layout, &layout_diagram_sankey(&parsed.ir));
+    }
+
+    #[test]
+    fn semantic_guardrails_keep_explicit_generic_overrides_and_packet_expansion_protection() {
+        let ir = graph_ir(DiagramType::Gantt, 90, &[]);
+        let explicit_generic =
+            evaluate_layout_guardrails(&ir, LayoutAlgorithm::Tree, LayoutGuardrails::default());
+        assert_eq!(
+            explicit_generic.selected_algorithm,
+            LayoutAlgorithm::Sugiyama
+        );
+        assert!(explicit_generic.fallback_applied);
+        assert_eq!(explicit_generic.reason, "guardrail_forced_time_budget");
+
+        let packet = parse("packet-beta\n0-4000000000: \"Huge field\"\n").ir;
+        let traced = layout_diagram_traced(&packet);
+        assert_eq!(
+            traced.trace.guard.initial_algorithm,
+            LayoutAlgorithm::Packet
+        );
+        assert_eq!(traced.trace.guard.selected_algorithm, LayoutAlgorithm::Grid);
+        assert!(traced.trace.guard.fallback_applied);
+        assert!(traced.trace.guard.estimated_layout_iterations > 125_000_000);
+        assert!(
+            traced
+                .layout
+                .extensions
+                .packet_field_continuations
+                .is_empty()
+        );
+        assert_eq!(traced.layout.nodes.len(), 1);
+    }
+
+    #[test]
+    fn semantic_guardrails_preserve_venn_expensive_solver_admission() {
+        let small = parse("venn-beta\nset A\nset B\nset C\n").ir;
+        let guard =
+            evaluate_layout_guardrails(&small, LayoutAlgorithm::Venn, LayoutGuardrails::default());
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Venn);
+        assert!(!guard.fallback_applied);
+
+        let mut source = String::from("venn-beta\n");
+        for index in 0..90 {
+            source.push_str(&format!("set S{index}\n"));
+        }
+        let large = parse(&source).ir;
+        assert_eq!(large.venn_meta.as_ref().unwrap().sets.len(), 90);
+        // Exercise admission only: this regression must never invoke the unbounded solver.
+        let guard =
+            evaluate_layout_guardrails(&large, LayoutAlgorithm::Venn, LayoutGuardrails::default());
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Sugiyama);
+        assert!(guard.fallback_applied);
+        assert!(guard.time_budget_exceeded);
+        assert_eq!(guard.reason, "guardrail_forced_time_budget");
     }
 
     #[test]
