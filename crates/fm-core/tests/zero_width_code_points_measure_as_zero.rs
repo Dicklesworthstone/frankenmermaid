@@ -128,6 +128,11 @@ fn zero_width_formatting_code_points_add_no_width() {
         ("variation selector 16", "☀", "☀\u{FE0F}"),
         ("variation selector 15", "☀", "☀\u{FE0E}"),
         ("skin tone", "👋", "👋\u{1F3FD}"),
+        (
+            "emoji subdivision tags",
+            "🏴",
+            "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+        ),
         ("zero-width space", "ab", "a\u{200B}b"),
         ("zero-width joiner alone", "ab", "a\u{200D}b"),
     ] {
@@ -177,4 +182,103 @@ fn characters_that_draw_still_measure() {
         CharWidthClass::classify('👋').multiplier() > 0.0,
         "a drawn emoji was classified as zero-width"
     );
+}
+
+#[test]
+fn monospace_labels_do_not_bill_combining_marks_or_joiners() {
+    let metrics = FontMetrics::monospace(15.0);
+    for (plain, decorated) in [
+        ("Café", "Cafe\u{301}"),
+        ("👩", "👩🏽‍💻"),
+        (
+            "🏴",
+            "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+        ),
+        ("ab", "a\u{200b}b"),
+        ("ab", "a\u{200d}b"),
+    ] {
+        assert_eq!(
+            metrics.estimate_width(plain),
+            metrics.estimate_width(decorated),
+            "a monospace label must not gain invisible glyphs: {decorated:?}",
+        );
+    }
+}
+
+#[test]
+fn a_joiner_does_not_hide_the_next_unrelated_wide_character() {
+    for metrics in [FontMetrics::default_metrics(), FontMetrics::monospace(15.0)] {
+        for text in ["a\u{200d}界", "\u{200d}界", "👩\u{200d}界"] {
+            let expected = metrics.estimate_width(&text.replace('\u{200d}', ""));
+            assert_eq!(metrics.estimate_width(text), expected, "{text:?}");
+        }
+    }
+}
+
+#[test]
+fn diagram_paragraphs_and_cards_preserve_complete_multilingual_graphemes() {
+    use fm_core::{DiagramType, IrLabel, IrLabelId, IrNode, KanbanCardLayout, MermaidDiagramIr};
+
+    for metrics in [FontMetrics::default_metrics(), FontMetrics::monospace(15.0)] {
+        for glyph in [
+            "कि",
+            "क्षि",
+            "ಕಿ",
+            "\u{1100}\u{1161}\u{11a8}",
+            "กำ",
+            "👩🏽‍💻",
+            "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+        ] {
+            let source = glyph.repeat(60);
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.labels.push(IrLabel {
+                text: source.clone(),
+                ..Default::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "multilingual".into(),
+                label: Some(IrLabelId(0)),
+                ..Default::default()
+            });
+
+            for family in [
+                DiagramType::Flowchart,
+                DiagramType::State,
+                DiagramType::Mindmap,
+            ] {
+                ir.diagram_type = family;
+                let paragraph = ir.node_layout_text(&ir.nodes[0], &metrics);
+                assert!(paragraph.contains('\n'), "long text must wrap: {glyph:?}");
+                assert_eq!(paragraph.replace('\n', ""), source);
+                for row in paragraph.split('\n') {
+                    assert_eq!(
+                        row,
+                        glyph.repeat(row.len() / glyph.len()),
+                        "{family:?} split a grapheme across rows: {glyph:?}",
+                    );
+                }
+            }
+            assert_eq!(ir.labels[0].text, source, "layout must preserve authored IR");
+
+            let glyph_width = metrics.estimate_preserved_width(
+                glyph,
+                metrics.font_size(),
+                metrics.avg_char_width(),
+            );
+            let card_width = metrics.font_size() * 2.0 + glyph_width * 2.5 * 1.12;
+            let card = KanbanCardLayout::new(None, &source, &metrics, Some(card_width), None);
+            assert!(card.rows.len() > 1);
+            assert_eq!(
+                card.rows
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<String>(),
+                source,
+            );
+            for row in &card.rows {
+                assert_eq!(row.text, glyph.repeat(row.text.len() / glyph.len()));
+                assert!(row.center_y + row.font_size * 0.5 <= card.height - card.padding);
+            }
+        }
+    }
 }

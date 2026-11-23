@@ -5,6 +5,7 @@
 //! across different rendering targets (SVG, Canvas, Terminal).
 
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Invoke `f` on each line of `text`, byte-identically to [`str::lines`], but locate the `'\n'`
 /// separators with a SIMD `memchr` scan instead of std's UTF-8-decoding `CharSearcher` (which
@@ -126,6 +127,8 @@ pub const fn is_zero_width(c: char) -> bool {
         | 0xFE00..=0xFE0F
         // Emoji skin-tone modifiers — inside the full-width emoji block, hence the ordering note
         | 0x1F3FB..=0x1F3FF
+        // Emoji tag sequences select a subdivision flag without adding visible glyphs.
+        | 0xE0020..=0xE007F
         // Variation Selectors Supplement
         | 0xE0100..=0xE01EF
     )
@@ -412,92 +415,46 @@ impl FontMetrics {
     /// Estimate the width of a single line of text.
     #[must_use]
     pub fn estimate_width(&self, text: &str) -> f32 {
-        // ASCII fast path (common labels, non-monospace): a direct multiplier-table load per
-        // byte replaces the per-char `classify().multiplier()` match chain. Bit-identical —
-        // `ASCII_WIDTH_MULT[b]` IS `classify(b as char).multiplier()`, and the `avg * mult`
-        // op + left-to-right f32 sum are unchanged. Monospace / non-ASCII keep the char path.
-        if self.config.preset != FontPreset::Monospace {
+        // Keep the common ASCII path and its left-to-right f32 accumulation unchanged.
+        if text.is_ascii() {
             let avg = self.avg_char_width;
-            // Pure ASCII: unchanged. `bytes()` is the shape the auto-vectorizer likes, so the
-            // overwhelmingly common label keeps the fastest path it already had.
-            if text.is_ascii() {
-                return text
-                    .bytes()
+            return if self.config.preset == FontPreset::Monospace {
+                text.bytes().map(|_| avg).sum()
+            } else {
+                text.bytes()
                     .map(|b| avg * ASCII_WIDTH_MULT[b as usize])
-                    .sum();
-            }
-            // MIXED SCRIPT. The `is_ascii()` gate above used to be the ONLY gate, so a label like
-            // `Café` — three ASCII chars and one accented one — sent every character down the
-            // `classify()` match chain. One non-ASCII byte cost the whole label its table.
-            //
-            // That is the wrong shape for `docs_site_50`, the worst ratio this engine actually
-            // renders at (434.107779x): the ledger describes it as flowchart-dominated with
-            // "escaping/non-ASCII labels", and it measures 940 node labels across 50 diagrams. A
-            // label that is mostly ASCII with an accent or a dash is exactly its common case, and
-            // it was taking the slow path end to end.
-            //
-            // ⚠️ THE BIT-IDENTITY BELOW IS ABOUT THE *ASCII* CHARACTERS OF A MIXED LABEL, AND IS
-            // NARROWER THAN IT WAS. Non-ASCII widths deliberately MOVED when zero-width code points
-            // stopped being billed as full characters: a combining mark, variation selector,
-            // skin-tone modifier or joiner now contributes 0.0 (see `is_zero_width`), and a
-            // ZWJ-joined character contributes 0.0 via the loop below. That was a correctness fix —
-            // `Café` measured 29.7 spelled NFC and 37.95 spelled NFD, two widths for one label — so
-            // any golden containing those code points is EXPECTED to change, and a golden that does
-            // not contain them cannot.
-            //
-            // For ASCII the identity is structural rather than a claim: `ASCII_WIDTH_MULT`
-            // is BUILT at compile time as `classify(i as char).multiplier()` for every i < 128, so
-            // for an ASCII char the table and the match chain are the same f32 by construction.
-            // Every term is still `avg * multiplier(c)` and the terms are still summed
-            // left-to-right over `chars()` in order, so the f32 accumulation sequence is unchanged.
-            // Node sizes therefore cannot move, and no golden can shift.
-            //
-            // The monospace branch of `char_width` is also hoisted out of the loop: the preset
-            // cannot change per character, so testing it once is the same answer with one branch
-            // instead of one per char.
-            // A ZERO-WIDTH JOINER FUSES THE FOLLOWING CHARACTER INTO THE PRECEDING GLYPH, so the
-            // sequence `👨 ZWJ 👩 ZWJ 👧` draws as ONE family emoji roughly one emoji wide — not as
-            // three emoji plus two joiners. Classifying the joiner itself as zero-width is not
-            // enough: without this, the family still measures 3x a single emoji. One bool of state
-            // is the whole grapheme-clustering this needs, because the only character that fuses a
-            // following glyph is the joiner.
-            //
-            // The accumulation is still `avg * multiplier` summed left-to-right over `chars()`, and
-            // a joined character contributes a literal `0.0` term rather than being skipped, so the
-            // f32 addition SEQUENCE is unchanged for every string that contains no joiner.
-            let mut total = 0.0_f32;
+                    .sum()
+            };
+        }
+
+        // Width classes are deterministic estimates, not a text-shaping engine. A joiner may
+        // combine emoji only within an extended grapheme cluster: `a ZWJ 界` still contains two
+        // visible characters. Resetting at Unicode boundaries also keeps standalone joiners
+        // from hiding the next CJK character, while preserving complete emoji sequences.
+        let mut total = 0.0_f32;
+        for grapheme in text.graphemes(true) {
             let mut after_joiner = false;
-            for c in text.chars() {
-                let (multiplier, is_full_width) = if c.is_ascii() {
-                    (ASCII_WIDTH_MULT[c as usize], false)
+            for c in grapheme.chars() {
+                total += if after_joiner && is_east_asian_wide(c) {
+                    0.0
                 } else {
-                    let class = CharWidthClass::classify(c);
-                    (
-                        class.multiplier(),
-                        matches!(class, CharWidthClass::FullWidth),
-                    )
+                    self.char_width(c)
                 };
-                // ⚠️ A JOINER FUSES AN EMOJI, NOT ANY CHARACTER. `👨 ZWJ 👩` is one family glyph, but
-                // `a ZWJ b` still draws two Latin letters — the joiner only requests a joined form,
-                // which Latin fonts do not provide. Suppressing every character after a joiner
-                // measured `a\u{200D}b` as one character wide, which is why only a FULL-WIDTH
-                // follower is treated as fused.
-                total += avg
-                    * if after_joiner && is_full_width {
-                        0.0
-                    } else {
-                        multiplier
-                    };
                 after_joiner = c == ZERO_WIDTH_JOINER;
             }
-            return total;
         }
-        text.chars().map(|c| self.char_width(c)).sum()
+        total
     }
 
     fn char_width(&self, c: char) -> f32 {
         if self.config.preset == FontPreset::Monospace {
-            self.avg_char_width
+            if is_zero_width(c) {
+                0.0
+            } else {
+                self.avg_char_width
+            }
+        } else if c.is_ascii() {
+            self.avg_char_width * ASCII_WIDTH_MULT[c as usize]
         } else {
             self.avg_char_width * CharWidthClass::classify(c).multiplier()
         }
@@ -607,8 +564,14 @@ impl FontMetrics {
     }
 
     /// Truncate text to fit within a maximum width, adding ellipsis.
+    ///
+    /// Only complete extended grapheme clusters are retained. An ellipsis that fits exactly
+    /// is allowed; non-positive or NaN budgets cannot hold text and return an empty string.
     #[must_use]
     pub fn truncate_to_width(&self, text: &str, max_width: f32) -> String {
+        if max_width.is_nan() || max_width <= 0.0 {
+            return String::new();
+        }
         if self.estimate_width(text) <= max_width {
             return text.to_string();
         }
@@ -616,24 +579,36 @@ impl FontMetrics {
         let ellipsis = "...";
         let ellipsis_width = self.estimate_width(ellipsis);
 
-        if max_width <= ellipsis_width {
+        if max_width < ellipsis_width {
             return String::new();
         }
 
         let available_width = max_width - ellipsis_width;
-        let mut result = String::new();
+        let mut end = 0;
         let mut current_width = 0.0;
 
-        for c in text.chars() {
-            let char_width = self.char_width(c);
-            if current_width + char_width > available_width {
+        for (offset, grapheme) in text.grapheme_indices(true) {
+            let advance = self.estimate_width(grapheme);
+            if current_width + advance > available_width {
                 break;
             }
-            result.push(c);
-            current_width += char_width;
+            end = offset + grapheme.len();
+            current_width += advance;
         }
 
+        let mut result = String::with_capacity(end + ellipsis.len());
+        result.push_str(&text[..end]);
         result.push_str(ellipsis);
+        // Per-cluster sums can round differently from measuring the final string. Enforce
+        // the actual budget at a boundary without ever cutting through the retained cluster.
+        while end > 0 && self.estimate_width(&result) > max_width {
+            end = text[..end]
+                .grapheme_indices(true)
+                .next_back()
+                .map_or(0, |(offset, _)| offset);
+            result.truncate(end);
+            result.push_str(ellipsis);
+        }
         result
     }
 
@@ -656,21 +631,12 @@ impl FontMetrics {
                 rows.push(line.to_owned());
                 continue;
             }
-            let mut boundaries = vec![0];
-            let mut after_joiner = false;
-            let mut regional_count = 0;
-            for (offset, character) in line.char_indices() {
-                let regional = matches!(character, '\u{1f1e6}'..='\u{1f1ff}');
-                if offset > 0
-                    && !is_zero_width(character)
-                    && !after_joiner
-                    && (!regional || regional_count % 2 == 0)
-                {
-                    boundaries.push(offset);
-                }
-                after_joiner = character == ZERO_WIDTH_JOINER;
-                regional_count = if regional { regional_count + 1 } else { 0 };
-            }
+            // Width classifications cannot determine legal break positions: spacing marks,
+            // Indic conjuncts, Hangul jamo, and emoji tags also belong to complete clusters.
+            let mut boundaries: Vec<_> = line
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .collect();
             boundaries.push(line.len());
             let mut start = 0;
             while start + 1 < boundaries.len() {
@@ -733,9 +699,9 @@ impl FontMetrics {
         let mut boundaries = vec![0];
         let mut after_space = false;
         let mut seen_word = false;
-        for (offset, character) in text.char_indices() {
-            let space = character.is_whitespace();
-            if after_space && !space && seen_word && !is_zero_width(character) {
+        for (offset, grapheme) in text.grapheme_indices(true) {
+            let space = grapheme.chars().all(char::is_whitespace);
+            if after_space && !space && seen_word {
                 boundaries.push(offset);
                 if boundaries.len() > MAX_WORDS {
                     return original;
@@ -860,7 +826,21 @@ impl FontMetrics {
             let mut current_width = 0.0;
             let space_width = self.estimate_width(" ");
 
-            for word in line.split_whitespace() {
+            // Collapse only complete whitespace clusters. `split_whitespace()` could detach
+            // a combining mark from an authored space before the glyph-safe wrapper saw it.
+            let mut word_start = None;
+            let words = line
+                .grapheme_indices(true)
+                .chain(std::iter::once((line.len(), " ")))
+                .filter_map(|(offset, grapheme)| {
+                    if grapheme.chars().all(char::is_whitespace) {
+                        word_start.take().map(|start| &line[start..offset])
+                    } else {
+                        word_start.get_or_insert(offset);
+                        None
+                    }
+                });
+            for word in words {
                 let word_width = self.estimate_width(word);
                 if !current_line.is_empty() && current_width + space_width + word_width <= max_width
                 {
@@ -875,31 +855,18 @@ impl FontMetrics {
                 }
                 current_width = 0.0;
                 let mut start = 0;
-                let mut after_joiner = false;
-                let mut regional_count = 0;
-                for (offset, c) in word.char_indices() {
-                    let regional = matches!(c, '\u{1f1e6}'..='\u{1f1ff}');
-                    let advance = if after_joiner
-                        && is_east_asian_wide(c)
-                        && self.config.preset != FontPreset::Monospace
-                    {
-                        0.0
-                    } else {
-                        self.char_width(c)
-                    };
-                    let can_break = offset > start
+                for (offset, grapheme) in word.grapheme_indices(true) {
+                    let advance = self.estimate_width(grapheme);
+                    if offset > start
                         && current_width > 0.0
-                        && !is_zero_width(c)
-                        && !after_joiner
-                        && (!regional || regional_count % 2 == 0);
-                    if can_break && current_width + advance > max_width {
+                        && advance > 0.0
+                        && current_width + advance > max_width
+                    {
                         lines.push(word[start..offset].to_string());
                         start = offset;
                         current_width = 0.0;
                     }
                     current_width += advance;
-                    after_joiner = c == ZERO_WIDTH_JOINER;
-                    regional_count = if regional { regional_count + 1 } else { 0 };
                 }
                 current_line.push_str(&word[start..]);
             }
@@ -1052,6 +1019,57 @@ mod tests {
         assert!(truncated.ends_with("..."));
         assert!(truncated.len() < text.len());
         assert!(metrics.estimate_width(&truncated) <= 100.0 + metrics.avg_char_width());
+    }
+
+    #[test]
+    fn truncation_keeps_extended_graphemes_whole_and_respects_the_width() {
+        for metrics in [FontMetrics::default(), FontMetrics::monospace(15.0)] {
+            let ellipsis_width = metrics.estimate_width("...");
+            for glyph in [
+                "e\u{301}",
+                "कि",
+                "क्षि",
+                "ಕಿ",
+                "\u{1100}\u{1161}\u{11a8}",
+                "กำ",
+                "👩🏽‍💻",
+                "🇺🇸",
+                "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+            ] {
+                let text = format!("{glyph}{glyph}WWWW");
+                let glyph_width = metrics.estimate_width(glyph);
+                let width = glyph_width + ellipsis_width + 0.01;
+                let truncated = metrics.truncate_to_width(&text, width);
+                assert_eq!(truncated, format!("{glyph}..."), "{glyph:?}");
+                assert!(metrics.estimate_width(&truncated) <= width);
+
+                let narrow_width = glyph_width * 0.5 + ellipsis_width;
+                assert_eq!(
+                    metrics.truncate_to_width(&text, narrow_width),
+                    "...",
+                    "a glyph that does not fit must not be cut in half: {glyph:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncation_handles_empty_exact_and_invalid_width_budgets() {
+        let metrics = FontMetrics::default();
+        let ellipsis_width = metrics.estimate_width("...");
+        assert_eq!(
+            metrics.truncate_to_width("long label", ellipsis_width),
+            "..."
+        );
+        assert_eq!(
+            metrics.truncate_to_width("long label", ellipsis_width - 0.01),
+            ""
+        );
+        assert_eq!(metrics.truncate_to_width("", ellipsis_width), "");
+        assert_eq!(metrics.truncate_to_width("short", f32::INFINITY), "short");
+        for width in [0.0, -1.0, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(metrics.truncate_to_width("long label", width), "");
+        }
     }
 
     #[test]
@@ -1218,6 +1236,46 @@ mod tests {
             assert_eq!(wrapped.concat(), text);
         }
         assert_eq!(metrics.wrap_to_width("界界", 1.0), ["界", "界"]);
+    }
+
+    #[test]
+    fn all_wrapping_modes_keep_extended_graphemes_whole() {
+        for metrics in [FontMetrics::default(), FontMetrics::monospace(15.0)] {
+            for glyph in [
+                "कि",
+                "क्षि",
+                "ಕಿ",
+                "\u{1100}\u{1161}\u{11a8}",
+                "กำ",
+                "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+                "\u{600}A",
+            ] {
+                let text = glyph.repeat(3);
+                let expected = vec![glyph.to_owned(); 3];
+                assert_eq!(metrics.wrap_to_width(&text, 1.0), expected, "{glyph:?}");
+                assert_eq!(
+                    metrics.wrap_preserved_to_width(&text, 1.0),
+                    expected,
+                    "{glyph:?}"
+                );
+                assert_eq!(
+                    metrics.wrap_balanced_to_width(&text, 1.0),
+                    expected,
+                    "{glyph:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_wrapping_does_not_detach_a_combining_mark_from_a_space() {
+        let metrics = FontMetrics::default();
+        let text = "A \u{301}B";
+        assert_eq!(metrics.wrap_to_width(text, 1.0), ["A", " \u{301}", "B"]);
+        assert_eq!(
+            metrics.wrap_preserved_to_width(text, 1.0),
+            ["A", " \u{301}", "B"]
+        );
     }
 
     #[test]
