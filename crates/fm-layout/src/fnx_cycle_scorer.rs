@@ -635,8 +635,7 @@ mod tests {
         let scoring = CriticalityScoringConfig::default();
         let mut cache = crate::fnx_cache::AnalysisCache::default();
         let mut projection = ProjectionConfig::default();
-        let preserved =
-            compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+        let preserved = compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
         assert_eq!(preserved.scores.len(), 4);
         assert_eq!(preserved.bridge_count, 1);
         assert!(!preserved.scores[&0].is_bridge);
@@ -647,17 +646,18 @@ mod tests {
         projection.preserve_self_loops = false;
         for collapse_parallel_edges in [false, true] {
             projection.collapse_parallel_edges = collapse_parallel_edges;
-            let removed =
-                compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
-            assert_eq!(removed.scores.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+            let removed = compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+            assert_eq!(
+                removed.scores.keys().copied().collect::<Vec<_>>(),
+                vec![0, 1, 2]
+            );
             assert_eq!(removed.bridge_count, 1);
             assert!(!removed.scores[&0].is_bridge);
             assert!(!removed.scores[&2].is_bridge);
             assert!(removed.scores[&1].is_bridge);
             assert_eq!(removed.scores[&0].source_centrality, 0.5);
             let hits = cache.stats().hits;
-            let cached =
-                compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
+            let cached = compute_criticality_scores_cached(&ir, &projection, &scoring, &mut cache);
             assert_eq!(cache.stats().hits, hits + 1);
             assert_eq!(cached.get_score(0), removed.get_score(0));
             assert_eq!(cached.scores.len(), 3);
@@ -700,7 +700,10 @@ mod tests {
             }
         }
         let results = compute_criticality_scores(&ir, &CriticalityScoringConfig::default());
-        assert_eq!(results.scores.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            results.scores.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(results.bridge_count, 1);
         assert!(!results.scores[&1].is_bridge);
         assert!(!results.scores[&2].is_bridge);

@@ -959,7 +959,11 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![0, 2, 3]
                 );
-                assert!(contributors.iter().all(|meta| meta.weight == expected_weight));
+                assert!(
+                    contributors
+                        .iter()
+                        .all(|meta| meta.weight == expected_weight)
+                );
                 assert_eq!(contributors[2].source_index, 1);
                 assert_eq!(contributors[2].target_index, 0);
                 assert_eq!(contributors[1].label.as_deref(), Some("edge 1"));

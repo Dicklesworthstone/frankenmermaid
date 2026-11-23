@@ -49,6 +49,193 @@ pub struct SccResult {
     pub node_to_component: BTreeMap<usize, usize>,
 }
 
+/// The directed backend must preserve the graph and return a complete SCC partition before its
+/// result can influence layout. Invalid caller input falls back without executing the backend;
+/// projection and partition failures are reported to the rollout controller as failed attempts.
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FnxSccError {
+    InvalidEndpoint { edge_index: usize },
+    ProjectionMismatch,
+    InvalidPartition,
+}
+
+/// Execute the actual FNX directed backend, preserving numeric IR ordering rather than the
+/// backend's string ordering (`n10` must not precede `n2` in the public result).
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+pub(crate) fn compute_scc_with_fnx(ir: &MermaidDiagramIr) -> Result<SccResult, FnxSccError> {
+    use crate::fnx_adapter::{ProjectedId, ir_to_digraph};
+
+    // Reject malformed caller data before constructing or executing an FNX graph. Such input is
+    // handled by native best-effort analysis, not charged to the backend's health error rate.
+    let resolved_edges: Vec<_> = ir
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(edge_index, edge)| {
+            endpoint_node_index(ir, edge.from)
+                .zip(endpoint_node_index(ir, edge.to))
+                .ok_or(FnxSccError::InvalidEndpoint { edge_index })
+        })
+        .collect::<Result<_, _>>()?;
+    let (graph, table) = ir_to_digraph(ir);
+    if !table.verify_counts(ir.nodes.len(), ir.edges.len()) || graph.node_count() != ir.nodes.len()
+    {
+        return Err(FnxSccError::ProjectionMismatch);
+    }
+
+    // Counts alone cannot detect a dropped edge. Check every resolved endpoint and its edge
+    // provenance too; parallel directed edges intentionally share one simple-graph edge.
+    let mut pairs = BTreeSet::new();
+    for (edge_index, (source, target)) in resolved_edges.into_iter().enumerate() {
+        let source_id = table
+            .get_fnx_id(&ProjectedId::Node(source))
+            .ok_or(FnxSccError::ProjectionMismatch)?;
+        let target_id = table
+            .get_fnx_id(&ProjectedId::Node(target))
+            .ok_or(FnxSccError::ProjectionMismatch)?;
+        if !graph.has_edge(source_id, target_id)
+            || table
+                .get_edge_meta_by_index(edge_index)
+                .is_none_or(|meta| meta.source_index != source || meta.target_index != target)
+        {
+            return Err(FnxSccError::ProjectionMismatch);
+        }
+        pairs.insert((source, target));
+    }
+    if graph.edge_count() != pairs.len() {
+        return Err(FnxSccError::ProjectionMismatch);
+    }
+
+    normalize_fnx_scc(
+        fnx_algorithms::strongly_connected_components(&graph),
+        &table,
+        ir.nodes.len(),
+        &pairs,
+    )
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn normalize_fnx_scc(
+    backend_components: Vec<Vec<String>>,
+    table: &crate::fnx_adapter::ProjectionTable,
+    node_count: usize,
+    edges: &BTreeSet<(usize, usize)>,
+) -> Result<SccResult, FnxSccError> {
+    let mut components = Vec::new();
+    let mut seen = vec![false; node_count];
+    for component in backend_components {
+        if component.is_empty() {
+            return Err(FnxSccError::InvalidPartition);
+        }
+        let mut nodes = Vec::with_capacity(component.len());
+        for node in component {
+            let index = table
+                .get_ir_node_index(&node)
+                .filter(|&index| index < node_count)
+                .ok_or(FnxSccError::InvalidPartition)?;
+            if std::mem::replace(&mut seen[index], true) {
+                return Err(FnxSccError::InvalidPartition);
+            }
+            nodes.push(index);
+        }
+        nodes.sort_unstable();
+        components.push(nodes);
+    }
+    if seen.iter().any(|&present| !present) {
+        return Err(FnxSccError::InvalidPartition);
+    }
+    components.sort_unstable_by_key(|nodes| nodes[0]);
+
+    let mut result = SccResult {
+        components: Vec::with_capacity(components.len()),
+        non_trivial_count: 0,
+        max_component_size: 0,
+        node_to_component: BTreeMap::new(),
+    };
+    for (index, nodes) in components.into_iter().enumerate() {
+        let is_trivial = nodes.len() == 1 && !edges.contains(&(nodes[0], nodes[0]));
+        result.non_trivial_count += usize::from(!is_trivial);
+        result.max_component_size = result.max_component_size.max(nodes.len());
+        for &node in &nodes {
+            result.node_to_component.insert(node, index);
+        }
+        result.components.push(StronglyConnectedComponent {
+            index,
+            nodes,
+            is_trivial,
+        });
+    }
+
+    // A complete partition can still be wrong: splitting a cycle or merging one-way connected
+    // nodes silently changes cycle-removal decisions. Verify strong connectivity inside every
+    // component and acyclicity between components before accepting the backend's answer.
+    if !valid_scc_partition(&result, node_count, edges) {
+        return Err(FnxSccError::InvalidPartition);
+    }
+    Ok(result)
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn valid_scc_partition(
+    result: &SccResult,
+    node_count: usize,
+    edges: &BTreeSet<(usize, usize)>,
+) -> bool {
+    let mut outgoing = vec![Vec::new(); node_count];
+    let mut incoming = vec![Vec::new(); node_count];
+    let mut component_edges = vec![Vec::new(); result.components.len()];
+    let mut indegrees = vec![0_usize; result.components.len()];
+    for &(source, target) in edges {
+        outgoing[source].push(target);
+        incoming[target].push(source);
+        let source_component = result.node_to_component[&source];
+        let target_component = result.node_to_component[&target];
+        if source_component != target_component {
+            component_edges[source_component].push(target_component);
+            indegrees[target_component] += 1;
+        }
+    }
+
+    for adjacency in [&outgoing, &incoming] {
+        let mut visited = vec![false; node_count];
+        for component in &result.components {
+            let mut stack = vec![component.nodes[0]];
+            visited[component.nodes[0]] = true;
+            let mut reached = 0;
+            while let Some(node) = stack.pop() {
+                reached += 1;
+                for &next in &adjacency[node] {
+                    if result.node_to_component[&next] == component.index && !visited[next] {
+                        visited[next] = true;
+                        stack.push(next);
+                    }
+                }
+            }
+            if reached != component.nodes.len() {
+                return false;
+            }
+        }
+    }
+
+    let mut ready: Vec<_> = indegrees
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &degree)| (degree == 0).then_some(index))
+        .collect();
+    let mut visited_components = 0;
+    while let Some(component) = ready.pop() {
+        visited_components += 1;
+        for &next in &component_edges[component] {
+            indegrees[next] -= 1;
+            if indegrees[next] == 0 {
+                ready.push(next);
+            }
+        }
+    }
+    visited_components == result.components.len()
+}
+
 /// Compute Strongly Connected Components using Tarjan's algorithm.
 ///
 /// Output ordering contract:
@@ -643,6 +830,46 @@ mod tests {
     }
 
     // SCC Tests
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_partition_validation_rejects_loss_duplicates_splits_and_merges() {
+        let mut ir = make_test_ir_with_edges(&[(0, 1), (1, 0)]);
+        ir.nodes.push(IrNode {
+            id: "isolated".to_string(),
+            ..Default::default()
+        });
+        let table = crate::fnx_adapter::ProjectionTable::from_ir(&ir);
+        let pairs = BTreeSet::from([(0, 1), (1, 0)]);
+
+        for invalid in [
+            vec![vec!["n0", "n1"]],
+            vec![vec!["n0", "n1", "n1"], vec!["n2"]],
+            vec![vec!["n0", "n1"], vec!["n2", "n3"]],
+            vec![vec!["n0", "n1"], vec!["n2"], vec![]],
+            vec![vec!["n0"], vec!["n1"], vec!["n2"]],
+            vec![vec!["n0", "n1", "n2"]],
+        ] {
+            let components = invalid
+                .iter()
+                .map(|nodes| nodes.iter().map(|node| (*node).to_string()).collect())
+                .collect();
+            assert_eq!(
+                normalize_fnx_scc(components, &table, ir.nodes.len(), &pairs),
+                Err(FnxSccError::InvalidPartition),
+                "invalid backend partition was accepted: {invalid:?}"
+            );
+        }
+
+        let unordered = vec![
+            vec!["n2".to_string()],
+            vec!["n1".to_string(), "n0".to_string()],
+        ];
+        assert_eq!(
+            normalize_fnx_scc(unordered, &table, ir.nodes.len(), &pairs).unwrap(),
+            compute_scc(&ir)
+        );
+    }
 
     #[test]
     fn scc_empty_graph() {

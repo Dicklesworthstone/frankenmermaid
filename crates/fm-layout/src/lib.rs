@@ -21029,27 +21029,51 @@ std::thread_local! {
         RefCell::new(crate::fnx_cache::AnalysisCache::default());
 }
 
-/// Evaluate directed Strongly Connected Components under an FNX canary rollout controller (`bd-qsjjb`).
+/// Evaluate directed Strongly Connected Components under an FNX canary rollout controller.
 ///
-/// Records request latency and error status into `rollout`, checks health criteria against
-/// `HealthCriteria::default()`, and automatically triggers deterministic rollback if violated.
+/// Selected requests use the real directed backend when `fnx-experimental-directed` is enabled
+/// on native targets. Disabled, unsampled, rolled-back, and unavailable requests use the native
+/// SCC implementation without adding fictitious FNX telemetry. Malformed caller endpoints are
+/// rejected before entering FNX and do not affect backend health. A failed projection of valid
+/// input or an invalid SCC partition records an error and falls back for the current request.
+/// Health failures roll subsequent requests back; rollback timestamps are epoch milliseconds,
+/// independent of the request ID used for deterministic traffic sampling.
 #[must_use]
 pub fn analyze_cycles_with_fnx_canary(
     ir: &MermaidDiagramIr,
     rollout: &mut fm_core::canary::RolloutState,
     request_id: u64,
 ) -> crate::fnx_directed::SccResult {
-    let enabled = rollout.should_enable_fnx(request_id);
-    let start = Instant::now();
-    let scc = crate::fnx_directed::compute_scc(ir);
-    if enabled {
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    if rollout.should_enable_fnx(request_id) {
+        let start = Instant::now();
+        let result = crate::fnx_directed::compute_scc_with_fnx(ir);
+        if let Err(crate::fnx_directed::FnxSccError::InvalidEndpoint { edge_index }) = &result {
+            tracing::debug!(
+                edge_index,
+                request_id,
+                "layout.fnx_scc.invalid_input_native_fallback"
+            );
+            return crate::fnx_directed::compute_scc(ir);
+        }
         let latency_us = saturating_elapsed_micros(start.elapsed());
-        rollout.record_request(latency_us, false);
+        rollout.record_request(latency_us, result.is_err());
         if let Some(reason) = rollout.check_health(&fm_core::canary::HealthCriteria::default()) {
-            rollout.rollback(reason, request_id);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(rollout.phase_started_at, |elapsed| {
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                });
+            rollout.rollback(reason, timestamp);
+        }
+        match result {
+            Ok(scc) => return scc,
+            Err(error) => tracing::warn!(?error, request_id, "layout.fnx_scc.native_fallback"),
         }
     }
-    scc
+    #[cfg(not(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32"))))]
+    let _ = (rollout, request_id);
+    crate::fnx_directed::compute_scc(ir)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -56258,7 +56282,13 @@ mod tests {
         let scc = super::analyze_cycles_with_fnx_canary(&ir, &mut rollout, 1);
         assert_eq!(scc.non_trivial_count, 1);
         assert_eq!(scc.max_component_size, 3);
-        assert_eq!(rollout.requests_processed, 1);
+        assert_eq!(
+            rollout.requests_processed,
+            u64::from(cfg!(all(
+                feature = "fnx-experimental-directed",
+                not(target_arch = "wasm32")
+            )))
+        );
 
         let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::CycleAware);
         assert_eq!(layout.stats.cycle_count, 1);

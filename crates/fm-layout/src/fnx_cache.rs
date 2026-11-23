@@ -497,7 +497,8 @@ mod tests {
         let projection = ProjectionConfig::default();
         let scoring = CriticalityScoringConfig::default();
         let mut cache = AnalysisCache::default();
-        let original = crate::fnx_diagnostics::analyze_structure_cached(&ir, &projection, &mut cache);
+        let original =
+            crate::fnx_diagnostics::analyze_structure_cached(&ir, &projection, &mut cache);
         crate::fnx_cycle_scorer::compute_criticality_scores_cached(
             &ir,
             &projection,
@@ -511,7 +512,11 @@ mod tests {
         moved_node.nodes[1].span_primary.start.byte = 128;
         moved_node.nodes[1].span_primary.end = moved_node.nodes[1].span_primary.start;
         assert!(cache.get_diagnostics(&moved_node, &projection).is_none());
-        assert!(cache.get_criticality(&moved_node, &projection, &scoring).is_some());
+        assert!(
+            cache
+                .get_criticality(&moved_node, &projection, &scoring)
+                .is_some()
+        );
 
         let mut moved_edge = ir.clone();
         moved_edge.edges[0].span.start.line = 72;
@@ -519,7 +524,11 @@ mod tests {
         moved_edge.edges[0].span.start.byte = 256;
         moved_edge.edges[0].span.end = moved_edge.edges[0].span.start;
         assert!(cache.get_diagnostics(&moved_edge, &projection).is_none());
-        assert!(cache.get_criticality(&moved_edge, &projection, &scoring).is_some());
+        assert!(
+            cache
+                .get_criticality(&moved_edge, &projection, &scoring)
+                .is_some()
+        );
         assert_eq!(
             CacheKey::from_ir_and_config(&ir, &projection),
             CacheKey::from_ir_and_config(&moved_edge, &projection)
@@ -544,8 +553,15 @@ mod tests {
             .expect("first bridge diagnostic");
         assert_eq!(bridge.span, Some(moved_edge.edges[0].span));
         let cached_original = cache.get_diagnostics(&ir, &projection).unwrap();
-        assert_eq!(cached_original.diagnostics.len(), original.diagnostics.len());
-        for (cached, expected) in cached_original.diagnostics.iter().zip(&original.diagnostics) {
+        assert_eq!(
+            cached_original.diagnostics.len(),
+            original.diagnostics.len()
+        );
+        for (cached, expected) in cached_original
+            .diagnostics
+            .iter()
+            .zip(&original.diagnostics)
+        {
             assert_eq!(cached.code, expected.code);
             assert_eq!(cached.span, expected.span);
             assert_eq!(cached.message, expected.message);
