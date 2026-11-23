@@ -1363,7 +1363,13 @@ The SVG renderer turns a `DiagramLayout` into a complete SVG document with visua
 | Note | | Folded-corner rectangle |
 | Horizontal Bar | | Divider / separator |
 
-Node icons are extractable from `{ icon: "..." }` metadata and from `::icon(name)` directives on mindmaps; custom SVG icons can be supplied via `SvgRenderConfig::custom_icons: BTreeMap<String, CustomSvgIcon>` (keyed by icon name).
+### Node icons
+
+Node icons come from `{ icon: "..." }` metadata and mindmap `::icon(name)` directives. For ordinary graph nodes, including flowcharts, mindmaps, and architecture services, SVG (both Legacy and Scene), Canvas2D, and GPU plans render named icons and Unicode icons. Scene, Canvas2D, and GPU rendering share vector geometry for built-in names such as `server`, `database`, `cloud`, and `mobile`. Font Awesome names and aliases are normalized, and unknown names remain visible as initials. Shared render scenes retain the icon geometry and its authored colors and opacity even after the semantic IR is discarded.
+
+Set `SvgRenderConfig::node_icon_position` or `CanvasRenderConfig::node_icon_position` to `fm_layout::shapes::NodeIconPosition::Above` (the default) or `Left`; GPU plans use the Canvas configuration. Shared Scene, Canvas2D, and GPU placement reserves measured space for icons and captions, including the width of Unicode sequences. For standalone scenes, `fm_layout::build_render_scene_with_icon_position` accepts the same placement and font metrics. `SvgRenderConfig::custom_icons` maps normalized icon names to `CustomSvgIcon` definitions; both SVG backends support these overrides, including Scene SVG exported without semantic IR.
+
+When terminal labels are shown, named icons become readable tokens such as `[server]`, while Unicode icons retain their glyph text; ASCII mode substitutes `[icon]`. SVG and Canvas Unicode appearance depends on the available fonts. The GPU text atlas currently renders individual character glyphs: it retains joined emoji sequences, but does not provide emoji shaping or color emoji rendering.
 
 ### Visual effects
 

@@ -1021,6 +1021,19 @@ impl GlyphFace {
         }
     }
 
+    fn for_icon(
+        node_fonts: &[crate::renderer::DeclaredNodeFont],
+        index: usize,
+        base: &Self,
+        text: &fm_layout::shapes::NodeIconText,
+    ) -> Self {
+        let mut face = Self::for_node(node_fonts, index, base, None, None);
+        if text.monospace {
+            face.family = "monospace".to_owned();
+        }
+        face
+    }
+
     fn for_class_row(
         node_fonts: &[crate::renderer::DeclaredNodeFont],
         index: usize,
@@ -1410,6 +1423,41 @@ impl TextSink<'_> {
         index: usize,
     ) {
         self.push_centred_with_font(text, center, self.metrics.font_size(), color, source, index);
+    }
+
+    /// Keep an icon inside its shared footprint when the scalar atlas cannot shape a joined
+    /// sequence. Every code point remains available; only the complete run's geometry scales.
+    fn push_icon_text(
+        &mut self,
+        text: &str,
+        center: (f32, f32),
+        font_px: f32,
+        width: f32,
+        color: [f32; 4],
+        index: usize,
+    ) {
+        let first_quad = self.quads.len();
+        self.push_centred_with_font(text, center, font_px, color, GpuTextSource::NodeIcon, index);
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        let half_width = self.quads[first_quad..]
+            .iter()
+            .map(|quad| (quad.center[0] - center.0).abs() + quad.half_extent[0])
+            .fold(0.0_f32, f32::max);
+        if !half_width.is_finite() || half_width <= width * 0.5 {
+            return;
+        }
+        let scale = width * 0.5 / half_width;
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        for quad in &mut self.quads[first_quad..] {
+            quad.center[0] = (quad.center[0] - center.0).mul_add(scale, center.0);
+            quad.center[1] = (quad.center[1] - center.1).mul_add(scale, center.1);
+            quad.half_extent[0] *= scale;
+            quad.half_extent[1] *= scale;
+        }
     }
 
     /// Centre the complete label block, preserving authored rows and empty interior lines.
@@ -1905,6 +1953,8 @@ pub enum GpuTextSource {
     TreemapDetail,
     /// Reference number inside a tile whose complete caption is in the details column.
     TreemapReference,
+    /// A Unicode icon or named-icon fallback, attributed to its original IR node.
+    NodeIcon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3188,6 +3238,7 @@ impl GpuRenderPlan {
             Vec::new()
         };
         let mut labelled: Vec<(u32, [f32; 2], Cow<'_, str>)> = Vec::new();
+        let mut icon_texts = Vec::new();
         let mut class_cards = Vec::new();
         let mut er_cards = Vec::new();
         let mut c4_cards = Vec::new();
@@ -3488,21 +3539,102 @@ impl GpuRenderPlan {
                     declared.get("font-size").map(String::as_str),
                     declared.get("font-family").map(String::as_str),
                 );
-                let label =
-                    ir.node_layout_text(ir_node, styled_metrics.as_ref().unwrap_or(&metrics));
+                let node_metrics = styled_metrics.as_ref().unwrap_or(&metrics);
+                let icon_layout = ir_node.icon().and_then(|icon| {
+                    let placed = fm_layout::shapes::node_icon_layout_with_metrics(
+                        node.bounds,
+                        ir_node.shape,
+                        icon,
+                        node_metrics,
+                        config.node_icon_position,
+                    )?;
+                    let geometry =
+                        fm_layout::shapes::node_icon_geometry(icon, placed.center, placed.size)?;
+                    let (fill, stroke) = crate::renderer::resolve_node_colors_with_defaults(
+                        ir,
+                        node.node_index,
+                        config,
+                    );
+                    let mut fill = fill
+                        .as_deref()
+                        .and_then(parse_paint_rgba)
+                        .or_else(|| parse_paint_rgba(&config.node_fill))
+                        .unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                    let mut stroke = stroke
+                        .as_deref()
+                        .and_then(parse_paint_rgba)
+                        .or_else(|| parse_paint_rgba(&config.node_stroke))
+                        .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                    let opacity = crate::renderer::resolve_node_opacity(ir, node.node_index)
+                        .unwrap_or(1.0) as f32;
+                    if let Some(text) = geometry.text {
+                        let mut color = if text.use_label_color {
+                            crate::renderer::resolve_node_text_color(ir, node.node_index)
+                                .as_deref()
+                                .and_then(parse_paint_rgba)
+                                .or_else(|| parse_paint_rgba(&config.label_color))
+                                .unwrap_or(DEFAULT_LABEL_RGBA)
+                        } else {
+                            stroke
+                        };
+                        color[3] *= opacity
+                            * if text.use_label_color {
+                                1.0
+                            } else {
+                                crate::renderer::parse_opacity(
+                                    declared.get("stroke-opacity").map(String::as_str),
+                                )
+                                .unwrap_or(1.0) as f32
+                            };
+                        icon_texts.push((node.node_index, text, color, placed.width));
+                    }
+                    fill[3] *= opacity
+                        * crate::renderer::parse_opacity(
+                            declared.get("fill-opacity").map(String::as_str),
+                        )
+                        .unwrap_or(1.0) as f32;
+                    stroke[3] *= opacity
+                        * crate::renderer::parse_opacity(
+                            declared.get("stroke-opacity").map(String::as_str),
+                        )
+                        .unwrap_or(1.0) as f32;
+                    for path in geometry.paths {
+                        let paint = path.fill.map(|paint| match paint {
+                            fm_layout::shapes::NodeIconPaint::Fill => fill,
+                            fm_layout::shapes::NodeIconPaint::Stroke => stroke,
+                        });
+                        append_node_path(
+                            &mut node_fill_triangles,
+                            &mut node_border_segments,
+                            &path.commands,
+                            paint,
+                            (path.stroke_width > 0.0).then_some(stroke),
+                            path.stroke_width,
+                            [0.0; 2],
+                            node.node_index,
+                        );
+                    }
+                    Some(placed)
+                });
+                let label = ir.node_layout_text(ir_node, node_metrics);
                 if label.is_empty() {
                     continue;
                 }
-                let center = ir_node
-                    .shape
-                    .label_region(node.bounds.width, node.bounds.height)
-                    .map_or_else(
-                        || node.bounds.center(),
-                        |region| fm_layout::LayoutPoint {
-                            x: node.bounds.x + region.x + region.width / 2.0,
-                            y: node.bounds.y + region.y + region.height / 2.0,
-                        },
-                    );
+                let center = icon_layout.map_or_else(
+                    || {
+                        ir_node
+                            .shape
+                            .label_region(node.bounds.width, node.bounds.height)
+                            .map_or_else(
+                                || node.bounds.center(),
+                                |region| fm_layout::LayoutPoint {
+                                    x: node.bounds.x + region.x + region.width / 2.0,
+                                    y: node.bounds.y + region.y + region.height / 2.0,
+                                },
+                            )
+                    },
+                    |icon| icon.label_bounds.center(),
+                );
                 labelled.push((
                     node.node_index.try_into().unwrap_or(u32::MAX),
                     [center.x, center.y],
@@ -3625,6 +3757,7 @@ impl GpuRenderPlan {
                     .flat_map(|(_, _, card, _)| card.rows.iter().map(|row| row.font_size)),
             )
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
+            .chain(icon_texts.iter().map(|(_, text, _, _)| text.font_size))
             .chain(
                 cluster_captions
                     .iter()
@@ -3671,6 +3804,12 @@ impl GpuRenderPlan {
             .map(|index| crate::renderer::resolve_declared_node_font(ir, index))
             .collect();
         let mut styled_texts = Vec::new();
+        for (index, text, _, _) in &icon_texts {
+            styled_texts.push((
+                GlyphFace::for_icon(&node_fonts, *index, &default_face, text),
+                text.text.as_str(),
+            ));
+        }
         for (index, _, text) in &labelled {
             styled_texts.push((
                 GlyphFace::for_node(&node_fonts, *index as usize, &default_face, None, None),
@@ -3862,6 +4001,19 @@ impl GpuRenderPlan {
             runs: &mut text_runs,
             metrics: &metrics,
         };
+
+        for (index, text, color, width) in &icon_texts {
+            let face = GlyphFace::for_icon(&node_fonts, *index, &default_face, text);
+            let mut icon_sink = sink.with_face(&face, &metrics);
+            icon_sink.push_icon_text(
+                &text.text,
+                (text.center.x, text.center.y),
+                text.font_size,
+                *width,
+                *color,
+                *index,
+            );
+        }
 
         for ((node_index, center, text), node_metrics) in labelled.iter().zip(&run_metrics) {
             let mut label_rgba = crate::renderer::resolve_node_text_color(

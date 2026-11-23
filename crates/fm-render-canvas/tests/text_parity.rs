@@ -11,6 +11,414 @@
 use fm_render_canvas::{CanvasRenderConfig, MockCanvas2dContext, render_to_canvas};
 
 #[test]
+fn node_icons_reach_canvas_and_gpu_without_erasing_their_captions() {
+    use fm_layout::shapes::NodeIconPosition;
+    use fm_render_canvas::{
+        DrawOperation, GpuRenderPlan, GpuTextSource, render_to_canvas_with_layout,
+    };
+
+    for (icon, caption) in [("🚀", "Launch"), ("👨‍👩‍👧‍👦", "Family")] {
+        let source = format!(
+            "flowchart LR\nA[\"{icon} {caption}\"] --> B[Control]\n\
+             style A color:#123456,font-weight:bold,font-style:italic,font-family:monospace,font-size:24px,opacity:0.4\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        assert_eq!(ir.nodes[0].icon(), Some(icon));
+        assert_eq!(ir.node_display_text(&ir.nodes[0]), caption);
+        for position in [NodeIconPosition::Above, NodeIconPosition::Left] {
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                node_icon_position: position,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            let original = layout.clone();
+            let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+            let result = render_to_canvas_with_layout(&ir, &layout, &mut context, &config);
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(layout, original, "icons must not rewrite routing geometry");
+            assert_eq!(
+                plan,
+                GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+
+            let (mut font, mut color, mut alpha) = (String::new(), String::new(), 1.0);
+            let mut stack = Vec::new();
+            let mut rows = Vec::new();
+            for operation in context.operations() {
+                match operation {
+                    DrawOperation::Save => stack.push((font.clone(), color.clone(), alpha)),
+                    DrawOperation::Restore => {
+                        (font, color, alpha) = stack.pop().expect("balanced canvas state");
+                    }
+                    DrawOperation::SetFont(value) => font.clone_from(value),
+                    DrawOperation::SetFillStyle(value) => color.clone_from(value),
+                    DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                    DrawOperation::FillText(text, x, y) => {
+                        rows.push((text.as_str(), *x, *y, font.clone(), color.clone(), alpha));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                rows.len(),
+                3,
+                "both captions and the original icon must be drawn"
+            );
+            assert_eq!(result.labels_drawn, 3);
+            let glyph = rows
+                .iter()
+                .find(|row| row.0 == icon)
+                .expect("complete icon text");
+            let label = rows
+                .iter()
+                .find(|row| row.0 == caption)
+                .expect("complete caption");
+            let control = rows
+                .iter()
+                .find(|row| row.0 == "Control")
+                .expect("control caption");
+            assert!(glyph.3.contains("italic bold"), "{}", glyph.3);
+            assert!(glyph.3.ends_with("monospace"));
+            assert_eq!(glyph.4, "#123456");
+            assert!((glyph.5 - 0.4).abs() < 0.001);
+            assert_eq!(control.5, 1.0, "icon opacity leaked into the next node");
+            assert!(!control.3.contains("bold"));
+            match position {
+                NodeIconPosition::Above => {
+                    assert!((glyph.1 - label.1).abs() < 0.001);
+                    assert!(glyph.2 < label.2, "icon overlaps its caption");
+                }
+                NodeIconPosition::Left => {
+                    assert!(glyph.1 < label.1, "icon overlaps its caption");
+                    assert!((glyph.2 - label.2).abs() < 0.001);
+                }
+            }
+
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| run.source == GpuTextSource::NodeIcon)
+                .expect("GPU icon text run");
+            assert_eq!(run.node_index, 0);
+            let face = &plan.glyph_atlas.faces[run.face_index as usize];
+            assert_eq!(
+                (
+                    face.family.as_str(),
+                    face.weight.as_str(),
+                    face.style.as_str()
+                ),
+                ("monospace", "bold", "italic")
+            );
+            let quads = &plan.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+            let base_metrics = config.font_metrics();
+            let metrics = ir.effective_node_font_metrics(0, &base_metrics);
+            let placed = fm_layout::shapes::node_icon_layout_with_metrics(
+                layout.nodes[0].bounds,
+                ir.nodes[0].shape,
+                icon,
+                &metrics,
+                position,
+            )
+            .unwrap();
+            let recovered: String = quads
+                .iter()
+                .map(|quad| {
+                    assert!((quad.color[3] - 0.4).abs() < 0.001);
+                    for (actual, channel) in quad.color[..3].iter().zip([0x12, 0x34, 0x56]) {
+                        assert!((*actual - channel as f32 / 255.0).abs() < 0.001);
+                    }
+                    if icon.chars().count() == 1 {
+                        assert!((quad.half_extent[1] * 2.0 - 32.4).abs() < 0.001);
+                    } else {
+                        assert!(quad.half_extent[1] > 0.0);
+                        assert!(quad.half_extent[1] * 2.0 <= placed.size + 0.001);
+                    }
+                    assert!(
+                        (quad.center[0] - placed.center.x).abs() + quad.half_extent[0]
+                            <= placed.width * 0.5 + 0.001,
+                        "GPU scalar fallback escaped its icon slot"
+                    );
+                    plan.glyph_atlas
+                        .cells
+                        .iter()
+                        .find(|cell| {
+                            cell.face_index == run.face_index
+                                && cell.uv_min == quad.uv_min
+                                && cell.uv_max == quad.uv_max
+                        })
+                        .expect("every icon quad must sample its declared face")
+                        .glyph
+                })
+                .collect();
+            assert_eq!(
+                recovered, icon,
+                "the atlas discarded part of the authored icon"
+            );
+            let offset_y = config.padding - f64::from(layout.bounds.y);
+            assert!(
+                quads
+                    .iter()
+                    .all(|quad| { (f64::from(quad.center[1]) + offset_y - glyph.2).abs() < 0.001 })
+            );
+        }
+    }
+}
+
+#[test]
+fn left_icons_keep_complete_paragraphs_inside_naturally_sized_nodes() {
+    use fm_layout::shapes::{NodeIconPosition, node_icon_layout_with_metrics};
+    use fm_render_canvas::{
+        DrawOperation, GpuRenderPlan, GpuTextSource, render_to_canvas_with_layout,
+    };
+
+    let caption =
+        "Review the complete service deployment and publish every validated release artifact";
+    for icon in ["fa:server", "👨‍👩‍👧‍👦"] {
+        let source = format!("flowchart LR\nA[\"{icon} {caption}\"] --> B[\"fa:server OK\"]\n");
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let original = layout.clone();
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            node_icon_position: NodeIconPosition::Left,
+            ..Default::default()
+        };
+        let metrics = config.font_metrics();
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        render_to_canvas_with_layout(&ir, &layout, &mut context, &config);
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert_eq!(layout, original);
+
+        for node_box in &layout.nodes {
+            let node = &ir.nodes[node_box.node_index];
+            let placed = node_icon_layout_with_metrics(
+                node_box.bounds,
+                node.shape,
+                node.icon().unwrap(),
+                &metrics,
+                NodeIconPosition::Left,
+            )
+            .unwrap();
+            let caption = ir.node_layout_text(node, &metrics);
+            if node_box.node_index == 0 {
+                assert!(
+                    caption.lines().count() > 1,
+                    "fixture must exercise paragraph rows"
+                );
+            }
+            for row in caption.lines() {
+                let drawn = context
+                    .operations()
+                    .iter()
+                    .find_map(|operation| match operation {
+                        DrawOperation::FillText(text, x, y) if text == row => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .expect("every complete paragraph row remains visible");
+                let center_x = drawn.0 - config.padding + f64::from(layout.bounds.x);
+                let half_width = f64::from(metrics.estimate_width(row)) / 2.0;
+                assert!(center_x - half_width >= f64::from(placed.label_bounds.x));
+                assert!(
+                    center_x + half_width
+                        <= f64::from(placed.label_bounds.x + placed.label_bounds.width)
+                );
+            }
+            for run in plan
+                .text_runs
+                .iter()
+                .filter(|run| run.node_index as usize == node_box.node_index)
+            {
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                if run.source == GpuTextSource::NodeIcon {
+                    assert!(quads.iter().all(|quad| {
+                        let left = quad.center[0] - quad.half_extent[0];
+                        let right = quad.center[0] + quad.half_extent[0];
+                        left >= node_box.bounds.x - 0.001 && right <= placed.label_bounds.x + 0.001
+                    }));
+                } else if run.source == GpuTextSource::Node {
+                    assert!(quads.iter().all(|quad| {
+                        let left = quad.center[0] - quad.half_extent[0];
+                        let right = quad.center[0] + quad.half_extent[0];
+                        left >= placed.label_bounds.x - 0.001
+                            && right <= node_box.bounds.x + node_box.bounds.width + 0.001
+                    }));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn architecture_and_mindmap_icons_have_real_geometry_on_canvas_and_gpu() {
+    use fm_render_canvas::{DrawOperation, GpuRenderPlan, render_to_canvas_with_layout};
+
+    for source in [
+        "architecture-beta\nservice a(cloud)[Cloud]\nservice b(database)[Database]\n\
+         service c(disk)[Disk]\nservice d(internet)[Internet]\nservice e(server)[Server]\n\
+         a:R --> L:b\nb:R --> L:c\nc:R --> L:d\nd:R --> L:e\n",
+        "mindmap\n  root((Ideas))\n    child[Books]\n      ::icon(fa fa-book)\n",
+    ] {
+        let parsed = fm_parser::parse(source);
+        let ir = parsed.ir;
+        let icons = ir.nodes.iter().filter(|node| node.icon().is_some()).count();
+        assert!(
+            icons > 0,
+            "fixture failed to parse icon declarations: {:?}",
+            parsed.warnings
+        );
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = CanvasRenderConfig::default();
+        let mut original = MockCanvas2dContext::new(1800.0, 1200.0);
+        render_to_canvas_with_layout(&ir, &layout, &mut original, &config);
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+
+        // Keep exactly the same node and routing boxes. Removing only icon metadata must
+        // remove real painted paths, not merely a counter or a different node size.
+        let mut control = ir.clone();
+        for node in &mut control.nodes {
+            if let Some(interaction) = node.interaction.as_mut() {
+                interaction.icon = None;
+            }
+        }
+        let mut without_icons = MockCanvas2dContext::new(1800.0, 1200.0);
+        render_to_canvas_with_layout(&control, &layout, &mut without_icons, &config);
+        let control_plan = GpuRenderPlan::from_layout_with_config(&control, &layout, &config);
+        let strokes = |context: &MockCanvas2dContext| {
+            context
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::Stroke))
+                .count()
+        };
+        assert!(strokes(&original) >= strokes(&without_icons) + icons);
+        assert!(plan.node_border_segments.len() > control_plan.node_border_segments.len());
+        assert!(plan.node_fill_triangles.len() > control_plan.node_fill_triangles.len());
+        for node in &ir.nodes {
+            let caption = ir.node_display_text(node);
+            if !caption.is_empty() {
+                assert!(
+                    original.operations().iter().any(|operation| {
+                        matches!(operation, DrawOperation::FillText(text, _, _) if text == caption)
+                    }),
+                    "icon erased the caption {caption}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unknown_icon_names_remain_visible_without_replacing_the_caption() {
+    use fm_render_canvas::{DrawOperation, GpuRenderPlan, GpuTextSource};
+
+    let ir = fm_parser::parse(
+        "flowchart LR\nA[\"fa:custom-thing Service\"]\n\
+         style A stroke:#2468ac80,stroke-opacity:0.25,opacity:0.5\n",
+    )
+    .ir;
+    let config = CanvasRenderConfig::default();
+    let mut context = MockCanvas2dContext::new(800.0, 600.0);
+    render_to_canvas(&ir, &mut context, &config);
+    let text: Vec<_> = context
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, ["CT", "Service"]);
+    let mut alpha = 1.0_f64;
+    for operation in context.operations() {
+        match operation {
+            DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+            DrawOperation::FillText(text, _, _) if text == "CT" => {
+                assert!((alpha - 0.125).abs() < 0.001);
+            }
+            DrawOperation::FillText(text, _, _) if text == "Service" => {
+                assert!((alpha - 0.5).abs() < 0.001);
+            }
+            _ => {}
+        }
+    }
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    assert!(
+        plan.text_runs
+            .iter()
+            .any(|run| run.source == GpuTextSource::NodeIcon && run.quad_count == 2)
+    );
+    for run in &plan.text_runs {
+        let expected_alpha = if run.source == GpuTextSource::NodeIcon {
+            128.0 / 255.0 * 0.125
+        } else {
+            0.5
+        };
+        assert!(
+            plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                .iter()
+                .all(|quad| (quad.color[3] - expected_alpha).abs() < 0.001)
+        );
+    }
+}
+
+#[test]
+fn named_icon_paths_keep_authored_channel_paints_and_opacity() {
+    use fm_render_canvas::{DrawOperation, GpuRenderPlan};
+
+    let ir = fm_parser::parse(
+        "flowchart LR\nA[\"fa:server API\"]\n\
+         style A fill:#ff000080,stroke:#0000ff80,fill-opacity:0.25,stroke-opacity:0.4,opacity:0.5\n",
+    ).ir;
+    let config = CanvasRenderConfig::default();
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    // The process box uses the SDF instance; these triangles and segments are the icon.
+    assert!(!plan.node_fill_triangles.is_empty());
+    assert!(!plan.node_border_segments.is_empty());
+    for fill in &plan.node_fill_triangles {
+        assert_eq!(&fill.color[..3], &[1.0, 0.0, 0.0]);
+        assert!((fill.color[3] - (128.0 / 255.0 * 0.25 * 0.5)).abs() < 0.001);
+    }
+    for stroke in &plan.node_border_segments {
+        assert_eq!(&stroke.color[..3], &[0.0, 0.0, 1.0]);
+        assert!((stroke.color[3] - (128.0 / 255.0 * 0.4 * 0.5)).abs() < 0.001);
+    }
+
+    let mut context = MockCanvas2dContext::new(800.0, 600.0);
+    render_to_canvas(&ir, &mut context, &config);
+    let (mut fill, mut stroke, mut alpha) = (String::new(), String::new(), 1.0);
+    let mut stack = Vec::new();
+    let mut fills = 0;
+    let mut strokes = 0;
+    for operation in context.operations() {
+        match operation {
+            DrawOperation::Save => stack.push((fill.clone(), stroke.clone(), alpha)),
+            DrawOperation::Restore => (fill, stroke, alpha) = stack.pop().unwrap(),
+            DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+            DrawOperation::SetStrokeStyle(value) => stroke.clone_from(value),
+            DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+            DrawOperation::Fill if fill == "#ff000080" => {
+                assert!((alpha - 0.125).abs() < 0.001);
+                fills += 1;
+            }
+            DrawOperation::Stroke if stroke == "#0000ff80" => {
+                assert!((alpha - 0.2).abs() < 0.001);
+                strokes += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        fills >= 2 && strokes >= 4,
+        "node body plus its server pictogram"
+    );
+}
+
+#[test]
 fn standalone_scenes_keep_sankey_quantities_and_git_branch_captions() {
     use fm_layout::{RenderItem, RenderSource};
     use fm_render_canvas::{DrawOperation, render_scene_to_canvas};

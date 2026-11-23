@@ -311,6 +311,502 @@ impl NodePaintPath {
     }
 }
 
+/// Position of a node's icon relative to its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeIconPosition {
+    #[default]
+    Above,
+    Left,
+}
+
+/// Icon and text placement inside a node's inscribed content region.
+///
+/// The routing box is unchanged. Consumers use `label_bounds` for the caption instead of
+/// centering the caption on top of the icon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodeIconLayout {
+    pub center: LayoutPoint,
+    pub size: f32,
+    /// Horizontal ink allowance, which can exceed `size` for a Unicode icon sequence.
+    pub width: f32,
+    pub label_bounds: LayoutRect,
+}
+
+#[must_use]
+pub fn node_icon_layout(
+    bounds: LayoutRect,
+    shape: NodeShape,
+    font_size: f32,
+    position: NodeIconPosition,
+) -> Option<NodeIconLayout> {
+    if ![bounds.x, bounds.y, bounds.width, bounds.height, font_size]
+        .into_iter()
+        .all(f32::is_finite)
+        || font_size <= 0.0
+        || bounds.width <= 8.0
+        || bounds.height <= 8.0
+    {
+        return None;
+    }
+    let region =
+        shape
+            .label_region(bounds.width, bounds.height)
+            .unwrap_or(fm_core::NodeLabelRegion {
+                x: 0.0,
+                y: 0.0,
+                width: bounds.width,
+                height: bounds.height,
+            });
+    let size = (font_size * 1.35)
+        .max(10.0)
+        .min((region.width - 8.0).max(0.0))
+        .min((region.height - 8.0).max(0.0));
+    if size <= 0.0 {
+        return None;
+    }
+    let mut label_bounds = LayoutRect {
+        x: bounds.x + region.x,
+        y: bounds.y + region.y,
+        width: region.width,
+        height: region.height,
+    };
+    let center = match position {
+        NodeIconPosition::Above => {
+            let reserved = (size + 10.0).min(region.height);
+            let center = LayoutPoint {
+                x: label_bounds.x + region.width / 2.0,
+                y: label_bounds.y + reserved / 2.0 + 2.0,
+            };
+            label_bounds.y += reserved;
+            label_bounds.height -= reserved;
+            center
+        }
+        NodeIconPosition::Left => {
+            let reserved = (size + 14.0).min(region.width);
+            let center = LayoutPoint {
+                x: label_bounds.x + reserved / 2.0 + 2.0,
+                y: label_bounds.y + region.height / 2.0,
+            };
+            label_bounds.x += reserved;
+            label_bounds.width -= reserved;
+            center
+        }
+    };
+    Some(NodeIconLayout {
+        center,
+        size,
+        width: size,
+        label_bounds,
+    })
+}
+
+/// Place the icon using the same font metrics that sized its node, including Unicode sequences.
+/// A left icon owns its measured width; the caption is centered in the remaining content region.
+#[must_use]
+pub fn node_icon_layout_with_metrics(
+    bounds: LayoutRect,
+    shape: NodeShape,
+    raw_icon: &str,
+    metrics: &fm_core::FontMetrics,
+    position: NodeIconPosition,
+) -> Option<NodeIconLayout> {
+    let mut placed = node_icon_layout(bounds, shape, metrics.font_size(), position)?;
+    if !is_unicode_icon(raw_icon) {
+        return Some(placed);
+    }
+    let icon_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: placed.size,
+        ..metrics.config().clone()
+    });
+    let width = icon_metrics
+        .estimate_dimensions(raw_icon.trim())
+        .0
+        .max(placed.size);
+    if !width.is_finite() {
+        return Some(placed);
+    }
+    match position {
+        NodeIconPosition::Above => {
+            // An externally supplied small box may be narrower than the icon sequence. Keep
+            // its complete text, scaling its font size only when the physical box requires it.
+            let available = (placed.label_bounds.width - 8.0).max(placed.size);
+            if width > available {
+                placed.size *= available / width;
+            }
+            placed.width = width.min(available);
+        }
+        NodeIconPosition::Left => {
+            // Normally compute_node_size has already allocated this width. Keep a small caption
+            // region even for manually supplied undersized boxes; GPU text uses this same finite
+            // footprint instead of overflowing into the caption when its atlas lacks shaping.
+            let extra = (width - placed.size)
+                .min((placed.label_bounds.width - metrics.font_size()).max(0.0));
+            placed.width += extra;
+            placed.center.x += extra / 2.0;
+            placed.label_bounds.x += extra;
+            placed.label_bounds.width -= extra;
+            if width > placed.width {
+                placed.size *= placed.width / width;
+            }
+        }
+    }
+    Some(placed)
+}
+
+/// Which resolved node paint fills an icon path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeIconPaint {
+    Fill,
+    Stroke,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeIconPath {
+    pub commands: Vec<PathCmd>,
+    pub fill: Option<NodeIconPaint>,
+    /// Zero means that this piece has no outline.
+    pub stroke_width: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeIconText {
+    pub text: String,
+    pub center: LayoutPoint,
+    pub font_size: f32,
+    pub monospace: bool,
+    /// Unicode symbols use the node's text color; named-icon fallbacks use its stroke color.
+    pub use_label_color: bool,
+}
+
+/// Backend-independent icon ink, in layout coordinates, with no theme baked into its paths.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodeIconGeometry {
+    pub paths: Vec<NodeIconPath>,
+    pub text: Option<NodeIconText>,
+}
+
+/// Normalize Mermaid and Font Awesome icon spellings to the shared built-in vocabulary.
+#[must_use]
+pub fn normalize_icon_token(raw_icon: &str) -> String {
+    let normalized = raw_icon
+        .trim()
+        .to_ascii_lowercase()
+        .replace("fa ", "")
+        .replace(['_', ' '], "-");
+    let name = normalized.strip_prefix("fa:").unwrap_or(&normalized);
+    let name = name.strip_prefix("fa-").unwrap_or(name);
+    match name {
+        "mobile-alt" | "phone" => "mobile",
+        "cubes" | "docker" => "container",
+        "list" => "queue",
+        "balance-scale" | "loadbalancer" => "load-balancer",
+        "cog" | "settings" => "gear",
+        "person" => "user",
+        "security" => "lock",
+        "storage" | "hdd" => "disk",
+        "globe" | "web" => "internet",
+        other => other,
+    }
+    .to_owned()
+}
+
+/// Unicode symbols, including joined emoji, are rendered as text rather than icon-name initials.
+#[must_use]
+pub fn is_unicode_icon(raw_icon: &str) -> bool {
+    let raw_icon = raw_icon.trim();
+    !raw_icon.is_ascii()
+        && (raw_icon.chars().count() <= 4 || !raw_icon.chars().any(char::is_alphanumeric))
+}
+
+/// Draw the built-in SVG icon vocabulary using the same paths on every graphical surface.
+/// Unknown names remain visible as initials, and Unicode icons retain their complete sequence.
+#[must_use]
+pub fn node_icon_geometry(
+    raw_icon: &str,
+    center: LayoutPoint,
+    size: f32,
+) -> Option<NodeIconGeometry> {
+    let raw_icon = raw_icon.trim();
+    if raw_icon.is_empty()
+        || ![center.x, center.y, size].into_iter().all(f32::is_finite)
+        || size <= 0.0
+    {
+        return None;
+    }
+    let mut geometry = NodeIconGeometry::default();
+    // Emoji can contain multiple joined people, skin-tone modifiers and variation selectors.
+    // A code-point limit would turn a complete family emoji into a made-up named icon.
+    if is_unicode_icon(raw_icon) {
+        geometry.text = Some(NodeIconText {
+            text: raw_icon.to_owned(),
+            center,
+            font_size: size,
+            monospace: false,
+            use_label_color: true,
+        });
+        return Some(geometry);
+    }
+    let name = normalize_icon_token(raw_icon);
+    if name.is_empty() {
+        return None;
+    }
+    let x = center.x - size / 2.0;
+    let y = center.y - size / 2.0;
+    let rect = |left: f32, top: f32, width: f32, height: f32| LayoutRect {
+        x: size.mul_add(left, x),
+        y: size.mul_add(top, y),
+        width: size * width,
+        height: size * height,
+    };
+    let line = |x1: f32, y1: f32, x2: f32, y2: f32| {
+        vec![
+            PathCmd::MoveTo {
+                x: size.mul_add(x1, x),
+                y: size.mul_add(y1, y),
+            },
+            PathCmd::LineTo {
+                x: size.mul_add(x2, x),
+                y: size.mul_add(y2, y),
+            },
+        ]
+    };
+    let mut path = |commands, fill, stroke_width| {
+        geometry.paths.push(NodeIconPath {
+            commands,
+            fill,
+            stroke_width,
+        });
+    };
+    let body = Some(NodeIconPaint::Fill);
+    match name.as_str() {
+        "user" => {
+            path(
+                polygon_ellipse_path(rect(0.35, 0.04, 0.3, 0.3), 24),
+                None,
+                1.1,
+            );
+            for (x1, y1, x2, y2) in [
+                (0.5, 0.35, 0.5, 0.7),
+                (0.25, 0.47, 0.75, 0.47),
+                (0.5, 0.7, 0.28, 1.0),
+                (0.5, 0.7, 0.72, 1.0),
+            ] {
+                path(line(x1, y1, x2, y2), None, 1.1);
+            }
+        }
+        "server" => {
+            path(rounded_rect_path(rect(0.0, 0.0, 1.0, 0.72), 2.0), body, 1.1);
+            for row in [0.2, 0.38] {
+                path(line(0.18, row, 0.82, row), None, 1.0);
+            }
+        }
+        "database" => {
+            path(cylinder_path(rect(0.0, 0.0, 1.0, 1.0)), body, 1.1);
+        }
+        "cloud" => {
+            path(cloud_path(rect(0.0, 0.0, 1.0, 1.0)), body, 1.1);
+        }
+        "lock" => {
+            path(
+                rounded_rect_path(rect(0.16, 0.42, 0.68, 0.46), 2.0),
+                body,
+                1.1,
+            );
+            path(
+                vec![
+                    PathCmd::MoveTo {
+                        x: x + size * 0.3,
+                        y: y + size * 0.42,
+                    },
+                    PathCmd::LineTo {
+                        x: x + size * 0.3,
+                        y: y + size * 0.26,
+                    },
+                    PathCmd::CubicTo {
+                        c1x: x + size * 0.3,
+                        c1y: y - size * 0.02,
+                        c2x: x + size * 0.7,
+                        c2y: y - size * 0.02,
+                        x: x + size * 0.7,
+                        y: y + size * 0.26,
+                    },
+                    PathCmd::LineTo {
+                        x: x + size * 0.7,
+                        y: y + size * 0.42,
+                    },
+                ],
+                None,
+                1.1,
+            );
+        }
+        "gear" => {
+            path(
+                polygon_ellipse_path(rect(0.3, 0.3, 0.4, 0.4), 24),
+                body,
+                1.1,
+            );
+            for (dx, dy) in [
+                (0.0, -0.42),
+                (0.3, -0.3),
+                (0.42, 0.0),
+                (0.3, 0.3),
+                (0.0, 0.42),
+                (-0.3, 0.3),
+                (-0.42, 0.0),
+                (-0.3, -0.3),
+            ] {
+                path(
+                    line(
+                        0.5 + dx * 0.55,
+                        0.5 + dy * 0.55,
+                        0.5 + dx * 0.78,
+                        0.5 + dy * 0.78,
+                    ),
+                    None,
+                    1.0,
+                );
+            }
+        }
+        "disk" => {
+            path(
+                rounded_rect_path(rect(0.0, 0.22, 1.0, 0.56), 0.0),
+                body,
+                1.1,
+            );
+            path(line(0.14, 0.5, 0.6, 0.5), None, 1.1);
+            path(line(0.74, 0.5, 0.86, 0.5), None, 1.1);
+        }
+        "internet" => {
+            path(
+                polygon_ellipse_path(rect(0.0, 0.0, 1.0, 1.0), 32),
+                body,
+                1.1,
+            );
+            path(
+                polygon_ellipse_path(rect(0.275, 0.0, 0.45, 1.0), 32),
+                None,
+                1.1,
+            );
+            for dy in [-0.45_f32, 0.0, 0.45] {
+                let reach = 0.5 * (1.0 - dy * dy).sqrt();
+                path(
+                    line(0.5 - reach, 0.5 + dy * 0.5, 0.5 + reach, 0.5 + dy * 0.5),
+                    None,
+                    1.1,
+                );
+            }
+        }
+        "api" => {
+            geometry.text = Some(NodeIconText {
+                text: "</>".to_owned(),
+                center,
+                font_size: size * 0.72,
+                monospace: true,
+                use_label_color: false,
+            });
+        }
+        "mobile" => {
+            path(
+                rounded_rect_path(rect(0.22, 0.0, 0.56, 1.0), 4.0),
+                body,
+                1.1,
+            );
+            path(
+                polygon_ellipse_path(rect(0.46, 0.82, 0.08, 0.08), 16),
+                Some(NodeIconPaint::Stroke),
+                0.0,
+            );
+        }
+        "desktop" => {
+            path(rounded_rect_path(rect(0.0, 0.0, 1.0, 0.64), 2.0), body, 1.1);
+            path(line(0.5, 0.64, 0.5, 0.84), None, 1.0);
+            path(line(0.28, 0.84, 0.72, 0.84), None, 1.0);
+        }
+        "container" => {
+            for (dx, dy) in [(0.0, 0.14), (0.24, 0.14), (0.12, 0.38)] {
+                path(rounded_rect_path(rect(dx, dy, 0.28, 0.22), 1.0), body, 1.0);
+            }
+        }
+        "queue" => {
+            for row in [0.18, 0.42, 0.66] {
+                path(line(0.12, row, 0.88, row), None, 1.2);
+            }
+        }
+        "cache" => {
+            // Each exposed L is behind the next sheet; omit the covered edges so the GPU's
+            // separate fill and outline passes cannot expose hidden rear borders.
+            for inset in [0.0, 0.1] {
+                path(
+                    vec![
+                        PathCmd::MoveTo {
+                            x: x + size * (inset + 0.62),
+                            y: y + size * (inset + 0.1),
+                        },
+                        PathCmd::LineTo {
+                            x: x + size * (inset + 0.62),
+                            y: y + size * inset,
+                        },
+                        PathCmd::LineTo {
+                            x: x + size * inset,
+                            y: y + size * inset,
+                        },
+                        PathCmd::LineTo {
+                            x: x + size * inset,
+                            y: y + size * (inset + 0.46),
+                        },
+                        PathCmd::LineTo {
+                            x: x + size * (inset + 0.1),
+                            y: y + size * (inset + 0.46),
+                        },
+                    ],
+                    None,
+                    1.0,
+                );
+            }
+            path(
+                rounded_rect_path(rect(0.2, 0.2, 0.62, 0.46), 2.0),
+                body,
+                1.0,
+            );
+        }
+        "load-balancer" => {
+            path(line(0.5, 0.1, 0.5, 0.85), None, 1.1);
+            for end in [0.18, 0.82] {
+                path(line(0.5, 0.28, end, 0.5), None, 1.1);
+                path(line(0.5, 0.58, end, 0.8), None, 1.1);
+            }
+        }
+        "book" => {
+            path(
+                rounded_rect_path(rect(0.08, 0.0, 0.84, 0.9), 2.0),
+                body,
+                1.1,
+            );
+            path(line(0.5, 0.08, 0.5, 0.82), None, 1.0);
+        }
+        _ => {
+            let text: String = name
+                .split('-')
+                .filter_map(|part| part.chars().next())
+                .take(2)
+                .flat_map(char::to_uppercase)
+                .collect();
+            geometry.text = Some(NodeIconText {
+                text: if text.is_empty() {
+                    "?".to_owned()
+                } else {
+                    text
+                },
+                center,
+                font_size: size * 0.62,
+                monospace: false,
+                use_label_color: false,
+            });
+        }
+    }
+    Some(geometry)
+}
+
 /// Visible node geometry, distinct from [`node_path`]'s routing boundary.
 ///
 /// A text node still has a routing box but paints no box. Interior rules, folds, rings and
@@ -1592,6 +2088,161 @@ pub fn polygon_ellipse_path(bounds: LayoutRect, segments: usize) -> Vec<PathCmd>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_icons_preserve_symbols_aliases_and_distinct_named_geometry() {
+        let center = LayoutPoint { x: 20.0, y: 30.0 };
+        for icon in ["🚀", "👩🏽‍💻", "👨‍👩‍👧‍👦", "🏳️‍🌈"] {
+            let geometry = node_icon_geometry(icon, center, 24.0).unwrap();
+            assert!(geometry.paths.is_empty());
+            let text = geometry.text.unwrap();
+            assert_eq!(text.text, icon);
+            assert_eq!(text.center, center);
+            assert_eq!(text.font_size, 24.0);
+            assert!(text.use_label_color);
+        }
+        for (alias, canonical) in [
+            ("fa fa-book", "book"),
+            ("fa:fa-server", "server"),
+            ("fa:database", "database"),
+            ("hdd", "disk"),
+            ("globe", "internet"),
+            ("fa-balance-scale", "load-balancer"),
+        ] {
+            assert_eq!(
+                node_icon_geometry(alias, center, 24.0),
+                node_icon_geometry(canonical, center, 24.0)
+            );
+        }
+        let builtins = [
+            "cloud",
+            "database",
+            "disk",
+            "internet",
+            "server",
+            "book",
+            "user",
+            "lock",
+            "gear",
+            "mobile",
+            "desktop",
+            "container",
+            "queue",
+            "cache",
+            "load-balancer",
+        ];
+        let geometries: Vec<_> = builtins
+            .iter()
+            .map(|name| {
+                let geometry = node_icon_geometry(name, center, 24.0).unwrap();
+                assert!(!geometry.paths.is_empty(), "{name} lost its pictogram");
+                assert!(geometry.text.is_none(), "{name} fell back to initials");
+                geometry
+            })
+            .collect();
+        for (index, geometry) in geometries.iter().enumerate() {
+            assert!(
+                geometries[..index].iter().all(|other| other != geometry),
+                "{} shares another icon's geometry",
+                builtins[index]
+            );
+        }
+        assert!(node_icon_geometry(" ", center, 24.0).is_none());
+        assert!(node_icon_geometry("book", center, f32::NAN).is_none());
+        assert!(node_icon_geometry("book", center, -1.0).is_none());
+    }
+
+    #[test]
+    fn icon_placement_keeps_caption_and_ink_in_the_inscribed_node_region() {
+        let bounds = LayoutRect {
+            x: 30.0,
+            y: 60.0,
+            width: 300.0,
+            height: 240.0,
+        };
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            let region = shape.label_region(bounds.width, bounds.height).unwrap_or(
+                fm_core::NodeLabelRegion {
+                    x: 0.0,
+                    y: 0.0,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
+            );
+            for position in [NodeIconPosition::Above, NodeIconPosition::Left] {
+                let placed = node_icon_layout(bounds, shape, 16.0, position).unwrap();
+                let (left, top) = (bounds.x + region.x, bounds.y + region.y);
+                let (right, bottom) = (left + region.width, top + region.height);
+                assert!(placed.center.x - placed.size / 2.0 >= left);
+                assert!(placed.center.x + placed.size / 2.0 <= right);
+                assert!(placed.center.y - placed.size / 2.0 >= top);
+                assert!(placed.center.y + placed.size / 2.0 <= bottom);
+                assert!(placed.label_bounds.x >= left && placed.label_bounds.y >= top);
+                assert!(placed.label_bounds.x + placed.label_bounds.width <= right);
+                assert!(placed.label_bounds.y + placed.label_bounds.height <= bottom);
+                match position {
+                    NodeIconPosition::Above => {
+                        assert!(placed.center.y + placed.size / 2.0 < placed.label_bounds.y);
+                    }
+                    NodeIconPosition::Left => {
+                        assert!(placed.center.x + placed.size / 2.0 < placed.label_bounds.x);
+                    }
+                }
+            }
+        }
+        assert!(node_icon_layout(bounds, NodeShape::Rect, 0.0, NodeIconPosition::Above).is_none());
+    }
+
+    #[test]
+    fn measured_unicode_icons_reserve_their_complete_width() {
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig::default());
+        let bounds = LayoutRect {
+            x: 30.0,
+            y: 60.0,
+            width: 240.0,
+            height: 120.0,
+        };
+        for icon in ["界面", "👨‍👩‍👧‍👦", "🏳️‍🌈"] {
+            for position in [NodeIconPosition::Above, NodeIconPosition::Left] {
+                let placed = node_icon_layout_with_metrics(
+                    bounds,
+                    NodeShape::Rect,
+                    icon,
+                    &metrics,
+                    position,
+                )
+                .unwrap();
+                assert!(placed.size > 0.0 && placed.width.is_finite());
+                assert!(placed.width >= placed.size);
+                assert!(placed.center.x - placed.width / 2.0 >= bounds.x);
+                assert!(placed.center.x + placed.width / 2.0 <= bounds.x + bounds.width);
+                if position == NodeIconPosition::Left {
+                    assert!(placed.center.x + placed.width / 2.0 < placed.label_bounds.x);
+                    assert!(placed.label_bounds.width > metrics.font_size());
+                }
+            }
+        }
+        let narrow = LayoutRect {
+            width: 48.0,
+            ..bounds
+        };
+        let placed = node_icon_layout_with_metrics(
+            narrow,
+            NodeShape::Rect,
+            "界面",
+            &metrics,
+            NodeIconPosition::Left,
+        )
+        .unwrap();
+        assert!(placed.size.is_finite() && placed.size > 0.0);
+        assert!(placed.center.x + placed.width / 2.0 < placed.label_bounds.x);
+    }
 
     fn test_bounds() -> LayoutRect {
         LayoutRect {

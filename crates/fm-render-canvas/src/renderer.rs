@@ -151,6 +151,8 @@ pub struct CanvasRenderConfig {
     pub font_size: f64,
     /// Line height for node labels and layout measurement, as a multiple of the font size.
     pub line_height: f64,
+    /// Place authored node icons above or to the left of their captions.
+    pub node_icon_position: fm_layout::shapes::NodeIconPosition,
     /// Padding around the diagram.
     pub padding: f64,
     /// Corner radius for rounded nodes. Ordinary cards use 55% of this radius and
@@ -269,6 +271,7 @@ impl Default for CanvasRenderConfig {
             ),
             font_size: 15.0,
             line_height: 1.5,
+            node_icon_position: fm_layout::shapes::NodeIconPosition::Above,
             padding: 24.0,
             rounded_corners: 8.0,
             background: None,
@@ -4121,6 +4124,100 @@ impl Canvas2dRenderer {
                     .or(paragraph.as_deref())
                     .unwrap_or("");
 
+                let node_icon = ir_node.and_then(|node| node.icon()).and_then(|icon| {
+                    let placed = fm_layout::shapes::node_icon_layout_with_metrics(
+                        node_box.bounds,
+                        shape,
+                        icon,
+                        node_metrics,
+                        self.config.node_icon_position,
+                    )?;
+                    let geometry =
+                        fm_layout::shapes::node_icon_geometry(icon, placed.center, placed.size)?;
+                    Some((placed, geometry))
+                });
+                if let Some((_, geometry)) = &node_icon {
+                    // These are the same paths and paint roles used by the scene and GPU
+                    // surfaces. Isolate fonts, dashes and alpha from the following caption.
+                    ctx.save();
+                    ctx.set_line_dash(&[]);
+                    for path in &geometry.paths {
+                        ctx.begin_path();
+                        self.emit_path_commands(ctx, &path.commands, offset_x, offset_y);
+                        if let Some(paint) = path.fill {
+                            let (color, alpha) = match paint {
+                                fm_layout::shapes::NodeIconPaint::Fill => (
+                                    fill.as_deref().unwrap_or(&self.config.node_fill),
+                                    fill_opacity,
+                                ),
+                                fm_layout::shapes::NodeIconPaint::Stroke => (
+                                    stroke.as_deref().unwrap_or(&self.config.node_stroke),
+                                    stroke_opacity,
+                                ),
+                            };
+                            ctx.set_fill_style(color);
+                            with_paint_opacity(ctx, overall_opacity, alpha, Canvas2dContext::fill);
+                            self.draw_calls += 1;
+                        }
+                        if path.stroke_width > 0.0 {
+                            ctx.set_stroke_style(
+                                stroke.as_deref().unwrap_or(&self.config.node_stroke),
+                            );
+                            ctx.set_line_width(f64::from(path.stroke_width));
+                            with_paint_opacity(
+                                ctx,
+                                overall_opacity,
+                                stroke_opacity,
+                                Canvas2dContext::stroke,
+                            );
+                            self.draw_calls += 1;
+                        }
+                    }
+                    if let Some(text) = &geometry.text {
+                        let font = DeclaredNodeFont {
+                            size: Some(f64::from(text.font_size)),
+                            weight: declared_parts.weight,
+                            style: declared_parts.style,
+                            family: if text.monospace {
+                                Some("monospace".to_owned())
+                            } else {
+                                declared_parts.family.clone()
+                            },
+                        };
+                        ctx.set_font(&font.compose(
+                            f64::from(text.font_size),
+                            None,
+                            &self.config.font_family,
+                        ));
+                        ctx.set_fill_style(if text.use_label_color {
+                            label_fill
+                        } else {
+                            stroke.as_deref().unwrap_or(&self.config.node_stroke)
+                        });
+                        ctx.set_text_align(TextAlign::Center);
+                        ctx.set_text_baseline(TextBaseline::Middle);
+                        with_paint_opacity(
+                            ctx,
+                            overall_opacity,
+                            if text.use_label_color {
+                                1.0
+                            } else {
+                                stroke_opacity
+                            },
+                            |ctx| {
+                                ctx.fill_text(
+                                    &text.text,
+                                    f64::from(text.center.x) + offset_x,
+                                    f64::from(text.center.y) + offset_y,
+                                );
+                            },
+                        );
+                        self.draw_calls += 1;
+                        *labels_drawn += 1;
+                    }
+                    ctx.restore();
+                }
+
                 if !label_text.is_empty() {
                     // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
                     //
@@ -4138,13 +4235,23 @@ impl Canvas2dRenderer {
                     // SVG writer uses.
                     let label_region =
                         shape.label_region(node_box.bounds.width, node_box.bounds.height);
-                    let (label_cx, label_cy) =
-                        label_region.map_or((x + w / 2.0, y + h / 2.0), |region| {
+                    let (label_cx, label_cy) = node_icon.as_ref().map_or_else(
+                        || {
+                            label_region.map_or((x + w / 2.0, y + h / 2.0), |region| {
+                                (
+                                    x + f64::from(region.x + region.width / 2.0),
+                                    y + f64::from(region.y + region.height / 2.0),
+                                )
+                            })
+                        },
+                        |(icon, _)| {
+                            let center = icon.label_bounds.center();
                             (
-                                x + f64::from(region.x + region.width / 2.0),
-                                y + f64::from(region.y + region.height / 2.0),
+                                f64::from(center.x) + offset_x,
+                                f64::from(center.y) + offset_y,
                             )
-                        });
+                        },
+                    );
                     let (cx, align) = match gantt_label {
                         Some(entry) => (
                             f64::from(entry.x) + offset_x,
@@ -9654,6 +9761,7 @@ mod tests {
                 transform: None,
                 clip: None,
                 paints_resolved: false,
+                node_icon: None,
                 children: vec![RenderItem::Path(RenderPath {
                     source: RenderSource::Edge(0),
                     commands: vec![

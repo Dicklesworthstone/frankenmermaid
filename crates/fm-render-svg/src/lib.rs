@@ -55,13 +55,17 @@ use fm_core::{
     mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_node_element_id,
     mermaid_node_element_id_with_variant,
 };
+#[cfg(test)]
+use fm_layout::build_render_scene_with_metrics;
+pub use fm_layout::shapes::NodeIconPosition;
+use fm_layout::shapes::{NodeIconPaint, is_unicode_icon, normalize_icon_token};
 use fm_layout::{
     CentralityTier, DiagramLayout, DirectedPathLayoutPrefix, FillStyle, LayoutBand, LayoutBandKind,
     LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
     MarkerKind, PathCmd, QuadrantChartLayout, QuadrantPointGeometry, QuadrantPointLabel,
-    QuadrantTextRole, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource,
-    RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-    TextBaseline as RenderTextBaseline, build_render_scene_with_metrics,
+    QuadrantTextRole, RenderClip, RenderGroup, RenderItem, RenderNodeIcon, RenderPath, RenderScene,
+    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+    TextBaseline as RenderTextBaseline, build_render_scene_with_icon_position,
     certify_directed_path_layout_prefix, format_xychart_tick_value, is_composite_state_node,
     resolve_xychart_y_domain, sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
     try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
@@ -87,16 +91,6 @@ pub enum SvgBackend {
     LegacyLayout,
     /// Shared target-agnostic render scene backend.
     Scene,
-}
-
-/// Node icon placement strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NodeIconPosition {
-    /// Place the icon above the text label.
-    #[default]
-    Above,
-    /// Place the icon to the left of the text label.
-    Left,
 }
 
 /// Configurable custom SVG icon definition.
@@ -757,7 +751,12 @@ fn render_svg_with_layout_impl_reusing(
                     &accents,
                 )
             } else {
-                build_render_scene_with_metrics(ir, layout, &config.font_metrics())
+                build_render_scene_with_icon_position(
+                    ir,
+                    layout,
+                    &config.font_metrics(),
+                    config.node_icon_position,
+                )
             };
             (
                 render_scene_document_with_ir(&scene, config, Some(ir)),
@@ -2646,6 +2645,22 @@ fn render_scene_group(
         elem = elem.clip_path_ref(&format!("url(#{clip_id})"));
     }
 
+    if let Some(icon) = &group.node_icon {
+        elem = render_scene_node_icon(
+            elem,
+            group,
+            icon,
+            config,
+            ir,
+            clip_defs,
+            clip_id_counter,
+            interactions,
+        );
+        interactions.inherited_node = inherited_node;
+        interactions.paints_resolved = inherited_paints;
+        return finish_scene_node_interaction(elem, group.source, ir, config, interactions);
+    }
+
     let furniture_theme = matches!(
         group.id.as_deref(),
         Some("gantt-sections" | "sequence-lifelines" | "layout-bands" | "layout-band-labels")
@@ -2806,6 +2821,125 @@ fn render_scene_group(
     interactions.inherited_node = inherited_node;
     interactions.paints_resolved = inherited_paints;
     elem
+}
+
+/// An icon owns its measured typography and paint roles. Reapplying its node's label style
+/// would shrink emoji back to label size or repaint a stroke-colored detail with the body fill.
+#[allow(clippy::too_many_arguments)]
+fn render_scene_node_icon(
+    mut element: Element,
+    group: &RenderGroup,
+    icon: &RenderNodeIcon,
+    config: &SvgRenderConfig,
+    ir: Option<&MermaidDiagramIr>,
+    clip_defs: &mut Vec<Element>,
+    clip_id_counter: &mut usize,
+    interactions: &mut SceneInteractionState,
+) -> Element {
+    let normalized = normalize_icon_token(&icon.token);
+    let unicode = is_unicode_icon(&icon.token);
+    let position_class = match icon.position {
+        NodeIconPosition::Above => "fm-node-icon-pos-above",
+        NodeIconPosition::Left => "fm-node-icon-pos-left",
+    };
+    element = element
+        .class("fm-node-has-icon")
+        .class("fm-node-icon")
+        .class(position_class)
+        .class_prefixed("fm-node-icon-", &sanitize_css_token(&normalized));
+    if unicode {
+        element = element.class("fm-node-icon-emoji");
+    }
+    let theme = resolve_theme(ir, config);
+    let semantic = ir.and_then(|ir| match group.source {
+        RenderSource::Node(index) => ir
+            .nodes
+            .get(index)
+            .and_then(|node| semantic_node_colors(ir, index, node.shape, config, &theme.colors)),
+        _ => None,
+    });
+    let fill_color = semantic
+        .as_ref()
+        .map_or(theme.colors.node_fill.as_str(), |colors| {
+            colors.fill.as_str()
+        });
+    let stroke_color = semantic
+        .as_ref()
+        .map_or(theme.colors.node_stroke.as_str(), |colors| {
+            colors.stroke.as_str()
+        });
+    if !unicode && let Some(custom) = config.custom_icons.get(&normalized) {
+        return element.child(
+            render_custom_svg_icon(
+                custom,
+                icon.layout.center.x,
+                icon.layout.center.y,
+                icon.layout.size,
+                icon.authored_stroke.as_deref().unwrap_or(stroke_color),
+            )
+            .fill_opacity(icon.fill_opacity)
+            .stroke_opacity(icon.stroke_opacity),
+        );
+    }
+    let geometry =
+        fm_layout::shapes::node_icon_geometry(&icon.token, icon.layout.center, icon.layout.size);
+    let mut path_index = 0;
+    for child in &group.children {
+        let (mut rendered, source) = match child {
+            RenderItem::Path(path) => {
+                let mut rendered = render_scene_path(path, false, None, false, true);
+                let fill_role = geometry
+                    .as_ref()
+                    .and_then(|geometry| geometry.paths.get(path_index))
+                    .and_then(|path| path.fill);
+                path_index += 1;
+                if path.fill.is_some() {
+                    rendered = match fill_role {
+                        Some(NodeIconPaint::Fill) if icon.authored_fill.is_none() => {
+                            rendered.fill(fill_color)
+                        }
+                        Some(NodeIconPaint::Stroke) if icon.authored_stroke.is_none() => {
+                            rendered.fill(stroke_color)
+                        }
+                        _ => rendered,
+                    };
+                }
+                if path.stroke.is_some() && icon.authored_stroke.is_none() {
+                    rendered = rendered.stroke(stroke_color);
+                }
+                (rendered, path.source)
+            }
+            RenderItem::Text(text) => {
+                let mut rendered = render_scene_text(text, config, None, false, true);
+                let label_color = geometry
+                    .as_ref()
+                    .and_then(|geometry| geometry.text.as_ref())
+                    .is_some_and(|text| text.use_label_color);
+                if label_color && icon.authored_color.is_none() {
+                    rendered = rendered.fill(&theme.colors.text);
+                } else if !label_color && icon.authored_stroke.is_none() {
+                    rendered = rendered.fill(stroke_color);
+                }
+                (rendered, text.source)
+            }
+            // Generated icon groups contain only paths and text. Keep externally composed
+            // nested content in the normal scene renderer instead of silently discarding it.
+            RenderItem::Group(nested) => {
+                element = element.child(render_scene_group(
+                    nested,
+                    config,
+                    ir,
+                    clip_defs,
+                    clip_id_counter,
+                    interactions,
+                ));
+                continue;
+            }
+        };
+        rendered = apply_source_metadata(rendered, source, config.include_source_spans, ir, false);
+        element = element.child(inline_scene_paints(rendered));
+    }
+    element
 }
 
 /// A scene's final presentation values must outrank the embedded theme stylesheet. In particular,
@@ -14492,38 +14626,6 @@ fn render_c4_person_icon(x: f32, y: f32, stroke: &str) -> Element {
     )
 }
 
-fn normalize_icon_token(raw_icon: &str) -> String {
-    let trimmed = raw_icon.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let normalized = trimmed
-        .strip_prefix("fa:")
-        .unwrap_or(trimmed)
-        .strip_prefix("fa-")
-        .unwrap_or(trimmed)
-        .replace("fa ", "")
-        .replace(['_', ' '], "-")
-        .to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "fa-book" => "book".to_string(),
-        "fa-cloud" => "cloud".to_string(),
-        "fa-database" => "database".to_string(),
-        "fa-server" => "server".to_string(),
-        "fa-user" => "user".to_string(),
-        "fa-lock" => "lock".to_string(),
-        "fa-mobile" | "fa-mobile-alt" => "mobile".to_string(),
-        "fa-desktop" => "desktop".to_string(),
-        "fa-cubes" | "docker" => "container".to_string(),
-        "fa-list" => "queue".to_string(),
-        "fa-balance-scale" => "load-balancer".to_string(),
-        "fa-gear" | "fa-cog" => "gear".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn render_node_icon(
     raw_icon: &str,
     cx: f32,
@@ -14537,8 +14639,7 @@ fn render_node_icon(
         return None;
     }
 
-    let looks_like_emoji = trimmed.chars().count() <= 4 && !trimmed.is_ascii();
-    if looks_like_emoji {
+    if is_unicode_icon(trimmed) {
         return Some(
             TextBuilder::new(trimmed)
                 .x(cx)
@@ -28844,23 +28945,35 @@ marker#arrow-open path {
     #[test]
     fn renders_named_node_icon_with_icon_classes() {
         let mut ir = create_ir_with_single_node("api", NodeShape::Rect);
-        ir.nodes[0].interaction_mut().icon = Some("server".to_string());
-
-        let svg = render_svg(&ir);
-
-        assert!(svg.contains("fm-node-has-icon"));
-        assert!(svg.contains("fm-node-icon-server"));
+        for token in ["server", "fa:fa-server"] {
+            ir.nodes[0].interaction_mut().icon = Some(token.to_owned());
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let config = SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                };
+                let svg = render_svg_with_config(&ir, &config);
+                assert!(svg.contains("fm-node-has-icon"));
+                assert!(svg.contains("fm-node-icon-server"));
+            }
+        }
     }
 
     #[test]
     fn renders_emoji_node_icon_as_text() {
         let mut ir = create_ir_with_single_node("spark", NodeShape::Rounded);
-        ir.nodes[0].interaction_mut().icon = Some("🚀".to_string());
-
-        let svg = render_svg(&ir);
-
-        assert!(svg.contains("fm-node-icon-emoji"));
-        assert!(svg.contains("🚀"));
+        for token in ["🚀", "👨‍👩‍👧‍👦"] {
+            ir.nodes[0].interaction_mut().icon = Some(token.to_owned());
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let config = SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                };
+                let svg = render_svg_with_config(&ir, &config);
+                assert!(svg.contains("fm-node-icon-emoji"));
+                assert!(svg.contains(token));
+            }
+        }
     }
 
     #[test]
@@ -28880,26 +28993,208 @@ marker#arrow-open path {
             },
         );
 
-        let svg = render_svg_with_config(&ir, &config);
-
-        assert!(svg.contains("fm-node-icon-custom"));
-        assert!(svg.contains("M4 4 L20 4 L20 20 L4 20 Z"));
-        assert!(svg.contains("#ff4d4f"));
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            config.backend = backend;
+            let svg = render_svg_with_config(&ir, &config);
+            assert!(svg.contains("fm-node-icon-custom"));
+            assert!(svg.contains("M4 4 L20 4 L20 20 L4 20 Z"));
+            assert!(svg.contains("#ff4d4f"));
+        }
     }
 
     #[test]
     fn renders_left_positioned_node_icons() {
         let mut ir = create_ir_with_single_node("queue", NodeShape::Rect);
         ir.nodes[0].interaction_mut().icon = Some("queue".to_string());
-        let config = SvgRenderConfig {
+        let mut config = SvgRenderConfig {
             node_icon_position: NodeIconPosition::Left,
             ..SvgRenderConfig::default()
         };
 
-        let svg = render_svg_with_config(&ir, &config);
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            config.backend = backend;
+            let svg = render_svg_with_config(&ir, &config);
+            assert!(svg.contains("fm-node-icon-pos-left"));
+            assert!(svg.contains("fm-node-icon-queue"));
+        }
+    }
 
-        assert!(svg.contains("fm-node-icon-pos-left"));
-        assert!(svg.contains("fm-node-icon-queue"));
+    fn scene_icon_fragment(svg: &str) -> &str {
+        let id = svg.find("id=\"fm-node-icon-0\"").expect("icon group");
+        let start = svg[..id].rfind("<g").unwrap();
+        let end = svg[id..].find("</g>").unwrap() + id + 4;
+        &svg[start..end]
+    }
+
+    #[test]
+    fn scene_node_icons_preserve_resolved_paints_and_measured_unicode_typography() {
+        for token in ["mobile", "👨‍👩‍👧‍👦"] {
+            let mut ir = fm_parser::parse(
+                "flowchart LR\nA[Application]\n\
+                 style A fill:#123456,stroke:#abcdef,color:#2468ac,opacity:0.5,fill-opacity:0.4,stroke-opacity:0.8,font-size:20px\n",
+            ).ir;
+            ir.nodes[0].interaction_mut().icon = Some(token.to_owned());
+            let scene = build_render_scene_with_metrics(
+                &ir,
+                &layout_diagram(&ir),
+                &SvgRenderConfig::default().font_metrics(),
+            );
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    theme: ThemePreset::Dark,
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                for with_ir in [false, true] {
+                    let svg =
+                        render_scene_document_with_ir(&scene, &config, with_ir.then_some(&ir));
+                    let icon = scene_icon_fragment(&svg);
+                    if token == "mobile" {
+                        let paths: Vec<_> = icon
+                            .split("<path")
+                            .skip(1)
+                            .map(|path| path.split('>').next().unwrap())
+                            .collect();
+                        assert_eq!(paths.len(), 2, "{icon}");
+                        for (tag, color, opacity) in
+                            [(paths[0], "#123456", 0.2_f32), (paths[1], "#abcdef", 0.4)]
+                        {
+                            assert_eq!(scene_attribute(tag, "fill"), Some(color), "{tag}");
+                            assert_eq!(scene_style_property(tag, "fill"), Some(color), "{tag}");
+                            let actual: f32 = scene_attribute(tag, "fill-opacity")
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            assert!((actual - opacity).abs() < 0.001, "{tag}");
+                            assert_eq!(scene_attribute(tag, "opacity"), None, "{tag}");
+                            assert_eq!(scene_style_property(tag, "opacity"), None, "{tag}");
+                        }
+                        assert_eq!(scene_attribute(paths[0], "stroke"), Some("#abcdef"));
+                    } else {
+                        assert!(icon.contains(token), "{icon}");
+                        let tag = icon
+                            .split("<text")
+                            .nth(1)
+                            .unwrap()
+                            .split('>')
+                            .next()
+                            .unwrap();
+                        let font_size: f32 =
+                            scene_attribute(tag, "font-size").unwrap().parse().unwrap();
+                        assert!((font_size - 27.0).abs() < 0.001, "{tag}");
+                        assert_eq!(scene_attribute(tag, "fill"), Some("#2468ac"));
+                        let opacity: f32 = scene_attribute(tag, "fill-opacity")
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        assert!((opacity - 0.5).abs() < f32::EPSILON, "{tag}");
+                        assert_eq!(
+                            scene_style_property(tag, "font-size"),
+                            None,
+                            "node font must not shrink the icon: {tag}"
+                        );
+                        assert_eq!(scene_style_property(tag, "opacity"), None, "{tag}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scene_node_icons_support_custom_replacement_without_semantic_ir() {
+        let scene = {
+            let mut ir = fm_parser::parse(
+                "flowchart LR\nA[Application]\nstyle A stroke:#abcdef,opacity:0.5,fill-opacity:0.4,stroke-opacity:0.8\n",
+            ).ir;
+            ir.nodes[0].interaction_mut().icon = Some("chip-core".to_owned());
+            build_render_scene_with_icon_position(
+                &ir,
+                &layout_diagram(&ir),
+                &SvgRenderConfig::default().font_metrics(),
+                NodeIconPosition::Left,
+            )
+        };
+        let mut config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            ..Default::default()
+        };
+        let fallback = render_scene_to_svg(&scene, &config);
+        assert!(scene_icon_fragment(&fallback).contains("<text"));
+        config.custom_icons.insert(
+            "chip-core".to_owned(),
+            CustomSvgIcon {
+                path_data: "M4 4 L20 4 L20 20 L4 20 Z".to_owned(),
+                view_box_width: 24.0,
+                view_box_height: 24.0,
+                fill: Some("#765432".to_owned()),
+                stroke: None,
+                stroke_width: 1.2,
+            },
+        );
+        let svg = render_scene_to_svg(&scene, &config);
+        let icon = scene_icon_fragment(&svg);
+        assert!(icon.contains("fm-node-icon-pos-left"));
+        assert!(icon.contains("fm-node-icon-custom"));
+        assert!(icon.contains("M4 4 L20 4 L20 20 L4 20 Z"));
+        assert!(icon.contains("fill=\"#765432\""));
+        assert!(icon.contains("stroke=\"#abcdef\""));
+        let custom = icon
+            .split('<')
+            .find(|tag| tag.contains("fm-node-icon-custom"))
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        for (attribute, expected) in [("fill-opacity", 0.2_f32), ("stroke-opacity", 0.4)] {
+            let actual: f32 = scene_attribute(custom, attribute).unwrap().parse().unwrap();
+            assert!((actual - expected).abs() < f32::EPSILON, "{custom}");
+        }
+        assert!(
+            !icon.contains("<text"),
+            "custom paths must replace initials: {icon}"
+        );
+        assert_eq!(svg, render_scene_to_svg(&scene, &config));
+    }
+
+    #[test]
+    fn scene_node_icons_follow_the_configured_theme_without_author_overrides() {
+        let mut ir = create_ir_with_single_node("phone", NodeShape::Rect);
+        ir.nodes[0].interaction_mut().icon = Some("mobile".to_owned());
+        let scene = build_render_scene_with_metrics(
+            &ir,
+            &layout_diagram(&ir),
+            &SvgRenderConfig::default().font_metrics(),
+        );
+        for theme in [ThemePreset::Default, ThemePreset::Dark] {
+            let config = SvgRenderConfig {
+                theme,
+                semantic_colors: false,
+                ..Default::default()
+            };
+            let colors = resolve_theme(None, &config).colors;
+            for with_ir in [false, true] {
+                let svg = render_scene_document_with_ir(&scene, &config, with_ir.then_some(&ir));
+                let icon = scene_icon_fragment(&svg);
+                let paths: Vec<_> = icon
+                    .split("<path")
+                    .skip(1)
+                    .map(|path| path.split('>').next().unwrap())
+                    .collect();
+                assert_eq!(
+                    scene_attribute(paths[0], "fill"),
+                    Some(colors.node_fill.as_str())
+                );
+                assert_eq!(
+                    scene_attribute(paths[0], "stroke"),
+                    Some(colors.node_stroke.as_str())
+                );
+                assert_eq!(
+                    scene_attribute(paths[1], "fill"),
+                    Some(colors.node_stroke.as_str())
+                );
+            }
+        }
     }
 
     #[test]

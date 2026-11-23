@@ -3570,6 +3570,22 @@ pub enum RenderClip {
     Path(Vec<PathCmd>),
 }
 
+/// An icon's measured slot and authored paint channels. The containing group also carries
+/// complete portable geometry; SVG can replace that geometry with a configured custom icon
+/// without requiring the semantic IR or changing the adjacent label's placement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderNodeIcon {
+    pub token: String,
+    pub layout: shapes::NodeIconLayout,
+    pub position: shapes::NodeIconPosition,
+    pub authored_fill: Option<String>,
+    pub authored_stroke: Option<String>,
+    pub authored_color: Option<String>,
+    /// Overall node opacity is already folded into each paint channel.
+    pub fill_opacity: f32,
+    pub stroke_opacity: f32,
+}
+
 /// A group of render items with optional transform/clip state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderGroup {
@@ -3580,6 +3596,7 @@ pub struct RenderGroup {
     pub paints_resolved: bool,
     pub transform: Option<RenderTransform>,
     pub clip: Option<RenderClip>,
+    pub node_icon: Option<RenderNodeIcon>,
     pub children: Vec<RenderItem>,
 }
 
@@ -3592,6 +3609,7 @@ impl RenderGroup {
             paints_resolved: false,
             transform: None,
             clip: None,
+            node_icon: None,
             children: Vec::new(),
         }
     }
@@ -4241,6 +4259,18 @@ pub fn build_render_scene_with_metrics(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> RenderScene {
+    build_render_scene_with_icon_position(ir, layout, metrics, shapes::NodeIconPosition::Above)
+}
+
+/// Build a complete scene with a shared icon placement policy. Existing builders use icons
+/// above labels; an SVG caller can select left placement without moving text after composition.
+#[must_use]
+pub fn build_render_scene_with_icon_position(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+    icon_position: shapes::NodeIconPosition,
+) -> RenderScene {
     if ir.diagram_type == DiagramType::Treemap && ir.treemap_meta.is_some() {
         return TreemapChartLayout::new(ir, layout, metrics).to_scene("#1e293b", "#7c8da5");
     }
@@ -4284,7 +4314,8 @@ pub fn build_render_scene_with_metrics(
             &fm_core::mindmap::DEFAULT_BRANCH_ACCENTS,
         );
     }
-    let (mut label_layer, label_bounds) = build_label_layer(ir, layout, metrics);
+    let (mut label_layer, label_bounds) =
+        build_label_layer_with_icon_position(ir, layout, metrics, icon_position);
     let mut node_layer = build_node_layer(ir, layout);
     let mut content_bounds = Some(label_bounds);
     if ir.diagram_type == DiagramType::PacketBeta {
@@ -6468,10 +6499,124 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
     layer
 }
 
+fn build_node_icon_group(
+    token: &str,
+    source: RenderSource,
+    layout: shapes::NodeIconLayout,
+    position: shapes::NodeIconPosition,
+    style: &BTreeMap<String, String>,
+) -> Option<RenderGroup> {
+    use shapes::NodeIconPaint;
+
+    let geometry = shapes::node_icon_geometry(token, layout.center, layout.size)?;
+    let authored_paint = |property: &str| {
+        style.get(property).and_then(|value| {
+            if value.trim().eq_ignore_ascii_case("none") {
+                Some(String::from("none"))
+            } else {
+                scene_paint(value)
+            }
+        })
+    };
+    let authored_fill = authored_paint("fill");
+    let authored_stroke = authored_paint("stroke");
+    let authored_color = style.get("color").and_then(|value| scene_paint(value));
+    let opacity = scene_style_opacity(style, "opacity");
+    let fill_opacity = opacity * scene_style_opacity(style, "fill-opacity");
+    let stroke_opacity = opacity * scene_style_opacity(style, "stroke-opacity");
+    let fill_color = authored_fill.as_deref().unwrap_or("#ffffff");
+    let stroke_color = authored_stroke.as_deref().unwrap_or("#94a3b8");
+    let fill = |role| {
+        let (color, opacity) = match role {
+            NodeIconPaint::Fill => (fill_color, fill_opacity),
+            NodeIconPaint::Stroke => (stroke_color, stroke_opacity),
+        };
+        (color != "none").then(|| FillStyle::Solid {
+            color: color.to_owned(),
+            opacity,
+        })
+    };
+    let index = match source {
+        RenderSource::Node(index) => index,
+        _ => return None,
+    };
+    let mut group = RenderGroup::new(Some(format!("fm-node-icon-{index}")))
+        .with_source(source)
+        .with_resolved_paints();
+    for path in geometry.paths {
+        let stroke = (path.stroke_width > 0.0 && stroke_color != "none").then(|| {
+            let mut stroke = StrokeStyle::solid(stroke_color, path.stroke_width);
+            stroke.opacity = stroke_opacity;
+            stroke
+        });
+        group.children.push(RenderItem::Path(RenderPath {
+            source,
+            commands: path.commands,
+            fill: path.fill.and_then(fill),
+            stroke,
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        }));
+    }
+    if let Some(text) = geometry.text {
+        let text_fill = if text.use_label_color {
+            FillStyle::Solid {
+                color: authored_color.as_deref().unwrap_or("#0f172a").to_owned(),
+                opacity,
+            }
+        } else {
+            fill(NodeIconPaint::Stroke).unwrap_or_else(|| FillStyle::Solid {
+                color: String::from("transparent"),
+                opacity: 0.0,
+            })
+        };
+        group.children.push(RenderItem::Text(RenderText {
+            source,
+            text: text.text,
+            x: text.center.x,
+            y: text.center.y,
+            font_size: text.font_size,
+            font: if text.monospace {
+                RenderFont::new(
+                    Some("monospace"),
+                    style.get("font-weight").map(String::as_str),
+                    style.get("font-style").map(String::as_str),
+                )
+            } else {
+                RenderFont::from_style(style)
+            },
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: text_fill,
+        }));
+    }
+    group.node_icon = Some(RenderNodeIcon {
+        token: token.to_owned(),
+        layout,
+        position,
+        authored_fill,
+        authored_stroke,
+        authored_color,
+        fill_opacity,
+        stroke_opacity,
+    });
+    Some(group)
+}
+
+#[cfg(test)]
 fn build_label_layer(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
+) -> (RenderGroup, LayoutRect) {
+    build_label_layer_with_icon_position(ir, layout, metrics, shapes::NodeIconPosition::Above)
+}
+
+fn build_label_layer_with_icon_position(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+    icon_position: shapes::NodeIconPosition,
 ) -> (RenderGroup, LayoutRect) {
     let mut layer = RenderGroup::new(Some(String::from("labels")))
         .with_source(RenderSource::Diagram)
@@ -6983,30 +7128,59 @@ fn build_label_layer(
         } else {
             ir.node_layout_text(node, metrics)
         };
+        if ir.diagram_type == DiagramType::Sequence {
+            if !label_text.is_empty() {
+                append_sequence_participant_text(&mut layer, ir, node_box, &label_text, metrics);
+            }
+            continue;
+        }
+
+        let icon_layout = node
+            .icon()
+            .filter(|icon| !icon.trim().is_empty())
+            .and_then(|icon| {
+                let icon_layout = shapes::node_icon_layout_with_metrics(
+                    node_box.bounds,
+                    node.shape,
+                    icon,
+                    metrics,
+                    icon_position,
+                )?;
+                let group = build_node_icon_group(
+                    icon,
+                    RenderSource::Node(node_box.node_index),
+                    icon_layout,
+                    icon_position,
+                    &declared,
+                )?;
+                layer.children.push(RenderItem::Group(group));
+                Some(icon_layout)
+            });
         if label_text.is_empty() {
             continue;
         }
-
-        if ir.diagram_type == DiagramType::Sequence {
-            append_sequence_participant_text(&mut layer, ir, node_box, &label_text, metrics);
-            continue;
-        }
-
-        let (center_x, center_y) = node
-            .shape
-            .label_region(node_box.bounds.width, node_box.bounds.height)
-            .map_or_else(
-                || {
-                    let center = node_box.bounds.center();
-                    (center.x, center.y)
-                },
-                |region| {
-                    (
-                        node_box.bounds.x + region.x + region.width / 2.0,
-                        node_box.bounds.y + region.y + region.height / 2.0,
+        let (center_x, center_y) = icon_layout.map_or_else(
+            || {
+                node.shape
+                    .label_region(node_box.bounds.width, node_box.bounds.height)
+                    .map_or_else(
+                        || {
+                            let center = node_box.bounds.center();
+                            (center.x, center.y)
+                        },
+                        |region| {
+                            (
+                                node_box.bounds.x + region.x + region.width / 2.0,
+                                node_box.bounds.y + region.y + region.height / 2.0,
+                            )
+                        },
                     )
-                },
-            );
+            },
+            |icon| {
+                let center = icon.label_bounds.center();
+                (center.x, center.y)
+            },
+        );
         let color = declared
             .get("color")
             .and_then(|paint| scene_paint(paint))
@@ -20564,14 +20738,20 @@ fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) 
         return (0.0, 0.0);
     };
 
-    let looks_like_glyph = icon.chars().count() <= 4 && !icon.is_ascii();
-    if looks_like_glyph {
-        let (width, height) = metrics.estimate_dimensions(icon);
-        (width.max(metrics.font_size()), height + 10.0)
+    let icon_size = (metrics.font_size() * 1.35).max(10.0);
+    let (width, height) = if shapes::is_unicode_icon(icon) {
+        let icon_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: icon_size,
+            ..metrics.config().clone()
+        });
+        let (width, height) = icon_metrics.estimate_dimensions(icon);
+        (width.max(icon_size), height.max(icon_size))
     } else {
-        let icon_size = (metrics.font_size() * 1.35).max(18.0);
-        (icon_size + 12.0, icon_size + 12.0)
-    }
+        (icon_size, icon_size)
+    };
+    // Reserve the same icon size and gaps used by the shared painter for both positions.
+    // Joined emoji are measured as glyphs at their painted size, not as named-icon initials.
+    (width + 14.0, height + 10.0)
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
@@ -30648,12 +30828,12 @@ mod tests {
     use super::{
         CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ClusterCaptionLayout,
         ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout, DirtySet, EdgeRouting,
-        GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm,
-        LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
-        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
-        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
-        RenderSource, StateNoteSide, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
-        TracedLayout, build_directed_path_edge_paths, build_edge_paths,
+        FillStyle, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
+        LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
+        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
+        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderGroup, RenderItem,
+        RenderScene, RenderSource, RenderText, StateNoteSide, SubgraphRegion, SubgraphRegionId,
+        SubgraphRegionKind, TracedLayout, build_directed_path_edge_paths, build_edge_paths,
         build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
         certify_directed_path_layout_prefix, compute_node_size, constraint_solution_is_usable,
         coordinate_assignment, dispatch_layout_algorithm, er_compartment_dimensions,
@@ -30669,7 +30849,7 @@ mod tests {
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, node_size_cache_key, route_edge_points,
-        route_edge_points_with_obstacles, solve_constraint_coordinates,
+        route_edge_points_with_obstacles, shapes, solve_constraint_coordinates,
         try_relayout_directed_path_suffix,
     };
     use fm_core::{
@@ -38748,6 +38928,141 @@ mod tests {
 
         assert!(path_count >= layout.nodes.len() + layout.edges.len());
         assert!(text_count >= 3);
+    }
+
+    fn scene_node_icon_parts(scene: &RenderScene) -> (&RenderGroup, &RenderText) {
+        let labels = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("labels") => Some(group),
+                _ => None,
+            })
+            .unwrap();
+        let icon = labels
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.node_icon.is_some() => Some(group),
+                _ => None,
+            })
+            .unwrap();
+        let label = labels
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Text(text) if text.source == RenderSource::Node(0) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        (icon, label)
+    }
+
+    #[test]
+    fn scene_node_icons_reserve_labels_and_preserve_authored_paint_channels() {
+        let mut ir = fm_parser::parse(
+            "flowchart LR\nA[Application]\n\
+             style A fill:#123456,stroke:#abcdef,color:#2468ac,opacity:0.5,fill-opacity:0.4,stroke-opacity:0.8,font-size:20px\n",
+        ).ir;
+        ir.nodes[0].interaction_mut().icon = Some("mobile".to_owned());
+        let layout = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for position in [
+            shapes::NodeIconPosition::Above,
+            shapes::NodeIconPosition::Left,
+        ] {
+            let scene =
+                super::build_render_scene_with_icon_position(&ir, &layout, &metrics, position);
+            let (group, label) = scene_node_icon_parts(&scene);
+            let icon = group.node_icon.as_ref().unwrap();
+            assert_eq!(group.source, RenderSource::Node(0));
+            assert!(group.paints_resolved);
+            assert_eq!(icon.position, position);
+            assert!((icon.layout.size - 27.0).abs() < 0.001);
+            let center = icon.layout.label_bounds.center();
+            assert_eq!((label.x, label.y), (center.x, center.y));
+            assert_eq!(label.text, "Application");
+            match position {
+                shapes::NodeIconPosition::Above => assert!(label.y > icon.layout.center.y),
+                shapes::NodeIconPosition::Left => assert!(label.x > icon.layout.center.x),
+            }
+            let paths: Vec<_> = group
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Path(path) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            let body = paths.iter().find(|path| path.stroke.is_some()).unwrap();
+            assert_eq!(
+                body.fill,
+                Some(FillStyle::Solid {
+                    color: "#123456".to_owned(),
+                    opacity: 0.2,
+                })
+            );
+            let outline = body.stroke.as_ref().unwrap();
+            assert_eq!(outline.color, "#abcdef");
+            assert!((outline.opacity - 0.4).abs() < 0.001);
+            let detail = paths.iter().find(|path| path.stroke.is_none()).unwrap();
+            assert_eq!(
+                detail.fill,
+                Some(FillStyle::Solid {
+                    color: "#abcdef".to_owned(),
+                    opacity: 0.4,
+                })
+            );
+            assert_eq!(
+                label.fill,
+                FillStyle::Solid {
+                    color: "#2468ac".to_owned(),
+                    opacity: 0.5,
+                }
+            );
+            assert_eq!(
+                scene,
+                super::build_render_scene_with_icon_position(&ir, &layout, &metrics, position)
+            );
+        }
+    }
+
+    #[test]
+    fn scene_node_icons_keep_complete_unicode_and_unknown_name_fallbacks() {
+        for token in ["👨‍👩‍👧‍👦", "chip-core"] {
+            let scene = {
+                let mut ir = fm_parser::parse(
+                    "flowchart TB\nA[Caption]\nstyle A font-size:20px,color:#123456,opacity:0.5\n",
+                )
+                .ir;
+                ir.nodes[0].interaction_mut().icon = Some(token.to_owned());
+                build_render_scene(&ir, &layout_diagram(&ir))
+            };
+            let (group, label) = scene_node_icon_parts(&scene);
+            let text = group
+                .children
+                .iter()
+                .find_map(|item| match item {
+                    RenderItem::Text(text) => Some(text),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(label.text, "Caption");
+            assert_eq!(text.source, RenderSource::Node(0));
+            assert!(!text.text.is_empty());
+            if token == "👨‍👩‍👧‍👦" {
+                assert_eq!(text.text, token);
+                assert!((text.font_size - 27.0).abs() < 0.001);
+                assert_eq!(
+                    text.fill,
+                    FillStyle::Solid {
+                        color: "#123456".to_owned(),
+                        opacity: 0.5,
+                    }
+                );
+            }
+        }
     }
 
     #[test]

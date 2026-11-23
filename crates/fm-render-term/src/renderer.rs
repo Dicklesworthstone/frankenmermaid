@@ -4761,6 +4761,39 @@ impl TermRenderer {
         node: &fm_core::IrNode,
         mut text: String,
     ) -> String {
+        // The parser removes leading emoji and explicit icon directives from the label. Keep
+        // that authored identity on the text surface too: named vector icons have a readable
+        // token, while Unicode icons keep their complete grapheme (including joiners/modifiers).
+        // Final cell fitting still owns the width budget, just as it does for link markers.
+        if let Some(icon) = node.icon().map(str::trim).filter(|icon| !icon.is_empty()) {
+            let icon = icon
+                .split_whitespace()
+                .map(|part| {
+                    part.chars()
+                        .filter(|ch| !ch.is_control())
+                        .collect::<String>()
+                })
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let icon = if icon.is_empty() {
+                String::new()
+            } else if icon.is_ascii() {
+                format!("[{}]", fm_layout::shapes::normalize_icon_token(&icon))
+            } else if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                String::from("[icon]")
+            } else {
+                icon
+            };
+            if !icon.is_empty() {
+                text = if text.is_empty() {
+                    icon
+                } else {
+                    format!("{icon} {text}")
+                };
+            }
+        }
+
         if matches!(self.config.link_mode, fm_core::MermaidLinkMode::Footnote)
             && let Some(idx) = Self::footnote_index(ir, &node.id)
         {
@@ -9757,6 +9790,108 @@ mod tests {
             Some('1'),
             "cardinality had no safe fallback:\n{output}"
         );
+    }
+
+    #[test]
+    fn parsed_node_icons_remain_visible_in_every_terminal_render_mode() {
+        for (source, icon, name) in [
+            ("flowchart TB\nA[\"🚀 Launch\"]", "🚀", "Launch"),
+            (
+                "mindmap\n  root((Cloud))\n    ::icon(fa fa-cloud)",
+                "[cloud]",
+                "Cloud",
+            ),
+            (
+                "architecture-beta\nservice api(server)[API]",
+                "[server]",
+                "API",
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.nodes.len(), 1, "{source}");
+            assert!(ir.nodes[0].icon().is_some(), "fixture must extract an icon");
+            let mut layout = layout_diagram(&ir);
+            layout.nodes[0].bounds = LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 80.0,
+            };
+            layout.bounds = layout.nodes[0].bounds;
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::HalfBlock,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::Braille,
+            ] {
+                for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+                    let config = TermRenderConfig {
+                        tier,
+                        render_mode: mode,
+                        max_label_chars: 80,
+                        max_label_lines: 1,
+                        ..Default::default()
+                    };
+                    let rendered =
+                        render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 20);
+                    assert!(
+                        rendered.output.contains(&format!("{icon} {name}")),
+                        "{mode:?}/{tier:?}: {}",
+                        rendered.output
+                    );
+                    assert!(
+                        rendered
+                            .output
+                            .lines()
+                            .all(|row| row.width() <= rendered.width)
+                    );
+                    let repeated =
+                        render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 20);
+                    assert_eq!(rendered.output, repeated.output);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn node_icon_captions_preserve_joined_glyphs_links_and_ascii_fallback() {
+        let mut ir =
+            fm_parser::parse("flowchart TB\nA[Team]\nclick A \"https://example.com/team\"").ir;
+        ir.nodes[0].interaction_mut().icon = Some(String::from("👩🏽‍💻"));
+        let config = TermRenderConfig {
+            link_mode: fm_core::MermaidLinkMode::Footnote,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 20));
+        let label = renderer
+            .node_display_label(&ir, ir.nodes.first(), "A")
+            .unwrap();
+        assert_eq!(label, "👩🏽‍💻 Team [1]");
+        let fitted = renderer.fit_node_label_line(&ir, ir.nodes.first(), &label, 8);
+        assert!(fitted.ends_with(" [1]"), "{fitted}");
+        assert!(fitted.width() <= 8);
+        assert!(fitted.starts_with("👩🏽‍💻"), "{fitted}");
+
+        let ascii = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig {
+                glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+                ..config
+            },
+            80,
+            20,
+        ));
+        assert_eq!(
+            ascii
+                .node_display_label(&ir, ir.nodes.first(), "A")
+                .unwrap(),
+            "[icon] Team [1]"
+        );
+        ir.nodes[0].interaction_mut().icon = Some(String::from("fa:fa-server\n\u{1b}"));
+        let label = ascii
+            .node_display_label(&ir, ir.nodes.first(), "A")
+            .unwrap();
+        assert_eq!(label, "[server] Team [1]");
+        assert!(!label.chars().any(char::is_control));
     }
 
     #[test]

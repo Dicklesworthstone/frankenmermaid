@@ -117,6 +117,7 @@ Current status in this file is grounded in:
 | ER cardinality labels | Complete | Notation parsed and rendered as endpoint labels |
 | Theme variable overrides | Complete | primaryColor, lineColor, clusterBkg, etc. mapped to palette |
 | Authored node typography in GPU text | Complete | Deterministic atlas cells distinguish family, weight, style, and character; node/card/cluster text and mirrored sequence headers consume resolved faces; browser and native rasterizers select each face explicitly |
+| Node icons across renderers | Partial | Shared named-icon paths and Unicode text in Scene, SVG, Canvas2D, and GPU plans; Above/Left placement reserves caption space; Scene SVG supports custom icon overrides without semantic IR; terminal labels retain glyphs or readable tokens. GPU's character atlas does not shape joined emoji or render color emoji |
 | Sequence notes SVG | Complete | Rounded-corner boxes near lifelines |
 | Sequence fragments SVG | Complete | Dashed-border rectangles with kind/label tabs |
 
