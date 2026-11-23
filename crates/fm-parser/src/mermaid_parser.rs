@@ -585,10 +585,32 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     // nodes. Unterminated/over-limit blocks stay visible to recovery after recording an init error.
     // CSV fields may contain physical lines that look exactly like directives. Only standalone
     // Sankey directives reach these generic passes; masking keeps their original byte positions.
-    let directive_content = if diagram_type == DiagramType::Sankey {
+    let directive_source = if diagram_type == DiagramType::Sankey {
         sankey_directive_source(content)
     } else {
         Cow::Borrowed(content)
+    };
+    // Accessibility descriptions are prose, including lines that resemble graph syntax, styles,
+    // or configuration. Establish their boundaries once, before any of those consumers run.
+    // Mask both streams: Sankey's body still needs its CSV records, while generic passes must not
+    // see directive-looking text inside those records. Byte lengths and line endings stay intact.
+    let accessibility = scan_accessibility_directives(
+        &directive_source,
+        diagram_type,
+        config.auto_close_delimiters,
+    );
+    let description_columns_changed = accessibility
+        .description_ranges
+        .iter()
+        .any(|range| !directive_source[range.clone()].is_ascii());
+    let directive_content = blank_source_ranges(
+        &directive_source,
+        accessibility.description_ranges.iter().cloned(),
+    );
+    let body_source = if diagram_type == DiagramType::Sankey {
+        blank_source_ranges(content, accessibility.description_ranges.iter().cloned())
+    } else {
+        Cow::Borrowed(directive_content.as_ref())
     };
     let deck_directives = scan_multiline_deck_directives(&directive_content);
     for error in &deck_directives.errors {
@@ -617,7 +639,7 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
         builder.add_warning(message.clone());
         builder.add_init_error(message, span);
     }
-    let body_content = blank_multiline_deck_directives(content, &deck_directives.blocks);
+    let body_content = blank_multiline_deck_directives(&body_source, &deck_directives.blocks);
 
     parse_init_directives(&directive_content, &mut builder);
     // The deck pass reads the ORIGINAL text (block byte offsets index into it); keep a handle
@@ -671,12 +693,12 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
     } else {
         Cow::Borrowed(content)
     };
-    // Extract accessibility directives (accTitle / accDescr) from any diagram type.
-    extract_accessibility_directives(
-        &generic_content,
-        &mut builder,
-        diagram_type == DiagramType::Sequence,
-    );
+    if let Some(title) = accessibility.acc_title {
+        builder.set_acc_title(title);
+    }
+    if let Some(description) = accessibility.acc_descr {
+        builder.set_acc_descr(description);
+    }
 
     // Promote a `title` directive that the statement loop dropped rather than promoted (bd-193x
     // sibling). No-op when a type-specific parser already set one.
@@ -727,6 +749,9 @@ pub(crate) fn parse_mermaid_with_detection_config_and_init(
         builder.add_warning("No parseable nodes or edges were found");
     }
 
+    if description_columns_changed {
+        restore_masked_line_span_columns(builder.ir_mut(), &directive_source, &directive_content);
+    }
     builder.finish(detection.confidence, detection.method)
 }
 
@@ -3118,6 +3143,14 @@ fn is_accessibility_directive_statement(statement: &str) -> bool {
             rest.starts_with(':') || rest.starts_with(char::is_whitespace) || rest.is_empty()
         })
     })
+}
+
+/// The literal body following an accessibility-description block opener.
+fn accessibility_description_body(statement: &str) -> Option<&str> {
+    trim_fast(statement)
+        .strip_prefix("accDescr")
+        .map(trim_start_fast)
+        .and_then(|rest| rest.strip_prefix('{'))
 }
 
 /// Recognise a flowchart accessibility directive, returning what follows the keyword (bd-0di8).
@@ -9175,7 +9208,21 @@ fn parse_event_model(content: &str, builder: &mut IrBuilder) {
     let mut frames: Vec<EmFrame<'_>> = Vec::new();
     let mut data_entities: Vec<(&str, &str)> = Vec::new();
     let mut header_seen = false;
-    let span_at = |line: usize| Span::at_line(line, 0);
+    // Frames receive spans during the lexical scan, before any lane ordering. Advance source
+    // lines once and retain the current line for multiple frames on the same physical row.
+    // A column-one placeholder selected arbitrary text instead of the frame declaration.
+    let mut source_lines = byte_lines(content);
+    let mut source_line_number = 0;
+    let mut source_line = "";
+    let mut span_at = |line: usize| {
+        if line > source_line_number {
+            source_line = source_lines
+                .nth(line - source_line_number - 1)
+                .unwrap_or("");
+            source_line_number = line;
+        }
+        span_for(line, source_line)
+    };
 
     loop {
         lexer.skip_trivia();
@@ -10400,7 +10447,7 @@ fn parse_radar(content: &str, builder: &mut IrBuilder) {
         if lowered.starts_with("radar-beta") || lowered == "radar" {
             continue;
         }
-        let span = span_for(line_number, raw_line);
+        let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = trimmed.strip_prefix("title ") {
             title = Some(trim_fast(rest).to_string());
@@ -10537,7 +10584,7 @@ fn parse_treemap(content: &str, builder: &mut IrBuilder) {
         if trimmed.is_empty() || trimmed.starts_with("%%") {
             continue;
         }
-        let span = span_for(line_number, raw_line);
+        let span = span_for(line_number + 1, raw_line);
 
         // The header reaches this parser as ordinary content, exactly as it does for `parse_kanban`.
         // Without this it fails the quoted-label check and warns about the author's own header.
@@ -17938,12 +17985,17 @@ pub(crate) fn validate_init_directives(input: &str) -> MermaidConfigValidation {
     let content = blank_front_matter_prefix(input, body);
     // Keep the explicit admission boundary consistent with rendering: a physical line inside a
     // quoted Sankey field is CSV data, even when it resembles a configuration directive.
-    let directive_content =
-        if crate::detect_type_with_confidence(input).diagram_type == DiagramType::Sankey {
-            sankey_directive_source(&content)
-        } else {
-            Cow::Borrowed(content.as_ref())
-        };
+    let diagram_type = crate::detect_type_with_confidence(input).diagram_type;
+    let directive_source = if diagram_type == DiagramType::Sankey {
+        sankey_directive_source(&content)
+    } else {
+        Cow::Borrowed(content.as_ref())
+    };
+    let accessibility = scan_accessibility_directives(&directive_source, diagram_type, true);
+    let directive_content = blank_source_ranges(
+        &directive_source,
+        accessibility.description_ranges.iter().cloned(),
+    );
 
     for (index, line) in byte_lines(&directive_content).enumerate() {
         let line_number = index + 1;
@@ -18911,19 +18963,166 @@ fn blank_multiline_deck_directives<'a>(
     input: &'a str,
     blocks: &[MultilineDeckDirectiveBlock],
 ) -> Cow<'a, str> {
-    if blocks.is_empty() {
+    blank_source_ranges(
+        input,
+        blocks.iter().map(|block| block.start_byte..block.end_byte),
+    )
+}
+
+/// Remove opaque source regions from a parser's view without moving any following byte or line.
+fn blank_source_ranges<'a>(
+    input: &'a str,
+    ranges: impl IntoIterator<Item = std::ops::Range<usize>>,
+) -> Cow<'a, str> {
+    let mut ranges = ranges.into_iter().peekable();
+    if ranges.peek().is_none() {
         return Cow::Borrowed(input);
     }
 
     let mut blanked = input.as_bytes().to_vec();
-    for block in blocks {
-        for byte in &mut blanked[block.start_byte..block.end_byte] {
+    for range in ranges {
+        for byte in &mut blanked[range] {
             if !matches!(*byte, b'\n' | b'\r') {
                 *byte = b' ';
             }
         }
     }
     Cow::Owned(String::from_utf8(blanked).expect("spaces preserve UTF-8 validity"))
+}
+
+/// Restore the whole-line spans emitted by body parsers after byte-preserving Unicode masking.
+/// An ASCII space per byte keeps directive offsets correct, but increases the character count
+/// before a real statement on the same line. Only an end column equal to the masked line length
+/// and beyond the original line can identify such a span; already-original metadata stays intact.
+fn restore_masked_line_span_columns(
+    ir: &mut fm_core::MermaidDiagramIr,
+    original: &str,
+    masked: &str,
+) {
+    let lines: BTreeMap<_, _> = byte_lines(original)
+        .zip(byte_lines(masked))
+        .enumerate()
+        .filter_map(|(index, (original, masked))| {
+            if original.is_ascii() || original == masked {
+                return None;
+            }
+            let original_cols = u32::try_from(original.chars().count()).unwrap_or(u32::MAX);
+            let masked_cols = u32::try_from(masked.chars().count()).unwrap_or(u32::MAX);
+            (masked_cols > original_cols).then_some((
+                u32::try_from(index + 1).unwrap_or(u32::MAX),
+                (original, masked, original_cols, masked_cols),
+            ))
+        })
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    let restore = |span: &mut Span| {
+        let Some(&(original, masked, original_cols, masked_cols)) = lines.get(&span.end.line)
+        else {
+            return;
+        };
+        if span.end.col != masked_cols {
+            return;
+        }
+        if span.start.line == span.end.line && span.start.col > 1 {
+            let Some((mut byte, _)) = masked.char_indices().nth(span.start.col as usize - 1) else {
+                return;
+            };
+            while !original.is_char_boundary(byte) {
+                byte -= 1;
+            }
+            span.start.col =
+                u32::try_from(original[..byte].chars().count() + 1).unwrap_or(u32::MAX);
+        }
+        span.end.col = original_cols;
+    };
+    visit_ir_source_spans(ir, restore);
+}
+
+/// Keep source-column repairs consistent between the IR and its graph/diagnostic mirrors.
+fn visit_ir_source_spans(ir: &mut fm_core::MermaidDiagramIr, mut visit: impl FnMut(&mut Span)) {
+    for span in ir
+        .nodes
+        .iter_mut()
+        .map(|node| &mut node.span_primary)
+        .chain(ir.edges.iter_mut().map(|edge| &mut edge.span))
+        .chain(ir.ports.iter_mut().map(|port| &mut port.span))
+        .chain(ir.labels.iter_mut().map(|label| &mut label.span))
+        .chain(ir.clusters.iter_mut().map(|cluster| &mut cluster.span))
+        .chain(ir.graph.edges.iter_mut().map(|edge| &mut edge.span))
+        .chain(
+            ir.graph
+                .clusters
+                .iter_mut()
+                .map(|cluster| &mut cluster.span),
+        )
+        .chain(
+            ir.graph
+                .subgraphs
+                .iter_mut()
+                .map(|subgraph| &mut subgraph.span),
+        )
+        .chain(ir.style_refs.iter_mut().map(|style| &mut style.span))
+        .chain(ir.style_defs.iter_mut().map(|style| &mut style.span))
+        .chain(ir.state_notes.iter_mut().map(|note| &mut note.span))
+        .chain(
+            ir.meta
+                .init
+                .warnings
+                .iter_mut()
+                .map(|warning| &mut warning.span),
+        )
+        .chain(ir.meta.init.errors.iter_mut().map(|error| match error {
+            fm_core::MermaidError::Parse { span, .. }
+            | fm_core::MermaidError::Validation { span, .. }
+            | fm_core::MermaidError::Unsupported { span, .. } => span,
+        }))
+        .chain(
+            ir.constraints
+                .iter_mut()
+                .map(|constraint| match constraint {
+                    IrConstraint::SameRank { span, .. }
+                    | IrConstraint::MinLength { span, .. }
+                    | IrConstraint::Pin { span, .. }
+                    | IrConstraint::OrderInRank { span, .. }
+                    | IrConstraint::NonOverlap { span, .. } => span,
+                }),
+        )
+    {
+        visit(span);
+    }
+    for diagnostic in &mut ir.diagnostics {
+        for span in diagnostic.span.iter_mut().chain(
+            diagnostic
+                .related
+                .iter_mut()
+                .map(|related| &mut related.span),
+        ) {
+            visit(span);
+        }
+    }
+    if let Some(deck) = &mut ir.deck {
+        visit(&mut deck.span);
+        for slide in &mut deck.slides {
+            visit(&mut slide.span);
+        }
+    }
+    if let Some(treemap) = &mut ir.treemap_meta {
+        for item in &mut treemap.nodes {
+            visit(&mut item.span);
+        }
+    }
+    if let Some(radar) = &mut ir.radar_meta {
+        for span in radar
+            .axes
+            .iter_mut()
+            .map(|axis| &mut axis.span)
+            .chain(radar.curves.iter_mut().map(|curve| &mut curve.span))
+        {
+            visit(span);
+        }
+    }
 }
 
 /// Read the `---` YAML front matter block: the diagram `title` and any `config:` it carries.
@@ -19722,6 +19921,7 @@ fn sankey_record_is_directive(source: &str, fields: Option<&[String; 3]>) -> boo
             .get(..6)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("title "))
         || is_accessibility_directive_statement(trimmed)
+        || accessibility_description_body(trimmed).is_some()
         || is_non_graph_statement(trimmed)
         || trimmed.starts_with("class ")
 }
@@ -19752,7 +19952,8 @@ fn sankey_records(input: &str) -> impl Iterator<Item = SankeyRecord<'_>> {
         let source = &remaining[..scan.end];
         let trimmed = trim_fast(source);
         let directive = if let Some(ending) = directive_end {
-            if (ending == "}" && trimmed == ending) || (ending != "}" && trimmed.ends_with(ending))
+            if (ending == "}" && trimmed.contains('}'))
+                || (ending != "}" && trimmed.ends_with(ending))
             {
                 directive_end = None;
             }
@@ -19767,7 +19968,9 @@ fn sankey_records(input: &str) -> impl Iterator<Item = SankeyRecord<'_>> {
                     && sankey_has_completed_deck(remaining)
                 {
                     directive_end = Some("}%%");
-                } else if trimmed.starts_with("accDescr") && trimmed.ends_with('{') {
+                } else if accessibility_description_body(trimmed)
+                    .is_some_and(|body| !body.contains('}'))
+                {
                     // The generic accessibility parser owns its EOF auto-close policy too.
                     directive_end = Some("}");
                 }
@@ -21200,51 +21403,109 @@ fn extract_generic_diagram_title(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-/// Extract `accTitle` and `accDescr` accessibility directives.
+#[derive(Default)]
+struct AccessibilityDirectives {
+    acc_title: Option<String>,
+    acc_descr: Option<String>,
+    description_ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// Resolve accessibility metadata and identify the description blocks that every other parser
+/// must treat as opaque. The same boundaries protect rendering and strict configuration checks.
 ///
-/// Supported syntax:
-/// - `accTitle: My Title`
-/// - `accDescr: Single-line description`
-/// - `accDescr { multi-line description }`
-fn extract_accessibility_directives(
+/// Completed deck payloads, multiline flowchart labels, and state-note bodies own their text;
+/// an accessibility-looking line inside one of those is not a diagram-level directive. Sankey
+/// callers first hide CSV records with `sankey_directive_source` for the same reason.
+fn scan_accessibility_directives(
     input: &str,
-    builder: &mut IrBuilder,
-    sequence_statements: bool,
-) {
+    diagram_type: DiagramType,
+    auto_close_delimiters: bool,
+) -> AccessibilityDirectives {
+    let mut directives = AccessibilityDirectives::default();
     // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
     // appears, bail before the per-line scan (run on every parse of every diagram type).
-    // Output-identical: with neither substring no directive line matches and no accDescr
-    // block is ever opened, so there is nothing to flush at end of input.
-    // SIMD `memmem::find` replaces `str::contains`'s TwoWaySearcher (same ASCII-substring test).
     let bytes = input.as_bytes();
     if memchr::memmem::find(bytes, b"accTitle").is_none()
         && memchr::memmem::find(bytes, b"accDescr").is_none()
     {
-        return;
+        return directives;
     }
 
-    let mut in_acc_descr_block = false;
+    let base = input.as_ptr() as usize;
+    let mut description_start = None;
     let mut descr_lines: Vec<&str> = Vec::new();
+    let mut in_deck = false;
+    let mut in_state_note = false;
+    let mut flow_quote = FlowQuoteState::Closed;
+    let mut join_flow_quotes = true;
 
-    for line in input.lines() {
+    for line in byte_lines(input) {
+        let line_start = line.as_ptr() as usize - base;
+        let trimmed_line = trim_fast(line);
+        if description_start.is_none() {
+            if in_deck {
+                in_deck = !trimmed_line.ends_with("}%%");
+                continue;
+            }
+            if in_state_note {
+                in_state_note = trimmed_line != "end note";
+                continue;
+            }
+            if diagram_type == DiagramType::Flowchart && flow_quote != FlowQuoteState::Closed {
+                flow_quote = scan_flow_quotes(line, flow_quote);
+                continue;
+            }
+            if is_multiline_deck_start(trimmed_line)
+                && !trimmed_line.contains("}%%")
+                && sankey_has_completed_deck(&input[line.as_ptr() as usize - base..])
+            {
+                in_deck = true;
+                continue;
+            }
+            if is_comment(trimmed_line) {
+                continue;
+            }
+            if diagram_type == DiagramType::State
+                && !trimmed_line.contains(':')
+                && (trimmed_line.starts_with("note right of ")
+                    || trimmed_line.starts_with("note left of "))
+            {
+                in_state_note = true;
+                continue;
+            }
+        }
+
         // Compact sequence directives use the same boundaries as the diagram body. Description
         // block contents remain literal physical lines, including semicolons and comment text.
-        let statements = if sequence_statements && !in_acc_descr_block {
+        let mut statements = if diagram_type == DiagramType::Sequence && description_start.is_none()
+        {
             split_sequence_statements(line)
         } else {
             SplitStatements::Single(std::iter::once(line))
         };
-        for statement in statements {
+        while let Some(statement) = statements.next() {
             let trimmed = trim_fast(statement);
+            let statement_start = statement.as_ptr() as usize - base;
+            let statement_end = statement_start + statement.len();
 
-            if in_acc_descr_block {
-                if trimmed == "}" {
-                    in_acc_descr_block = false;
+            if let Some(start) = description_start {
+                if let Some(close) = statement.find('}') {
+                    let ending_text = trim_fast(&statement[..close]);
+                    if !ending_text.is_empty() {
+                        descr_lines.push(ending_text);
+                    }
+                    directives
+                        .description_ranges
+                        .push(start..statement_start + close + 1);
+                    description_start = None;
                     let descr = descr_lines.join("\n");
                     if !descr.is_empty() {
-                        builder.set_acc_descr(descr);
+                        directives.acc_descr = Some(descr);
                     }
                     descr_lines.clear();
+                    if diagram_type == DiagramType::Sequence {
+                        statements = split_sequence_statements(&statement[close + 1..]);
+                    }
                 } else {
                     descr_lines.push(trimmed);
                 }
@@ -21254,30 +21515,71 @@ fn extract_accessibility_directives(
             if let Some(rest) = trimmed.strip_prefix("accTitle:") {
                 let title = rest.trim();
                 if !title.is_empty() {
-                    builder.set_acc_title(title.to_string());
+                    directives.acc_title = Some(title.to_string());
                 }
             } else if let Some(rest) = trimmed.strip_prefix("accDescr:") {
                 let descr = rest.trim();
                 if !descr.is_empty() {
-                    builder.set_acc_descr(descr.to_string());
+                    directives.acc_descr = Some(descr.to_string());
                 }
-            } else if trimmed.starts_with("accDescr") && trimmed.ends_with('{') {
-                in_acc_descr_block = true;
-                descr_lines.clear();
+            } else if let Some(body) =
+                accessibility_description_body(&line[statement_start - line_start..])
+            {
+                // A sequence statement iterator splits at semicolons. Once a description opens,
+                // consume its ORIGINAL line slice instead: punctuation and `%%` inside prose are
+                // literal, and the first real statement after its closer must stay outside it.
+                if let Some(close) = body.find('}') {
+                    let end = body.as_ptr() as usize - base + close + 1;
+                    directives.description_ranges.push(statement_start..end);
+                    let descr = trim_fast(&body[..close]);
+                    if !descr.is_empty() {
+                        directives.acc_descr = Some(descr.to_string());
+                    }
+                    if diagram_type == DiagramType::Sequence {
+                        statements = split_sequence_statements(&body[close + 1..]);
+                    }
+                } else {
+                    description_start = Some(statement_start);
+                    descr_lines.clear();
+                    let body = trim_fast(body);
+                    if !body.is_empty() {
+                        descr_lines.push(body);
+                    }
+                    break;
+                }
+            } else if diagram_type == DiagramType::Flowchart && join_flow_quotes {
+                let state = scan_flow_quotes(statement, FlowQuoteState::Closed);
+                if state != FlowQuoteState::Closed {
+                    // Match flowchart recovery: an unclosed quote is not a multiline label.
+                    // Stop looking ahead after the first unmatched quote so malformed input
+                    // cannot make repeated suffix searches quadratic.
+                    let mut remaining_state = state;
+                    let closes = byte_lines(&input[statement_end..]).any(|next_line| {
+                        remaining_state = scan_flow_quotes(next_line, remaining_state);
+                        remaining_state == FlowQuoteState::Closed
+                    });
+                    if closes {
+                        flow_quote = state;
+                    } else {
+                        join_flow_quotes = false;
+                    }
+                }
             }
         }
     }
 
-    // Flush unclosed accDescr block — treat end-of-input as implicit close.
-    if in_acc_descr_block
-        && builder.parser_config().auto_close_delimiters
-        && !descr_lines.is_empty()
-    {
-        let descr = descr_lines.join("\n");
-        if !descr.is_empty() {
-            builder.set_acc_descr(descr);
+    // An unterminated description remains prose through EOF even when automatic metadata
+    // recovery is disabled. It must not turn into executable directives or graph structure.
+    if let Some(start) = description_start {
+        directives.description_ranges.push(start..input.len());
+        if auto_close_delimiters && !descr_lines.is_empty() {
+            let descr = descr_lines.join("\n");
+            if !descr.is_empty() {
+                directives.acc_descr = Some(descr);
+            }
         }
     }
+    directives
 }
 
 fn is_comment(line: &str) -> bool {
@@ -23001,7 +23303,9 @@ mod tests {
         assert_eq!(compact.ir.edges.len(), 1);
         assert_eq!(
             compact.ir.meta.acc_descr.as_deref(),
-            Some("Alice->>Bob: description only")
+            // Semicolons delimit ordinary sequence statements, but remain literal prose inside
+            // an accessibility-description block.
+            Some("; Alice->>Bob: description only;")
         );
         let label = compact.ir.edges[0].label.expect("actual message");
         assert_eq!(compact.ir.labels[label.0].text, "real");
@@ -26229,7 +26533,7 @@ First,Target,2
         let parsed = parse_mermaid(
             "sankey-beta\n\
              accDescr {\n\
-             A description ending in a brace }\n\
+             A description containing an open brace {\n\
              Not,A,12\n\
              }\n\
              %%{deck: {\n\
@@ -26243,7 +26547,7 @@ First,Target,2
         assert_eq!(parsed.ir.edges[0].span.start.line, 10);
         assert_eq!(
             parsed.ir.meta.acc_descr.as_deref(),
-            Some("A description ending in a brace }\nNot,A,12")
+            Some("A description containing an open brace {\nNot,A,12")
         );
         assert_eq!(
             parsed
@@ -32960,6 +33264,510 @@ classDef hot color: #ff0000, stroke-color: #111111, radius: 9
     }
 
     // ── Accessibility directive tests ──────────────────────────────────
+
+    #[test]
+    fn accessibility_description_is_opaque_across_diagram_families() {
+        for (header, body) in [
+            ("classDiagram", "class Account\nAccount --> Order"),
+            ("stateDiagram-v2", "Account --> Order"),
+            ("erDiagram", "Account ||--o{ Order : places"),
+            ("mindmap", "  root(Root)\n    Child"),
+            ("timeline", "2025 : Release"),
+            ("block-beta", "columns 2\nA B\nA --> B"),
+        ] {
+            let source = format!(
+                "{header}\naccDescr {{\nphantom --> impostor\nThis is narrative only\n}}\n{body}\n"
+            );
+            let parsed = parse_mermaid(&source);
+            assert!(
+                parsed.warnings.is_empty(),
+                "{header}: {:?}",
+                parsed.warnings
+            );
+            assert_eq!(parsed.ir.nodes.len(), 2, "{header}");
+            assert_eq!(parsed.ir.edges.len(), 1, "{header}");
+            assert_eq!(
+                parsed.ir.meta.acc_descr.as_deref(),
+                Some("phantom --> impostor\nThis is narrative only"),
+                "{header}"
+            );
+            assert!(parsed.ir.nodes.iter().all(|node| {
+                node.id != "phantom" && node.id != "impostor" && node.span_primary.start.line >= 6
+            }));
+        }
+    }
+
+    #[test]
+    fn accessibility_description_closer_does_not_close_state_or_class_groups() {
+        for (source, expected_members) in [
+            (
+                "stateDiagram-v2\nstate Outer {\naccDescr {\nNarrative\n}\nA --> B\n}\nstate Tail\n",
+                ["A", "B"],
+            ),
+            (
+                "classDiagram\nnamespace Outer {\naccDescr {\nNarrative\n}\nclass A\nclass B\n}\nclass Tail\n",
+                ["A", "B"],
+            ),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.ir.clusters.len(), 1);
+            let members: Vec<_> = parsed.ir.clusters[0]
+                .members
+                .iter()
+                .map(|id| parsed.ir.nodes[id.0].id.as_str())
+                .collect();
+            assert_eq!(members, expected_members);
+            assert!(parsed.ir.nodes.iter().any(|node| node.id == "Tail"));
+            assert!(!parsed.ir.nodes.iter().any(|node| node.id == "Narrative"));
+        }
+    }
+
+    #[test]
+    fn accessibility_description_cannot_apply_styles_config_titles_or_decks() {
+        let source = concat!(
+            "flowchart LR\naccTitle: Actual accessible title\naccDescr {\n",
+            "style A fill:#ff0000\nclassDef loud stroke:#ff0000\nclass A loud\n",
+            "linkStyle 0 stroke:#ff0000\ntitle Injected title\naccTitle: Injected title\n",
+            "%%{deck: {\nFake deck text\n%%{init: this is not JSON}%%\n",
+            "A --> B\nstyle A fill:#123456\n",
+            "%%{init: {theme: 'dark'}}%%\ntitle Actual title\n",
+            "%%{deck: {slides: [{id: 'real', nodes: ['A']}]}}%%\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Actual title"));
+        assert_eq!(
+            parsed.ir.meta.acc_title.as_deref(),
+            Some("Actual accessible title")
+        );
+        assert!(
+            parsed
+                .ir
+                .meta
+                .acc_descr
+                .as_ref()
+                .unwrap()
+                .contains("this is not JSON")
+        );
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert!(parsed.ir.meta.init.errors.is_empty());
+        assert!(parsed.ir.style_defs.is_empty());
+        assert!(parsed.ir.nodes.iter().all(|node| node.classes.is_empty()));
+        assert_eq!(parsed.ir.style_refs.len(), 1);
+        assert_eq!(parsed.ir.style_refs[0].style, "fill:#123456");
+        let deck = parsed
+            .ir
+            .deck
+            .as_ref()
+            .expect("real deck survives description masking");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].id, "real");
+        let validation = validate_init_directives(source);
+        assert!(validation.is_valid(), "{:?}", validation.errors);
+    }
+
+    #[test]
+    fn accessibility_description_masks_only_narrative_config_errors() {
+        let source = concat!(
+            "flowchart LR\naccDescr {\n%%{init: narrative only}%%\n\n",
+            "A --> B\n%%{init: actually invalid}%%\n",
+        );
+        let validation = validate_init_directives(source);
+        assert_eq!(validation.errors.len(), 1);
+        assert_eq!(validation.errors[0].field, "init[6]");
+        assert_eq!(validation.errors[0].value, "actually invalid");
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.meta.init.errors.len(), 1);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| { warning.contains("Line 6: invalid init directive payload") })
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn accessibility_description_mask_preserves_unicode_bytes_and_crlf_positions() {
+        let source = "flowchart LR\r\naccDescr {\r\n説明 café\r\n}\r\nA --> B\r\n";
+        let scan = super::scan_accessibility_directives(source, DiagramType::Flowchart, true);
+        assert_eq!(scan.acc_descr.as_deref(), Some("説明 café"));
+        assert_eq!(scan.description_ranges.len(), 1);
+        let range = scan.description_ranges[0].clone();
+        let masked = super::blank_source_ranges(source, scan.description_ranges);
+        assert_eq!(masked.len(), source.len());
+        assert_eq!(&masked[..range.start], &source[..range.start]);
+        assert_eq!(&masked[range.end..], &source[range.end..]);
+        for (before, after) in source.bytes().zip(masked.bytes()) {
+            if matches!(before, b'\r' | b'\n') {
+                assert_eq!(after, before);
+            }
+        }
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges[0].span.start.line, 5);
+        assert_eq!(parsed.ir.nodes[0].span_primary.start.line, 5);
+    }
+
+    #[test]
+    fn accessibility_description_compact_unicode_keeps_source_lens_spans() {
+        for newline in ["\n", "\r\n"] {
+            for source in [
+                format!("sequenceDiagram; accDescr {{ 説明 😀 }}; A->>B: actual{newline}"),
+                format!("sankey-beta{newline}accDescr {{{newline}説明 😀 }} A,B,10{newline}"),
+            ] {
+                let parsed = parse_mermaid(&source);
+                assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+                assert_eq!(parsed.ir.meta.acc_descr.as_deref(), Some("説明 😀"));
+                assert_eq!(parsed.ir.nodes.len(), 2);
+                assert_eq!(parsed.ir.edges.len(), 1);
+                let line = source.lines().last().unwrap();
+                for span in parsed
+                    .ir
+                    .nodes
+                    .iter()
+                    .map(|node| node.span_primary)
+                    .chain(parsed.ir.edges.iter().map(|edge| edge.span))
+                {
+                    let range = crate::resolve_span_text_range(&source, span)
+                        .expect("compact Unicode source span must resolve");
+                    assert_eq!(&source[range.start_byte..range.end_byte], line);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accessibility_description_unicode_suffix_spans_cover_diagram_families() {
+        // Every family has its own body parser, but shares the same source-span repair.
+        // Cover node/edge spans, graph mirrors, clusters, and metadata-only charts too.
+        for newline in ["\n", "\r\n"] {
+            for (header, body) in [
+                ("flowchart LR", "A --> B"),
+                ("sequenceDiagram", "A->>B: actual"),
+                ("classDiagram", "A --> B"),
+                ("stateDiagram-v2", "A --> B"),
+                ("erDiagram", "A ||--o{ B : contains"),
+                ("block-beta", "A B"),
+                ("timeline", "2025 : Release"),
+                ("pie", "\"A\": 1"),
+                ("quadrantChart", "A: [0.1, 0.9]"),
+                ("packet-beta", "0-7: \"A\""),
+                ("journey", "Task: 5: User"),
+                ("gantt", "Task :t1, 2026-01-01, 1d"),
+                ("xychart-beta", "bar [5]"),
+                ("gitGraph", "commit"),
+                ("architecture-beta", "service a(server)[A]"),
+                ("C4Context", "Person(a, \"A\")"),
+                ("C4Container", "Person(a, \"A\")"),
+                ("C4Component", "Person(a, \"A\")"),
+                ("C4Dynamic", "Person(a, \"A\")"),
+                ("C4Deployment", "Person(a, \"A\")"),
+                ("requirementDiagram", "requirement A {\n id: 1\n}"),
+                ("radar-beta", "axis a\ncurve c{1}"),
+                ("treemap", "\"A\": 1"),
+                ("venn-beta", "set A"),
+                ("wardley-beta", "component A [0.5, 0.5]"),
+                ("eventmodeling", "tf 01 ui A"),
+                ("mindmap", "root(Root)"),
+                ("ishikawa", "Problem"),
+                ("treeView-beta", "\"Root\""),
+                ("kanban", "Lane"),
+            ] {
+                let body = body.replace('\n', newline);
+                let source = format!("{header}{newline}accDescr {{ 説明 😀 }} {body}{newline}");
+                let mut parsed = parse_mermaid(&source);
+                assert!(
+                    parsed.warnings.is_empty(),
+                    "{header}: {:?}",
+                    parsed.warnings
+                );
+                assert_eq!(
+                    parsed.ir.meta.acc_descr.as_deref(),
+                    Some("説明 😀"),
+                    "{header}"
+                );
+                let mut affected = 0;
+                super::visit_ir_source_spans(&mut parsed.ir, |span| {
+                    if span.is_unknown() {
+                        return;
+                    }
+                    let range = crate::resolve_span_text_range(&source, *span)
+                        .unwrap_or_else(|| panic!("{header}: invalid source span {span:?}"));
+                    if span.start.line == 2 && span.end.line == 2 {
+                        assert_eq!(
+                            &source[range.start_byte..range.end_byte],
+                            source.lines().nth(1).unwrap(),
+                            "{header}"
+                        );
+                        affected += 1;
+                    }
+                });
+                assert!(
+                    affected > 0,
+                    "{header}: exercise a real diagram source span"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accessibility_description_column_repair_preserves_original_metadata_spans() {
+        let source = "accDescr { 説明 😀 } A --> B";
+        let scan = super::scan_accessibility_directives(source, DiagramType::Flowchart, true);
+        let masked = super::blank_source_ranges(source, scan.description_ranges);
+        let original_span = super::span_for(1, source);
+        let masked_span = super::span_for(1, &masked);
+        assert_ne!(original_span, masked_span);
+        let mut ir = fm_core::MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.diagnostics.push(
+            fm_core::Diagnostic::warning("already original")
+                .with_span(original_span)
+                .with_related("masked source", masked_span),
+        );
+        let suffix_byte = source.find("A --> B").unwrap();
+        let mut original_suffix = original_span;
+        original_suffix.start.col = source[..suffix_byte].chars().count() as u32 + 1;
+        let mut masked_suffix = masked_span;
+        masked_suffix.start.col = masked[..suffix_byte].chars().count() as u32 + 1;
+        ir.diagnostics
+            .push(fm_core::Diagnostic::warning("masked suffix").with_span(masked_suffix));
+        let mut byte_span = original_suffix;
+        byte_span.start.byte = suffix_byte as u32;
+        byte_span.end.byte = source.len() as u32;
+        ir.diagnostics
+            .push(fm_core::Diagnostic::warning("original bytes").with_span(byte_span));
+        super::restore_masked_line_span_columns(&mut ir, source, &masked);
+        assert_eq!(ir.diagnostics[0].span, Some(original_span));
+        assert_eq!(ir.diagnostics[0].related[0].span, original_span);
+        assert_eq!(ir.diagnostics[1].span, Some(original_suffix));
+        assert_eq!(ir.diagnostics[2].span, Some(byte_span));
+        let range = crate::resolve_span_text_range(source, original_suffix).unwrap();
+        assert_eq!(&source[range.start_byte..range.end_byte], "A --> B");
+    }
+
+    #[test]
+    fn chart_metadata_spans_reference_authored_lines() {
+        for source in [
+            "radar-beta\naxis a\ncurve c{1}\n",
+            "treemap\n\"Root\"\n  \"Leaf\": 1\n",
+        ] {
+            let mut parsed = parse_mermaid(source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            let mut lines = Vec::new();
+            super::visit_ir_source_spans(&mut parsed.ir, |span| {
+                let range = crate::resolve_span_text_range(source, *span)
+                    .expect("chart metadata must reference its original physical line");
+                assert_eq!(
+                    &source[range.start_byte..range.end_byte],
+                    source.lines().nth(span.start.line as usize - 1).unwrap()
+                );
+                lines.push(span.start.line);
+            });
+            assert_eq!(lines, [2, 3]);
+        }
+    }
+
+    #[test]
+    fn event_model_source_spans_track_compact_frames() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "eventmodeling{newline}tf 01 ui A tf 02 cmd B{newline}tf 03 evt C{newline}"
+            );
+            let parsed = parse_mermaid(&source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.ir.nodes.len(), 3);
+            assert_eq!(parsed.ir.edges.len(), 2);
+            for (node, expected_line) in parsed.ir.nodes.iter().zip([2, 2, 3]) {
+                assert_eq!(node.span_primary.start.line, expected_line);
+                let range = crate::resolve_span_text_range(&source, node.span_primary)
+                    .expect("event frame span must select its declaration line");
+                assert_eq!(
+                    &source[range.start_byte..range.end_byte],
+                    source.lines().nth(expected_line as usize - 1).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accessibility_description_recovery_never_executes_unclosed_narrative() {
+        let source = concat!(
+            "classDiagram\nA --> B\naccDescr {\nphantom --> impostor\n",
+            "%%{init: narrative only\n",
+        );
+        for auto_close_delimiters in [true, false] {
+            let parsed = parse_with_mode_and_config(
+                source,
+                MermaidParseMode::Compat,
+                &ParserConfig {
+                    auto_close_delimiters,
+                    ..ParserConfig::default()
+                },
+            );
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.ir.nodes.len(), 2);
+            assert_eq!(parsed.ir.edges.len(), 1);
+            assert_eq!(parsed.ir.meta.acc_descr.is_some(), auto_close_delimiters);
+            assert!(parsed.ir.meta.init.errors.is_empty());
+        }
+        assert!(validate_init_directives(source).is_valid());
+
+        let recovered = parse_mermaid(
+            "flowchart LR\nA[\"Unclosed\naccDescr {\nRecovery information\n}\nB --> C\n",
+        );
+        assert_eq!(
+            recovered.ir.meta.acc_descr.as_deref(),
+            Some("Recovery information")
+        );
+        assert!(recovered.ir.nodes.iter().any(|node| node.id == "B"));
+        assert!(recovered.ir.nodes.iter().any(|node| node.id == "C"));
+    }
+
+    #[test]
+    fn accessibility_description_supports_inline_blocks_and_source_order() {
+        let parsed =
+            parse_mermaid("flowchart LR\naccDescr: old\naccDescr { Read all orders }\nA --> B\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.acc_descr.as_deref(), Some("Read all orders"));
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let compact = parse_mermaid(
+            "sequenceDiagram; accDescr { Narrative }; A->>B: actual; accDescr: final",
+        );
+        assert!(compact.warnings.is_empty(), "{:?}", compact.warnings);
+        assert_eq!(compact.ir.meta.acc_descr.as_deref(), Some("final"));
+        assert_eq!(compact.ir.nodes.len(), 2);
+        assert_eq!(compact.ir.edges.len(), 1);
+
+        for (source, expected) in [
+            (
+                "sequenceDiagram\naccDescr { Use A; then B }\nA->>B: actual\n",
+                "Use A; then B",
+            ),
+            (
+                "sequenceDiagram; accDescr { Use A; then B }; A->>B: actual",
+                "Use A; then B",
+            ),
+            (
+                "sequenceDiagram\naccDescr { Use A; then B } %% trailing comment\nA->>B: actual\n",
+                "Use A; then B",
+            ),
+            (
+                "sequenceDiagram\naccDescr { Use A; then B\nContinue; with literal %% prose\n}\nA->>B: actual\n",
+                "Use A; then B\nContinue; with literal %% prose",
+            ),
+            (
+                "sequenceDiagram\naccDescr {\nUse A; then B }\nA->>B: actual\n",
+                "Use A; then B",
+            ),
+            (
+                "sequenceDiagram\naccDescr {\nUse A; then B } %% trailing comment\nA->>B: actual\n",
+                "Use A; then B",
+            ),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.ir.meta.acc_descr.as_deref(), Some(expected));
+            assert_eq!(parsed.ir.nodes.len(), 2);
+            assert_eq!(parsed.ir.edges.len(), 1);
+            let label = parsed.ir.edges[0].label.expect("actual message");
+            assert_eq!(parsed.ir.labels[label.0].text, "actual");
+            assert_eq!(
+                parsed.ir.edges[0].span.start.line as usize,
+                source.lines().count()
+            );
+        }
+
+        let suffix = parse_mermaid(
+            "sequenceDiagram\naccDescr {\nUse A; then B }; accTitle: After; A->>B: actual\n",
+        );
+        assert!(suffix.warnings.is_empty(), "{:?}", suffix.warnings);
+        assert_eq!(suffix.ir.meta.acc_descr.as_deref(), Some("Use A; then B"));
+        assert_eq!(suffix.ir.meta.acc_title.as_deref(), Some("After"));
+        assert_eq!(suffix.ir.edges.len(), 1);
+        assert_eq!(suffix.ir.edges[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn accessibility_description_markers_in_labels_notes_and_csv_remain_content() {
+        let flow = parse_mermaid(
+            "flowchart LR\nA[\"Intro\naccDescr {\nLiteral node text\n}\nEnd\"] --> B\n",
+        );
+        assert!(flow.warnings.is_empty(), "{:?}", flow.warnings);
+        assert_eq!(flow.ir.nodes.len(), 2);
+        assert_eq!(flow.ir.edges.len(), 1);
+        assert!(flow.ir.meta.acc_descr.is_none());
+        let label = flow.ir.nodes[0].label.expect("multiline label");
+        assert!(flow.ir.labels[label.0].text.contains("accDescr {"));
+        assert!(flow.ir.labels[label.0].text.contains("Literal node text"));
+
+        let state = parse_mermaid(
+            "stateDiagram-v2\nA --> B\nnote right of A\naccDescr {\nLiteral note text\n}\nend note\n",
+        );
+        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+        assert!(state.ir.meta.acc_descr.is_none());
+        assert_eq!(state.ir.state_notes.len(), 1);
+        assert_eq!(
+            state.ir.state_notes[0].text,
+            "accDescr {\nLiteral note text\n}"
+        );
+
+        let sankey = parse_mermaid(
+            "sankey-beta\n\"Start\naccDescr {\nLiteral CSV text\n}\nEnd\",Target,7\naccDescr { Actual description }\n",
+        );
+        assert!(sankey.warnings.is_empty(), "{:?}", sankey.warnings);
+        assert_eq!(sankey.ir.nodes.len(), 2);
+        assert_eq!(sankey.ir.edges.len(), 1);
+        assert_eq!(
+            sankey.ir.meta.acc_descr.as_deref(),
+            Some("Actual description")
+        );
+        assert!(sankey.ir.nodes[0].id.contains("accDescr {"));
+
+        for opener in ["accDescr { Intro", "accDescr{ Intro"] {
+            for closing in ["more narrative\n}", "more narrative }"] {
+                let source = format!("sankey-beta\n{opener}\n{closing}\nA,B,10\n");
+                let sankey = parse_mermaid(&source);
+                assert!(sankey.warnings.is_empty(), "{:?}", sankey.warnings);
+                assert_eq!(
+                    sankey.ir.meta.acc_descr.as_deref(),
+                    Some("Intro\nmore narrative")
+                );
+                assert_eq!(sankey.ir.nodes.len(), 2);
+                assert_eq!(sankey.ir.edges.len(), 1);
+                assert_eq!(
+                    sankey.ir.edges[0].span.start.line as usize,
+                    source.lines().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accessibility_description_does_not_consume_deck_payloads_or_similar_identifiers() {
+        let source = concat!(
+            "flowchart LR\n%%{deck: {\n/*\naccDescr {\nLiteral deck comment\n*/\n",
+            "slides: [{id: 'real', nodes: ['accDescr']}],\n}}%%\n",
+            "accDescr { Actual description }\naccDescrMore[Alpha] --> accDescr[Beta]\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].id, "accDescrMore");
+        assert_eq!(parsed.ir.nodes[1].id, "accDescr");
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("Actual description")
+        );
+        assert_eq!(parsed.ir.deck.as_ref().unwrap().slides[0].id, "real");
+    }
 
     #[test]
     fn acc_title_parsed_from_any_diagram() {
