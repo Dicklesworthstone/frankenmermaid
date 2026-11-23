@@ -293,24 +293,7 @@ impl AffineMatrix2D {
     }
 }
 
-/// Recover a positive uniform scale from the `e+∧e-` rotor component.
-///
-/// A dilation rotor stores `sinh(ln(scale) / 2)`, so extracting the scale
-/// requires the inverse hyperbolic sine before exponentiating. Keeping this
-/// conversion in one place prevents transform inspection from disagreeing
-/// with affine conversion.
-#[must_use]
-fn dilation_scale(epm: f64) -> f64 {
-    let half_log_scale = epm.asinh();
-    let scale = (2.0 * half_log_scale).exp();
-    if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    }
-}
-
-/// A CGA rotor representing a rigid transform in 2D.
+/// A CGA rotor representing an orientation-preserving similarity in 2D.
 ///
 /// Rotors compose via geometric product and apply transforms via
 /// the sandwich product: x' = R x R̃.
@@ -331,6 +314,9 @@ pub enum CgaTransformError {
     /// A rotor contains `NaN` or infinity and cannot define a transform.
     #[error("CGA rotor contains a non-finite component")]
     NonFiniteRotor,
+    /// A finite rotor is singular or does not preserve the point at infinity.
+    #[error("CGA rotor does not represent a nondegenerate affine similarity")]
+    InvalidRotor,
     /// A point contains `NaN` or infinity and cannot be transformed safely.
     #[error("CGA transform point contains a non-finite coordinate")]
     NonFinitePoint,
@@ -359,12 +345,12 @@ impl Rotor {
 
     /// Create a translation rotor.
     ///
-    /// T = 1 + (dx·e1 + dy·e2)·e_inf/2
+    /// T = 1 - (dx·e1 + dy·e2)·e_inf/2
     /// where e_inf = e+ + e- is the point at infinity.
     #[must_use]
     pub fn translation(dx: f64, dy: f64) -> Self {
-        let half_dx = dx / 2.0;
-        let half_dy = dy / 2.0;
+        let half_dx = canonical_zero(-dx / 2.0);
+        let half_dy = canonical_zero(-dy / 2.0);
         Self {
             components: [
                 1.0, 0.0, half_dx, // e1+ component
@@ -378,18 +364,27 @@ impl Rotor {
 
     /// Create a rotation rotor (angle in radians, around origin).
     ///
-    /// R = cos(θ/2) + sin(θ/2)·e1∧e2
+    /// R = cos(θ/2) - sin(θ/2)·e1∧e2
     #[must_use]
     pub fn rotation(angle: f64) -> Self {
         let half = angle / 2.0;
         Self {
-            components: [half.cos(), half.sin(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            components: [
+                half.cos(),
+                canonical_zero(-half.sin()),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
         }
     }
 
     /// Create a uniform scale rotor.
     ///
-    /// S = cosh(ln(s)/2) + sinh(ln(s)/2)·e+∧e-
+    /// S = cosh(ln(s)/2) - sinh(ln(s)/2)·e+∧e-
     ///
     /// # Panics
     /// Panics if factor is not positive (ln of non-positive is undefined).
@@ -405,7 +400,7 @@ impl Rotor {
                 0.0,
                 0.0,
                 0.0,
-                half_log.sinh(), // e+- component
+                canonical_zero(-half_log.sinh()), // e+- component
                 0.0,
             ],
         }
@@ -462,6 +457,44 @@ impl Rotor {
     /// Compose two rotors: self * other (geometric product of even subalgebra).
     #[must_use]
     pub fn compose(self, other: Self) -> Self {
+        let left = self.components;
+        let right = other.components;
+        if left[2] == left[3] && left[4] == left[5] && right[2] == right[3] && right[4] == right[5]
+        {
+            // In the infinity-preserving subalgebra, the e+ and e- translation
+            // terms cancel exactly in the linear part. Expanding them first
+            // would subtract enormous squared translations, losing the scalar
+            // identity term or producing infinity minus infinity. Reduce those
+            // equal pairs algebraically before evaluating the same product.
+            let x = (left[0] - left[6]) * right[2]
+                + (left[1] - left[7]) * right[4]
+                + (right[0] + right[6]) * left[2]
+                - (right[1] + right[7]) * left[4];
+            let y = (left[0] - left[6]) * right[4] - (left[1] - left[7]) * right[2]
+                + (right[0] + right[6]) * left[4]
+                + (right[1] + right[7]) * left[2];
+            return Self {
+                components: [
+                    left[0] * right[0] - left[1] * right[1] + left[6] * right[6]
+                        - left[7] * right[7],
+                    left[0] * right[1]
+                        + left[1] * right[0]
+                        + left[6] * right[7]
+                        + left[7] * right[6],
+                    x,
+                    x,
+                    y,
+                    y,
+                    left[6] * right[0] + left[0] * right[6]
+                        - left[7] * right[1]
+                        - left[1] * right[7],
+                    left[6] * right[1]
+                        + left[1] * right[6]
+                        + left[7] * right[0]
+                        + left[0] * right[7],
+                ],
+            };
+        }
         Self::from_multivector(
             self.to_multivector()
                 .geometric_product(other.to_multivector()),
@@ -525,103 +558,94 @@ impl Rotor {
 
     /// Convert this rotor to a 2D affine matrix.
     ///
-    /// Applies the rotor to basis points (0,0), (1,0), (0,1) and extracts
-    /// the affine coefficients.
+    /// Decodes the similarity represented by `R P reverse(R)`, normalizing the
+    /// resulting conformal point. Composition has the same order as
+    /// [`AffineMatrix2D::compose`], including interleaved translations,
+    /// rotations, and dilations. A nonzero homogeneous multiple of a rotor
+    /// represents the same transform.
+    ///
+    /// Invalid or unrepresentable state produces non-finite coefficients;
+    /// [`Self::try_to_affine_matrix`] returns an explicit error instead.
     #[must_use]
     pub fn to_affine_matrix(self) -> AffineMatrix2D {
-        let s = self.components[0];
-        let e12 = self.components[1];
-        let e1p = self.components[2];
-        let e1m = self.components[3];
-        let e2p = self.components[4];
-        let e2m = self.components[5];
-        let epm = self.components[6];
-        let e12pm = self.components[7];
-
-        // Decompose the composite rotor M = T·S·R. Writing L = ln(scale)/2 and h = θ/2, the
-        // geometric product distributes the dilation across BOTH the scalar/e12 pair and the
-        // e+-/e12+- pair:
-        //
-        //     s     = cos(h)·cosh(L)      e12   = sin(h)·cosh(L)
-        //     epm   = cos(h)·sinh(L)      e12pm = sin(h)·sinh(L)
-        //
-        // The previous code read `epm` as sinh(L) directly and normalized the half-angle by
-        // sqrt(1 + epm²). Both are only true when the other factor is absent, i.e. for a rotor
-        // carrying a dilation OR a rotation but never both — which is precisely the case the unit
-        // tests covered. Recover each factor from its own invariant instead.
-        let cosh_l = s.hypot(e12);
-        let (cos_half, sin_half) = if cosh_l > 1e-12 {
-            (s / cosh_l, e12 / cosh_l)
-        } else {
-            (s, e12)
-        };
-        // Projecting (epm, e12pm) onto the half-angle direction yields sinh(L) with its sign,
-        // since cos(h)² + sin(h)² = 1.
-        let sinh_l = epm.mul_add(cos_half, e12pm * sin_half);
-        // e^L = cosh(L) + sinh(L), and scale = e^(2L) = (cosh(L) + sinh(L))².
-        let half_dilation = cosh_l + sinh_l;
-        let scale_factor = if half_dilation.is_finite() && half_dilation > 1e-12 {
-            half_dilation * half_dilation
-        } else {
-            dilation_scale(sinh_l)
-        };
-
-        // Recover full rotation angle using double angle formulas
-        let cos_theta = cos_half * cos_half - sin_half * sin_half;
-        let sin_theta = 2.0 * cos_half * sin_half;
-
-        // Translation from e1+/e1- and e2+/e2- components.
-        //
-        // These are NOT the translation directly once a rotation or dilation is also present.
-        // `Rotor::translation` stores t/2 on each of e1e±/e2e±, but composing it with a rotation
-        // (`compose` = geometric product) mixes those components: (e1e±)·e12 yields an e2e± term
-        // and vice versa. For the canonical composite M = T·S·R the raw sums come out as
-        //
-        //     raw = sqrt(scale) · Rot(θ/2) · t
-        //
-        // — the stored translation rotated by HALF the rotation angle and dilated by the half-
-        // dilation. Reading `e1p + e1m` back as `tx` was therefore only correct for a pure
-        // translation, which is the only case the unit tests covered. Undo both to recover t.
-        let raw_tx = e1p + e1m;
-        let raw_ty = e2p + e2m;
-        let (raw_tx, raw_ty) = if half_dilation.is_finite() && half_dilation > 1e-12 {
-            (raw_tx / half_dilation, raw_ty / half_dilation)
-        } else {
-            (raw_tx, raw_ty)
-        };
-        // Inverse of a Rot(θ/2), i.e. Rot(-θ/2), using the already-normalized half-angle terms.
-        let tx = raw_tx.mul_add(cos_half, raw_ty * sin_half);
-        let ty = raw_ty.mul_add(cos_half, -(raw_tx * sin_half));
-
-        // CANONICALIZE THE SIGN OF ZERO (bd-1s1g.6). `b` is a negated sine, so an unrotated
-        // transform -- by far the commonest one -- produced `-0.0 * scale` = `-0.0`, and the
-        // identity matrix came out carrying a negative zero. It reached the canvas op stream as
-        // `SetTransform(1.0, 0.0, -0.0, 1.0, ...)`.
-        //
-        // The sign of a zero has NO geometric meaning in an affine matrix: `-0.0 == 0.0` is true,
-        // so it changes no rendering and no numeric assertion can see it. What it does change is
-        // the BITS, and this bead's subject is bit-identical output across targets. It also hides
-        // asymmetrically -- fm-render-svg's `write_number_into` takes an integer fast path
-        // (`let i = n as i32; if i as f32 == n`) which prints `-0.0` as "0", so the SVG normalises
-        // it by accident while the canvas records it faithfully. Fixed HERE, where it is produced,
-        // rather than at either formatter: normalising at the canvas would have made the last
-        // instrument that can see it blind too.
-        AffineMatrix2D {
-            a: canonical_zero(cos_theta * scale_factor),
-            b: canonical_zero(-sin_theta * scale_factor),
-            tx: canonical_zero(tx),
-            c: canonical_zero(sin_theta * scale_factor),
-            d: canonical_zero(cos_theta * scale_factor),
-            ty: canonical_zero(ty),
-        }
+        self.try_to_affine_matrix().unwrap_or(AffineMatrix2D {
+            a: f64::NAN,
+            b: f64::NAN,
+            tx: f64::NAN,
+            c: f64::NAN,
+            d: f64::NAN,
+            ty: f64::NAN,
+        })
     }
 
-    /// Convert this rotor to an affine matrix while rejecting non-finite state.
+    /// Convert this rotor while rejecting non-finite, singular, or non-affine state.
+    ///
+    /// Extremely large or small dilations can lose the difference between
+    /// their hyperbolic components in `f64`. Such a singular encoding is
+    /// rejected, never replaced with the identity transform.
     pub fn try_to_affine_matrix(self) -> Result<AffineMatrix2D, CgaTransformError> {
         if !self.is_finite() {
             return Err(CgaTransformError::NonFiniteRotor);
         }
-        let matrix = self.to_affine_matrix();
+        let [s, e12, e1p, e1m, e2p, e2m, epm, e12pm] = self.components;
+        let linear_scale = s.abs().max(e12.abs()).max(epm.abs()).max(e12pm.abs());
+        if linear_scale == 0.0 {
+            return Err(CgaTransformError::InvalidRotor);
+        }
+
+        // A similarity fixes infinity: its translation blades occur in equal
+        // e+ / e- pairs. Constructors and the reduced product preserve that
+        // equality exactly. A tolerance relative to a large translation would
+        // admit a real transversion, whose action is not affine.
+        // R reverse(R) must also have no pseudoscalar part; normalize that
+        // comparison so homogeneous rescaling cannot overflow it.
+        const TOLERANCE: f64 = 64.0 * f64::EPSILON;
+        let s = s / linear_scale;
+        let e12 = e12 / linear_scale;
+        let epm = epm / linear_scale;
+        let e12pm = e12pm / linear_scale;
+        if e1p != e1m || e2p != e2m || s.mul_add(e12pm, -(e12 * epm)).abs() > TOLERANCE {
+            return Err(CgaTransformError::InvalidRotor);
+        }
+
+        // For z = x + i*y, the normalized sandwich product is z' = alpha*z + t:
+        //   q     = (s + epm) + i*(e12 + e12pm)
+        //   alpha = ((s - epm) - i*(e12 - e12pm)) / q
+        //   t     = -((e1p + e1m) + i*(e2p + e2m)) / q
+        // These ratios depend on the composed rotor, not on the order used to
+        // construct it. They also cancel any nonzero homogeneous rotor factor.
+        let q_re = s + epm;
+        let q_im = e12 + e12pm;
+        let alpha_re = s - epm;
+        let alpha_im = e12pm - e12;
+        let q_norm = q_re.hypot(q_im);
+        let rotor_norm = alpha_re.mul_add(q_re, -(alpha_im * q_im));
+        if q_norm == 0.0 || rotor_norm <= 0.0 {
+            return Err(CgaTransformError::InvalidRotor);
+        }
+
+        // Divide by the magnitude before rotating rather than forming |q|²;
+        // squaring would underflow for small homogeneous representations.
+        let q_cos = q_re / q_norm;
+        let q_sin = q_im / q_norm;
+        let alpha_re = alpha_re / q_norm;
+        let alpha_im = alpha_im / q_norm;
+        let a = alpha_re.mul_add(q_cos, alpha_im * q_sin);
+        let c = alpha_im.mul_add(q_cos, -(alpha_re * q_sin));
+        let raw_tx = (e1p / linear_scale) / q_norm + (e1m / linear_scale) / q_norm;
+        let raw_ty = (e2p / linear_scale) / q_norm + (e2m / linear_scale) / q_norm;
+        let tx = -raw_tx.mul_add(q_cos, raw_ty * q_sin);
+        let ty = -raw_ty.mul_add(q_cos, -(raw_tx * q_sin));
+
+        // Keep SVG, Canvas, and terminal transform streams bit-consistent at zero.
+        let matrix = AffineMatrix2D {
+            a: canonical_zero(a),
+            b: canonical_zero(-c),
+            tx: canonical_zero(tx),
+            c: canonical_zero(c),
+            d: canonical_zero(a),
+            ty: canonical_zero(ty),
+        };
         if [matrix.a, matrix.b, matrix.tx, matrix.c, matrix.d, matrix.ty]
             .into_iter()
             .all(f64::is_finite)
@@ -648,6 +672,304 @@ fn canonical_zero(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_affine_close(actual: AffineMatrix2D, expected: AffineMatrix2D, tolerance: f64) {
+        let linear_tolerance = tolerance * expected.a.hypot(expected.c);
+        let translation_tolerance = tolerance * expected.tx.abs().max(expected.ty.abs()).max(1.0);
+        for (got, want, allowed) in [
+            (actual.a, expected.a, linear_tolerance),
+            (actual.b, expected.b, linear_tolerance),
+            (actual.c, expected.c, linear_tolerance),
+            (actual.d, expected.d, linear_tolerance),
+            (actual.tx, expected.tx, translation_tolerance),
+            (actual.ty, expected.ty, translation_tolerance),
+        ] {
+            assert!(
+                (got - want).abs() <= allowed,
+                "affine coefficient {got} differs from {want} by more than {allowed}: \
+                 actual={actual:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotor_composition_matches_affine_matrices_in_every_primitive_order() {
+        for scale in [0.125, 1.0, 3.5] {
+            for angle in [0.0, std::f64::consts::FRAC_PI_2, -0.7] {
+                let operations = [
+                    (
+                        Rotor::translation(7.5, -12.0),
+                        AffineMatrix2D::translation(7.5, -12.0),
+                    ),
+                    (Rotor::rotation(angle), AffineMatrix2D::rotation(angle)),
+                    (Rotor::scale(scale), AffineMatrix2D::scale(scale)),
+                ];
+                for order in [
+                    [0, 1, 2],
+                    [0, 2, 1],
+                    [1, 0, 2],
+                    [1, 2, 0],
+                    [2, 0, 1],
+                    [2, 1, 0],
+                ] {
+                    let mut rotor = Rotor::identity();
+                    let mut matrix = AffineMatrix2D::identity();
+                    for index in order {
+                        rotor = rotor.compose(operations[index].0);
+                        matrix = matrix.compose(operations[index].1);
+                    }
+                    assert_affine_close(
+                        rotor.try_to_affine_matrix().expect("valid composition"),
+                        matrix,
+                        1e-11,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotor_constructors_and_composition_match_the_conformal_sandwich() {
+        let rotation = std::f64::consts::FRAC_PI_3;
+        let cases = [
+            (
+                Rotor::translation(3.0, -2.0),
+                AffineMatrix2D::translation(3.0, -2.0),
+            ),
+            (
+                Rotor::rotation(rotation),
+                AffineMatrix2D::rotation(rotation),
+            ),
+            (Rotor::scale(2.0), AffineMatrix2D::scale(2.0)),
+            (
+                Rotor::scale(2.0)
+                    .compose(Rotor::translation(3.0, -2.0))
+                    .compose(Rotor::rotation(rotation)),
+                AffineMatrix2D::scale(2.0)
+                    .compose(AffineMatrix2D::translation(3.0, -2.0))
+                    .compose(AffineMatrix2D::rotation(rotation)),
+            ),
+        ];
+        for (rotor, matrix) in cases {
+            for (x, y) in [(0.0, 0.0), (1.0, 0.0), (-2.0, 3.0)] {
+                let transformed = rotor
+                    .to_multivector()
+                    .geometric_product(CgaPoint::new(x, y).to_multivector())
+                    .geometric_product(rotor.reverse().to_multivector());
+                let weight = transformed.components[blade::EM] - transformed.components[blade::EP];
+                let actual = (
+                    transformed.components[blade::E1] / weight,
+                    transformed.components[blade::E2] / weight,
+                );
+                let expected = matrix.apply(x, y);
+                assert!(
+                    (actual.0 - expected.0).abs() < 1e-10 && (actual.1 - expected.1).abs() < 1e-10,
+                    "sandwich mapped ({x}, {y}) to {actual:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pivoted_rotation_and_zoom_preserve_the_pivot() {
+        let (pivot_x, pivot_y) = (17.0, -9.0);
+        for (operation, matrix) in [
+            (
+                Rotor::rotation(std::f64::consts::FRAC_PI_2),
+                AffineMatrix2D::rotation(std::f64::consts::FRAC_PI_2),
+            ),
+            (Rotor::scale(0.25), AffineMatrix2D::scale(0.25)),
+            (Rotor::scale(4.0), AffineMatrix2D::scale(4.0)),
+        ] {
+            let rotor = Rotor::translation(pivot_x, pivot_y)
+                .compose(operation)
+                .compose(Rotor::translation(-pivot_x, -pivot_y));
+            let expected = AffineMatrix2D::translation(pivot_x, pivot_y)
+                .compose(matrix)
+                .compose(AffineMatrix2D::translation(-pivot_x, -pivot_y));
+            let actual = rotor.try_to_affine_matrix().expect("pivoted similarity");
+            assert_affine_close(actual, expected, 1e-11);
+            let fixed = actual.apply(pivot_x, pivot_y);
+            assert!((fixed.0 - pivot_x).abs() < 1e-10);
+            assert!((fixed.1 - pivot_y).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn mixed_rotor_inverse_undoes_the_transform_on_points() {
+        for scale in [0.25, 1.0, 4.0] {
+            let rotor = Rotor::rotation(0.37)
+                .compose(Rotor::translation(-8.0, 13.0))
+                .compose(Rotor::scale(scale))
+                .compose(Rotor::translation(2.0, -3.0));
+            let inverse = rotor.inverse().expect("a similarity has an inverse");
+            for composed in [rotor.compose(inverse), inverse.compose(rotor)] {
+                assert_affine_close(
+                    composed.to_affine_matrix(),
+                    AffineMatrix2D::identity(),
+                    1e-10,
+                );
+            }
+            for point in [(0.0, 0.0), (3.0, -5.0), (-40.0, 22.0)] {
+                let mapped = rotor.to_affine_matrix().apply(point.0, point.1);
+                let restored = inverse.to_affine_matrix().apply(mapped.0, mapped.1);
+                assert!((restored.0 - point.0).abs() < 1e-9);
+                assert!((restored.1 - point.1).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn homogeneous_rotor_multiples_preserve_geometry() {
+        let rotor = Rotor::rotation(-0.45)
+            .compose(Rotor::scale(2.5))
+            .compose(Rotor::translation(3.0, -7.0));
+        let expected = AffineMatrix2D::rotation(-0.45)
+            .compose(AffineMatrix2D::scale(2.5))
+            .compose(AffineMatrix2D::translation(3.0, -7.0));
+        for factor in [1e-200, -3.0, 2.0, 1e200] {
+            let scaled = Rotor {
+                components: rotor.components.map(|component| component * factor),
+            };
+            assert_affine_close(
+                scaled
+                    .try_to_affine_matrix()
+                    .expect("finite homogeneous rotor"),
+                expected,
+                1e-11,
+            );
+        }
+    }
+
+    #[test]
+    fn small_and_large_dilations_preserve_both_translation_orders() {
+        for scale in [1e-6, 1e-3, 1e3, 1e6] {
+            let rotation = Rotor::rotation(0.4);
+            let matrix_rotation = AffineMatrix2D::rotation(0.4);
+            let translation = Rotor::translation(7.0, -11.0);
+            let matrix_translation = AffineMatrix2D::translation(7.0, -11.0);
+            for (rotor, expected) in [
+                (
+                    Rotor::scale(scale).compose(translation).compose(rotation),
+                    AffineMatrix2D::scale(scale)
+                        .compose(matrix_translation)
+                        .compose(matrix_rotation),
+                ),
+                (
+                    translation.compose(rotation).compose(Rotor::scale(scale)),
+                    matrix_translation
+                        .compose(matrix_rotation)
+                        .compose(AffineMatrix2D::scale(scale)),
+                ),
+            ] {
+                assert_affine_close(
+                    rotor
+                        .try_to_affine_matrix()
+                        .expect("representable dilation"),
+                    expected,
+                    2e-9,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn singular_and_non_affine_rotors_are_rejected_without_identity_fallback() {
+        for rotor in [
+            Rotor {
+                components: [0.0; 8],
+            },
+            Rotor {
+                components: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0],
+            },
+            Rotor {
+                components: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            },
+            Rotor {
+                components: [1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            Rotor {
+                components: [1.0, 0.0, 1e14, 1e14 - 1.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            Rotor {
+                components: [1.0, 0.0, 0.0, 0.0, 1e14, 1e14 - 1.0, 0.0, 0.0],
+            },
+            Rotor {
+                components: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+            },
+        ] {
+            assert_eq!(
+                rotor.try_to_affine_matrix(),
+                Err(CgaTransformError::InvalidRotor)
+            );
+            assert!(!rotor.to_affine_matrix().a.is_finite());
+            let mut stack = TransformStack::new();
+            stack.push_translation(3.0, 4.0);
+            let before = stack.rotor();
+            assert_eq!(
+                stack.try_push_rotor(rotor),
+                Err(CgaTransformError::InvalidRotor)
+            );
+            assert_eq!(stack.rotor(), before);
+            assert_eq!(stack.len(), 1);
+            assert_eq!(stack.try_apply(1.0, 2.0), Ok((4.0, 6.0)));
+        }
+    }
+
+    #[test]
+    fn checked_push_rejects_overflow_without_changing_stack_history() {
+        let mut stack = TransformStack::new();
+        stack
+            .try_push_rotor(Rotor::translation(9e307, 0.0))
+            .unwrap();
+        let before = stack.rotor();
+        assert!(
+            stack
+                .try_push_rotor(Rotor::translation(9e307, 0.0))
+                .is_err()
+        );
+        assert_eq!(stack.rotor(), before);
+        assert_eq!(stack.len(), 1);
+        assert!(stack.pop());
+        assert_eq!(stack.try_apply(2.0, 3.0), Ok((2.0, 3.0)));
+    }
+
+    #[test]
+    fn checked_matrix_push_rejects_unrepresentable_finite_scales_without_mutation() {
+        let mut stack = TransformStack::new();
+        stack.push_translation(3.0, 4.0);
+        let before = stack.rotor();
+        for scale in [1e100, 1e200] {
+            // Both matrices are finite similarities, but the first loses its
+            // rotor's hyperbolic difference and the second overflows to_rotor's
+            // scale extraction. Neither may enter the checked stack.
+            assert!(!stack.try_push_matrix(AffineMatrix2D::scale(scale)));
+            assert_eq!(stack.rotor(), before);
+            assert_eq!(stack.len(), 1);
+            assert_eq!(stack.try_apply(1.0, 2.0), Ok((4.0, 6.0)));
+        }
+        assert!(stack.pop());
+        assert_eq!(stack.try_apply(1.0, 2.0), Ok((1.0, 2.0)));
+    }
+
+    #[test]
+    fn large_translations_compose_and_invert_without_losing_the_linear_part() {
+        for magnitude in [1e10, 1e150, 1e300] {
+            let composed = Rotor::translation(magnitude, -magnitude)
+                .compose(Rotor::translation(2.0 * magnitude, 3.0 * magnitude));
+            let expected = AffineMatrix2D::translation(3.0 * magnitude, 2.0 * magnitude);
+            assert_affine_close(composed.try_to_affine_matrix().unwrap(), expected, 1e-14);
+            assert_eq!(composed.norm_squared(), 1.0);
+            let inverse = composed
+                .inverse()
+                .expect("finite translation is invertible");
+            assert_affine_close(
+                composed.compose(inverse).to_affine_matrix(),
+                AffineMatrix2D::identity(),
+                1e-14,
+            );
+        }
+    }
 
     #[test]
     fn identity_rotor_produces_identity_matrix() {
@@ -858,6 +1180,20 @@ mod tests {
             left.to_multivector()
                 .geometric_product(right.to_multivector())
         );
+
+        // The reduced infinity-preserving product must remain the actual
+        // geometric product even when the inputs are not normalized rotors.
+        let left = Rotor {
+            components: [2.0, -1.0, 3.0, 3.0, -4.0, -4.0, 5.0, 6.0],
+        };
+        let right = Rotor {
+            components: [-3.0, 7.0, -2.0, -2.0, 4.0, 4.0, -5.0, 8.0],
+        };
+        assert_eq!(
+            left.compose(right).to_multivector(),
+            left.to_multivector()
+                .geometric_product(right.to_multivector())
+        );
     }
 
     #[test]
@@ -953,12 +1289,14 @@ impl TransformStack {
         self.stack.push(rotor);
     }
 
-    /// Push a rotor only when it is finite, leaving this stack unchanged on error.
+    /// Push a representable similarity, leaving this stack unchanged on error.
     pub fn try_push_rotor(&mut self, rotor: Rotor) -> Result<(), CgaTransformError> {
-        if !rotor.is_finite() {
-            return Err(CgaTransformError::NonFiniteRotor);
-        }
-        self.push_rotor(rotor);
+        rotor.try_to_affine_matrix()?;
+        let composed = self.composed.compose(rotor);
+        composed.try_to_affine_matrix()?;
+        self.previous_composed.push(self.composed);
+        self.composed = composed;
+        self.stack.push(rotor);
         Ok(())
     }
 
@@ -976,10 +1314,7 @@ impl TransformStack {
     /// caller already guards, so the safe entry point is added beside it rather than in place of it.
     pub fn try_push_matrix(&mut self, matrix: AffineMatrix2D) -> bool {
         match matrix.try_to_rotor() {
-            Some(rotor) => {
-                self.push_rotor(rotor);
-                true
-            }
+            Some(rotor) => self.try_push_rotor(rotor).is_ok(),
             None => false,
         }
     }
@@ -1013,18 +1348,18 @@ impl TransformStack {
     /// This is useful for counter-rotating text in rotated diagrams.
     #[must_use]
     pub fn rotation_angle(&self) -> f64 {
-        // For a rotation rotor R = cos(θ/2) + sin(θ/2)·e12,
-        // the scalar is cos(θ/2) and e12 component is sin(θ/2).
+        // For R = cos(θ/2) - sin(θ/2)·e12, the e12 component carries the
+        // negative half-angle sine. A dilation scales both terms equally.
         let s = self.composed.components[0];
         let e12 = self.composed.components[1];
-        2.0 * e12.atan2(s)
+        canonical_zero(2.0 * (-e12).atan2(s))
     }
 
     /// Get the translation component of the composed transform.
     ///
     /// Derived from `to_affine_matrix` rather than read straight off the e1e±/e2e± components:
-    /// once the stack also carries a rotation or dilation those raw sums are the translation
-    /// rotated by half the angle and dilated by the half-dilation, not the translation itself.
+    /// once the stack also carries a rotation or dilation those raw sums mix the translation
+    /// with the linear transform instead of storing the final offset directly.
     /// Going through the decomposition also guarantees this can never disagree with `apply`.
     #[must_use]
     pub fn translation(&self) -> (f64, f64) {
@@ -1034,8 +1369,8 @@ impl TransformStack {
 
     /// Get the scale factor of the composed transform.
     ///
-    /// The e+- component alone is `cos(θ/2)·sinh(ln(scale)/2)`, so reading it as `sinh` understates
-    /// the dilation of any stack that also rotates. Recover it from the linear block instead:
+    /// The e+- component alone is `-cos(θ/2)·sinh(ln(scale)/2)`, so it does not directly measure
+    /// the dilation of a stack that also rotates. Recover it from the linear block instead:
     /// `a = cos(θ)·scale` and `c = sin(θ)·scale`, so `hypot(a, c) = scale`.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
@@ -2172,6 +2507,42 @@ mod transform_stack_tests {
     }
 
     #[test]
+    fn interleaved_stack_transforms_and_pops_match_matrix_composition() {
+        let operations = [
+            AffineMatrix2D::scale(2.0),
+            AffineMatrix2D::translation(12.0, -5.0),
+            AffineMatrix2D::rotation(0.7),
+            AffineMatrix2D::translation(-3.0, 8.0),
+            AffineMatrix2D::scale(0.25),
+            AffineMatrix2D::rotation(-0.3),
+        ];
+        let mut stack = TransformStack::new();
+        let mut expected = AffineMatrix2D::identity();
+        let mut history = Vec::new();
+        for operation in operations {
+            history.push((stack.rotor(), expected));
+            assert!(stack.try_push_matrix(operation));
+            expected = expected.compose(operation);
+            for point in [(0.0, 0.0), (4.0, -7.0), (-20.0, 12.0)] {
+                let actual = stack.try_apply(point.0, point.1).unwrap();
+                let wanted = expected.apply(point.0, point.1);
+                assert!((actual.0 - wanted.0).abs() < 1e-10);
+                assert!((actual.1 - wanted.1).abs() < 1e-10);
+            }
+        }
+        while let Some((rotor, matrix)) = history.pop() {
+            assert!(stack.pop());
+            assert_eq!(stack.rotor(), rotor, "pop restores the exact saved state");
+            let actual = stack.try_apply(4.0, -7.0).unwrap();
+            let wanted = matrix.apply(4.0, -7.0);
+            assert!((actual.0 - wanted.0).abs() < 1e-10);
+            assert!((actual.1 - wanted.1).abs() < 1e-10);
+        }
+        assert!(stack.is_empty());
+        assert!(!stack.pop());
+    }
+
+    #[test]
     #[should_panic(expected = "scale factor must be positive")]
     fn rotor_scale_zero_panics() {
         let _ = Rotor::scale(0.0);
@@ -3158,7 +3529,7 @@ mod rotor_fault_tests {
 
     /// Just short of π is where a half-angle formulation can flip sign.
     ///
-    /// The rotor stores cos(θ/2) and sin(θ/2); at θ ≈ π the scalar part passes through zero, so a
+    /// The rotor stores cos(θ/2) and -sin(θ/2); at θ ≈ π the scalar part passes through zero, so a
     /// sign error here produces a rotation by -π instead of π — visually a mirror, and silent.
     #[test]
     fn near_pi_rotation_does_not_flip_sign() {
@@ -3397,22 +3768,9 @@ mod rotor_fault_tests {
         );
     }
 
-    /// PUSH ORDER IS PART OF THE CONTRACT: translation first, scale second.
-    ///
-    /// `TransformStack::apply` goes through `Rotor::to_affine_matrix`, which decomposes the
-    /// CANONICAL composite `M = T * S * R` and nothing else -- it divides the raw translation
-    /// components by the half-dilation to recover `t`, which is only the inverse of how they were
-    /// built when the translation was composed first.
-    ///
-    /// Push scale first and the stack holds `S * T`, whose translation part the decomposition reads
-    /// back scaled by `1/s` instead of `s` -- an error of `s^2`, silent, and in the direction that
-    /// looks plausible. `viewport.rs` records having been caught by this; `TermTransform` was
-    /// shipping it (bd-2q3f.2), which is what this test now pins.
-    ///
-    /// Asserted numerically rather than described, because "the decomposition cannot read that
-    /// order back" in a doc comment is what the previous two callers each read and then did anyway.
+    /// Both composition orders are valid and must retain their different geometry.
     #[test]
-    fn only_translation_before_scale_survives_the_affine_decomposition() {
+    fn translation_before_or_after_scale_obeys_matrix_composition() {
         let mut canonical = TransformStack::new();
         canonical.push_translation(10.0, 20.0);
         canonical.push_scale(2.0);
@@ -3422,17 +3780,13 @@ mod rotor_fault_tests {
             "T then S must give s*p + t = (16, 30), got ({x}, {y})"
         );
 
-        // The unsupported order, pinned so a change in `to_affine_matrix` that fixed it would fail
-        // here and prompt an update rather than passing unnoticed.
         let mut reversed = TransformStack::new();
         reversed.push_scale(2.0);
         reversed.push_translation(10.0, 20.0);
         let (rx, ry) = reversed.apply(3.0, 5.0);
         assert!(
-            (rx - 11.0).abs() < 1e-9 && (ry - 20.0).abs() < 1e-9,
-            "S then T is the unsupported order and currently yields s*p + t/s = (11, 20); \
-             got ({rx}, {ry}). If this changed, the decomposition learned the other order -- \
-             update this test and TermTransform's comment together"
+            (rx - 26.0).abs() < 1e-9 && (ry - 50.0).abs() < 1e-9,
+            "S then T must give s*(p + t) = (26, 50), got ({rx}, {ry})"
         );
     }
 

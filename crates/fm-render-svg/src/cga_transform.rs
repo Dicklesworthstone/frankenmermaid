@@ -237,6 +237,42 @@ mod tests {
     }
 
     #[test]
+    fn cga_stack_composes_local_transforms_and_serializes_the_same_map() {
+        let mut stack = CgaTransformStack::new();
+        stack.scale(2.0);
+        stack.rotate(90.0);
+        stack.translate(10.0, 20.0);
+        // SVG lists compose right-to-left: translate (3, 5), rotate, then scale.
+        let (x, y) = stack.apply(3.0, 5.0);
+        assert!((x + 50.0).abs() < 1e-5);
+        assert!((y - 26.0).abs() < 1e-5);
+        let (tx, ty) = stack.translation();
+        assert!((tx + 40.0).abs() < 1e-5);
+        assert!((ty - 20.0).abs() < 1e-5);
+        assert!((stack.rotation_degrees() - 90.0).abs() < 1e-5);
+        assert!((stack.scale_factor() - 2.0).abs() < 1e-5);
+
+        let svg = stack.to_svg_matrix();
+        let values: Vec<f64> = svg
+            .strip_prefix("matrix(")
+            .and_then(|value| value.strip_suffix(')'))
+            .expect("SVG matrix")
+            .split(',')
+            .map(|value| value.trim().parse().expect("finite coefficient"))
+            .collect();
+        assert_eq!(values.len(), 6);
+        let svg_x = values[0] * 3.0 + values[2] * 5.0 + values[4];
+        let svg_y = values[1] * 3.0 + values[3] * 5.0 + values[5];
+        assert!((svg_x + 50.0).abs() < 1e-5);
+        assert!((svg_y - 26.0).abs() < 1e-5);
+
+        assert!(stack.pop());
+        let (x, y) = stack.apply(3.0, 5.0);
+        assert!((x + 10.0).abs() < 1e-5);
+        assert!((y - 6.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn render_transform_conversion_preserves_svg_axis_order() {
         use fm_layout::RenderTransform;
         let transform = RenderTransform::Matrix {

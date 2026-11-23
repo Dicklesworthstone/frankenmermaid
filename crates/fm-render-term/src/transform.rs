@@ -56,15 +56,8 @@ impl TermTransform {
             return None;
         }
 
-        // ⚠️ THE SCALE IS DELIBERATELY NOT PUSHED HERE (bd-2q3f.2). `TransformStack::apply` goes
-        // through `Rotor::to_affine_matrix`, which decomposes the canonical `M = T * S * R` and
-        // nothing else. Pushing the scale first made every later `translate` build `S * T`, whose
-        // translation the decomposition reads back scaled by `1/s` instead of `s` — an `s^2` error,
-        // silent, in the plausible-looking direction. `viewport.rs` in fm-render-canvas records
-        // being caught by exactly this and pushes translation first for the same reason.
-        //
-        // The stack therefore holds TRANSLATIONS ONLY, and the scale is composed on at the end by
-        // `rotor_part`, which is the canonical order the decomposition can read.
+        // Keep layout-space translations on the stack so `pop` only undoes an explicit pan.
+        // `rotor_part` applies the grid's fixed uniform scale after those translations.
         let stack = TransformStack::new();
 
         Some(Self {
@@ -79,14 +72,10 @@ impl TermTransform {
     /// Pushed onto the rotor stack, so panning composes with everything already there instead of
     /// being tracked as a separate pair of offsets.
     ///
-    /// Stored in DEVICE units — `dx * uniform` — because the stack is composed before the scale.
-    /// Translating by `t` in layout space and then scaling is the same map as scaling and then
-    /// translating by `s * t`, and the second form is the one `to_affine_matrix` can decompose. The
-    /// caller's units are unchanged: this is an internal representation, and `translate(10.0, 20.0)`
-    /// still means ten layout units.
+    /// Both the input and the stored translation use layout units. The rotor applies the uniform
+    /// scale afterwards, and the terminal's aspect correction remains last.
     pub fn translate(&mut self, dx: f32, dy: f32) {
-        self.stack
-            .push_translation(f64::from(dx) * self.uniform, f64::from(dy) * self.uniform);
+        self.stack.push_translation(f64::from(dx), f64::from(dy));
     }
 
     /// Undo the most recent pushed transform. `false` when nothing was pushed.
@@ -140,13 +129,9 @@ impl TermTransform {
     /// that distinction matters for the current grid.
     #[must_use]
     pub fn rotor_part(&self) -> fm_core::cga::Rotor {
-        // Translations (already in device units) FIRST, uniform scale composed on last: the
-        // canonical `T * S` that `to_affine_matrix` decomposes. Building it here rather than
-        // keeping the scale on the stack is what stops a later `translate` from producing `S * T`
-        // — see the note in `new`.
-        self.stack
-            .rotor()
-            .compose(fm_core::cga::Rotor::scale(self.uniform))
+        // S * T maps a layout point to s * (point + pan). This order keeps translations in the
+        // caller's units and leaves the fixed scale outside the undo stack.
+        fm_core::cga::Rotor::scale(self.uniform).compose(self.stack.rotor())
     }
 }
 
@@ -223,6 +208,35 @@ mod tests {
             (got_x - 3.0 * scale_x).abs() < 1e-3 && (got_y - 5.0 * scale_y).abs() < 1e-3,
             "popping did not restore the untranslated mapping: ({got_x}, {got_y})"
         );
+    }
+
+    #[test]
+    fn nested_layout_pans_preserve_aspect_inverse_and_undo() {
+        for (scale_x, scale_y) in [(0.25_f32, 0.5_f32), (3.0, 1.5), (2.0, 2.0)] {
+            let mut transform = TermTransform::new(scale_x, scale_y).expect("valid grid");
+            transform.translate(10.0, -20.0);
+            transform.translate(-3.0, 5.0);
+            let (x, y) = transform.apply(4.0, 8.0);
+            assert!((x - 11.0 * scale_x).abs() < 1e-5);
+            assert!((y + 7.0 * scale_y).abs() < 1e-5);
+
+            let inverse = transform.rotor_part().inverse().expect("invertible rotor");
+            let (layout_x, layout_y) = inverse
+                .to_affine_matrix()
+                .apply(f64::from(x), f64::from(y) / transform.aspect());
+            assert!((layout_x - 4.0).abs() < 1e-9);
+            assert!((layout_y - 8.0).abs() < 1e-9);
+
+            assert!(transform.pop());
+            let (x, y) = transform.apply(4.0, 8.0);
+            assert!((x - 14.0 * scale_x).abs() < 1e-5);
+            assert!((y + 12.0 * scale_y).abs() < 1e-5);
+            assert!(transform.pop());
+            assert!(!transform.pop());
+            let (x, y) = transform.apply(4.0, 8.0);
+            assert!((x - 4.0 * scale_x).abs() < 1e-5);
+            assert!((y - 8.0 * scale_y).abs() < 1e-5);
+        }
     }
 
     /// CONTROL: a degenerate grid is refused rather than silently normalised.

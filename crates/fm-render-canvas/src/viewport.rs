@@ -155,14 +155,8 @@ impl Viewport {
     /// Get the transform matrix for this viewport.
     #[must_use]
     pub fn transform(&self) -> ViewportTransform {
-        // Translation FIRST. `push_rotor` composes as `composed = composed * rotor`, so the first
-        // push ends up leftmost, and `Rotor::to_affine_matrix` decomposes the canonical
-        // `M = T * S * R` — the same order the `TransformStack` doc example pushes in.
-        //
-        // Pushing scale first instead built `S * T`, which that decomposition cannot read back:
-        // it recovered the offset without the zoom, so `transform()` mapped (25, 40) to
-        // (100, 105) where `diagram_to_canvas` gives (150, 130). This is the diagram-to-canvas
-        // mapping, `zoom * p + offset`, so the offset must be applied AFTER the zoom.
+        // Push translation first to form T * S: the offset is in canvas pixels, so it applies
+        // after zoom. This must agree with `diagram_to_canvas` and the inverse used by hit tests.
         let mut transforms = TransformStack::new();
         transforms.push_translation(self.offset_x, self.offset_y);
         transforms.push_scale(self.zoom);
