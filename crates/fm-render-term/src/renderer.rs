@@ -913,14 +913,7 @@ impl TermRenderer {
 
         // Chart-specific terminal rendering.
         if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
-            render_gantt_cell(
-                &mut buffer,
-                ir,
-                layout,
-                cell_width,
-                cell_height,
-                self.config.show_labels,
-            );
+            render_gantt_cell(&mut buffer, ir, layout, &self.config);
         } else if ir.diagram_type == fm_core::DiagramType::QuadrantChart
             && ir.quadrant_meta.is_some()
         {
@@ -6656,23 +6649,23 @@ fn render_gantt_cell(
     buffer: &mut CellBuffer,
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
-    cell_width: usize,
-    cell_height: usize,
-    show_labels: bool,
+    config: &ResolvedConfig,
 ) {
     let Some(gantt_meta) = &ir.gantt_meta else {
         return;
     };
 
-    let label_width = if show_labels {
+    let (cell_width, cell_height) = (buffer.width, buffer.height);
+    let ascii = config.glyph_mode == fm_core::MermaidGlyphMode::Ascii;
+    let label_width = if config.show_labels {
         gantt_meta
             .sections
             .iter()
-            .map(|s| s.name.len())
+            .map(|s| s.name.width())
             .max()
             .unwrap_or(0)
-            .min(cell_width / 3)
             .max(8)
+            .min(cell_width / 3)
     } else {
         0
     };
@@ -6707,27 +6700,43 @@ fn render_gantt_cell(
             nodes_by_index
         });
 
-    // Title
-    if show_labels && let Some(title) = &gantt_meta.title {
-        let tx = cell_width.saturating_sub(title.len()) / 2;
-        buffer.set_string(tx, 0, title);
-    }
-
+    let bar_origin = label_width + 2;
     let schedule_width = layout.bounds.width.max(1.0);
+    let project = |x: f32| {
+        let fraction = ((x - layout.bounds.x) / schedule_width).clamp(0.0, 1.0);
+        bar_origin as f32 + fraction * bar_area_width as f32
+    };
+
+    if config.show_labels {
+        if let Some(title) = &gantt_meta.title {
+            let x = cell_width.saturating_sub(title.width()) / 2;
+            buffer.set_label(x, 0, title, cell_width - x);
+        }
+        // Row one is reserved for the calendar. Thin dense ticks without shifting the
+        // remaining dates away from the task geometry they describe.
+        let mut next_free = bar_origin;
+        for tick in &layout.extensions.axis_ticks {
+            let x = project(tick.position).floor() as usize;
+            let width = tick.label.width();
+            if width > 0 && x >= next_free && width <= cell_width.saturating_sub(x) {
+                buffer.set_label(x, 1, &tick.label, width);
+                next_free = x + width + 1;
+            }
+        }
+    }
     let mut row = 2_usize;
 
     for (section_idx, section) in gantt_meta.sections.iter().enumerate() {
         if row >= cell_height {
             break;
         }
-        // Section header (truncated by char count for UTF-8 safety).
-        if show_labels {
-            let header: String = section.name.chars().take(label_width).collect();
-            buffer.set_string(0, row, &header);
+        // Section and task names share a display-cell gutter.
+        if config.show_labels {
+            buffer.set_label(0, row, &section.name, label_width);
         }
         // Separator line
         for col in label_width + 1..cell_width {
-            buffer.set(col, row, '\u{2500}'); // ─
+            buffer.set(col, row, if ascii { '-' } else { '─' });
         }
         row += 1;
 
@@ -6749,12 +6758,10 @@ fn render_gantt_cell(
                         .or(Some(node.id.as_str()))
                 })
                 .unwrap_or("task");
-            if show_labels {
-                let task_label: String = task_name.chars().take(label_width).collect();
-                buffer.set_string(0, row, &task_label);
+            if config.show_labels {
+                buffer.set_label(0, row, task_name, label_width);
             }
 
-            let bar_origin = label_width + 2;
             let node_box = match &layout_nodes_by_index {
                 Some(nodes_by_index) => nodes_by_index.get(task.node.0).and_then(|node| *node),
                 None => layout
@@ -6762,30 +6769,50 @@ fn render_gantt_cell(
                     .iter()
                     .find(|node| node.node_index == task.node.0),
             };
-            let (bar_start, bar_end) = node_box
-                .map(|node_box| {
-                    let start_ratio =
-                        ((node_box.bounds.x - layout.bounds.x) / schedule_width).clamp(0.0, 1.0);
-                    let end_ratio = ((node_box.bounds.x + node_box.bounds.width - layout.bounds.x)
-                        / schedule_width)
-                        .clamp(start_ratio, 1.0);
-                    let start = bar_origin + (start_ratio * bar_area_width as f32).floor() as usize;
-                    let end = bar_origin + (end_ratio * bar_area_width as f32).ceil() as usize;
-                    (start, end.max(start + 1))
-                })
-                .unwrap_or((
-                    bar_origin,
-                    (bar_origin + bar_area_width / 2).max(bar_origin + 1),
-                ));
-            let bar_char = if matches!(task.flags.primary_type(), GanttTaskType::Critical) {
-                '\u{2593}' // ▓
-            } else if matches!(task.flags.primary_type(), GanttTaskType::Done) {
-                '\u{2591}' // ░
+            let (start, end) = node_box.map_or(
+                (bar_origin as f32, (bar_origin + bar_area_width / 2) as f32),
+                |node| {
+                    (
+                        project(node.bounds.x),
+                        project(node.bounds.x + node.bounds.width),
+                    )
+                },
+            );
+            if task.flags.milestone {
+                // A milestone's layout box is a hit target. Only its centre denotes a date.
+                let col = ((start + end) * 0.5).floor() as usize;
+                let glyph = match (task.flags.crit, ascii) {
+                    (true, true) => 'X',
+                    (true, false) => '◈',
+                    (false, true) => '*',
+                    (false, false) => '◆',
+                };
+                buffer.set(col.min(cell_width - 1), row, glyph);
             } else {
-                '\u{2588}' // █
-            };
-            for col in bar_start..bar_end.min(cell_width) {
-                buffer.set(col, row, bar_char);
+                let left = (start.floor() as usize).min(cell_width - 1);
+                let right = (end.ceil() as usize).clamp(left + 1, cell_width);
+                let fill = match (task.flags.primary_type(), ascii) {
+                    (GanttTaskType::Done, true) => '.',
+                    (GanttTaskType::Done, false) => '░',
+                    (GanttTaskType::Active, true) => '=',
+                    (GanttTaskType::Active, false) => '▒',
+                    (GanttTaskType::Critical, true) => '!',
+                    (GanttTaskType::Critical, false) => '▓',
+                    (_, true) => '#',
+                    (_, false) => '█',
+                };
+                let progress_end = task.progress.filter(|p| p.is_finite()).map_or(right, |p| {
+                    left + ((right - left) as f32 * p.clamp(0.0, 1.0)).round() as usize
+                });
+                let track = if ascii { '-' } else { '·' };
+                for col in left..right {
+                    buffer.set(col, row, if col < progress_end { fill } else { track });
+                }
+                if task.flags.crit
+                    && (task.flags.done || task.flags.active || task.progress.is_some())
+                {
+                    buffer.set(left, row, '!');
+                }
             }
             row += 1;
         }
@@ -12353,6 +12380,65 @@ mod tests {
                     "{mode:?} {cols}x{height}: {}",
                     clipped.output
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_gantt_preserves_calendar_milestones_and_partial_completion() {
+        let ir = fm_parser::parse(
+            "gantt\n\
+             dateFormat YYYY-MM-DD\n\
+             axisFormat %m-%d\n\
+             section Work\n\
+             Build :active, build, 2026-01-01, 8d, 50%\n\
+             Tested :crit, done, tested, 2026-01-01, 8d\n\
+             Release :milestone, release, 2026-01-05, 0d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        for (glyph_mode, fill, track, done, milestone) in [
+            (fm_core::MermaidGlyphMode::Ascii, '=', '-', '.', '*'),
+            (fm_core::MermaidGlyphMode::Unicode, '▒', '·', '░', '◆'),
+        ] {
+            let config = TermRenderConfig {
+                glyph_mode,
+                tier: MermaidTier::Compact,
+                render_mode: MermaidRenderMode::CellOnly,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 100, 40);
+            let row = |name: &str| {
+                result
+                    .output
+                    .lines()
+                    .find(|line| line.starts_with(name))
+                    .unwrap()
+            };
+            let due = row("Release");
+            assert_eq!(
+                due.trim_start_matches("Release").trim(),
+                milestone.to_string()
+            );
+            let build = row("Build");
+            let filled = build.chars().filter(|&ch| ch == fill).count();
+            let remaining = build.chars().filter(|&ch| ch == track).count();
+            assert!(filled > 1 && filled.abs_diff(remaining) <= 1, "{build}");
+            let tested = row("Tested");
+            assert!(tested.contains('!') && tested.contains(done), "{tested}");
+            let col = due.chars().position(|ch| ch == milestone).unwrap();
+            assert!(col > build.chars().position(|ch| ch == fill).unwrap());
+            assert!(col < build.width());
+            let dates = result.output.lines().nth(1).unwrap();
+            assert!(
+                layout
+                    .extensions
+                    .axis_ticks
+                    .iter()
+                    .any(|tick| dates.contains(&tick.label))
+            );
+            if glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                assert!(result.output.is_ascii(), "{}", result.output);
             }
         }
     }
