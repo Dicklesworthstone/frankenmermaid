@@ -113,8 +113,8 @@ fm-cli render diagram.mmd --fnx-fallback graceful
 fm-cli render diagram.mmd --fnx-fallback warn 2>&1 | tee render.log
 grep -q "FNX fallback" render.log && echo "FNX fell back to native"
 
-# (future) Production with strict FNX requirement
-# fm-cli render diagram.mmd --fnx-fallback strict
+# Production with a required FNX backend and strict analysis budgets
+fm-cli render diagram.mmd --fnx-mode enabled --fnx-fallback strict
 ```
 
 ---

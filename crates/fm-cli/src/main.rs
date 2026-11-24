@@ -975,6 +975,19 @@ enum FnxFallbackArg {
 }
 
 impl FnxFallbackArg {
+    fn handle_budget(self, stage: &str, reason: Option<&str>) -> Result<()> {
+        if let Some(reason) = reason {
+            match self {
+                Self::Graceful => {}
+                Self::Warn => eprintln!("Warning: FNX fallback during {stage}: {reason}"),
+                Self::Strict => {
+                    anyhow::bail!("strict FNX fallback policy rejected {stage}: {reason}")
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Get string representation for logging.
     #[must_use]
     const fn as_str(self) -> &'static str {
@@ -1337,11 +1350,7 @@ impl BatchRenderPlan {
         use_cache: bool,
         options: &RenderCommandOptions<'_>,
     ) -> Result<Self> {
-        validate_fnx_options(
-            options.fnx_mode,
-            options.fnx_projection,
-            options.fnx_fallback,
-        )?;
+        validate_fnx_options(options.fnx_mode, options.fnx_projection)?;
         if options.format == OutputFormat::Png {
             anyhow::bail!(
                 "render-batch does not support --format png; rasterization is not batch-safe here"
@@ -5449,6 +5458,9 @@ fn render_parsed_ir_with_pressure(
             layout_guardrails,
         ),
     };
+    options
+        .fnx_fallback
+        .handle_budget("layout", traced_layout.trace.fnx.budget_exceeded_reason)?;
     let layout_cache_hit = traced_layout.trace.incremental.cache_hit;
     let layout = &traced_layout.layout;
     let layout_time = layout_start.elapsed();
@@ -6140,11 +6152,7 @@ fn build_fnx_witness(
     None
 }
 
-fn validate_fnx_options(
-    fnx_mode: FnxModeArg,
-    fnx_projection: FnxProjectionArg,
-    fnx_fallback: FnxFallbackArg,
-) -> Result<()> {
+fn validate_fnx_options(fnx_mode: FnxModeArg, fnx_projection: FnxProjectionArg) -> Result<()> {
     if matches!(fnx_mode, FnxModeArg::Enabled)
         && !cfg!(all(
             feature = "fnx-integration",
@@ -6153,22 +6161,16 @@ fn validate_fnx_options(
     {
         anyhow::bail!("--fnx-mode enabled requires fnx-integration feature");
     }
-    if fnx_mode.should_use_fnx() {
-        if matches!(
+    if fnx_mode.should_use_fnx()
+        && matches!(
             fnx_projection,
             FnxProjectionArg::Directed | FnxProjectionArg::Auto
-        ) {
-            anyhow::bail!(
-                "--fnx-projection {} is not yet supported (use undirected)",
-                fnx_projection.as_str()
-            );
-        }
-        if matches!(fnx_fallback, FnxFallbackArg::Strict | FnxFallbackArg::Warn) {
-            anyhow::bail!(
-                "--fnx-fallback {} is not yet supported (use graceful)",
-                fnx_fallback.as_str()
-            );
-        }
+        )
+    {
+        anyhow::bail!(
+            "--fnx-projection {} is not yet supported (use undirected)",
+            fnx_projection.as_str()
+        );
     }
     Ok(())
 }
@@ -6208,7 +6210,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     if deck_manifest_out.is_some() && format != OutputFormat::Svg {
         anyhow::bail!("--deck-manifest-out is only supported with --format svg");
     }
-    validate_fnx_options(fnx_mode, fnx_projection, fnx_fallback)?;
+    validate_fnx_options(fnx_mode, fnx_projection)?;
 
     let source = load_input(input, max_input_bytes)?;
     let outcome = render_source(
@@ -9521,7 +9523,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         fnx_projection,
         fnx_fallback,
     } = options;
-    validate_fnx_options(fnx_mode, fnx_projection, fnx_fallback)?;
+    validate_fnx_options(fnx_mode, fnx_projection)?;
 
     let source = load_input(input, max_input_bytes)?;
     let total_start = Instant::now();
@@ -9597,9 +9599,37 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let (_fnx_results, _fnx_analysis_time): (Option<()>, std::time::Duration) =
         (None, std::time::Duration::ZERO);
 
+    // Preserve the structured validation report even when the caller requires FNX to finish.
+    let fallback =
+        fnx_fallback.handle_budget("layout", traced_layout.trace.fnx.budget_exceeded_reason);
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    let fallback = fallback.and_then(|()| {
+        let reason = fnx_results
+            .as_ref()
+            .and_then(|result| result.budget_exceeded.as_ref())
+            .map(|reason| reason.reason_code());
+        fnx_fallback.handle_budget("structural analysis", reason)
+    });
+    let valid = fallback.is_ok() && !should_fail_validation(&diagnostics, fail_on);
+    if let Err(error) = fallback {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "fnx".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/fnx-strict-fallback".to_string(),
+                severity: "error".to_string(),
+                message: error.to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("fnx.fallback.strict".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Use --fnx-fallback warn to accept partial analysis".to_string(),
+                ),
+            },
+        });
+    }
     sort_diagnostics(&mut diagnostics);
-
-    let valid = !should_fail_validation(&diagnostics, fail_on);
 
     let result = ValidateResult {
         valid,

@@ -177,7 +177,13 @@ FNX is automatically disabled in WebAssembly builds due to dependency constraint
 | Value | Description |
 |-------|-------------|
 | `graceful` | Continue with native engine if FNX fails (default) |
-| `strict` | Fail the command if FNX analysis fails |
+| `warn` | Report budget cancellation on stderr and continue with available results |
+| `strict` | Fail the affected render or validation when an FNX analysis exceeds its budget |
+
+A diagram with no applicable FNX pass can render successfully under all three policies.
+Use `--fnx-mode enabled` to require a build with FNX support. During validation,
+`strict` preserves the diagnostic report and returns a failing exit status even with
+`--fail-on none`.
 
 ---
 

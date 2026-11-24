@@ -322,6 +322,62 @@ fn fnx_fallback_reports_reason_in_witness() {
 
 #[cfg(feature = "fnx-integration")]
 #[test]
+fn validate_obeys_fallback_policy_and_preserves_the_report() {
+    let input = format!("sequenceDiagram\n{}", "Alice->>Bob: Hello\n".repeat(3_500));
+    for policy in ["warn", "strict"] {
+        let output = run_cli(
+            &[
+                "validate",
+                "-",
+                "--format",
+                "json",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                policy,
+                "--fail-on",
+                "none",
+            ],
+            &input,
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("structured budget report");
+        assert_eq!(report["fnx_witness"]["budget_exceeded"], true);
+        assert_eq!(report["valid"], policy == "warn");
+        assert_eq!(output.status.success(), policy == "warn");
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        assert_eq!(
+            diagnostics.iter().any(|entry| {
+                entry["rule_id"] == "fnx.fallback.strict" && entry["severity"] == "error"
+            }),
+            policy == "strict"
+        );
+        if policy == "warn" {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("FNX fallback"));
+        }
+    }
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn strict_render_allows_a_diagram_with_no_applicable_analysis() {
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--fnx-mode",
+            "enabled",
+            "--fnx-fallback",
+            "strict",
+        ],
+        "pie\n\"A\": 30\n\"B\": 70\n",
+    );
+    assert_success(&output, "strict render with no FNX cancellation");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("<svg"));
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
 fn validate_reports_budget_exhaustion_without_inventing_unperformed_findings() {
     // Two participants keep geometry simple while 3,500 messages exceed the default 10,000
     // work-unit analysis budget before the bridge and cycle passes. This remains a budget
