@@ -421,7 +421,10 @@ const fn arrow_stroke(arrow: ArrowType) -> EdgeStroke {
     }
 }
 
-fn edge_stroke(edge: &fm_core::IrEdge, reversed: bool) -> EdgeStroke {
+fn edge_stroke(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> EdgeStroke {
+    let Some(edge) = ir.edges.get(path.edge_index) else {
+        return EdgeStroke::Solid;
+    };
     if let Some(notation) = edge.er_notation() {
         return if notation.contains("..") {
             EdgeStroke::Dotted
@@ -429,7 +432,7 @@ fn edge_stroke(edge: &fm_core::IrEdge, reversed: bool) -> EdgeStroke {
             EdgeStroke::Solid
         };
     }
-    if fm_layout::edge_uses_feedback_marker(edge, reversed) {
+    if fm_layout::edge_uses_feedback_marker(edge, path.reversed) {
         EdgeStroke::Dotted
     } else {
         arrow_stroke(edge.arrow)
@@ -962,16 +965,7 @@ impl TermRenderer {
                 let (cx, cy) = self.point_to_cells(&radar.center, scale_x, scale_y);
                 for axis in &radar.axes {
                     let (tx, ty) = self.point_to_cells(&axis.tip, scale_x, scale_y);
-                    self.draw_line_cell(
-                        &mut buffer,
-                        cx,
-                        cy,
-                        tx,
-                        ty,
-                        &self.edge_glyphs,
-                        false,
-                        ArrowType::Line,
-                    );
+                    self.draw_line_cell(&mut buffer, cx, cy, tx, ty, EdgeStroke::Solid);
                 }
                 for curve in &radar.curves {
                     let pts: Vec<(usize, usize)> = curve
@@ -982,16 +976,7 @@ impl TermRenderer {
                     for idx in 0..pts.len() {
                         let (x0, y0) = pts[idx];
                         let (x1, y1) = pts[(idx + 1) % pts.len()];
-                        self.draw_line_cell(
-                            &mut buffer,
-                            x0,
-                            y0,
-                            x1,
-                            y1,
-                            &self.edge_glyphs,
-                            false,
-                            ArrowType::Line,
-                        );
+                        self.draw_line_cell(&mut buffer, x0, y0, x1, y1, EdgeStroke::Solid);
                     }
                 }
                 for (index, axis) in radar.axes.iter().enumerate() {
@@ -1081,9 +1066,7 @@ impl TermRenderer {
                             row,
                             fx + fw - 2,
                             row,
-                            &self.edge_glyphs,
-                            false,
-                            ArrowType::DottedLine,
+                            EdgeStroke::Dotted,
                         );
                     }
                 }
@@ -1865,24 +1848,13 @@ impl TermRenderer {
             return;
         }
 
-        let glyphs = &self.edge_glyphs;
-        let stroke = ir
-            .edges
-            .get(edge_path.edge_index)
-            .map_or(EdgeStroke::Solid, |edge| {
-                edge_stroke(edge, edge_path.reversed)
-            });
-        let arrow = match stroke {
-            EdgeStroke::Solid => ArrowType::Line,
-            EdgeStroke::Dotted => ArrowType::DottedLine,
-            EdgeStroke::Thick => ArrowType::ThickLine,
-        };
+        let stroke = edge_stroke(ir, edge_path);
 
         // Draw line segments.
         for window in edge_path.points.windows(2) {
             let (x0, y0) = self.point_to_cells(&window[0], scale_x, scale_y);
             let (x1, y1) = self.point_to_cells(&window[1], scale_x, scale_y);
-            self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, false, arrow);
+            self.draw_line_cell(buffer, x0, y0, x1, y1, stroke);
         }
 
         for (x, y, glyph) in self
@@ -1944,7 +1916,6 @@ impl TermRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn draw_line_cell(
         &self,
         buffer: &mut CellBuffer,
@@ -1952,12 +1923,10 @@ impl TermRenderer {
         y0: usize,
         x1: usize,
         y1: usize,
-        glyphs: &EdgeGlyphs,
-        reversed: bool,
-        arrow: ArrowType,
+        stroke: EdgeStroke,
     ) {
-        let stroke = arrow_stroke(arrow);
-        let line_char = if reversed || stroke == EdgeStroke::Dotted {
+        let glyphs = &self.edge_glyphs;
+        let line_char = if stroke == EdgeStroke::Dotted {
             if x0 == x1 {
                 glyphs.dotted_v
             } else {
@@ -2664,36 +2633,16 @@ impl TermRenderer {
         if edge_path.bundled || is_invisible_edge(ir, edge_path) {
             return;
         }
-        let stroke = ir
-            .edges
-            .get(edge_path.edge_index)
-            .map_or(EdgeStroke::Solid, |edge| {
-                edge_stroke(edge, edge_path.reversed)
-            });
-        for window in edge_path.points.windows(2) {
-            let x0 = (window[0].x * scale_x) as isize + padding_x as isize;
-            let y0 = (window[0].y * scale_y) as isize + padding_y as isize;
-            let x1 = (window[1].x * scale_x) as isize + padding_x as isize;
-            let y1 = (window[1].y * scale_y) as isize + padding_y as isize;
-            match stroke {
-                EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
-                EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
-                EdgeStroke::Thick => {
-                    let (ox, oy) = if (x1 - x0).abs() >= (y1 - y0).abs() {
-                        (0, 1)
-                    } else {
-                        (1, 0)
-                    };
-                    for offset in -1..=1 {
-                        canvas.draw_line(
-                            x0 + ox * offset,
-                            y0 + oy * offset,
-                            x1 + ox * offset,
-                            y1 + oy * offset,
-                        );
-                    }
-                }
-            }
+        let stroke = edge_stroke(ir, edge_path);
+        for pair in edge_path.points.windows(2) {
+            Self::draw_canvas_shaft(
+                canvas,
+                stroke,
+                pair[0],
+                pair[1],
+                (scale_x, scale_y),
+                (padding_x, padding_y),
+            );
         }
         if let Some(edge) = ir.edges.get(edge_path.edge_index)
             && let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
@@ -2708,6 +2657,39 @@ impl TermRenderer {
                 Self::draw_er_marker_canvas(
                     canvas, kind, endpoint, scale_x, scale_y, padding_x, padding_y,
                 );
+            }
+        }
+    }
+
+    fn draw_canvas_shaft(
+        canvas: &mut Canvas,
+        stroke: EdgeStroke,
+        from: fm_layout::LayoutPoint,
+        to: fm_layout::LayoutPoint,
+        (scale_x, scale_y): (f32, f32),
+        (padding_x, padding_y): (usize, usize),
+    ) {
+        let x0 = (from.x * scale_x) as isize + padding_x as isize;
+        let y0 = (from.y * scale_y) as isize + padding_y as isize;
+        let x1 = (to.x * scale_x) as isize + padding_x as isize;
+        let y1 = (to.y * scale_y) as isize + padding_y as isize;
+        match stroke {
+            EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
+            EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
+            EdgeStroke::Thick => {
+                let (ox, oy) = if (x1 - x0).abs() >= (y1 - y0).abs() {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                };
+                for offset in -1..=1 {
+                    canvas.draw_line(
+                        x0 + ox * offset,
+                        y0 + oy * offset,
+                        x1 + ox * offset,
+                        y1 + oy * offset,
+                    );
+                }
             }
         }
     }
@@ -4963,9 +4945,13 @@ impl TermRenderer {
         let mut canvas = Canvas::new(width, height, self.config.render_mode);
         let mut cells = CellBuffer::new(width, height);
         for path in &layout.edges {
-            if is_invisible_edge(ir, path) || (path.edge_index == own.edge_index) == foreign {
+            if path.bundled
+                || is_invisible_edge(ir, path)
+                || (path.edge_index == own.edge_index) == foreign
+            {
                 continue;
             }
+            let stroke = edge_stroke(ir, path);
             let mut segments = Vec::new();
             for pair in path.points.windows(2) {
                 if foreign {
@@ -4988,30 +4974,24 @@ impl TermRenderer {
                 if cell_mode {
                     let (x0, y0) = self.point_to_cells(&from, scale_x, scale_y);
                     let (x1, y1) = self.point_to_cells(&to, scale_x, scale_y);
-                    let arrow = ir
-                        .edges
-                        .get(path.edge_index)
-                        .map_or(ArrowType::Arrow, |edge| edge.arrow);
-                    self.draw_line_cell(
-                        &mut cells,
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        &self.edge_glyphs,
-                        path.reversed,
-                        arrow,
-                    );
+                    self.draw_line_cell(&mut cells, x0, y0, x1, y1, stroke);
                 } else {
-                    let x0 = (from.x * scale_x * mult_x as f32) as isize
-                        + (self.config.padding * mult_x) as isize;
-                    let y0 = (from.y * scale_y * mult_y as f32) as isize
-                        + (self.config.padding * mult_y) as isize;
-                    let x1 = (to.x * scale_x * mult_x as f32) as isize
-                        + (self.config.padding * mult_x) as isize;
-                    let y1 = (to.y * scale_y * mult_y as f32) as isize
-                        + (self.config.padding * mult_y) as isize;
-                    canvas.draw_line(x0, y0, x1, y1);
+                    // A clipped foreign segment may start in the middle of its dash cycle.
+                    // Protect its corridor through the gaps as well. On our own route only
+                    // the actual painted cells may be cleared for a caption.
+                    let stroke = if foreign && stroke == EdgeStroke::Dotted {
+                        EdgeStroke::Solid
+                    } else {
+                        stroke
+                    };
+                    Self::draw_canvas_shaft(
+                        &mut canvas,
+                        stroke,
+                        from,
+                        to,
+                        (scale_x * mult_x as f32, scale_y * mult_y as f32),
+                        (self.config.padding * mult_x, self.config.padding * mult_y),
+                    );
                 }
             }
         }
@@ -7443,9 +7423,7 @@ impl TermRenderer {
                     y0.max(0) as usize,
                     x1.max(0) as usize,
                     y1.max(0) as usize,
-                    &self.edge_glyphs,
-                    false,
-                    ArrowType::Line,
+                    EdgeStroke::Solid,
                 );
             }
             for series in &meta.series {
@@ -9393,6 +9371,56 @@ mod tests {
         bundled.bundled = true;
         renderer.render_edge_cell(&mut buffer, &ir, &bundled, 1.0, 1.0);
         assert!(buffer.cells.iter().all(|ch| *ch == ' '));
+    }
+
+    #[test]
+    fn caption_route_masks_match_painted_shafts_in_all_raster_modes() {
+        let mut ir = sample_ir();
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0] = terminal_edge_test_path(&[(3.0, 8.0), (40.0, 8.0), (40.0, 14.0)]);
+        layout.edges[0].reversed = true;
+        let mut other = terminal_edge_test_path(&[(1.0, 1.0), (1.0, 2.0)]);
+        other.edge_index = 1;
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                padding: 0,
+                ..TermRenderConfig::rich()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 20));
+            let (mx, my) = renderer.config.subcell_multiplier();
+            for arrow in [ArrowType::Line, ArrowType::DottedLine, ArrowType::ThickLine] {
+                ir.edges[0].arrow = arrow;
+                let path = &layout.edges[0];
+                let expected: Vec<Vec<char>> = if mode == MermaidRenderMode::CellOnly {
+                    let mut cells = CellBuffer::new(60, 20);
+                    renderer.render_edge_cell(&mut cells, &ir, path, 1.0, 1.0);
+                    cells.cells.chunks(60).map(<[char]>::to_vec).collect()
+                } else {
+                    let mut canvas = Canvas::new(60, 20, mode);
+                    renderer.render_edge_canvas(&mut canvas, &ir, path, mx as f32, my as f32, 0, 0);
+                    canvas.render_char_grid()
+                };
+                assert!(expected.iter().flatten().any(|&ch| !blank_terminal_cell(ch)));
+                let own =
+                    renderer.edge_label_route_grid(&ir, &layout, path, false, 60, 20, 1.0, 1.0);
+                assert_eq!(own, expected, "{mode:?}/{arrow:?}");
+                if arrow == ArrowType::ThickLine {
+                    let foreign =
+                        renderer.edge_label_route_grid(&ir, &layout, &other, true, 60, 20, 1.0, 1.0);
+                    assert_eq!(foreign, expected, "{mode:?}: protect the full crossing");
+                }
+            }
+            layout.edges[0].bundled = true;
+            let mask = renderer.edge_label_route_grid(&ir, &layout, &other, true, 60, 20, 1.0, 1.0);
+            assert!(mask.into_iter().flatten().all(blank_terminal_cell));
+            layout.edges[0].bundled = false;
+        }
     }
 
     #[test]
