@@ -325,6 +325,7 @@ fn fnx_fallback_reports_reason_in_witness() {
 fn validate_obeys_fallback_policy_and_preserves_the_report() {
     let input = format!("sequenceDiagram\n{}", "Alice->>Bob: Hello\n".repeat(3_500));
     for policy in ["warn", "strict"] {
+        let artifact = NamedTempFile::new().unwrap();
         let output = run_cli(
             &[
                 "validate",
@@ -337,11 +338,19 @@ fn validate_obeys_fallback_policy_and_preserves_the_report() {
                 policy,
                 "--fail-on",
                 "none",
+                "--diagnostics-out",
+                artifact.path().to_str().unwrap(),
             ],
             &input,
         );
         let report: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("structured budget report");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.path()).unwrap()).unwrap();
+        assert_eq!(
+            saved, report,
+            "the artifact survives strict command failure"
+        );
         assert_eq!(report["fnx_witness"]["budget_exceeded"], true);
         assert_eq!(report["valid"], policy == "warn");
         assert_eq!(output.status.success(), policy == "warn");
@@ -354,6 +363,25 @@ fn validate_obeys_fallback_policy_and_preserves_the_report() {
         );
         if policy == "warn" {
             assert!(String::from_utf8_lossy(&output.stderr).contains("FNX fallback"));
+            let warning = diagnostics
+                .iter()
+                .find(|entry| entry["rule_id"] == "fnx.fallback.warn")
+                .expect("warn policy is retained in machine-readable diagnostics");
+            assert_eq!(warning["error_code"], "mermaid/warning/fnx-fallback");
+            assert_eq!(warning["severity"], "warning");
+            assert!(
+                warning["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("structural analysis")
+            );
+            assert!(warning["remediation_hint"].is_string());
+        } else {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|entry| { entry["error_code"] == "mermaid/error/fnx-strict-fallback" })
+            );
         }
     }
 }
@@ -701,4 +729,33 @@ fn batch_checks_fnx_requirements_before_creating_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!out.exists());
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn fnx_batch_accepts_strict_and_warn_when_analysis_succeeds() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let source = directory.path().join("input.mmd");
+    std::fs::write(&source, "flowchart LR\nA-->B\n").unwrap();
+    for fallback in ["strict", "warn"] {
+        let out = directory.path().join(fallback);
+        let output = run_cli(
+            &[
+                "render-batch",
+                source.to_str().unwrap(),
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--jobs",
+                "1",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                fallback,
+            ],
+            "",
+        );
+        assert_success(&output, fallback);
+        let svg = std::fs::read_to_string(out.join("input.svg")).unwrap();
+        assert!(svg.contains("<svg"));
+    }
 }
