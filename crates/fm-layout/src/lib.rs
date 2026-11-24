@@ -2266,6 +2266,10 @@ fn hash_str(hash: &mut u64, value: &str) {
         *hash ^= u64::from(*byte);
         *hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
+    // 0xff never occurs in UTF-8. Terminate each field so moving characters between
+    // adjacent fields cannot reuse measurements for a different set of rendered rows.
+    *hash ^= 0xff;
+    *hash = hash.wrapping_mul(0x0100_0000_01b3);
 }
 
 /// Count DFS back-edges without full SCC decomposition.
@@ -20920,16 +20924,15 @@ fn node_size_cache_key(
 ) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_str(&mut hash, &node.id);
-    hash_u64(&mut hash, u64::from(ir.diagram_type == DiagramType::Kanban));
+    // The same node text can be a wrapped paragraph in one family and a single row in another.
+    hash_u64(&mut hash, ir.diagram_type as u64);
     if let Some(card) = ir.kanban_card(node_index) {
         for field in [&card.assigned, &card.priority, &card.ticket] {
             let value = field.as_deref().unwrap_or_default();
-            hash_u64(&mut hash, value.len() as u64);
             hash_str(&mut hash, value);
         }
         hash_u64(&mut hash, card.tags.len() as u64);
         for tag in &card.tags {
-            hash_u64(&mut hash, tag.len() as u64);
             hash_str(&mut hash, tag);
         }
     }
@@ -20942,15 +20945,7 @@ fn node_size_cache_key(
     // Ordinary labels use authored fonts too. A style-only edit must invalidate their cached
     // extents even when the node id, text, and global metrics have not changed.
     let style = ir.resolved_node_style(node_index);
-    hash_u64(
-        &mut hash,
-        style.get("font-size").map_or(0, |value| value.len()) as u64,
-    );
     hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
-    hash_u64(
-        &mut hash,
-        style.get("font-family").map_or(0, |value| value.len()) as u64,
-    );
     hash_str(
         &mut hash,
         style.get("font-family").map_or("", String::as_str),
@@ -20958,13 +20953,8 @@ fn node_size_cache_key(
     // Class members feed `compute_node_size` via `class_compartment_dimensions`, so they belong in the
     // key: editing a class body without touching its label would otherwise serve the cached size from
     // before the edit and silently truncate the new members.
+    hash_u64(&mut hash, u64::from(node.class_meta.is_some()));
     if let Some(meta) = node.class_meta.as_deref() {
-        hash_str(
-            &mut hash,
-            ir.resolved_node_style(node_index)
-                .get("font-size")
-                .map_or("", String::as_str),
-        );
         hash_u64(&mut hash, meta.attributes.len() as u64);
         hash_u64(&mut hash, meta.methods.len() as u64);
         hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
@@ -20977,6 +20967,7 @@ fn node_size_cache_key(
         }
         for member in meta.attributes.iter().chain(meta.methods.iter()) {
             hash_str(&mut hash, &member.name);
+            hash_u64(&mut hash, u64::from(member.return_type.is_some()));
             hash_str(&mut hash, member.return_type.as_deref().unwrap_or_default());
             hash_u64(&mut hash, member.visibility as u64);
             hash_u64(&mut hash, u64::from(member.is_static));
@@ -20987,14 +20978,6 @@ fn node_size_cache_key(
     // reason class members do, so they belong in the key too: adding an attribute without touching
     // the entity name would otherwise serve the size from before the edit, and the new rows would
     // render outside the stale box (bd-090g).
-    if !node.members.is_empty() {
-        let style = ir.resolved_node_style(node_index);
-        hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
-        hash_str(
-            &mut hash,
-            style.get("font-family").map_or("", String::as_str),
-        );
-    }
     hash_u64(&mut hash, node.members.len() as u64);
     for attr in &node.members {
         hash_str(&mut hash, &attr.data_type);
@@ -21014,32 +20997,16 @@ fn node_size_cache_key(
     }
     // Every C4 field contributes wrapped rows. Changing metadata or its authored size must
     // invalidate the card even when the node name stays the same.
+    hash_u64(&mut hash, u64::from(node.c4_meta.is_some()));
     if let Some(meta) = node.c4_meta.as_deref() {
         hash_str(&mut hash, &meta.element_type);
         hash_str(&mut hash, meta.technology.as_deref().unwrap_or_default());
         hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
-        hash_str(
-            &mut hash,
-            ir.resolved_node_style(node_index)
-                .get("font-size")
-                .map_or("", String::as_str),
-        );
-        hash_str(
-            &mut hash,
-            ir.resolved_node_style(node_index)
-                .get("font-family")
-                .map_or("", String::as_str),
-        );
     }
     // Every requirement field sizes a drawn row. Include presence as well as contents: a declared
     // empty value still has a prefix in SVG and therefore occupies a row.
+    hash_u64(&mut hash, u64::from(node.requirement_meta.is_some()));
     if let Some(meta) = node.requirement_meta.as_deref() {
-        let style = ir.resolved_node_style(node_index);
-        hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
-        hash_str(
-            &mut hash,
-            style.get("font-family").map_or("", String::as_str),
-        );
         for field in [
             &meta.requirement_type,
             &meta.risk,
@@ -56030,6 +55997,62 @@ mod tests {
              (height {})",
             node.bounds.height
         );
+    }
+
+    #[test]
+    fn cached_c4_size_distinguishes_technology_from_description_rows() {
+        let mut ir = c4_person_ir("Gateway");
+        ir.nodes[0].c4_meta.as_deref_mut().unwrap().technology = Some("API".to_owned());
+        let mut engine = IncrementalLayoutEngine::default();
+        let algorithm = LayoutAlgorithm::Auto;
+        let config = LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
+        );
+
+        let card = ir.nodes[0].c4_meta.as_deref_mut().unwrap();
+        card.technology = Some("APIGateway".to_owned());
+        card.description = None;
+        let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir, algorithm, config, guardrails,
+        );
+        assert!(fresh.layout.nodes[0].bounds.height < before.layout.nodes[0].bounds.height);
+        assert_eq!(updated.layout.nodes, fresh.layout.nodes);
+    }
+
+    #[test]
+    fn cached_node_size_tracks_diagram_family_wrapping() {
+        let mut ir = labeled_graph_ir(2, &[(0, 1)]);
+        ir.labels[0].text = concat!(
+            "Review the service request with the team before publishing changes ",
+            "to every production region"
+        )
+        .to_owned();
+        let config = LayoutConfig::default();
+        let algorithm = LayoutAlgorithm::Sugiyama;
+        let guardrails = LayoutGuardrails::default();
+        let mut engine = IncrementalLayoutEngine::default();
+        let wrapped = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
+        );
+
+        ir.diagram_type = DiagramType::Er;
+        ir.meta.diagram_type = DiagramType::Er;
+        let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir, algorithm, config, guardrails,
+        );
+        assert!(fresh.layout.nodes[0].bounds.width > wrapped.layout.nodes[0].bounds.width);
+        assert_eq!(updated.layout.nodes, fresh.layout.nodes);
+        assert_eq!(updated.layout.edges, fresh.layout.edges);
     }
 
     #[test]
