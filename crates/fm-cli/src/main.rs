@@ -976,16 +976,24 @@ enum FnxFallbackArg {
 
 impl FnxFallbackArg {
     fn handle_budget(self, stage: &str, reason: Option<&str>) -> Result<()> {
-        if let Some(reason) = reason {
-            match self {
-                Self::Graceful => {}
-                Self::Warn => eprintln!("Warning: FNX fallback during {stage}: {reason}"),
-                Self::Strict => {
-                    anyhow::bail!("strict FNX fallback policy rejected {stage}: {reason}")
-                }
-            }
+        if let Some(warning) = self.budget_warning(stage, reason) {
+            eprintln!("Warning: {warning}");
+        }
+        if let (Self::Strict, Some(reason)) = (self, reason) {
+            anyhow::bail!("strict FNX fallback policy rejected {stage}: {reason}")
         }
         Ok(())
+    }
+
+    /// The same warning is printed for people and retained in structured command output.
+    fn budget_warning(self, stage: &str, reason: Option<&str>) -> Option<String> {
+        match (self, reason) {
+            (Self::Warn, Some(reason)) => Some(format!(
+                "FNX fallback during {stage}: {reason}. Continuing with completed analysis \
+                 and native heuristics; reduce diagram complexity or use --fnx-mode disabled."
+            )),
+            _ => None,
+        }
     }
 
     /// Get string representation for logging.
@@ -5401,6 +5409,7 @@ fn render_parsed_ir_with_pressure(
     batch_renderer: Option<(&mut SvgBatchRenderer, Option<CertifiedSvgBatchPrefix>)>,
     engine: Option<&mut fm_layout::IncrementalLayoutEngine>,
 ) -> Result<RenderOutcome> {
+    validate_fnx_options(options.fnx_mode, options.fnx_projection)?;
     enforce_render_parse_contract(ir, options.parse_mode)?;
 
     let RenderTiming {
@@ -5412,7 +5421,7 @@ fn render_parsed_ir_with_pressure(
     let terminal_style_note = matches!(options.format, OutputFormat::Term | OutputFormat::Ascii)
         .then(|| terminal_style_directive_note(ir))
         .flatten();
-    let warnings: Vec<String> = warnings
+    let mut warnings: Vec<String> = warnings
         .iter()
         .cloned()
         .chain(terminal_style_note)
@@ -5465,6 +5474,12 @@ fn render_parsed_ir_with_pressure(
     options
         .fnx_fallback
         .handle_budget("layout", traced_layout.trace.fnx.budget_exceeded_reason)?;
+    if let Some(warning) = options
+        .fnx_fallback
+        .budget_warning("layout", traced_layout.trace.fnx.budget_exceeded_reason)
+    {
+        warnings.push(warning);
+    }
     let layout_cache_hit = traced_layout.trace.incremental.cache_hit;
     let layout = &traced_layout.layout;
     let layout_time = layout_start.elapsed();
@@ -5771,30 +5786,41 @@ fn build_fnx_witness(
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 fn build_fnx_validation_witness(
     fnx_enabled: bool,
+    layout_execution: &fm_layout::FnxExecutionTrace,
     results: Option<&FnxAnalysisResults>,
     analysis_time: std::time::Duration,
 ) -> Option<FnxWitness> {
     if !fnx_enabled {
         return None;
     }
-    let used = results.is_some_and(|result| !result.completed_passes.is_empty());
-    let budget_exceeded = results.and_then(|result| result.budget_exceeded.as_ref());
-    let (fallback_level, fallback_reason) = if let Some(reason) = budget_exceeded {
-        (
-            if used { "fnx_partial" } else { "fnx_disabled" },
-            reason.reason_code(),
-        )
+    // Validation performs layout and then structural analysis. Preserve the first
+    // cancellation even if the later stage completes; individual structural metrics
+    // remain gated on their own completed passes in the validation result.
+    let budget_reason = layout_execution.budget_exceeded_reason.or_else(|| {
+        results
+            .and_then(|result| result.budget_exceeded.as_ref())
+            .map(|reason| reason.reason_code())
+    });
+    let mut algorithms_invoked = Vec::<String>::new();
+    for algorithm in layout_execution.algorithms_invoked.iter().copied().chain(
+        results
+            .into_iter()
+            .flat_map(|result| &result.completed_passes)
+            .map(|pass| pass.as_str()),
+    ) {
+        if !algorithms_invoked.iter().any(|name| name == algorithm) {
+            algorithms_invoked.push(algorithm.to_string());
+        }
+    }
+    let used = !algorithms_invoked.is_empty();
+    let (fallback_level, fallback_reason) = if let Some(reason) = budget_reason {
+        (if used { "fnx_partial" } else { "fnx_disabled" }, reason)
     } else if used {
         ("fnx_full", "none")
     } else {
         ("fnx_disabled", "not_applicable")
     };
     let projection_mode = "undirected";
-    let algorithms_invoked = results
-        .into_iter()
-        .flat_map(|result| &result.completed_passes)
-        .map(|pass| pass.as_str().to_string())
-        .collect::<Vec<_>>();
     let component_count = results
         .filter(|result| result.completed(FnxAnalysisPass::ConnectedComponents))
         .map(|r| r.component_count.to_string())
@@ -5829,8 +5855,12 @@ fn build_fnx_validation_witness(
         used,
         projection_mode: projection_mode.to_string(),
         algorithms_invoked,
-        analysis_time_us: analysis_time.as_micros().min(u128::from(u64::MAX)) as u64,
-        budget_exceeded: budget_exceeded.is_some(),
+        analysis_time_us: layout_execution
+            .analysis_time
+            .saturating_add(analysis_time)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+        budget_exceeded: budget_reason.is_some(),
         fallback_level: fallback_level.to_string(),
         fallback_reason: fallback_reason.to_string(),
         results_hash,
@@ -5998,6 +6028,53 @@ mod fnx_render_witness_tests {
     }
 
     #[test]
+    fn strict_policy_rejects_real_layout_cancellation_on_repeated_requests() {
+        let mut ir = star_ir(3);
+        ir.edges[1].from = IrEndpoint::Node(IrNodeId(1));
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(2)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let parallel_edge = ir.edges[0].clone();
+        ir.edges.resize(2_500, parallel_edge);
+        // Projection plus three analyses cost 4 * (2,500 + 3) work units,
+        // exceeding the existing 10,000-unit FNX budget without relying on time.
+        // Relax only layout guardrails so dispatch reaches the real cycle scorer.
+        let guardrails = LayoutGuardrails {
+            max_layout_time_ms: 100_000,
+            max_layout_iterations: 100_000,
+            max_route_ops: 1_000_000,
+        };
+        let config = LayoutConfig {
+            fnx_enabled: true,
+            cycle_strategy: CycleStrategy::CycleAware,
+            ..LayoutConfig::default()
+        };
+        let mut engine = IncrementalLayoutEngine::default();
+        for _ in 0..2 {
+            let traced = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                config.clone(),
+                guardrails,
+            );
+            assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sugiyama);
+            assert!(!traced.trace.incremental.cache_hit);
+            let reason = traced
+                .trace
+                .fnx
+                .budget_exceeded_reason
+                .expect("the actual layout exceeds its FNX work budget");
+            let error = FnxFallbackArg::Strict
+                .handle_budget("layout", Some(reason))
+                .expect_err("a repeated request must not hide cancellation in the layout cache");
+            assert!(error.to_string().contains("strict FNX fallback policy"));
+        }
+    }
+
+    #[test]
     fn timing_is_telemetry_and_large_durations_saturate() {
         let mut first = trace(&star_ir(12), LayoutAlgorithm::Auto);
         first.trace.fnx.analysis_time = Duration::from_micros(42);
@@ -6077,6 +6154,7 @@ mod fnx_validation_progress_tests {
     fn witness(results: &FnxAnalysisResults) -> FnxWitness {
         build_fnx_validation_witness(
             true,
+            &fm_layout::FnxExecutionTrace::default(),
             Some(results),
             std::time::Duration::from_micros(42),
         )
@@ -6142,6 +6220,7 @@ mod fnx_validation_progress_tests {
         for results in [None, Some(&FnxAnalysisResults::default())] {
             let witness = build_fnx_validation_witness(
                 true,
+                &fm_layout::FnxExecutionTrace::default(),
                 results,
                 std::time::Duration::ZERO,
             )
@@ -6152,6 +6231,68 @@ mod fnx_validation_progress_tests {
             assert_eq!(witness.fallback_level, "fnx_disabled");
             assert_eq!(witness.fallback_reason, "not_applicable");
         }
+    }
+
+    #[test]
+    fn validation_witness_keeps_layout_cancellation_when_structural_analysis_completes() {
+        let complete = analyze(25);
+        assert!(complete.budget_exceeded.is_none());
+        let layout_execution = fm_layout::FnxExecutionTrace {
+            algorithms_invoked: vec!["bridges", "degree_centrality"],
+            analysis_time: std::time::Duration::from_micros(20),
+            budget_exceeded_reason: Some("work_exceeded"),
+        };
+        let combined = build_fnx_validation_witness(
+            true,
+            &layout_execution,
+            Some(&complete),
+            std::time::Duration::from_micros(42),
+        )
+        .expect("enabled validation has a witness");
+        assert!(combined.used);
+        assert!(combined.budget_exceeded);
+        assert_eq!(combined.fallback_level, "fnx_partial");
+        assert_eq!(combined.fallback_reason, "work_exceeded");
+        assert_eq!(combined.analysis_time_us, 62);
+        assert_eq!(
+            combined.algorithms_invoked,
+            [
+                "bridges",
+                "degree_centrality",
+                "connected_components",
+                "articulation_points",
+                "cycle_basis"
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_warning_keeps_real_cancellation_and_allows_nonparticipation() {
+        for work_budget in [0, 5] {
+            let results = analyze(work_budget);
+            let reason = results
+                .budget_exceeded
+                .as_ref()
+                .expect("the fixture exhausts its work budget")
+                .reason_code();
+            let warning = FnxFallbackArg::Warn
+                .budget_warning("structural analysis", Some(reason))
+                .expect("warn policy retains the fallback message");
+            assert!(warning.contains(reason));
+            assert!(warning.contains("structural analysis"));
+            assert!(warning.contains("--fnx-mode disabled"));
+            assert!(
+                FnxFallbackArg::Graceful
+                    .budget_warning("structural analysis", Some(reason))
+                    .is_none()
+            );
+        }
+        assert!(
+            FnxFallbackArg::Warn
+                .budget_warning("layout", None)
+                .is_none(),
+            "intentional native/cache paths are not failed analyses"
+        );
     }
 }
 
@@ -9612,17 +9753,44 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let (_fnx_results, _fnx_analysis_time): (Option<()>, std::time::Duration) =
         (None, std::time::Duration::ZERO);
 
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    let structural_budget_reason = fnx_results
+        .as_ref()
+        .and_then(|result| result.budget_exceeded.as_ref())
+        .map(|reason| reason.reason_code());
+    #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+    let structural_budget_reason: Option<&str> = None;
+
     // Preserve the structured validation report even when the caller requires FNX to finish.
     let fallback =
         fnx_fallback.handle_budget("layout", traced_layout.trace.fnx.budget_exceeded_reason);
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-    let fallback = fallback.and_then(|()| {
-        let reason = fnx_results
-            .as_ref()
-            .and_then(|result| result.budget_exceeded.as_ref())
-            .map(|reason| reason.reason_code());
-        fnx_fallback.handle_budget("structural analysis", reason)
-    });
+    let fallback = fallback
+        .and_then(|()| fnx_fallback.handle_budget("structural analysis", structural_budget_reason));
+    for (stage, reason) in [
+        ("layout", traced_layout.trace.fnx.budget_exceeded_reason),
+        ("structural analysis", structural_budget_reason),
+    ] {
+        if let Some(warning) = fnx_fallback.budget_warning(stage, reason) {
+            diagnostics.push(ValidationDiagnostic {
+                stage: "fnx".to_string(),
+                payload: StructuredDiagnostic {
+                    error_code: "mermaid/warning/fnx-fallback".to_string(),
+                    severity: "warning".to_string(),
+                    message: warning,
+                    span: None,
+                    source_line: None,
+                    source_column: None,
+                    rule_id: Some("fnx.fallback.warn".to_string()),
+                    confidence: None,
+                    remediation_hint: Some(
+                        "Reduce diagram complexity or use --fnx-mode disabled to skip FNX analysis"
+                            .to_string(),
+                    ),
+                },
+            });
+        }
+    }
     let valid = fallback.is_ok() && !should_fail_validation(&diagnostics, fail_on);
     if let Err(error) = fallback {
         diagnostics.push(ValidationDiagnostic {
@@ -9726,6 +9894,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         fnx_witness: build_fnx_validation_witness(
             fnx_enabled,
+            &traced_layout.trace.fnx,
             fnx_results.as_ref(),
             fnx_analysis_time,
         ),
