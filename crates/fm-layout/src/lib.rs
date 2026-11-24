@@ -7966,7 +7966,14 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .unwrap_or(&fm_core::FontMetrics::default_metrics()),
         ),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
-        LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
+        LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
+        ),
         LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir, &config),
         LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
         LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
@@ -17095,12 +17102,14 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 }
 
 /// Lay out a git graph: lane-based commit positioning with vertical stacking.
-fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+fn layout_diagram_gitgraph_traced(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let node_sizes = compute_node_sizes(ir, &metrics);
+    let node_sizes = compute_node_sizes(ir, metrics);
     let node_count = ir.nodes.len();
-    let spacing = LayoutSpacing::default();
 
     if node_count == 0 {
         return TracedLayout {
@@ -17125,12 +17134,52 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     // Assign lanes by cluster membership and position nodes in a single pass.
     let horizontal = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
-    let lane_width =
-        node_sizes.iter().map(|(w, _)| *w).fold(0.0_f32, f32::max) + spacing.node_spacing;
-    let row_height = spacing.rank_spacing.mul_add(
-        0.6,
-        node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max),
-    );
+    let reverse = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
+    const SIDE_PAD: f32 = 8.0;
+    let branch_sizes: Vec<_> = ir
+        .git_graph_meta
+        .iter()
+        .flat_map(|meta| &meta.branches)
+        .map(|name| metrics.estimate_dimensions(name))
+        .collect();
+    let caption_height = branch_sizes
+        .iter()
+        .map(|&(_, height)| height)
+        .fold(0.0_f32, f32::max);
+    let label_strip = (caption_height + 10.0).max(26.0);
+    // Shared band renderers place the alphabetic baseline 16 px below the band top.
+    let caption_top_overhang = (metrics.font_size() - 16.0).max(0.0);
+    let widest_caption = branch_sizes
+        .iter()
+        .map(|&(width, _)| width + 2.0 * SIDE_PAD)
+        .fold(0.0_f32, f32::max);
+    let cross_size = node_sizes
+        .iter()
+        .map(|&(width, height)| {
+            if horizontal {
+                height
+            } else {
+                width + 2.0 * SIDE_PAD
+            }
+        })
+        .fold(0.0_f32, f32::max)
+        .max(if horizontal { 0.0 } else { widest_caption });
+    // Horizontal lanes need room above every commit for their branch captions. Vertical
+    // lanes reserve the full caption width so neighboring branch names cannot overlap.
+    let lane_gap = if horizontal {
+        spacing
+            .node_spacing
+            .max(label_strip + SIDE_PAD + caption_top_overhang)
+    } else {
+        spacing.node_spacing
+    };
+    let lane_width = cross_size + lane_gap;
+    let depth_size = node_sizes
+        .iter()
+        .map(|&(width, height)| if horizontal { width } else { height })
+        .fold(0.0_f32, f32::max);
+    let depth_step = spacing.rank_spacing.mul_add(0.6, depth_size);
+    let depth_extent = (node_count - 1) as f32 * depth_step + depth_size;
 
     let mut lane_map: BTreeMap<usize, usize> = BTreeMap::new();
     let mut next_lane = 0_usize;
@@ -17161,16 +17210,16 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         // different centre from a bare `commit` on the same branch — the lane would be a
         // bookkeeping fact, not a readable column.
         let lane_origin = lane as f32 * lane_width;
-        let (x, y) = if horizontal {
-            (
-                i as f32 * row_height,
-                lane_origin + (lane_width - h) * 0.5_f32,
-            )
+        let forward = i as f32 * depth_step;
+        let depth = if reverse {
+            depth_extent - forward - if horizontal { w } else { h }
         } else {
-            (
-                lane_origin + (lane_width - w) * 0.5_f32,
-                i as f32 * row_height,
-            )
+            forward
+        };
+        let (x, y) = if horizontal {
+            (depth, lane_origin + (lane_width - h) * 0.5_f32)
+        } else {
+            (lane_origin + (lane_width - w) * 0.5_f32, depth)
         };
 
         nodes.push(LayoutNodeBox {
@@ -17196,7 +17245,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         EdgeRouting::default(),
         &[],
     );
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let mut bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
     // BRANCH NAMES REACH THE PICTURE (bd-jgco).
@@ -17240,10 +17289,8 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         // The band opens a strip ABOVE its first commit and the label is drawn into it. Bands are
         // background in every renderer, so a label placed over the lane's own content would be
         // painted over by the first commit box and the name would still be invisible — the exact
-        // defect this fixes, reintroduced one layer down. `LABEL_STRIP` exceeds the renderers'
-        // label baseline offset (svg draws at band.y + 16) so the text clears the commit.
-        const LABEL_STRIP: f32 = 26.0;
-        const SIDE_PAD: f32 = 8.0;
+        // defect this fixes, reintroduced one layer down. The reserved strip includes the
+        // measured caption height, including multiple lines and configured font sizes.
 
         // Sorted so band order is lane order and does not inherit the hash map's iteration order,
         // which would make the emitted SVG differ run to run.
@@ -17257,11 +17304,17 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 continue;
             }
             let (min_x, min_y, max_x, max_y) = lane_bounds[&lane];
+            let width =
+                ((max_x - min_x) + SIDE_PAD * 2.0).max(branch_sizes[lane].0 + SIDE_PAD * 2.0);
             let rect = LayoutRect {
-                x: min_x - SIDE_PAD,
-                y: min_y - LABEL_STRIP,
-                width: (max_x - min_x) + SIDE_PAD * 2.0,
-                height: (max_y - min_y) + LABEL_STRIP + SIDE_PAD,
+                x: if horizontal {
+                    min_x - SIDE_PAD
+                } else {
+                    (min_x + max_x - width) * 0.5
+                },
+                y: min_y - label_strip,
+                width,
+                height: (max_y - min_y) + label_strip + SIDE_PAD,
             };
             // Bands are built AFTER `compute_bounds`, which sees only nodes/clusters/edges, so the
             // label strip would sit outside the viewBox and be clipped away — drawn but unseeable.
@@ -17269,7 +17322,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             let right = bounds.x + bounds.width;
             let bottom = bounds.y + bounds.height;
             bounds.x = bounds.x.min(rect.x);
-            bounds.y = bounds.y.min(rect.y);
+            bounds.y = bounds.y.min(rect.y - caption_top_overhang);
             bounds.width = right.max(rect.x + rect.width) - bounds.x;
             bounds.height = bottom.max(rect.y + rect.height) - bounds.y;
 
@@ -31603,6 +31656,142 @@ mod tests {
                 pair[1].bounds.y > pair[0].bounds.y,
                 "commit order along the chain changed"
             );
+        }
+    }
+
+    #[test]
+    fn gitgraph_directions_keep_chronology_and_merge_endpoints() {
+        for (direction, horizontal, reverse) in [
+            ("LR", true, false),
+            ("RL", true, true),
+            ("TB", false, false),
+            ("BT", false, true),
+        ] {
+            let source = format!(
+                "gitGraph {direction}\n\
+                 commit id: \"root\"\n\
+                 branch feature\n\
+                 commit id: \"work\" msg: \"Implement the feature and its integration\"\n\
+                 commit id: \"tested\"\n\
+                 checkout main\n\
+                 merge feature id: \"released\"\n"
+            );
+            let parsed = fm_parser::parse(&source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            let ir = parsed.ir;
+            let layout = layout_diagram_with_config(
+                &ir,
+                LayoutConfig {
+                    spacing: LayoutSpacing {
+                        rank_spacing: 100.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            assert_eq!(layout.nodes.len(), 4);
+            assert_eq!(layout.edges.len(), ir.edges.len());
+            for pair in layout.nodes.windows(2) {
+                let first = pair[0].bounds;
+                let second = pair[1].bounds;
+                let gap = match (horizontal, reverse) {
+                    (true, false) => second.x - first.x - first.width,
+                    (true, true) => first.x - second.x - second.width,
+                    (false, false) => second.y - first.y - first.height,
+                    (false, true) => first.y - second.y - second.height,
+                };
+                assert!(
+                    gap >= 59.99,
+                    "{direction}: commits overlap or reverse order"
+                );
+            }
+            let cross = |index: usize| {
+                let center = layout.nodes[index].bounds.center();
+                if horizontal { center.y } else { center.x }
+            };
+            assert!((cross(0) - cross(3)).abs() < 0.001);
+            assert!((cross(1) - cross(2)).abs() < 0.001);
+            assert!(cross(1) > cross(0));
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                for (endpoint, point) in [
+                    (edge.from, path.points.first().unwrap()),
+                    (edge.to, path.points.last().unwrap()),
+                ] {
+                    let index = ir.resolve_endpoint_node(endpoint).unwrap().0;
+                    let bounds = layout.nodes[index].bounds;
+                    let center = bounds.center();
+                    let radius = bounds.width * 0.5;
+                    let distance = (point.x - center.x).hypot(point.y - center.y);
+                    assert!(
+                        (distance - radius).abs() < 0.1,
+                        "{direction}: relationship endpoint misses commit {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gitgraph_reserves_configured_typography_and_branch_captions() {
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 36.0,
+            line_height: 1.6,
+            ..Default::default()
+        });
+        for direction in ["LR", "RL", "TB", "BT"] {
+            let source = format!(
+                "gitGraph {direction}\n\
+                 commit id: \"root\"\n\
+                 branch feature_with_a_long_descriptive_branch_name\n\
+                 commit id: \"work\"\n\
+                 checkout main\n\
+                 merge feature_with_a_long_descriptive_branch_name\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let baseline = layout_diagram(&ir);
+            let layout = layout_diagram_with_config(
+                &ir,
+                LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    spacing: LayoutSpacing {
+                        node_spacing: 0.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            assert!(layout.nodes[0].bounds.width > baseline.nodes[0].bounds.width);
+            assert_eq!(layout.extensions.bands.len(), 2);
+            for (lane, band) in layout.extensions.bands.iter().enumerate() {
+                let (width, height) = metrics.estimate_dimensions(&band.label);
+                assert!(band.bounds.width >= width + 16.0 - 0.01);
+                assert!(band.bounds.x >= layout.bounds.x);
+                assert!(band.bounds.y >= layout.bounds.y);
+                assert!(
+                    band.bounds.x + band.bounds.width
+                        <= layout.bounds.x + layout.bounds.width + 0.01
+                );
+                assert!(
+                    band.bounds.y + band.bounds.height
+                        <= layout.bounds.y + layout.bounds.height + 0.01
+                );
+                for node in layout.nodes.iter().filter(|node| node.order == lane) {
+                    assert!(node.bounds.y >= band.bounds.y + height + 9.99);
+                    assert!(node.bounds.x >= band.bounds.x);
+                    assert!(
+                        node.bounds.x + node.bounds.width
+                            <= band.bounds.x + band.bounds.width + 0.01
+                    );
+                }
+            }
+            let first = layout.extensions.bands[0].bounds;
+            let second = layout.extensions.bands[1].bounds;
+            if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
+                assert!(first.y + first.height <= second.y + 0.01);
+            } else {
+                assert!(first.x + first.width <= second.x + 0.01);
+            }
         }
     }
 
