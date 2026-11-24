@@ -7960,7 +7960,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         ),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
-        LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
+        LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir, &config),
         LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
         LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
         LayoutAlgorithm::Ishikawa => layout_diagram_ishikawa_traced(ir),
@@ -18373,20 +18373,24 @@ fn row_worst_ratio(
 ///
 /// Reached only when [`architecture_declares_a_side`] holds, so a side-less architecture diagram
 /// still takes the general path and is unchanged.
-fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr, config: &LayoutConfig) -> TracedLayout {
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let spacing = spacing_with_source_hints(config.spacing, ir);
     let mut traced = layout_diagram_directed_grid_traced(
         ir,
         architecture_edge_step,
         "architecture_direction_placement",
+        &metrics,
+        spacing,
     );
     let layout = Arc::make_mut(&mut traced.layout);
-    route_architecture_sides(ir, layout);
-    layout.bounds = compute_bounds(
-        &layout.nodes,
-        &layout.clusters,
-        &layout.edges,
-        LayoutSpacing::default(),
-    );
+    route_architecture_sides(ir, layout, &metrics);
+    layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
+    (layout.stats.total_edge_length, layout.stats.reversed_edge_total_length) =
+        compute_edge_length_metrics(&layout.edges);
     traced
 }
 
@@ -18396,7 +18400,11 @@ fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// shared router ignored that and ran from db's bottom, through both boxes, to server's top. Each
 /// end now starts at the middle of its declared side (an undeclared end takes the side facing the
 /// other node), steps straight out, and the two stubs are joined orthogonally.
-fn route_architecture_sides(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+fn route_architecture_sides(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) {
     const STUB: f32 = 18.0;
     let port = |bounds: LayoutRect, side: ArchitectureSide| -> (LayoutPoint, (f32, f32)) {
         let (cx, cy) = (
@@ -18439,6 +18447,15 @@ fn route_architecture_sides(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
         }
     };
 
+    let mut obstacles: Vec<_> = layout.nodes.iter().map(|node| node.bounds).collect();
+    obstacles.extend(edge_labels::graph_cluster_caption_bounds(
+        ir,
+        &layout.clusters,
+        metrics,
+    ));
+    let mut index = (obstacles.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES)
+        .then(|| ObstacleSpatialIndex::new(&obstacles))
+        .flatten();
     for path in &mut layout.edges {
         let Some(edge) = ir.edges.get(path.edge_index) else {
             continue;
@@ -18506,6 +18523,49 @@ fn route_architecture_sides(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
         }
         points.push(q);
         points.dedup_by(|x, y| (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01);
+        // Other services and group headings block connectors. The two endpoint boxes have
+        // their own strict-interior test, which permits contact at the requested ports.
+        let parked = LayoutRect {
+            x: 1.0e30,
+            y: 1.0e30,
+            width: 0.0,
+            height: 0.0,
+        };
+        obstacles[from] = parked;
+        obstacles[to] = parked;
+        let along_normal = |from: LayoutPoint, to: LayoutPoint, nx, ny| {
+            (to.x - from.x).mul_add(nx, (to.y - from.y) * ny)
+        };
+        let wrong_face = points.len() >= 2
+            && (along_normal(p, points[1], pnx, pny) <= 0.0
+                || along_normal(q, points[points.len() - 2], qnx, qny) <= 0.0);
+        let obstructed = wrong_face
+            || points.windows(2).any(|pair| {
+                segment_enters_rect(pair[0], pair[1], a)
+                    || segment_enters_rect(pair[0], pair[1], b)
+                    || segment_blocked(pair[0], pair[1], &obstacles, index.as_mut()).is_some()
+            });
+        if obstructed {
+            let horizontal_span = if (q.x - p.x).abs() < 0.001 {
+                false
+            } else if (q.y - p.y).abs() < 0.001 {
+                true
+            } else {
+                horizontal(pnx)
+            };
+            if let Some(detour) = bounded_orthogonal_route(
+                p,
+                q,
+                horizontal_span,
+                &obstacles,
+                index.as_mut(),
+                Some([a, b]),
+            ) {
+                points = detour;
+            }
+        }
+        obstacles[from] = a;
+        obstacles[to] = b;
         path.points = points;
     }
 }
@@ -18516,12 +18576,12 @@ fn layout_diagram_directed_grid_traced(
     ir: &MermaidDiagramIr,
     edge_step: fn(&fm_core::IrEdge) -> Option<(i32, i32)>,
     placement_snapshot: &'static str,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let node_sizes = compute_node_sizes(ir, &metrics);
+    let node_sizes = compute_node_sizes(ir, metrics);
     let node_count = ir.nodes.len();
-    let spacing = LayoutSpacing::default();
 
     // Integer grid first, pixels second: placement is a discrete relation between services, and
     // deciding it in cell units keeps "b is right of a" exact rather than a float comparison that
@@ -18629,7 +18689,7 @@ fn layout_diagram_directed_grid_traced(
         0,
     );
 
-    finalize_specialized_layout(
+    finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -18637,6 +18697,8 @@ fn layout_diagram_directed_grid_traced(
         centers,
         trace,
         false,
+        spacing,
+        metrics,
     )
 }
 
@@ -28021,6 +28083,13 @@ fn bounded_orthogonal_route(
     )
 }
 
+fn segment_enters_rect(from: LayoutPoint, to: LayoutPoint, bounds: LayoutRect) -> bool {
+    from.x.max(to.x) > bounds.x + 0.001
+        && from.x.min(to.x) < bounds.x + bounds.width - 0.001
+        && from.y.max(to.y) > bounds.y + 0.001
+        && from.y.min(to.y) < bounds.y + bounds.height - 0.001
+}
+
 fn bounded_orthogonal_route_with_budget(
     source: LayoutPoint,
     target: LayoutPoint,
@@ -28121,12 +28190,13 @@ fn bounded_orthogonal_route_with_budget(
     let source_cell = source_y * width + source_x;
     let target_cell = target_y * width + target_x;
     let preferred_axis = usize::from(horizontal_ranks);
-    let mixed_ports = endpoint_bounds.and_then(|bounds| {
-        let source_port = rectangular_port_direction(source, bounds[0])?;
-        let target_port = rectangular_port_direction(target, bounds[1])?;
-        (source_port.0 != target_port.0).then_some([source_port, target_port])
+    let ports = endpoint_bounds.and_then(|bounds| {
+        Some([
+            rectangular_port_direction(source, bounds[0])?,
+            rectangular_port_direction(target, bounds[1])?,
+        ])
     });
-    let [source_axis, target_axis] = mixed_ports.map_or([preferred_axis; 2], |ports| {
+    let [source_axis, target_axis] = ports.map_or([preferred_axis; 2], |ports| {
         ports.map(|(horizontal, _)| usize::from(horizontal))
     });
     let initial = source_cell * 2 + source_axis;
@@ -28195,13 +28265,13 @@ fn bounded_orthogonal_route_with_budget(
             } else {
                 to.y - from.y
             };
-            if let Some(ports) = mixed_ports {
+            if let Some(ports) = ports {
                 let step = if axis == 1 {
                     to.x - from.x
                 } else {
                     to.y - from.y
                 };
-                // A mixed-face route can wind against the global source-target direction,
+                // An authored port can point away from the global source-target direction,
                 // but its first/last legs must still cross the actual outlines normally.
                 if (cell == source_cell && step * ports[0].1 <= 0.0)
                     || (next_cell == target_cell && step * ports[1].1 >= 0.0)
@@ -28211,19 +28281,16 @@ fn bounded_orthogonal_route_with_budget(
             }
             if primary_step * forward < 0.0
                 && (endpoint_bounds.is_none()
-                    || (mixed_ports.is_none() && (cell == source_cell || next_cell == target_cell)))
+                    || (ports.is_none() && (cell == source_cell || next_cell == target_cell)))
             {
                 continue;
             }
             // Strict interior overlap allows a segment to meet its own port on the boundary,
             // while every later segment must remain outside the complete endpoint rectangle.
             if endpoint_bounds.is_some_and(|bounds| {
-                bounds.iter().any(|bounds| {
-                    from.x.max(to.x) > bounds.x + 0.001
-                        && from.x.min(to.x) < bounds.x + bounds.width - 0.001
-                        && from.y.max(to.y) > bounds.y + 0.001
-                        && from.y.min(to.y) < bounds.y + bounds.height - 0.001
-                })
+                bounds
+                    .into_iter()
+                    .any(|bounds| segment_enters_rect(from, to, bounds))
             }) {
                 continue;
             }
@@ -34023,6 +34090,83 @@ mod tests {
             (end.y - (server.y + server.height)).abs() < 0.01,
             "enters server's bottom: {end:?}"
         );
+    }
+
+    #[test]
+    fn architecture_declared_ports_route_around_intervening_services_and_endpoint_fills() {
+        let ir = parse(concat!(
+            "architecture-beta\n",
+            "service a(server)[Gateway]\nservice b(server)[Worker]\nservice c(database)[Store]\n",
+            "a:R -- L:b\nb:R -- L:c\na:R -- L:c\na:L -- L:c\n",
+        ))
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.edges.len(), 4);
+        let a = layout.nodes[0].bounds;
+        let b = layout.nodes[1].bounds;
+        let c = layout.nodes[2].bounds;
+        assert!(a.center().x < b.center().x && b.center().x < c.center().x);
+        for (index, source_x, departure) in [(2, a.x + a.width, 1.0), (3, a.x, -1.0)] {
+            let points = &layout.edges[index].points;
+            let first = points[0];
+            let last = points[points.len() - 1];
+            assert_eq!(first, LayoutPoint { x: source_x, y: a.center().y });
+            assert_eq!(last, LayoutPoint { x: c.x, y: c.center().y });
+            assert!(departure * (points[1].x - first.x) > 0.0);
+            assert_eq!(points[1].y, first.y);
+            assert!(points[points.len() - 2].x < last.x);
+            assert_eq!(points[points.len() - 2].y, last.y);
+            for point in points {
+                assert!(point.x.is_finite() && point.y.is_finite());
+                assert!(point.x >= layout.bounds.x && point.x <= layout.bounds.x + layout.bounds.width);
+                assert!(point.y >= layout.bounds.y && point.y <= layout.bounds.y + layout.bounds.height);
+            }
+            for pair in points.windows(2) {
+                assert!(pair[0].x == pair[1].x || pair[0].y == pair[1].y);
+                for rect in [a, b, c] {
+                    // Midpoints alone miss a long segment through a narrow service.
+                    let crosses = if pair[0].x == pair[1].x {
+                        pair[0].x > rect.x && pair[0].x < rect.x + rect.width
+                            && pair[0].y.max(pair[1].y) > rect.y
+                            && pair[0].y.min(pair[1].y) < rect.y + rect.height
+                    } else {
+                        pair[0].y > rect.y && pair[0].y < rect.y + rect.height
+                            && pair[0].x.max(pair[1].x) > rect.x
+                            && pair[0].x.min(pair[1].x) < rect.x + rect.width
+                    };
+                    assert!(!crosses, "edge {index} cuts through {rect:?}: {pair:?}");
+                }
+            }
+        }
+        assert_eq!(layout.edges, layout_diagram(&ir).edges);
+    }
+
+    #[test]
+    fn architecture_grid_uses_the_requested_text_metrics_and_gaps() {
+        let ir = parse(concat!(
+            "architecture-beta\nservice a(server)[Request broker]\n",
+            "service b(server)[Background worker]\nservice c(database)[Durable store]\n",
+            "a:R -- L:b\nb:B -- T:c\n",
+        ))
+        .ir;
+        let baseline = layout_diagram(&ir);
+        let mut config = LayoutConfig {
+            font_metrics: Some(fm_core::FontMetrics::monospace(30.0)),
+            ..Default::default()
+        };
+        config.spacing.node_spacing = 140.0;
+        config.spacing.rank_spacing = 160.0;
+        let layout = layout_diagram_with_config(&ir, config);
+        let [a, b, c] = [0, 1, 2].map(|i| layout.nodes[i].bounds);
+        assert!(a.width > baseline.nodes[0].bounds.width);
+        assert!(b.x - (a.x + a.width) >= 139.99);
+        assert!(c.y - (b.y + b.height) >= 159.99);
+        let route_length: f32 = layout
+            .edges
+            .iter()
+            .map(|edge| super::polyline_length(&edge.points))
+            .sum();
+        assert!((layout.stats.total_edge_length - route_length).abs() < 0.01);
     }
 
     #[test]
