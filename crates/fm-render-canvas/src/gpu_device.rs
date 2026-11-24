@@ -527,8 +527,8 @@ pub struct DiagramPipelines {
 impl DiagramPipelines {
     /// Build every pipeline in [`crate::gpu_pipeline::pipelines`] order.
     ///
-    /// Order is preserved rather than sorted or keyed, because it IS the draw order: edges, then
-    /// their arrowheads, then the boxes that paint over both, then the labels on top.
+    /// This retains baseline layer order. `draw_batches` supplies the actual submission ranges,
+    /// including interleaved container fills and outlines within the background layer.
     #[must_use]
     pub fn new(gpu: &GpuDevice) -> Self {
         Self {
@@ -774,7 +774,11 @@ pub async fn render_diagram_async(
             occlusion_query_set: None,
         });
 
-        for (family, pass) in &pipelines.passes {
+        for batch in crate::gpu_pipeline::draw_batches(plan) {
+            let family = &batch.family;
+            let Some((_, pass)) = pipelines.passes.iter().find(|(f, _)| f == family) else {
+                continue;
+            };
             let Some((_, buffer, count)) = uploads.iter().find(|(f, _, _)| f == family) else {
                 continue;
             };
@@ -784,7 +788,14 @@ pub async fn render_diagram_async(
             render.set_pipeline(&pass.pipeline);
             render.set_bind_group(0, bind, &[]);
             render.set_vertex_buffer(0, buffer.slice(..));
-            render.draw(0..pass.vertices_per_instance, 0..*count);
+            let end = batch
+                .first_instance
+                .saturating_add(batch.instance_count)
+                .min(*count);
+            render.draw(
+                0..pass.vertices_per_instance,
+                batch.first_instance.min(end)..end,
+            );
         }
     }
     encoder.copy_texture_to_buffer(

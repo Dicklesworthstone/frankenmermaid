@@ -2043,9 +2043,9 @@ pub struct GpuRenderPlan {
     /// ⚠️ DECLARED BEFORE `node_instances` BECAUSE THAT IS THE DRAW ORDER. A container painted after
     /// its contents covers them, and the Canvas2D pass draws clusters first for exactly this
     /// reason -- the peer who added cluster opacity there had to restore `globalAlpha` afterwards
-    /// so it did not fade the nodes drawn inside. A consumer that submits these buffers in field
-    /// order gets the right picture; one that reorders them gets subgraphs painted over their own
-    /// nodes.
+    /// so it did not fade the nodes drawn inside. Use [`crate::gpu_pipeline::draw_batches`] for
+    /// submission: it interleaves each container with its separate outline before the next
+    /// container fill, so an opaque child also covers any overlapping parent border.
     ///
     /// Reuses `GpuNodeInstance` rather than introducing a cluster type: a subgraph box IS a rect
     /// with a fill, a stroke, a border width and an opacity, which is exactly this struct, and the
@@ -2057,6 +2057,10 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Authored dashed container outlines and C4 boundary outlines, above container fills.
+    /// `edge_index` refers to the cluster index. Each mask shares one continuous perimeter phase.
+    /// Outlines are contiguous per cluster, in the same order as `cluster_instances`.
+    pub cluster_border_segments: Vec<GpuEdgeSegment>,
     /// Authored `rect` fills in parent-before-child order, underneath sequence lifelines.
     pub sequence_background_instances: Vec<GpuNodeInstance>,
     /// Sequence lifelines. Other lane kinds use the panel buffer below.
@@ -2251,6 +2255,7 @@ impl GpuRenderPlan {
         };
         // Clusters first, so the buffer order is the draw order.
         let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
+        let mut cluster_border_segments = Vec::new();
         let cluster_depths = ir.cluster_nesting_depths();
         for cluster in crate::renderer::ordered_cluster_boxes(layout) {
             let (resolved_fill, resolved_stroke) = crate::renderer::resolve_cluster_paint(
@@ -2265,26 +2270,56 @@ impl GpuRenderPlan {
             let opacity = crate::renderer::resolve_cluster_opacity(ir, cluster.cluster_index)
                 .map(|value| value.clamp(0.0, 1.0) as f32)
                 .unwrap_or(1.0);
-            let fill = parse_paint_rgba(&resolved_fill)
+            let mut fill = parse_paint_rgba(&resolved_fill)
                 .or_else(|| parse_paint_rgba(&config.cluster_fill))
                 .unwrap_or(DEFAULT_CLUSTER_FILL_RGBA);
-            let stroke = parse_paint_rgba(&resolved_stroke)
+            let mut stroke = parse_paint_rgba(&resolved_stroke)
                 .or_else(|| parse_paint_rgba(&config.cluster_stroke))
                 .unwrap_or(DEFAULT_CLUSTER_STROKE_RGBA);
             let stroke_width =
                 crate::renderer::resolve_cluster_stroke_width(ir, cluster.cluster_index)
                     .map(|width| width as f32)
-                    .filter(|width| width.is_finite() && *width > 0.0)
+                    .filter(|width| width.is_finite() && *width >= 0.0)
                     .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
+            let style = crate::renderer::merged_cluster_style(ir, cluster.cluster_index);
+            fill[3] *= opacity
+                * crate::renderer::parse_opacity(style.get("fill-opacity").map(String::as_str))
+                    .unwrap_or(1.0) as f32;
+            stroke[3] *= opacity
+                * crate::renderer::parse_opacity(style.get("stroke-opacity").map(String::as_str))
+                    .unwrap_or(1.0) as f32;
+            let is_c4_boundary = ir
+                .clusters
+                .get(cluster.cluster_index)
+                .is_some_and(|cluster| cluster.c4_boundary_type.is_some());
+            let pattern = crate::renderer::resolve_cluster_dash_array(ir, cluster.cluster_index)
+                .or_else(|| is_c4_boundary.then(|| vec![4.0, 2.0]));
+            if let Some(pattern) = &pattern {
+                for (dash, offset) in edge_dash_masks(pattern) {
+                    let first = cluster_border_segments.len();
+                    push_dashed_border(
+                        &mut cluster_border_segments,
+                        cluster.bounds,
+                        GpuNodeShape::Rect,
+                        stroke,
+                        stroke_width,
+                        dash,
+                        cluster.cluster_index,
+                    );
+                    for segment in &mut cluster_border_segments[first..] {
+                        segment.dash_phase -= offset;
+                    }
+                }
+            }
             cluster_instances.push(GpuNodeInstance {
                 center: [
                     cluster.bounds.x + (cluster.bounds.width * 0.5),
                     cluster.bounds.y + (cluster.bounds.height * 0.5),
                 ],
                 half_extent: [cluster.bounds.width * 0.5, cluster.bounds.height * 0.5],
-                fill: [fill[0], fill[1], fill[2], fill[3] * opacity],
-                stroke: [stroke[0], stroke[1], stroke[2], stroke[3] * opacity],
-                stroke_width,
+                fill,
+                stroke,
+                stroke_width: if pattern.is_some() { 0.0 } else { stroke_width },
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
             });
@@ -5026,6 +5061,7 @@ impl GpuRenderPlan {
             xy_area_triangles: radar_triangles,
             xy_bar_instances: Vec::new(),
             cluster_instances,
+            cluster_border_segments,
             band_lane_segments,
             band_section_instances,
             er_marker_segments,
@@ -5397,6 +5433,7 @@ impl GpuRenderPlan {
             xy_area_triangles: Vec::new(),
             xy_bar_instances,
             cluster_instances: Vec::new(),
+            cluster_border_segments: Vec::new(),
             band_lane_segments: Vec::new(),
             band_section_instances: Vec::new(),
             band_column_segments: Vec::new(),
@@ -5744,6 +5781,7 @@ impl GpuRenderPlan {
             xy_area_triangles,
             xy_bar_instances,
             cluster_instances: Vec::new(),
+            cluster_border_segments: Vec::new(),
             band_lane_segments: Vec::new(),
             band_section_instances: Vec::new(),
             band_column_segments: Vec::new(),
@@ -11861,6 +11899,213 @@ mod tests {
         );
     }
 
+    #[test]
+    fn c4_boundaries_submit_dashed_outlines_before_their_contents() {
+        let ir = fm_parser::parse(
+            "C4Context\n System_Boundary(platform, \"Platform\") {\n System(api, \"API\")\n }\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.cluster_instances.len(), 1);
+        assert_eq!(plan.cluster_instances[0].stroke_width, 0.0);
+        assert_eq!(plan.cluster_border_segments.len(), 4);
+        assert!(
+            plan.cluster_border_segments
+                .iter()
+                .all(|segment| segment.dash == [4.0, 2.0])
+        );
+        let batches = crate::gpu_pipeline::draw_batches(&plan);
+        let border = batches
+            .iter()
+            .position(|batch| batch.family == crate::gpu_pipeline::PrimitiveFamily::ClusterBorder)
+            .unwrap();
+        let contents = batches
+            .iter()
+            .position(|batch| batch.family == crate::gpu_pipeline::PrimitiveFamily::Node)
+            .unwrap();
+        assert!(border < contents);
+        assert_eq!(batches[border].instance_count, 4);
+    }
+
+    #[test]
+    fn nested_container_batches_keep_parent_outlines_beneath_child_fills() {
+        use crate::gpu_pipeline::{PrimitiveFamily, draw_batches};
+
+        let ir = fm_parser::parse(
+            "flowchart TD\nsubgraph outer[Outer]\nsubgraph middle[Middle]\n\
+             subgraph inner[Inner]\nA\nend\nend\nend\n\
+             style outer stroke-dasharray:4 2\n\
+             style middle fill:#ffffff\n\
+             style inner stroke-dasharray:2 2 6 2\n",
+        )
+        .ir;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        let depths = ir.cluster_nesting_depths();
+        for cluster in &mut layout.clusters {
+            cluster.bounds = match depths[cluster.cluster_index] {
+                0 => LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
+                // A caller-supplied child crosses the parent's right border. Painting all
+                // outlines last would incorrectly put that border over the opaque child.
+                1 => LayoutRect {
+                    x: 90.0,
+                    y: 20.0,
+                    width: 40.0,
+                    height: 50.0,
+                },
+                _ => LayoutRect {
+                    x: 95.0,
+                    y: 30.0,
+                    width: 15.0,
+                    height: 20.0,
+                },
+            };
+        }
+        layout.clusters.reverse();
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.cluster_border_segments.len(), 12);
+        let containers: Vec<_> = draw_batches(&plan)
+            .into_iter()
+            .filter(|batch| {
+                matches!(
+                    batch.family,
+                    PrimitiveFamily::Cluster | PrimitiveFamily::ClusterBorder
+                )
+            })
+            .map(|batch| (batch.family, batch.first_instance, batch.instance_count))
+            .collect();
+        assert_eq!(
+            containers,
+            [
+                (PrimitiveFamily::Cluster, 0, 1),
+                (PrimitiveFamily::ClusterBorder, 0, 4),
+                (PrimitiveFamily::Cluster, 1, 1),
+                (PrimitiveFamily::Cluster, 2, 1),
+                (PrimitiveFamily::ClusterBorder, 4, 8),
+            ]
+        );
+        assert_eq!(plan.cluster_instances[1].fill, [1.0; 4]);
+        for (index, cluster) in plan.cluster_instances.iter().enumerate() {
+            assert_eq!(depths[cluster.node_index as usize], index);
+        }
+    }
+
+    #[test]
+    fn gpu_container_dashes_preserve_complete_patterns_and_channel_opacity() {
+        for pattern in [
+            vec![7.0, 3.0],
+            vec![4.0, 2.0, 1.0, 3.0],
+            vec![4.0, 2.0, 1.0],
+            vec![0.0, 2.0, 3.0, 1.0],
+            vec![0.0, 3.0],
+        ] {
+            let declaration = pattern
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\nsubgraph frame[Frame]\nA --> B\nend\n\
+                 style frame fill:rgba(0,0,255,0.5),stroke:rgba(255,0,0,0.5),\
+                 opacity:0.5,fill-opacity:0.4,stroke-opacity:0.8,stroke-width:3,\
+                 stroke-dasharray:{declaration}\n"
+            ))
+            .ir;
+            let mut layout = fm_layout::layout_diagram(&ir);
+            layout.clusters[0].bounds = LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 73.0,
+                height: 41.0,
+            };
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            assert_paint_rgba_eq(plan.cluster_instances[0].fill, [0.0, 0.0, 1.0, 0.1]);
+            assert_eq!(plan.cluster_instances[0].stroke_width, 0.0);
+            let mut repeated = pattern.clone();
+            if repeated.len() % 2 == 1 {
+                repeated.extend_from_slice(&pattern);
+            }
+            let on_intervals = repeated
+                .iter()
+                .step_by(2)
+                .filter(|&&value| value > 0.0)
+                .count();
+            assert_eq!(plan.cluster_border_segments.len(), 4 * on_intervals);
+            for segment in &plan.cluster_border_segments {
+                assert_paint_rgba_eq(segment.color, [1.0, 0.0, 0.0, 0.2]);
+                assert_eq!(segment.width, 3.0);
+            }
+            let period: f64 = repeated.iter().sum();
+            let lengths = [73.0, 41.0, 73.0, 41.0];
+            let mut distance = 0.0;
+            for (side, length) in lengths.into_iter().enumerate() {
+                for fraction in [0.13, 0.37, 0.61, 0.89] {
+                    let local = length * fraction;
+                    let mut phase = (distance + local) % period;
+                    let mut expected = false;
+                    for (index, interval) in repeated.iter().enumerate() {
+                        if phase < *interval {
+                            expected = index % 2 == 0;
+                            break;
+                        }
+                        phase -= interval;
+                    }
+                    let painted = plan
+                        .cluster_border_segments
+                        .iter()
+                        .skip(side)
+                        .step_by(4)
+                        .filter(|segment| {
+                            let period = segment.dash[0] + segment.dash[1];
+                            (local as f32 + segment.dash_phase).rem_euclid(period) < segment.dash[0]
+                        })
+                        .count();
+                    assert_eq!(painted, usize::from(expected), "{declaration} side {side}");
+                }
+                distance += length;
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_container_disabled_strokes_and_explicit_solid_patterns_survive() {
+        for (declaration, expected_segments) in [
+            ("stroke:none,stroke-dasharray:4 2", 0),
+            ("stroke-opacity:0,stroke-dasharray:4 2", 0),
+            ("stroke-width:0,stroke-dasharray:4 2", 0),
+            ("stroke-width:0px,stroke-dasharray:none", 0),
+            ("opacity:0,stroke-dasharray:4 2", 0),
+            ("stroke-dasharray:none", 4),
+            ("stroke-dasharray:0 0", 4),
+        ] {
+            let mut ir = fm_parser::parse(&format!(
+                "flowchart LR\nsubgraph frame[Frame]\nA\nend\nstyle frame {declaration}\n"
+            ))
+            .ir;
+            ir.clusters[0].c4_boundary_type = Some("system".to_owned());
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            assert_eq!(
+                plan.cluster_border_segments.len(),
+                expected_segments,
+                "{declaration}"
+            );
+            assert_eq!(plan.cluster_instances[0].stroke_width, 0.0);
+            if expected_segments > 0 {
+                assert!(
+                    plan.cluster_border_segments
+                        .iter()
+                        .all(|segment| segment.dash == [0.0; 2])
+                );
+            }
+        }
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -12108,12 +12353,7 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map_or(GPU_FULL_SRC, |(production, _tests)| production);
         // (resolver, why it is exempt) — an entry here must cite a bead.
-        const EXEMPT: &[(&str, &str)] = &[(
-            "resolve_cluster_dash_array",
-            "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
-                 length the SDF lacks. A cluster border is the same rect and can follow the same route; \
-                 it is not done here only because that bead scoped itself to nodes",
-        )];
+        const EXEMPT: &[(&str, &str)] = &[];
 
         let mut resolvers = Vec::new();
         let mut rest = RENDERER_SRC;

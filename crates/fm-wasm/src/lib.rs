@@ -350,6 +350,7 @@ pub fn apply_ir_lens_edit(
 pub struct WebGpuPlanSummary {
     bounds: [f32; 4],
     cluster_instances: usize,
+    cluster_border_segments: usize,
     edge_segments: usize,
     arrowheads: usize,
     node_instances: usize,
@@ -368,6 +369,7 @@ impl From<&GpuRenderPlan> for WebGpuPlanSummary {
                 plan.bounds.height,
             ],
             cluster_instances: plan.cluster_instances.len(),
+            cluster_border_segments: plan.cluster_border_segments.len(),
             edge_segments: plan.edge_segments.len(),
             arrowheads: plan.arrowheads.len(),
             node_instances: plan.node_instances.len(),

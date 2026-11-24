@@ -439,6 +439,7 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::XyArea,
             PrimitiveFamily::XyBar,
             PrimitiveFamily::Cluster,
+            PrimitiveFamily::ClusterBorder,
             PrimitiveFamily::SequenceBackground,
             PrimitiveFamily::BandLane,
             PrimitiveFamily::BandSection,

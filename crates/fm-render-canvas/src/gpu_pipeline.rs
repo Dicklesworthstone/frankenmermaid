@@ -108,6 +108,8 @@ pub enum PrimitiveFamily {
     XyBar,
     /// Subgraph containers behind their contents.
     Cluster,
+    /// Dashed subgraph and C4 boundary outlines, above container fills and below graph content.
+    ClusterBorder,
     /// Authored sequence-region backgrounds, underneath lifelines and activations.
     SequenceBackground,
     /// Sequence lifelines and other layout lanes.
@@ -207,6 +209,7 @@ impl PrimitiveFamily {
             Self::XyArea => PrimitiveInstances::Triangles(&plan.xy_area_triangles),
             Self::XyBar => PrimitiveInstances::Nodes(&plan.xy_bar_instances),
             Self::Cluster => PrimitiveInstances::Nodes(&plan.cluster_instances),
+            Self::ClusterBorder => PrimitiveInstances::Edges(&plan.cluster_border_segments),
             Self::SequenceBackground => {
                 PrimitiveInstances::Nodes(&plan.sequence_background_instances)
             }
@@ -542,22 +545,23 @@ pub const fn text_pipeline() -> PipelineDescriptor {
     }
 }
 
-/// Every pipeline this module describes, in SUBMISSION order.
+/// Every pipeline this module describes, in baseline layer order.
 ///
 /// The order is the draw order, not an arbitrary listing, and it is taken from `GpuRenderPlan`'s own
 /// field order — `edge_segments`, `arrowheads`, `node_instances`, `text_quads` — which that struct
-/// documents as the order a consumer must submit in. Edges and their heads go down first so a node
+/// uses to group the rendering layers. Edges and their heads go down first so a node
 /// box paints over the segment terminating at it; text goes last so a label is never painted over by
-/// the box that carries it. A caller iterating this slice gets the right picture without having to
-/// know why.
+/// the box that carries it. Use [`draw_batches`] to submit a plan: container fills and their dashed
+/// outlines need interleaving within these layers to preserve parent-before-child paint order.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 33] {
+pub const fn pipelines() -> [PipelineDescriptor; 34] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
         xy_area_pipeline(),
         xy_bar_pipeline(),
         node_family(PrimitiveFamily::Cluster, "fm-cluster"),
+        edge_family(PrimitiveFamily::ClusterBorder, "fm-cluster-border"),
         node_family(
             PrimitiveFamily::SequenceBackground,
             "fm-sequence-background",
@@ -818,7 +822,9 @@ pub fn run_advance_for(text: &str, font_px: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawBatch {
     pub family: PrimitiveFamily,
-    /// Number of instances, i.e. the length of the family's slice in the plan.
+    /// First instance within the family's uploaded buffer. Ordinary passes start at zero.
+    pub first_instance: u32,
+    /// Number of instances in this draw. Containers may be split to preserve nested paint order.
     pub instance_count: u32,
     pub vertices_per_instance: u32,
 }
@@ -837,20 +843,63 @@ impl DrawBatch {
 /// An **empty family produces no batch**. A zero-instance draw is legal and free on most backends,
 /// but emitting one makes "did this diagram plan any nodes?" unanswerable from the batch list, and
 /// the batch list is what a caller inspects when a diagram renders blank.
+/// Container fills and outlines are interleaved per container, preserving the same overlap
+/// semantics as Canvas2D. Consumers must honor each batch's `first_instance` and `instance_count`.
 #[must_use]
 pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
-    pipelines()
-        .into_iter()
-        .filter_map(|pipeline| {
-            let count = pipeline.family.instances(plan).len();
-            if count == 0 {
-                return None;
+    let mut batches = Vec::new();
+    let interleave_containers =
+        !plan.cluster_instances.is_empty() && !plan.cluster_border_segments.is_empty();
+    for pipeline in pipelines() {
+        if interleave_containers && pipeline.family == PrimitiveFamily::Cluster {
+            let mut first_border = 0;
+            for (index, cluster) in plan.cluster_instances.iter().enumerate() {
+                batches.push(DrawBatch {
+                    family: PrimitiveFamily::Cluster,
+                    first_instance: u32::try_from(index).unwrap_or(u32::MAX),
+                    instance_count: 1,
+                    vertices_per_instance: pipeline.vertices_per_instance,
+                });
+                let count = plan.cluster_border_segments[first_border..]
+                    .iter()
+                    .take_while(|segment| segment.edge_index == cluster.node_index)
+                    .count();
+                if count > 0 {
+                    batches.push(DrawBatch {
+                        family: PrimitiveFamily::ClusterBorder,
+                        first_instance: u32::try_from(first_border).unwrap_or(u32::MAX),
+                        instance_count: u32::try_from(count).unwrap_or(u32::MAX),
+                        vertices_per_instance: edge_pipeline().vertices_per_instance,
+                    });
+                    first_border += count;
+                }
             }
-            Some(DrawBatch {
+            // Preserve caller-supplied orphan outlines even when their container has been removed.
+            if first_border < plan.cluster_border_segments.len() {
+                batches.push(DrawBatch {
+                    family: PrimitiveFamily::ClusterBorder,
+                    first_instance: u32::try_from(first_border).unwrap_or(u32::MAX),
+                    instance_count: u32::try_from(
+                        plan.cluster_border_segments.len() - first_border,
+                    )
+                    .unwrap_or(u32::MAX),
+                    vertices_per_instance: edge_pipeline().vertices_per_instance,
+                });
+            }
+            continue;
+        }
+        if interleave_containers && pipeline.family == PrimitiveFamily::ClusterBorder {
+            continue;
+        }
+        let count = pipeline.family.instances(plan).len();
+        if count > 0 {
+            batches.push(DrawBatch {
                 family: pipeline.family,
+                first_instance: 0,
                 instance_count: u32::try_from(count).unwrap_or(u32::MAX),
                 vertices_per_instance: pipeline.vertices_per_instance,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    batches
 }

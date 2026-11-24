@@ -1534,9 +1534,9 @@ impl Canvas2dRenderer {
             // width was hardcoded to 1.0 and no dash was ever set, while the SVG arm emits both
             // (`stroke-width:5px`, `stroke-dasharray:9 4`). `unwrap_or(1.0)` keeps the previous
             // constant when nothing was declared, so an unstyled cluster is drawn exactly as before.
-            ctx.set_line_width(
-                resolve_cluster_stroke_width(ir, cluster_box.cluster_index).unwrap_or(1.0),
-            );
+            let stroke_width =
+                resolve_cluster_stroke_width(ir, cluster_box.cluster_index).unwrap_or(1.0);
+            ctx.set_line_width(stroke_width);
             // Set only when declared and cleared after the stroke, because `lineDash` is canvas
             // STATE — a dashed cluster would otherwise dash every shape drawn after it.
             let cluster_dash = resolve_cluster_dash_array(ir, cluster_box.cluster_index)
@@ -1563,16 +1563,18 @@ impl Canvas2dRenderer {
                 fill_opacity,
                 Canvas2dContext::fill,
             );
-            with_paint_opacity(
-                ctx,
-                cluster_opacity.unwrap_or(1.0),
-                stroke_opacity,
-                Canvas2dContext::stroke,
-            );
+            if stroke_width > 0.0 {
+                with_paint_opacity(
+                    ctx,
+                    cluster_opacity.unwrap_or(1.0),
+                    stroke_opacity,
+                    Canvas2dContext::stroke,
+                );
+            }
             if cluster_dash.is_some() {
                 ctx.set_line_dash(&[]);
             }
-            self.draw_calls += 2;
+            self.draw_calls += 1 + usize::from(stroke_width > 0.0);
 
             if ir.diagram_type != DiagramType::Timeline {
                 self.paint_cluster_caption(
@@ -4877,7 +4879,7 @@ pub(crate) fn band_has_cluster_background(
 /// shape `merged_node_style` and `merged_edge_style` already have. Only `IrStyleTarget::Cluster`
 /// is consulted: a cluster has no `classes` and no `inline_style`, so merging those would invent a
 /// cascade the IR does not have.
-fn merged_cluster_style(
+pub(crate) fn merged_cluster_style(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
 ) -> std::collections::BTreeMap<String, String> {
@@ -4916,11 +4918,14 @@ pub(crate) fn resolve_cluster_stroke_width(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
 ) -> Option<f64> {
-    parse_stroke_width(
-        merged_cluster_style(ir, cluster_index)
-            .get("stroke-width")
-            .map(String::as_str),
-    )
+    merged_cluster_style(ir, cluster_index)
+        .get("stroke-width")?
+        .trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|width| width.is_finite() && *width >= 0.0)
 }
 
 /// The author's declared cluster BORDER DASH, if any (bd-lvj3).
@@ -7303,6 +7308,41 @@ mod tests {
             plan.cluster_instances[1].fill,
             crate::gpu_plan::parse_paint_rgba(&dark_config.cluster_fill).unwrap()
         );
+    }
+
+    #[test]
+    fn zero_width_cluster_borders_preserve_the_fill_and_caption_without_stroking() {
+        for (width, expected_strokes) in [("0", 0), ("0px", 0), ("2", 1), ("-1", 1)] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart TD\nsubgraph frame[Frame]\nA\nend\nstyle frame stroke-width:{width}\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            assert_eq!(
+                renderer.draw_clusters(&layout, &ir, &mut context, 0.0, 0.0),
+                1
+            );
+            assert_eq!(
+                context
+                    .operations()
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Stroke))
+                    .count(),
+                expected_strokes,
+                "stroke-width:{width}"
+            );
+            assert!(
+                context
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op, DrawOperation::Fill))
+            );
+            assert!(context.operations().iter().any(|op| {
+                matches!(op, DrawOperation::FillText(text, _, _) if text == "Frame")
+            }));
+        }
     }
 
     #[test]
