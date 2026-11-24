@@ -2793,20 +2793,21 @@ fn parse_flowchart_document_items<'a>(
     (items, unclosed_subgraphs)
 }
 
-/// Byte index of the first `:::` (the inline-class suffix) in `s`, or `None`. Locates it via `memchr`
-/// on `:` plus a cheap prefix verify, avoiding the `TwoWaySearcher` (maximal-suffix factorization) that
-/// `str::contains(":::")` / `str::split(":::")` build per call — a per-statement + per-`:::`-node cost on
-/// flowchart parse. Byte-identical to those std searches (memchr keeps the SIMD first-byte skip, so a
-/// `:`-free statement — the common plain flowchart line — returns `None` in one vectorized scan).
-fn find_triple_colon(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = memchr::memchr(b':', &bytes[from..]) {
-        let idx = from + rel;
-        if bytes[idx..].starts_with(b":::") {
-            return Some(idx);
+/// Locate a token outside double-quoted and Markdown flowchart strings. Those
+/// strings may contain literal class and metadata markers in their captions.
+fn find_outside_flow_strings(source: &str, marker: &str) -> Option<usize> {
+    let mut state = FlowQuoteState::Closed;
+    let mut start = 0;
+    let &first = marker.as_bytes().first()?;
+    for index in memchr::memchr_iter(first, source.as_bytes()) {
+        if !source.as_bytes()[index..].starts_with(marker.as_bytes()) {
+            continue;
         }
-        from = idx + 1;
+        state = scan_flow_quotes(&source[start..index], state);
+        if state == FlowQuoteState::Closed {
+            return Some(index);
+        }
+        start = index;
     }
     None
 }
@@ -2885,7 +2886,7 @@ fn parse_flowchart_statement_asts(
     // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
     // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
     // so plain flowcharts (no `:::`) do not pay an extra scan.
-    let class_suffix_op = find_triple_colon(statement).is_some().then(|| {
+    let class_suffix_op = find_outside_flow_strings(statement, ":::").is_some().then(|| {
         // Every flow operator starts with one of `- < = .` (the first bytes of `FLOW_OPERATORS` /
         // `FLOW_OP_GATE`). A `:::` node declaration (`A[Label]:::class…`) contains none of them, so this
         // auto-vectorizing byte-set scan skips the depth-tracking `find_operator` SCALAR scan of the
@@ -3526,7 +3527,7 @@ fn parse_flowchart_node_metadata(
     config: &ParserConfig,
     warnings: &mut Vec<String>,
 ) -> Option<FlowMetadata> {
-    let at_pos = statement.find("@{")?;
+    let at_pos = find_outside_flow_strings(statement, "@{")?;
     let close = statement.rfind('}')?;
     if close < at_pos + 2 || !trim_fast(&statement[close + 1..]).is_empty() {
         return None;
@@ -7138,7 +7139,7 @@ fn mindmap_token_core(trimmed: &str) -> &str {
     // The `:::` split builds a substring searcher; guard it behind a cheap `memchr(':')` - the
     // common mindmap node has no colon.
     if trimmed.as_bytes().contains(&b':') {
-        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
+        trim_fast(find_outside_flow_strings(trimmed, ":::").map_or(trimmed, |pos| &trimmed[..pos]))
     } else {
         trimmed
     }
@@ -7184,43 +7185,23 @@ fn parse_mindmap_node_token_core(raw: &str, config: &ParserConfig) -> Option<Nod
         return None;
     }
 
-    // Every mindmap shape — `))…((`, `)…(`, `{{…}}`, `((…))`, `(…)`, `[…]` — contains a bracket/paren/
-    // brace delimiter. A plain node (the common case) has none, so skip the shape probes (each a
-    // `find`/`contains` substring searcher) below. Byte-identical: the probes all miss without a delimiter.
-    if core
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}'))
-    {
-        // Bang shape: id))text((
-        if let Some(parsed) = parse_mindmap_bang(core) {
-            return Some(parsed);
-        }
-
-        // Cloud shape: id)text(
-        if let Some(parsed) = parse_mindmap_cloud(core) {
-            return Some(parsed);
-        }
-
-        // Hexagon shape: id{{text}}
-        if let Some(parsed) = parse_mindmap_hexagon(core) {
-            return Some(parsed);
-        }
-
-        // Circle shape: id((text)); mindmap has no `(((…)))` double circle.
-        if let Some(parsed) = parse_circle_with_config(core, config, false) {
-            return Some(parsed);
-        }
-
-        // Rounded shape: id(text)
-        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
-        {
-            return Some(parsed);
-        }
-
-        // Square shape: id[text]
-        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-            return Some(parsed);
+    if let Some(start) = core.find(['(', ')', '[', ']', '{', '}']) {
+        let wrapped = &core[start..];
+        let recover = config.auto_close_delimiters;
+        let delimiters = match wrapped.as_bytes() {
+            [b')', b')', ..] => Some((2, "((", NodeShape::Asymmetric, false)),
+            [b')', ..] if !wrapped.ends_with("((") => Some((1, "(", NodeShape::Cloud, false)),
+            [b'{', b'{', ..] => Some((2, "}}", NodeShape::Hexagon, false)),
+            [b'(', b'(', ..] => Some((2, "))", NodeShape::Circle, recover)),
+            [b'(', ..] => Some((1, ")", NodeShape::Rounded, recover)),
+            [b'[', ..] => Some((1, "]", NodeShape::Rect, recover)),
+            _ => None,
+        };
+        if let Some((open_len, close, shape, recover)) = delimiters {
+            let body = &wrapped[open_len..];
+            if let Some(label) = body.strip_suffix(close).or_else(|| recover.then_some(body)) {
+                return shaped_node(&core[..start], label, shape);
+            }
         }
     }
 
@@ -7238,102 +7219,6 @@ fn parse_mindmap_node_token_core(raw: &str, config: &ParserConfig) -> Option<Nod
         label,
         icon,
         shape: NodeShape::Rect,
-        classes: Vec::new(),
-    })
-}
-
-/// Parse bang shape: id))text((
-fn parse_mindmap_bang(raw: &str) -> Option<NodeToken> {
-    let start = raw.find("))")?;
-    if !raw.ends_with("((") {
-        return None;
-    }
-
-    let id_raw = raw[..start].trim();
-    let label_raw = raw[start + 2..raw.len().saturating_sub(2)].trim();
-    let mut id = normalize_identifier(id_raw);
-    if id.is_empty() {
-        id = normalize_identifier(label_raw);
-    }
-    if id.is_empty() {
-        return None;
-    }
-
-    let mut label = parse_label(Some(label_raw));
-    let icon = extract_icon_prefix(label.as_mut());
-    clear_empty_label(&mut label);
-    Some(NodeToken {
-        id,
-        label,
-        icon,
-        shape: NodeShape::Asymmetric,
-        classes: Vec::new(),
-    })
-}
-
-/// Parse cloud shape: id)text(
-fn parse_mindmap_cloud(raw: &str) -> Option<NodeToken> {
-    // Must have ) followed by ( at the end, but NOT )) or ((
-    let start = raw.find(')')?;
-    if !raw.ends_with('(') {
-        return None;
-    }
-    // Exclude bang shape (starts with )))
-    if raw[start..].starts_with("))") {
-        return None;
-    }
-    // Exclude circle shape (ends with (()
-    if raw.ends_with("((") {
-        return None;
-    }
-
-    let id_raw = raw[..start].trim();
-    let label_raw = raw[start + 1..raw.len().saturating_sub(1)].trim();
-    let mut id = normalize_identifier(id_raw);
-    if id.is_empty() {
-        id = normalize_identifier(label_raw);
-    }
-    if id.is_empty() {
-        return None;
-    }
-
-    let mut label = parse_label(Some(label_raw));
-    let icon = extract_icon_prefix(label.as_mut());
-    clear_empty_label(&mut label);
-    Some(NodeToken {
-        id,
-        label,
-        icon,
-        shape: NodeShape::Cloud,
-        classes: Vec::new(),
-    })
-}
-
-/// Parse hexagon shape: id{{text}}
-fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
-    let start = raw.find("{{")?;
-    if !raw.ends_with("}}") {
-        return None;
-    }
-
-    let id_raw = raw[..start].trim();
-    let label_raw = raw[start + 2..raw.len().saturating_sub(2)].trim();
-    let mut id = normalize_identifier(id_raw);
-    if id.is_empty() {
-        id = normalize_identifier(label_raw);
-    }
-    if id.is_empty() {
-        return None;
-    }
-
-    let mut label = parse_label(Some(label_raw));
-    let icon = extract_icon_prefix(label.as_mut());
-    clear_empty_label(&mut label);
-    Some(NodeToken {
-        id,
-        label,
-        icon,
-        shape: NodeShape::Hexagon,
         classes: Vec::new(),
     })
 }
@@ -16985,12 +16870,11 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
 /// empty for a token with no suffix, which is the common node and must stay allocation-free.
 fn inline_class_names(raw: &str) -> Vec<String> {
     let trimmed = trim_fast(raw);
-    // The common node token has no `:` at all; `find_triple_colon` is a vectorized first-byte scan,
-    // but skipping it entirely keeps a plain flowchart off this path completely.
+    // A plain node has no class suffix.
     if !trimmed.as_bytes().contains(&b':') {
         return Vec::new();
     }
-    let Some(pos) = find_triple_colon(trimmed) else {
+    let Some(pos) = find_outside_flow_strings(trimmed, ":::") else {
         return Vec::new();
     };
     trimmed[pos + 3..]
@@ -17033,7 +16917,7 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     // The `:::className` CSS-class shorthand needs a `:`; guard the multi-char `split(":::")` (which
     // builds a substring searcher) behind a cheap `memchr(':')` — the common node token has no colon.
     let core = if trimmed.as_bytes().contains(&b':') {
-        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
+        trim_fast(find_outside_flow_strings(trimmed, ":::").map_or(trimmed, |pos| &trimmed[..pos]))
     } else {
         trimmed
     };
@@ -17045,7 +16929,7 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     // diamond delimiter: without this, `A@{ shape: cyl, label: "DB" } --> B` matched `A@` + `{…}`
     // and produced a Diamond captioned `shape: cyl, label: "DB`. The pinned mermaid 11.15.0 bundle
     // draws a cylinder captioned `DB`, verified by rendering it in Chromium.
-    if let Some(at_pos) = core.find("@{")
+    if let Some(at_pos) = find_outside_flow_strings(core, "@{")
         && core.ends_with('}')
         && at_pos + 2 < core.len() - 1
     {
@@ -17066,118 +16950,10 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         }
     }
 
-    // Fast path: every shaped token — `((…))`, `[(…)]`, `[[…]]`, `[…]`, `(…)`, `{…}`, `>…]`,
-    // `[/…\]`, … — contains an opening delimiter `(` `[` `{` or `>`. A plain identifier (the common
-    // node id) has none, so skip the ~11 `str::find`/`ends_with` shape probes AND
-    // `looks_like_unclosed_node_delimiter`'s `contains` sweep below — each builds a substring searcher
-    // and all of them would miss. Byte-identical: the gate only skips work that returns None here.
-    if core
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'(' | b'[' | b'{' | b'>'))
-    {
-        if let Some(parsed) = parse_circle_with_config(core, config, true) {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
-        {
-            return Some(parsed);
-        }
-        // Stadium `([…])`, before BOTH single-char probes below (bd-3w93). Against `(…)` it is the
-        // ordinary multi-char-delimiter-first rule this chain already follows for `[(`/`[[`. Against
-        // `[…]` it only matters under `auto_close_delimiters`, where an unterminated `([x` would
-        // otherwise be salvaged as a Rect whose label keeps a stray `(`.
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "([", "])", NodeShape::Stadium, config)
-        {
-            return Some(parsed);
-        }
-        // The slanted family must ALSO precede the bare `[…]` probe (bd-3w93). It sat after it,
-        // where it was unreachable: `[/Para/]` opens `[` and closes `]`, so the Rect probe matched
-        // first and produced a Rect labelled "/Para/" — delimiters and all — and these four probes
-        // could never run for a well-formed token.
-        // ⚠️ TWO ROUNDS, EXACT BEFORE SALVAGE — the four probes may NOT simply run in order.
-        //
-        // `auto_close_delimiters` (ON by default) tells `parse_wrapped_str_with_config` to accept a
-        // token that does NOT end with its closer, so it can rescue an unterminated `[/x`. Run in a
-        // single pass, that turns the FIRST probe into a probe that matches almost anything opening
-        // `[/`, and it consumed the two shapes listed after it:
-        //
-        // ```text
-        //   A[/a\]   parallelogram wants `[/`…`/]`; the token ends `\]`, so auto-close salvaged it
-        //            as an UNTERMINATED parallelogram labelled `a\]` — and the unmatched `]` then
-        //            tripped `warn_if_label_holds_unmatched_bracket`, which DROPPED the node
-        // ```
-        //
-        // A well-formed `[/Trap\]` / `[\InvTrap/]` on this path therefore vanished from the diagram
-        // entirely; mermaid 11.15.0 draws it. It survived in short statements only because those
-        // reach the chumsky grammar instead — this path takes over for 3+-hop chains, so
-        // `A[/a\] --> B[/b\] --> C[/c\]` drew NOTHING while the 2-hop prefix was fine. Proven by
-        // mechanism, not inference: the same five chains all parse correctly with
-        // `auto_close_delimiters: false`, and the rect control is unchanged either way.
-        //
-        // So: match a token against the probe whose closer it ACTUALLY carries first. Only when no
-        // probe claims it exactly does the salvage round run, which is the only round that ever
-        // needed the auto-close relaxation. All four resolve unambiguously in round one — a token
-        // ending `/]` opens either `[/` or `[\`, and the opener separates them.
-        const SLANTED: [(&str, &str, NodeShape); 4] = [
-            ("[/", "/]", NodeShape::Parallelogram),
-            ("[\\", "\\]", NodeShape::InvParallelogram),
-            ("[/", "\\]", NodeShape::Trapezoid),
-            ("[\\", "/]", NodeShape::InvTrapezoid),
-        ];
-        for (open, close, shape) in SLANTED {
-            if core.ends_with(close)
-                && let Some(parsed) =
-                    parse_wrapped_str_with_config(core, open, close, shape, config)
-            {
-                return Some(parsed);
-            }
-        }
-        if config.auto_close_delimiters {
-            for (open, close, shape) in SLANTED {
-                if let Some(parsed) =
-                    parse_wrapped_str_with_config(core, open, close, shape, config)
-                {
-                    return Some(parsed);
-                }
-            }
-        }
-        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-            return Some(parsed);
-        }
-        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
-        {
-            return Some(parsed);
-        }
-        // Hexagon `{{…}}` before the diamond, which would otherwise take it as a Diamond labelled
-        // `{…}` — the chumsky grammar always had this rule; this path never did. Only when the
-        // token's FIRST brace opens the pair, so a diamond whose quoted label holds `{{` stays one.
-        if memchr::memchr(b'{', core.as_bytes()).is_some_and(|at| core[at..].starts_with("{{"))
-            && let Some(parsed) =
-                parse_wrapped_str_with_config(core, "{{", "}}", NodeShape::Hexagon, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
-        {
-            return Some(parsed);
-        }
-
-        if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
-            return None;
-        }
+    // Only the first opener belongs to the node shape. Searching the caption for
+    // another opener can silently reassign its text to a different node ID.
+    if let Some(start) = core.find(['(', '[', '{', '>']) {
+        return parse_flowchart_shape(&core[..start], &core[start..], config);
     }
 
     let id = normalize_identifier(core);
@@ -17197,39 +16973,35 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     })
 }
 
-/// `id((text))` → Circle and, when `triple_is_double`, `id(((text)))` → DoubleCircle.
-///
-/// ⚠️ THIS IS THE TOKEN PATH, NOT THE CHUMSKY GRAMMAR, and it had drifted from it. It read `((x))`
-/// as a DOUBLE circle and `(((x)))` as a double circle labelled `(x)`, so the grammar's bd-vfxu fix
-/// never reached the statements that land here — text-form edges (`a -- x --> b((c))`) and 3+-hop
-/// chains drew a circle as a double circle. Mindmap reuses this for its own `((…))` and has no
-/// triple form, so it passes `false` and keeps reading the inner paren as label text.
-fn parse_circle_with_config(
-    raw: &str,
-    config: &ParserConfig,
-    triple_is_double: bool,
-) -> Option<NodeToken> {
-    let start = raw.find("((")?;
-    let (open_len, close, shape) = if triple_is_double && raw[start..].starts_with("(((") {
-        (3, ")))", NodeShape::DoubleCircle)
-    } else {
-        (2, "))", NodeShape::Circle)
+/// The longest opener identifies the shape, including when its closer is missing.
+fn parse_flowchart_shape(id: &str, wrapped: &str, config: &ParserConfig) -> Option<NodeToken> {
+    let (open_len, close, shape) = match wrapped.as_bytes() {
+        [b'(', b'(', b'(', ..] => (3, ")))", NodeShape::DoubleCircle),
+        [b'(', b'(', ..] => (2, "))", NodeShape::Circle),
+        [b'(', b'[', ..] => (2, "])", NodeShape::Stadium),
+        [b'[', b'(', ..] => (2, ")]", NodeShape::Cylinder),
+        [b'[', b'[', ..] => (2, "]]", NodeShape::Subroutine),
+        [b'[', b'/', ..] if wrapped.ends_with("\\]") => (2, "\\]", NodeShape::Trapezoid),
+        [b'[', b'/', ..] => (2, "/]", NodeShape::Parallelogram),
+        [b'[', b'\\', ..] if wrapped.ends_with("/]") => (2, "/]", NodeShape::InvTrapezoid),
+        [b'[', b'\\', ..] => (2, "\\]", NodeShape::InvParallelogram),
+        [b'{', b'{', ..] => (2, "}}", NodeShape::Hexagon),
+        [b'[', ..] => (1, "]", NodeShape::Rect),
+        [b'(', ..] => (1, ")", NodeShape::Rounded),
+        [b'{', ..] => (1, "}", NodeShape::Diamond),
+        [b'>', ..] => (1, "]", NodeShape::Asymmetric),
+        _ => return None,
     };
-    if !raw.ends_with(close) && !config.auto_close_delimiters {
-        return None;
-    }
+    let body = &wrapped[open_len..];
+    let label = body
+        .strip_suffix(close)
+        .or_else(|| config.auto_close_delimiters.then_some(body))?;
+    shaped_node(id, label, shape)
+}
 
-    let id_raw = raw[..start].trim();
-    let label_end = if raw.ends_with(close) {
-        raw.len().saturating_sub(close.len())
-    } else {
-        raw.len()
-    };
-    if start + open_len > label_end {
-        return None;
-    }
-    let label_raw = raw[start + open_len..label_end].trim();
-    let mut id = normalize_identifier(id_raw);
+fn shaped_node(id_raw: &str, label_raw: &str, shape: NodeShape) -> Option<NodeToken> {
+    let label_raw = trim_fast(label_raw);
+    let mut id = normalize_identifier(id_raw.trim());
     if id.is_empty() {
         id = normalize_identifier(label_raw);
     }
@@ -17247,124 +17019,6 @@ fn parse_circle_with_config(
         shape,
         classes: Vec::new(),
     })
-}
-
-fn parse_wrapped_with_config(
-    raw: &str,
-    open: char,
-    close: char,
-    shape: NodeShape,
-    config: &ParserConfig,
-) -> Option<NodeToken> {
-    let start = raw.find(open)?;
-    if !raw.ends_with(close) && !config.auto_close_delimiters {
-        return None;
-    }
-
-    let inner_start = start + open.len_utf8();
-    let end = if raw.ends_with(close) {
-        raw.len().saturating_sub(close.len_utf8())
-    } else {
-        raw.len()
-    };
-    if inner_start > end {
-        return None;
-    }
-
-    let id_raw = raw[..start].trim();
-    let label_raw = raw[inner_start..end].trim();
-    let mut id = normalize_identifier(id_raw);
-    if id.is_empty() {
-        id = normalize_identifier(label_raw);
-    }
-    if id.is_empty() {
-        return None;
-    }
-
-    let mut label = parse_label(Some(label_raw));
-    let icon = extract_icon_prefix(label.as_mut());
-    clear_empty_label(&mut label);
-    Some(NodeToken {
-        id,
-        label,
-        icon,
-        shape,
-        classes: Vec::new(),
-    })
-}
-
-fn parse_wrapped_str_with_config(
-    raw: &str,
-    open: &str,
-    close: &str,
-    shape: NodeShape,
-    config: &ParserConfig,
-) -> Option<NodeToken> {
-    // Locate the (multi-char) open delimiter via memchr on its first byte + a cheap prefix verify,
-    // rather than `raw.find(open)` which builds a `TwoWaySearcher` (maximal-suffix factorization) per
-    // call — pure setup, and node/block shape probing calls this with several delimiters (`((`, `[[`,
-    // `{{`, `[/`, …) that mostly miss. memchr keeps the SIMD first-byte search; only the factorization
-    // setup is dropped. Byte-identical: returns the first full-match index `find(open)` would.
-    let open_bytes = open.as_bytes();
-    let hay = raw.as_bytes();
-    let first = *open_bytes.first()?;
-    let start = {
-        let mut from = 0;
-        loop {
-            let rel = memchr::memchr(first, &hay[from..])?;
-            let cand = from + rel;
-            if hay[cand..].starts_with(open_bytes) {
-                break cand;
-            }
-            from = cand + 1;
-        }
-    };
-    if !raw.ends_with(close) && !config.auto_close_delimiters {
-        return None;
-    }
-
-    let inner_start = start + open.len();
-    let end = if raw.ends_with(close) {
-        raw.len().saturating_sub(close.len())
-    } else {
-        raw.len()
-    };
-    if inner_start > end {
-        return None;
-    }
-
-    let id_raw = raw[..start].trim();
-    let label_raw = raw[inner_start..end].trim();
-    let mut id = normalize_identifier(id_raw);
-    if id.is_empty() {
-        id = normalize_identifier(label_raw);
-    }
-    if id.is_empty() {
-        return None;
-    }
-
-    let mut label = parse_label(Some(label_raw));
-    let icon = extract_icon_prefix(label.as_mut());
-    clear_empty_label(&mut label);
-    Some(NodeToken {
-        id,
-        label,
-        icon,
-        shape,
-        classes: Vec::new(),
-    })
-}
-
-fn looks_like_unclosed_node_delimiter(raw: &str) -> bool {
-    (raw.contains("((") && !raw.ends_with("))"))
-        || (raw.contains("[(") && !raw.ends_with(")]"))
-        || (raw.contains("[[") && !raw.ends_with("]]"))
-        || (raw.contains("[/") && !raw.ends_with("/]") && !raw.ends_with("\\]"))
-        || (raw.contains("[\\") && !raw.ends_with("\\]") && !raw.ends_with("/]"))
-        || (raw.contains('[') && !raw.ends_with(']'))
-        || (raw.contains('(') && !raw.ends_with(')'))
-        || (raw.contains('{') && !raw.ends_with('}'))
-        || (raw.contains('>') && !raw.ends_with(']'))
 }
 
 fn dangling_placeholder_node(line_number: usize, placeholder_index: usize) -> NodeToken {
@@ -32636,6 +32290,94 @@ Rel_Back(db, app, "Responds")"#,
                 "node {id} must keep its declared shape and shed its delimiters"
             );
         }
+    }
+
+    #[test]
+    fn quoted_flowchart_captions_preserve_topology_in_chains_and_styled_nodes() {
+        let input = r#"flowchart LR
+            A["call ((worker))"]:::hot --> B{"read [[table]]"} --> C("key:::value")
+            C --> D{"literal@{key}"}:::last
+            D --> A"#;
+        for auto_close_delimiters in [false, true] {
+            let parsed = parse_with_mode_and_config(
+                input,
+                MermaidParseMode::Compat,
+                &ParserConfig {
+                    auto_close_delimiters,
+                    ..ParserConfig::default()
+                },
+            );
+            let ir = &parsed.ir;
+            assert_eq!(ir.nodes.len(), 4);
+            for (id, shape, text, classes) in [
+                ("A", NodeShape::Rect, "call ((worker))", &["hot"][..]),
+                ("B", NodeShape::Diamond, "read [[table]]", &[][..]),
+                ("C", NodeShape::Rounded, "key:::value", &[][..]),
+                ("D", NodeShape::Diamond, "literal@{key}", &["last"][..]),
+            ] {
+                let node = ir.nodes.iter().find(|node| node.id == id).expect(id);
+                assert_eq!(node.shape, shape, "{id}");
+                assert_eq!(ir.labels[node.label.expect(id).0].text, text);
+                assert_eq!(node.classes.as_slice(), classes, "{id}");
+            }
+            let endpoint_name = |endpoint| {
+                let id = ir.resolve_endpoint_node(endpoint).expect("resolved endpoint");
+                ir.nodes[id.0].id.as_str()
+            };
+            let edges: Vec<_> = ir
+                .edges
+                .iter()
+                .map(|edge| (endpoint_name(edge.from), endpoint_name(edge.to)))
+                .collect();
+            assert_eq!(edges, [("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")]);
+        }
+    }
+
+    #[test]
+    fn incomplete_compound_openers_do_not_turn_into_simpler_shapes() {
+        let strict = ParserConfig {
+            auto_close_delimiters: false,
+            ..ParserConfig::default()
+        };
+        for (token, recovered_shape) in [
+            ("X[[label]", NodeShape::Subroutine),
+            ("X([label)", NodeShape::Stadium),
+            ("X(((label))", NodeShape::DoubleCircle),
+            ("X{{label}", NodeShape::Hexagon),
+        ] {
+            assert!(
+                super::parse_node_token_with_config(token, &strict).is_none(),
+                "{token}"
+            );
+            let recovered =
+                super::parse_node_token_with_config(token, &ParserConfig::default()).unwrap();
+            assert_eq!(recovered.id, "X");
+            assert_eq!(recovered.shape, recovered_shape);
+        }
+    }
+
+    #[test]
+    fn mindmap_child_captions_can_describe_other_shape_syntax() {
+        let parsed = parse_mermaid(
+            r#"mindmap
+    root((Root))
+        db["see ((replica)) and db:::read"]:::selected
+        note("literal {{choice}}")"#,
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        let db = &parsed.ir.nodes[1];
+        assert_eq!(db.id, "db");
+        assert_eq!(db.shape, NodeShape::Rect);
+        assert_eq!(
+            parsed.ir.node_display_text(db),
+            "see ((replica)) and db:::read"
+        );
+        assert!(db.classes.iter().any(|class| class == "selected"));
+        let note = &parsed.ir.nodes[2];
+        assert_eq!(note.id, "note");
+        assert_eq!(note.shape, NodeShape::Rounded);
+        assert_eq!(parsed.ir.node_display_text(note), "literal {{choice}}");
     }
 
     /// A stadium and a rounded rectangle are different shapes and must stay different (bd-3w93).
