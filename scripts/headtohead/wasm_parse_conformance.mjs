@@ -161,6 +161,79 @@ for (const [name, source, check] of FRONT_MATTER_CASES) {
   console.log(`${name.padEnd(26)} ${verdict}`);
 }
 
+// Exercise the public namespace IR through the real JS/WASM boundary. Compact mode skips
+// implicit parents and uses qualified captions, while class ownership must remain intact.
+const CLASS_NAMESPACE_SOURCE = [
+  "classDiagram",
+  'namespace Company.Platform.Backend["Services"] {',
+  "  class Developer",
+  "}",
+  'namespace Company["Head office"] {',
+  '  namespace Platform.Frontend["Web"] {',
+  "    class Designer",
+  "  }",
+  "  class CEO",
+  "}",
+  "CEO --> Developer",
+  "Designer --> Developer",
+].join("\n");
+
+for (const [name, prefix, hierarchical] of [
+  ["class namespaces default", "", true],
+  ["class namespaces YAML", "---\nconfig:\n  class:\n    hierarchicalNamespaces: false\n---\n", false],
+  ["class namespaces init", "%%{init: {class: {hierarchicalNamespaces: false}}}%%\n", false],
+]) {
+  let verdict;
+  try {
+    const { ir, warnings } = fm.parse(prefix + CLASS_NAMESPACE_SOURCE);
+    assert.deepEqual(warnings, []);
+    assert.equal(ir.meta.init.config.class_hierarchical_namespaces ?? true, hierarchical);
+    const expected = hierarchical ? {
+      Company: ["Head office", null, ["Company.Platform"], ["CEO", "Designer", "Developer"]],
+      "Company.Platform": ["Platform", "Company", ["Company.Platform.Backend", "Company.Platform.Frontend"], ["Designer", "Developer"]],
+      "Company.Platform.Backend": ["Services", "Company.Platform", [], ["Developer"]],
+      "Company.Platform.Frontend": ["Web", "Company.Platform", [], ["Designer"]],
+    } : {
+      Company: ["Company", null, [], ["CEO"]],
+      "Company.Platform.Backend": ["Company.Platform.Backend", null, [], ["Developer"]],
+      "Company.Platform.Frontend": ["Company.Platform.Frontend", null, [], ["Designer"]],
+    };
+    assert.deepEqual(ir.graph.subgraphs.map((group) => group.key).sort(), Object.keys(expected).sort());
+    assert.equal(ir.clusters.length, hierarchical ? 4 : 3);
+    assert.equal(ir.graph.clusters.length, ir.clusters.length);
+    assert.deepEqual(ir.nodes.map((node) => node.id).sort(), ["CEO", "Designer", "Developer"]);
+    assert.equal(ir.graph.nodes.length, 3);
+    assert.equal(ir.edges.length, 2);
+    for (const group of ir.graph.subgraphs) {
+      const [caption, parent, children, members] = expected[group.key];
+      assert.equal(ir.labels[group.title].text, caption, group.key);
+      assert.equal(group.parent == null ? null : ir.graph.subgraphs[group.parent].key, parent, group.key);
+      assert.deepEqual(group.children.map((id) => ir.graph.subgraphs[id].key).sort(), children, group.key);
+      assert.deepEqual(group.members.map((id) => ir.nodes[id].id).sort(), members, group.key);
+      const cluster = ir.clusters[group.cluster];
+      assert.equal(cluster.title, group.title);
+      assert.deepEqual(cluster.members, group.members);
+      assert.equal(ir.graph.clusters[group.cluster].subgraph, group.id);
+      assert.deepEqual(ir.graph.clusters[group.cluster].members, group.members);
+    }
+    const owners = {
+      CEO: ["Company"],
+      Developer: hierarchical ? ["Company", "Company.Platform", "Company.Platform.Backend"] : ["Company.Platform.Backend"],
+      Designer: hierarchical ? ["Company", "Company.Platform", "Company.Platform.Frontend"] : ["Company.Platform.Frontend"],
+    };
+    for (const [index, node] of ir.nodes.entries()) {
+      const membership = ir.graph.nodes[index];
+      assert.deepEqual(membership.subgraphs.map((id) => ir.graph.subgraphs[id].key), owners[node.id], node.id);
+      assert.deepEqual(membership.clusters, membership.subgraphs.map((id) => ir.graph.subgraphs[id].cluster), node.id);
+    }
+    verdict = "ok   namespace captions, hierarchy, and class ownership survived";
+  } catch (error) {
+    failures += 1;
+    verdict = "FAIL " + String(error).slice(0, 160);
+  }
+  console.log(name.padEnd(26) + " " + verdict);
+}
+
 // Semantic putback must accept the exact object emitted by parseLens, including maps and
 // family-specific metadata. JSON.stringify/parse would bypass the boundary this test protects.
 const LENS_CASES = [

@@ -6143,7 +6143,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     #[test]
     fn support_contract_runs_shared_metadata_passes_once() {
         let source = concat!(
-            "---\ntitle: Release map\n---\n",
+            "---\ntitle: Release map\nconfig: {unsupportedSetting: true}\n---\n",
             "%%{init: {theme: 'dark', flowchart: {nodeSpacing: 80}}}%%\n",
             "flowchart LR\naccTitle: Release flow\naccDescr: Build and publish\n",
             "A[Build] --> B[Publish]\nstyle A fill:#123456\n",
@@ -6154,15 +6154,15 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             fm_core::DiagramType::Flowchart,
             fm_core::MermaidParseMode::Compat,
         );
-        // The ordinary front-matter path also validates its keys as configuration. Preserve
-        // that existing warning exactly once while retaining the separately extracted title.
+        // An unsupported configuration key must warn exactly once, while the valid title
+        // is extracted without an extra warning from a repeated metadata pass.
         assert_eq!(
             parsed.warnings,
-            ["Front matter: Unsupported Mermaid config key 'title' ignored"]
+            ["Front matter: Unsupported Mermaid config key 'unsupportedSetting' ignored"]
         );
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
-        assert_eq!(parsed.ir.nodes[0].span_primary.start.line, 8);
+        assert_eq!(parsed.ir.nodes[0].span_primary.start.line, 9);
         assert_eq!(parsed.ir.meta.title.as_deref(), Some("Release map"));
         assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Release flow"));
         assert_eq!(
