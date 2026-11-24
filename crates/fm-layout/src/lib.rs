@@ -1701,7 +1701,7 @@ fn record_graph_metrics_cache_miss(
 fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
     previous.nodes.len() == current.nodes.len()
         && previous.edges.len() == current.edges.len()
-        && previous.ports.len() == current.ports.len()
+        && port_owners_equal(previous, current)
         && previous
             .edges
             .iter()
@@ -1709,11 +1709,15 @@ fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramI
             .all(|(previous_edge, current_edge)| {
                 previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
             })
+}
+
+fn port_owners_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    previous.ports.len() == current.ports.len()
         && previous
             .ports
             .iter()
             .zip(&current.ports)
-            .all(|(previous_port, current_port)| previous_port.node == current_port.node)
+            .all(|(left, right)| left.node == right.node)
 }
 
 const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
@@ -1948,7 +1952,9 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
 
     // A length change is itself a topology change, and it also means the trailing
     // added/removed loops below will fire.
-    let mut topology_equal = previous.nodes.len() == current.nodes.len()
+    let same_port_owners = port_owners_equal(previous, current);
+    let mut topology_equal = same_port_owners
+        && previous.nodes.len() == current.nodes.len()
         && previous.edges.len() == current.edges.len()
         && previous.graph.subgraphs.len() == current.graph.subgraphs.len();
 
@@ -1972,7 +1978,9 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
             topology_equal = false;
             true
         } else {
-            node_labels_differ(previous, left.label, current, right.label)
+            left.shape != right.shape
+                || left.icon() != right.icon()
+                || label_contents_differ(previous, left.label, current, right.label)
                 || ((style_declarations_changed
                     || left.classes != right.classes
                     || left.inline_style != right.inline_style)
@@ -1998,7 +2006,13 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
     let shared_edges = previous.edges.len().min(current.edges.len());
     for (edge_index, (left, right)) in previous.edges.iter().zip(current.edges.iter()).enumerate() {
         // Endpoints are the topology-bearing half of an edge; arrow, label and span are not.
-        let endpoints_differ = left.from != right.from || left.to != right.to;
+        let endpoints_differ = left.from != right.from
+            || left.to != right.to
+            || (!same_port_owners
+                && (endpoint_node_index(previous, left.from)
+                    != endpoint_node_index(current, right.from)
+                    || endpoint_node_index(previous, left.to)
+                        != endpoint_node_index(current, right.to)));
         if endpoints_differ {
             topology_equal = false;
         }
@@ -2006,7 +2020,7 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
         if endpoints_differ
             || left.arrow != right.arrow
             || left.min_length() != right.min_length()
-            || left.label != right.label
+            || label_contents_differ(previous, left.label, current, right.label)
             || left.span != right.span
             || left.routing().or(previous.meta.edge_routing)
                 != right.routing().or(current.meta.edge_routing)
@@ -2034,15 +2048,18 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
         .zip(current.graph.subgraphs.iter())
         .enumerate()
     {
-        // Id, parent and members carry topology; title, direction and span do not.
-        let topology_differs =
-            left.id != right.id || left.parent != right.parent || left.members != right.members;
+        // The region index follows the named subgraph tree and its membership.
+        let topology_differs = left.id != right.id
+            || left.key != right.key
+            || left.parent != right.parent
+            || left.children != right.children
+            || left.members != right.members;
         if topology_differs {
             topology_equal = false;
         }
 
         if topology_differs
-            || left.title != right.title
+            || label_contents_differ(previous, left.title, current, right.title)
             || left.direction != right.direction
             || left.span != right.span
         {
@@ -2062,7 +2079,7 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
     }
 }
 
-/// Whether two nodes' labels differ, by id first and only then by resolved text.
+/// Whether two labels differ, by id first and only then by resolved text.
 ///
 /// Folds what used to be two separate clauses — an id comparison and a pair of
 /// `Option`-unwrapping text lookups — into one self-contained decision. Two ids that differ are
@@ -2070,7 +2087,7 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
 /// cannot differ; and equal ids need only ONE id resolved against each arena instead of
 /// unwrapping an `Option` per side. Keeping it in one function means the cheap-first ordering is
 /// a property of this function rather than a hidden dependency on clause order at the call site.
-fn node_labels_differ(
+fn label_contents_differ(
     previous: &MermaidDiagramIr,
     previous_label: Option<fm_core::IrLabelId>,
     current: &MermaidDiagramIr,
@@ -2182,15 +2199,31 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *diagnostics == current.diagnostics
 }
 
-/// Exact topology equality between two IRs, covering precisely the fields the former
-/// `dependency_graph_cache_key` FNV hash covered: node/edge/subgraph counts, node ids,
-/// per-node subgraph memberships, edge endpoints, and subgraph id/parent/members. Everything
-/// else (labels, spans, styles, meta) is intentionally NOT compared — label-only edits must
-/// keep reusing the cached dependency graph. Short-circuits at the first difference and,
-/// unlike the hash, cannot false-hit on a collision.
+/// Region relayout reuses frame geometry. Compare the resolved title as well as its arena ID:
+/// editing a label in place leaves its ID and the containing cluster record unchanged.
+fn cluster_layout_inputs_changed(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    if previous.clusters != current.clusters {
+        return true;
+    }
+    if current.clusters.is_empty() {
+        return false;
+    }
+    let cluster_style = |style: &&fm_core::IrStyleRef| {
+        matches!(style.target, fm_core::IrStyleTarget::Cluster(_))
+    };
+    previous
+        .style_refs
+        .iter()
+        .filter(cluster_style)
+        .ne(current.style_refs.iter().filter(cluster_style))
+        || current.clusters.iter().any(|cluster| {
+            label_contents_differ(previous, cluster.title, current, cluster.title)
+        })
+}
+
+/// Region construction uses resolved edge endpoints, node memberships, and the subgraph tree.
 fn dependency_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
-    previous.nodes.len() == current.nodes.len()
-        && previous.edges.len() == current.edges.len()
+    metrics_topology_equal(previous, current)
         && previous.graph.subgraphs.len() == current.graph.subgraphs.len()
         && previous.nodes.iter().zip(&current.nodes).enumerate().all(
             |(node_index, (previous_node, current_node))| {
@@ -2208,20 +2241,15 @@ fn dependency_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagr
             },
         )
         && previous
-            .edges
-            .iter()
-            .zip(&current.edges)
-            .all(|(previous_edge, current_edge)| {
-                previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
-            })
-        && previous
             .graph
             .subgraphs
             .iter()
             .zip(&current.graph.subgraphs)
             .all(|(previous_subgraph, current_subgraph)| {
                 previous_subgraph.id == current_subgraph.id
+                    && previous_subgraph.key == current_subgraph.key
                     && previous_subgraph.parent == current_subgraph.parent
+                    && previous_subgraph.children == current_subgraph.children
                     && previous_subgraph.members == current_subgraph.members
             })
 }
@@ -8909,6 +8937,9 @@ impl IncrementalLayoutEngine {
             || previous.meta.rank_spacing != ir.meta.rank_spacing
             || previous.meta.edge_routing != ir.meta.edge_routing
             || previous.constraints != ir.constraints
+            || previous.ports != ir.ports
+            || previous.graph.subgraphs != ir.graph.subgraphs
+            || cluster_layout_inputs_changed(previous, ir)
         {
             return None;
         }
@@ -8971,6 +9002,7 @@ impl IncrementalLayoutEngine {
                             // which can move the node between regions and clusters; cached
                             // geometry only stays valid for label-TEXT-only changes.
                             previous.id == node.id
+                                && previous.shape == node.shape
                                 && cached_graph
                                     .ir
                                     .graph
@@ -32870,6 +32902,119 @@ mod tests {
             assert_eq!(updated.layout.edges, fresh.layout.edges, "{change}");
             assert_eq!(updated.layout.bounds, fresh.layout.bounds, "{change}");
         }
+    }
+
+    #[test]
+    fn compound_edit_remeasures_a_reshaped_node_in_another_region() {
+        let mut ir = sized_subgraph_dependency_ir(32);
+        let config = LayoutConfig::default();
+        let algorithm = LayoutAlgorithm::Sugiyama;
+        let guardrails = LayoutGuardrails::default();
+        let mut engine = IncrementalLayoutEngine::default();
+        let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
+        );
+        let label = ir.nodes[5].label.unwrap();
+        ir.labels[label.0].text = "Node 6".to_owned();
+        ir.nodes[40].shape = NodeShape::Circle;
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
+        );
+        let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config);
+        assert_ne!(warm.layout.nodes[40].bounds, fresh.layout.nodes[40].bounds);
+        assert_eq!(
+            updated.layout.nodes[40].bounds,
+            fresh.layout.nodes[40].bounds
+        );
+        assert_eq!(updated.layout.edges, fresh.layout.edges);
+    }
+
+    #[test]
+    fn mixed_node_and_cluster_caption_edits_refresh_the_frame_and_routes() {
+        let mut baseline = sized_subgraph_dependency_ir(32);
+        let title = IrLabelId(baseline.labels.len());
+        baseline.labels.push(IrLabel {
+            text: "Group".to_owned(),
+            span: Span::default(),
+        });
+        baseline.clusters.push(fm_core::IrCluster {
+            title: Some(title),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            ..Default::default()
+        });
+        for restyle in [false, true] {
+            let mut engine = IncrementalLayoutEngine::default();
+            let config = LayoutConfig::default();
+            let algorithm = LayoutAlgorithm::Sugiyama;
+            let guardrails = LayoutGuardrails::default();
+            let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+                &baseline, algorithm, config.clone(), guardrails,
+            );
+            let mut edited = baseline.clone();
+            let label = edited.nodes[40].label.unwrap();
+            edited.labels[label.0].text = "Node 41".to_owned();
+            if restyle {
+                edited.style_refs.push(fm_core::IrStyleRef {
+                    target: fm_core::IrStyleTarget::Cluster(0),
+                    style: "font-size:96px".to_owned(),
+                    span: Span::default(),
+                });
+            } else {
+                edited.labels[title.0].text = "First caption row\nSecond caption row".to_owned();
+            }
+
+            let fresh =
+                super::layout_diagram_traced_with_config(&edited, algorithm, config.clone());
+            let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+                &edited, algorithm, config, guardrails,
+            );
+            assert_ne!(warm.layout.clusters, fresh.layout.clusters);
+            assert_eq!(updated.layout.clusters, fresh.layout.clusters);
+            assert_eq!(updated.layout.edges, fresh.layout.edges);
+        }
+    }
+
+    #[test]
+    fn moving_a_port_between_regions_rebuilds_dependencies_and_routes() {
+        let mut ir = sized_subgraph_dependency_ir(32);
+        ir.ports.push(fm_core::IrPort {
+            node: IrNodeId(0),
+            ..Default::default()
+        });
+        let port = IrEndpoint::Port(fm_core::IrPortId(0));
+        ir.edges[0].from = port;
+        ir.graph.edges[0].from = port;
+        let config = LayoutConfig::default();
+        let algorithm = LayoutAlgorithm::Sugiyama;
+        let guardrails = LayoutGuardrails::default();
+        let mut engine = IncrementalLayoutEngine::default();
+        let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir, algorithm, config.clone(), guardrails,
+        );
+        let mut edited = ir.clone();
+        edited.ports[0].node = IrNodeId(40);
+        let label = edited.nodes[5].label.unwrap();
+        edited.labels[label.0].text = "Node 6".to_owned();
+
+        let diff = super::derive_layout_diff(&ir, &edited);
+        assert!(!diff.topology_equal);
+        assert!(diff.edits.contains(&LayoutEdit::EdgeRemoved { edge_index: 0 }));
+        assert!(diff.edits.contains(&LayoutEdit::EdgeAdded { edge_index: 0 }));
+        let fresh = super::layout_diagram_traced_with_config(&edited, algorithm, config.clone());
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited, algorithm, config, guardrails,
+        );
+        let cached = &engine.dependency_graph_cache.as_ref().unwrap().graph;
+        assert_eq!(cached.as_ref(), &LayoutDependencyGraph::from_ir(&edited));
+        assert_ne!(warm.layout.edges, fresh.layout.edges);
+        assert_eq!(updated.layout.edges, fresh.layout.edges);
+        assert_eq!(updated.layout.nodes, fresh.layout.nodes);
     }
 
     #[test]
