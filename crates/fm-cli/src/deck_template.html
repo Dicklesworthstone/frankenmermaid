@@ -37,6 +37,21 @@
     #deck-hints, #deck-dots { display: none; }
     #deck-card { left: 16px; right: 16px; top: 16px; bottom: auto; max-width: none; }
   }
+  #deck-print-pages { display: none; }
+  @page { size: 10in 5.625in; margin: 0; }
+  @media print {
+    html, body { height: auto; overflow: visible; print-color-adjust: exact;
+      -webkit-print-color-adjust: exact; }
+    #deck-stage { display: none; }
+    #deck-print-pages { display: block; }
+    .deck-print-page { width: 10in; height: 5.625in; padding: .22in .32in;
+      display: flex; flex-direction: column; gap: .05in; overflow: hidden;
+      break-inside: avoid; break-after: page; }
+    .deck-print-page:last-child { break-after: auto; }
+    .deck-print-graph { flex: 1; min-height: 0; overflow: hidden; }
+    .deck-print-page h2 { font-size: 16pt; line-height: 1.15; }
+    .deck-print-page p { font-size: 10pt; line-height: 1.25; }
+  }
 </style>
 </head>
 <body>
@@ -51,6 +66,7 @@
 </div>
 <div id="deck-dots"></div>
 <div id="deck-controls">
+  <button id="deck-print" type="button">Print deck</button>
   <button id="deck-overview-btn" type="button">whole graph</button>
   <button id="deck-prev" type="button" aria-label="previous">‹</button>
   <button id="deck-next" type="button" aria-label="next">›</button>
@@ -60,6 +76,7 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
 </div>
 </div>
 
+<div id="deck-print-pages"></div>
 <script type="application/json" id="deck-manifest">{{MANIFEST_JSON}}</script>
 <script>RUNTIME_JS</script>
 <script>
@@ -90,9 +107,10 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
   var requested = "";
   try { requested = decodeURIComponent((location.hash || "").replace(/^#/, "")); }
   catch (_error) { /* Ignore a malformed fragment and present the first slide. */ }
+  var svgSource = {{SVG_JS_STRING}};
   var deck = window.FmDeckRuntime.mount({
     stage: stage,
-    svg: {{SVG_JS_STRING}},
+    svg: svgSource,
     manifest: manifest,
     ui: {
       num: document.getElementById("deck-num"),
@@ -121,6 +139,83 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
       }
     }
   }
+  // Print from the original SVG. The live viewport may be panned, mid-animation,
+  // or showing an early step. Each paper page represents one fully revealed slide.
+  var pages = document.getElementById("deck-print-pages");
+  function preparePrint() {
+    if (pages.childElementCount) return;
+    var template = document.createElement("template");
+    template.innerHTML = svgSource; // Engine SVG, the same input supplied to mount.
+    var original = template.content.querySelector("svg");
+    if (!original) return;
+
+    var members = new Set();
+    function visitMembers(slide, visit) {
+      slide.nodes.forEach(function (member) { visit(member.elementId, 1); });
+      (slide.edges || []).forEach(function (edge) {
+        visit(edge.elementId, edge.touching ? .45 : 1);
+      });
+      (slide.clusters || []).forEach(function (cluster) {
+        visit(cluster.elementId, cluster.cameraContained ? 1 : .45);
+      });
+    }
+    manifest.slides.forEach(function (slide) {
+      visitMembers(slide, function (id) { members.add(id); });
+    });
+    [manifest.nodeGeometry, manifest.edgeEndpoints].forEach(function (record) {
+      Object.keys(record || {}).forEach(function (id) { members.add(id); });
+    });
+
+    var fragment = document.createDocumentFragment();
+    manifest.slides.forEach(function (slide) {
+      var page = document.createElement("section");
+      page.className = "deck-print-page";
+      var graph = document.createElement("div");
+      graph.className = "deck-print-graph";
+      page.appendChild(graph);
+      // Isolate each SVG's IDs. Its local gradients, clip paths and arrowhead
+      // markers must resolve inside this page even when all pages are printed together.
+      var svg = original.cloneNode(true);
+      graph.attachShadow({ mode: "open" }).appendChild(svg);
+      var bounds = slide.bounds || manifest.viewBox;
+      var margin = Math.max(0, slide.fitMargin || 0);
+      svg.setAttribute("viewBox", [
+        bounds.x - margin, bounds.y - margin,
+        Math.max(1, bounds.width + 2 * margin), Math.max(1, bounds.height + 2 * margin),
+      ].join(" "));
+      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      svg.style.cssText += ";width:100%;height:100%;max-width:none;max-height:none;display:block";
+      var focus = new Map();
+      visitMembers(slide, function (id, opacity) { focus.set(id, opacity); });
+      svg.querySelectorAll("[id]").forEach(function (el) {
+        var id = el.id;
+        // Mirrored sequence participant headers follow their primary element.
+        if (!members.has(id) && id.startsWith("fm-node-")) {
+          while (!members.has(id) && id.lastIndexOf("-") > 0) {
+            id = id.slice(0, id.lastIndexOf("-"));
+          }
+        }
+        if (!members.has(id)) return;
+        var opacity = focus.has(id) ? focus.get(id) : manifest.options.dimOpacity;
+        if (opacity < 1) el.style.setProperty("opacity", String(opacity), "important");
+      });
+      var title = document.createElement("h2");
+      title.textContent = slide.title;
+      page.appendChild(title);
+      if (slide.caption) {
+        var caption = document.createElement("p");
+        caption.textContent = slide.caption;
+        page.appendChild(caption);
+      }
+      fragment.appendChild(page);
+    });
+    pages.appendChild(fragment);
+  }
+  window.addEventListener("beforeprint", preparePrint);
+  window.addEventListener("afterprint", function () { pages.replaceChildren(); });
+  document.getElementById("deck-print").addEventListener("click", function () {
+    window.print();
+  });
   // Embedded live previews must not steal the source editor's keyboard focus on refresh.
   if (window.parent === window) stage.focus();
 })();
