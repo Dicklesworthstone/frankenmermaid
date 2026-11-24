@@ -68,6 +68,14 @@ fn selected_backend_preserves_directed_components_ports_loops_and_numeric_order(
             }
         );
         assert_eq!(rollout.error_count, 0);
+        assert_eq!(
+            u64::try_from(rollout.latency_samples.len()).unwrap(),
+            rollout.requests_processed
+        );
+        assert_eq!(
+            rollout.p99_latency_us().is_some(),
+            DIRECTED_BACKEND_AVAILABLE
+        );
     }
 }
 
@@ -106,6 +114,8 @@ fn disabled_and_rolled_back_requests_do_not_enter_or_measure_the_backend() {
         assert_eq!(rollout.requests_processed, 0);
         assert_eq!(rollout.error_count, 0);
         assert_eq!(rollout.latency_sum_us, 0);
+        assert!(rollout.latency_samples.is_empty());
+        assert_eq!(rollout.p99_latency_us(), None);
         assert_eq!(rollout.phase, phase);
         assert_eq!(rollout.phase_started_at, 7_000);
     }
@@ -123,6 +133,7 @@ fn canary_and_partial_sampling_count_only_selected_backend_attempts() {
             expected
         );
         assert_eq!(rollout.requests_processed, 0);
+        assert!(rollout.latency_samples.is_empty());
         assert_eq!(
             analyze_cycles_with_fnx_canary(&ir, &mut rollout, selected_request),
             expected
@@ -132,6 +143,10 @@ fn canary_and_partial_sampling_count_only_selected_backend_attempts() {
             u64::from(DIRECTED_BACKEND_AVAILABLE)
         );
         assert_eq!(rollout.error_count, 0);
+        assert_eq!(
+            rollout.p99_latency_us().is_some(),
+            DIRECTED_BACKEND_AVAILABLE
+        );
     }
 }
 
@@ -159,6 +174,7 @@ fn observed_backend_health_errors_roll_back_after_a_real_selected_request() {
     );
     assert_eq!(rollout.requests_processed, 100);
     assert_eq!(rollout.error_count, 99);
+    assert_eq!(rollout.latency_samples.len(), 100);
     let after_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -179,6 +195,55 @@ fn observed_backend_health_errors_roll_back_after_a_real_selected_request() {
     );
     assert_eq!(rollout.requests_processed, 100);
     assert_eq!(rollout.error_count, 99);
+    assert_eq!(rollout.latency_samples.len(), 100);
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+#[test]
+fn real_clock_before_phase_start_does_not_rollback_for_the_largest_request_id() {
+    let ir = graph();
+    let mut rollout = RolloutState::new();
+    rollout.transition_to(RolloutPhase::Full, u64::MAX);
+    for _ in 0..99 {
+        rollout.record_request(100, true);
+    }
+
+    assert_eq!(
+        analyze_cycles_with_fnx_canary(&ir, &mut rollout, u64::MAX),
+        compute_scc(&ir)
+    );
+    assert_eq!(rollout.requests_processed, 100);
+    assert_eq!(rollout.error_count, 99);
+    assert_eq!(rollout.latency_samples.len(), 100);
+    assert_eq!(rollout.phase, RolloutPhase::Full);
+    assert_eq!(rollout.phase_started_at, u64::MAX);
+    assert!(rollout.rollback_reason.is_none());
+}
+
+#[test]
+fn native_and_unsampled_requests_leave_a_restored_unhealthy_window_untouched() {
+    let ir = graph();
+    let mut malformed = ir.clone();
+    malformed.edges[0].to = IrEndpoint::Unresolved;
+    for (phase, request_id, input) in [
+        (RolloutPhase::Disabled, 100, &ir),
+        (RolloutPhase::RolledBack, 100, &ir),
+        (RolloutPhase::Canary, 99, &ir),
+        (RolloutPhase::Partial, 9, &ir),
+        (RolloutPhase::Full, 100, &malformed),
+    ] {
+        let mut rollout = RolloutState::new();
+        rollout.transition_to(phase, 1_000);
+        for _ in 0..100 {
+            rollout.record_request(1_000, true);
+        }
+        let before = serde_json::to_string(&rollout).unwrap();
+        assert_eq!(
+            analyze_cycles_with_fnx_canary(input, &mut rollout, request_id),
+            compute_scc(input)
+        );
+        assert_eq!(serde_json::to_string(&rollout).unwrap(), before);
+    }
 }
 
 #[test]
@@ -201,6 +266,8 @@ fn malformed_input_falls_back_without_affecting_backend_health() {
     assert_eq!(rollout.requests_processed, 0);
     assert_eq!(rollout.error_count, 0);
     assert_eq!(rollout.latency_sum_us, 0);
+    assert!(rollout.latency_samples.is_empty());
+    assert_eq!(rollout.p99_latency_us(), None);
 }
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
@@ -241,4 +308,17 @@ fn unavailable_backend_never_manufactures_success_or_error_health_samples() {
     assert_eq!(rollout.requests_processed, 0);
     assert_eq!(rollout.error_count, 0);
     assert_eq!(rollout.latency_sum_us, 0);
+    assert!(rollout.latency_samples.is_empty());
+    assert_eq!(rollout.p99_latency_us(), None);
+
+    // An unavailable backend must not evaluate or reset restored FNX health either.
+    for _ in 0..100 {
+        rollout.record_request(1_000, true);
+    }
+    let before = serde_json::to_string(&rollout).unwrap();
+    assert_eq!(
+        analyze_cycles_with_fnx_canary(&graph(), &mut rollout, u64::MAX),
+        compute_scc(&graph())
+    );
+    assert_eq!(serde_json::to_string(&rollout).unwrap(), before);
 }

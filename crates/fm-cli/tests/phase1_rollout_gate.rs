@@ -145,7 +145,7 @@ fn phase1_canary_state_machine_progression() {
         min_sample_size: 100,
         ..Default::default()
     };
-    let rollback_reason = state.check_health(&criteria);
+    let rollback_reason = state.check_health(&criteria, timestamp + 300_000);
     assert!(
         rollback_reason.is_none(),
         "Healthy canary should not trigger rollback: {:?}",
@@ -182,14 +182,15 @@ fn phase1_rollback_on_error_threshold() {
         ..Default::default()
     };
 
-    let reason = state.check_health(&criteria);
+    let observed_at = timestamp + 300_000;
+    let reason = state.check_health(&criteria, observed_at);
     assert!(
         matches!(reason, Some(RollbackReason::ErrorRateExceeded { .. })),
         "Should trigger rollback for high error rate"
     );
 
     if let Some(reason) = reason {
-        state.rollback(reason, timestamp + 1000);
+        state.rollback(reason, observed_at);
         assert_eq!(state.phase, RolloutPhase::RolledBack);
     }
 

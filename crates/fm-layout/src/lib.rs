@@ -21110,6 +21110,7 @@ std::thread_local! {
 /// input or an invalid SCC partition records an error and falls back for the current request.
 /// Health failures roll subsequent requests back; rollback timestamps are epoch milliseconds,
 /// independent of the request ID used for deterministic traffic sampling.
+/// Health evaluation waits for the configured observation window and minimum sample count.
 #[must_use]
 pub fn analyze_cycles_with_fnx_canary(
     ir: &MermaidDiagramIr,
@@ -21130,12 +21131,14 @@ pub fn analyze_cycles_with_fnx_canary(
         }
         let latency_us = saturating_elapsed_micros(start.elapsed());
         rollout.record_request(latency_us, result.is_err());
-        if let Some(reason) = rollout.check_health(&fm_core::canary::HealthCriteria::default()) {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(rollout.phase_started_at, |elapsed| {
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-                });
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(rollout.phase_started_at, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        if let Some(reason) =
+            rollout.check_health(&fm_core::canary::HealthCriteria::default(), timestamp)
+        {
             rollout.rollback(reason, timestamp);
         }
         match result {

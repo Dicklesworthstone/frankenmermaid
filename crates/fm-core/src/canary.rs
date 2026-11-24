@@ -8,6 +8,90 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Maximum number of recent accepted FNX latencies retained for percentile checks.
+///
+/// P99 is exact for these retained samples. The observation window separately
+/// controls phase maturity; this is not a time-bucketed latency history.
+pub const MAX_LATENCY_SAMPLES: usize = 4096;
+
+/// Bounded latency history, serialized as a sequence of microsecond values.
+///
+/// The private deque prevents callers and restored snapshots from bypassing the
+/// retention limit while the public type permits `RolloutState` struct updates.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(transparent)]
+pub struct LatencySamples(std::collections::VecDeque<u64>);
+
+impl LatencySamples {
+    /// Number of retained observations, distinct from the phase's total traffic.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are no observed latency samples.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn record(&mut self, latency_us: u64) {
+        if self.0.len() == MAX_LATENCY_SAMPLES {
+            let _ = self.0.pop_front();
+        }
+        self.0.push_back(latency_us);
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    fn p99_us(&self) -> Option<u64> {
+        let sample_count = self.0.len();
+        if sample_count == 0 {
+            return None;
+        }
+
+        // Nearest-rank P99: ceil(99 * n / 100), as a zero-based index without
+        // multiplying and risking overflow.
+        let rank_index = sample_count - sample_count / 100 - 1;
+        let mut samples: Vec<u64> = self.0.iter().copied().collect();
+        let (_, percentile, _) = samples.select_nth_unstable(rank_index);
+        Some(*percentile)
+    }
+}
+
+impl<'de> Deserialize<'de> for LatencySamples {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LatencySamplesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LatencySamplesVisitor {
+            type Value = LatencySamples;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a sequence of microsecond latency samples")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut samples = LatencySamples::default();
+                // Do not collect an unbounded Vec or trust the input size hint.
+                while let Some(latency_us) = sequence.next_element::<u64>()? {
+                    samples.record(latency_us);
+                }
+                Ok(samples)
+            }
+        }
+
+        deserializer.deserialize_seq(LatencySamplesVisitor)
+    }
+}
+
 /// Canary rollout phase for FNX feature enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -44,9 +128,10 @@ pub struct HealthCriteria {
     pub max_error_rate: f64,
     /// Maximum acceptable P99 latency increase (percentage).
     pub max_latency_increase_pct: f64,
-    /// Minimum sample size before evaluation.
+    /// Minimum accepted request count before evaluation. Latency checks also
+    /// require this many retained samples, up to `MAX_LATENCY_SAMPLES`.
     pub min_sample_size: usize,
-    /// Observation window before phase transition.
+    /// Minimum elapsed phase time before health evaluation.
     pub observation_window: Duration,
 }
 
@@ -122,13 +207,17 @@ pub struct RolloutState {
     pub phase_started_at: u64,
     /// Rollback reason if in RolledBack phase.
     pub rollback_reason: Option<RollbackReason>,
-    /// Total requests processed in current phase.
+    /// Total accepted FNX attempts in the current phase, including failures.
     pub requests_processed: u64,
     /// Error count in current phase.
     pub error_count: u64,
-    /// Sum of latencies for P99 calculation (microseconds).
+    /// Sum of latencies for average telemetry only (microseconds).
     pub latency_sum_us: u64,
-    /// Baseline latency for comparison (microseconds).
+    /// Recent actual latencies for P99 calculation. Old snapshots without
+    /// samples must collect fresh observations before latency health evaluation.
+    #[serde(default)]
+    pub latency_samples: LatencySamples,
+    /// Baseline P99 latency for comparison (microseconds).
     pub baseline_latency_us: Option<u64>,
 }
 
@@ -142,6 +231,7 @@ impl Default for RolloutState {
             requests_processed: 0,
             error_count: 0,
             latency_sum_us: 0,
+            latency_samples: LatencySamples::default(),
             baseline_latency_us: None,
         }
     }
@@ -172,16 +262,21 @@ impl RolloutState {
             .unwrap_or(0)
     }
 
-    /// Get latency increase percentage compared to baseline.
+    /// Get the exact nearest-rank P99 of the retained latency samples.
+    ///
+    /// Returns `None` when no actual samples are known, including old snapshots
+    /// containing only aggregate counters. It never substitutes the mean.
     #[must_use]
-    pub fn latency_increase_pct(&self) -> f64 {
-        match self.baseline_latency_us {
-            Some(baseline) if baseline > 0 => {
-                let current = self.avg_latency_us();
-                ((current as f64 - baseline as f64) / baseline as f64) * 100.0
-            }
-            _ => 0.0,
-        }
+    pub fn p99_latency_us(&self) -> Option<u64> {
+        self.latency_samples.p99_us()
+    }
+
+    /// Get P99 latency increase compared to a nonzero baseline, when both exist.
+    #[must_use]
+    pub fn latency_increase_pct(&self) -> Option<f64> {
+        let baseline = self.baseline_latency_us.filter(|&baseline| baseline > 0)?;
+        let current = self.p99_latency_us()?;
+        Some(((current as f64 - baseline as f64) / baseline as f64) * 100.0)
     }
 
     /// Record a request with its latency and success status.
@@ -191,21 +286,32 @@ impl RolloutState {
         // release, making an unhealthy canary look as if it had almost no traffic or latency.
         self.requests_processed = self.requests_processed.saturating_add(1);
         self.latency_sum_us = self.latency_sum_us.saturating_add(latency_us);
+        self.latency_samples.record(latency_us);
         if is_error {
             self.error_count = self.error_count.saturating_add(1);
         }
     }
 
-    /// Set baseline latency for comparison.
+    /// Set the baseline P99 latency for comparison.
     pub fn set_baseline(&mut self, latency_us: u64) {
         self.baseline_latency_us = Some(latency_us);
     }
 
-    /// Check health criteria and return rollback reason if violated.
+    /// Check health criteria at an explicit epoch-millisecond timestamp.
+    ///
+    /// Evaluation waits for both phase maturity and enough accepted FNX
+    /// requests. A clock before the phase start leaves health undecided. The
+    /// caller supplies time so this core API also works on WASM and in replays.
     #[must_use]
-    pub fn check_health(&self, criteria: &HealthCriteria) -> Option<RollbackReason> {
-        // Skip if not enough samples
-        if self.requests_processed < criteria.min_sample_size as u64 {
+    pub fn check_health(
+        &self,
+        criteria: &HealthCriteria,
+        timestamp_ms: u64,
+    ) -> Option<RollbackReason> {
+        let elapsed_ms = timestamp_ms.checked_sub(self.phase_started_at)?;
+        if Duration::from_millis(elapsed_ms) < criteria.observation_window
+            || self.requests_processed < criteria.min_sample_size as u64
+        {
             return None;
         }
 
@@ -218,9 +324,13 @@ impl RolloutState {
             });
         }
 
-        // Check latency regression
-        let latency_increase = self.latency_increase_pct();
-        if latency_increase > criteria.max_latency_increase_pct {
+        // Aggregate counters from an old snapshot are not percentile samples.
+        // A minimum above capacity still waits for that much accepted traffic,
+        // then evaluates the most recent complete retained sample set.
+        if self.latency_samples.len() >= criteria.min_sample_size.min(MAX_LATENCY_SAMPLES)
+            && let Some(latency_increase) = self.latency_increase_pct()
+            && latency_increase > criteria.max_latency_increase_pct
+        {
             return Some(RollbackReason::LatencyRegressionExceeded {
                 observed_pct: latency_increase,
                 threshold_pct: criteria.max_latency_increase_pct,
@@ -238,6 +348,7 @@ impl RolloutState {
         self.requests_processed = 0;
         self.error_count = 0;
         self.latency_sum_us = 0;
+        self.latency_samples.clear();
         self.rollback_reason = None;
     }
 
@@ -305,7 +416,11 @@ pub struct RolloutMetrics {
     pub requests_processed: u64,
     pub error_rate: f64,
     pub avg_latency_us: u64,
-    pub latency_increase_pct: f64,
+    #[serde(default)]
+    pub latency_sample_count: usize,
+    #[serde(default)]
+    pub p99_latency_us: Option<u64>,
+    pub latency_increase_pct: Option<f64>,
 }
 
 impl From<&RolloutState> for RolloutMetrics {
@@ -314,6 +429,8 @@ impl From<&RolloutState> for RolloutMetrics {
             requests_processed: state.requests_processed,
             error_rate: state.error_rate(),
             avg_latency_us: state.avg_latency_us(),
+            latency_sample_count: state.latency_samples.len(),
+            p99_latency_us: state.p99_latency_us(),
             latency_increase_pct: state.latency_increase_pct(),
         }
     }
@@ -322,6 +439,112 @@ impl From<&RolloutState> for RolloutMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latency_history_distinguishes_missing_and_zero_latency() {
+        let mut samples = LatencySamples::default();
+        assert!(samples.is_empty());
+        assert_eq!(samples.p99_us(), None);
+        samples.record(0);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples.p99_us(), Some(0));
+        samples.clear();
+        assert!(samples.is_empty());
+        assert_eq!(samples.p99_us(), None);
+    }
+
+    #[test]
+    fn latency_history_uses_nearest_rank_p99_instead_of_the_mean_or_maximum() {
+        let mut samples = LatencySamples::default();
+        for _ in 0..99 {
+            samples.record(100);
+        }
+        samples.record(1_000);
+        // A single slow observation out of exactly 100 lies above P99.
+        assert_eq!(samples.p99_us(), Some(100));
+        samples.record(1_000);
+        // Two slow observations out of 101 enter P99, while the mean stays below 120us.
+        assert_eq!(samples.p99_us(), Some(1_000));
+    }
+
+    #[test]
+    fn latency_history_percentile_does_not_depend_on_observation_order() {
+        let mut ascending = LatencySamples::default();
+        let mut descending = LatencySamples::default();
+        for latency_us in 1..=100 {
+            ascending.record(latency_us);
+        }
+        for latency_us in (1..=100).rev() {
+            descending.record(latency_us);
+        }
+        assert_eq!(ascending.p99_us(), Some(99));
+        assert_eq!(descending.p99_us(), Some(99));
+        let mut largest = LatencySamples::default();
+        largest.record(u64::MAX);
+        assert_eq!(largest.p99_us(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn latency_history_evicts_oldest_observations_at_the_capacity_limit() {
+        let mut samples = LatencySamples::default();
+        for latency_us in 0..(MAX_LATENCY_SAMPLES + 17) {
+            samples.record(u64::try_from(latency_us).unwrap());
+        }
+        assert_eq!(samples.len(), MAX_LATENCY_SAMPLES);
+        assert_eq!(samples.0.front(), Some(&17));
+        assert_eq!(
+            samples.0.back(),
+            Some(&u64::try_from(MAX_LATENCY_SAMPLES + 16).unwrap())
+        );
+        for _ in 0..MAX_LATENCY_SAMPLES {
+            samples.record(100);
+        }
+        assert_eq!(samples.len(), MAX_LATENCY_SAMPLES);
+        assert_eq!(samples.p99_us(), Some(100));
+        assert!(samples.0.iter().all(|sample| *sample == 100));
+    }
+
+    #[test]
+    fn latency_history_round_trips_as_a_plain_sample_sequence() {
+        let mut samples = LatencySamples::default();
+        samples.record(11);
+        samples.record(22);
+        samples.record(33);
+        let json = serde_json::to_string(&samples).unwrap();
+        assert_eq!(json, "[11,22,33]");
+        let restored: LatencySamples = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.p99_us(), Some(33));
+        assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+    }
+
+    #[test]
+    fn latency_history_caps_restored_samples_and_preserves_the_newest_values() {
+        let input: Vec<u64> = (0..(MAX_LATENCY_SAMPLES + 17))
+            .map(|sample| u64::try_from(sample).unwrap())
+            .collect();
+        let json = serde_json::to_string(&input).unwrap();
+        let restored: LatencySamples = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.len(), MAX_LATENCY_SAMPLES);
+        assert_eq!(restored.0.front(), Some(&17));
+        assert_eq!(
+            restored.0.back(),
+            Some(&u64::try_from(MAX_LATENCY_SAMPLES + 16).unwrap())
+        );
+        let retained: Vec<u64> =
+            serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
+        assert_eq!(retained, input[17..]);
+    }
+
+    #[test]
+    fn latency_history_rejects_invalid_sample_values() {
+        for json in ["null", "[-1]", "[1.5]", r#"["100"]"#, "[null]"] {
+            assert!(
+                serde_json::from_str::<LatencySamples>(json).is_err(),
+                "invalid latency history was accepted: {json}"
+            );
+        }
+    }
 
     #[test]
     fn default_state_is_disabled() {
@@ -396,7 +619,7 @@ mod tests {
             ..Default::default()
         };
 
-        let reason = state.check_health(&criteria);
+        let reason = state.check_health(&criteria, 301_000);
         assert!(matches!(
             reason,
             Some(RollbackReason::ErrorRateExceeded { .. })
@@ -419,7 +642,7 @@ mod tests {
             ..Default::default()
         };
 
-        let reason = state.check_health(&criteria);
+        let reason = state.check_health(&criteria, 301_000);
         assert!(matches!(
             reason,
             Some(RollbackReason::LatencyRegressionExceeded { .. })
@@ -438,7 +661,7 @@ mod tests {
         }
 
         let criteria = HealthCriteria::default();
-        let reason = state.check_health(&criteria);
+        let reason = state.check_health(&criteria, 301_000);
         assert!(reason.is_none(), "health check should pass");
     }
 
@@ -470,6 +693,8 @@ mod tests {
         assert_eq!(state.requests_processed, 0);
         assert_eq!(state.error_count, 0);
         assert_eq!(state.latency_sum_us, 0);
+        assert!(state.latency_samples.is_empty());
+        assert_eq!(state.p99_latency_us(), None);
     }
 
     #[test]
@@ -483,7 +708,7 @@ mod tests {
         }
 
         let criteria = HealthCriteria::default();
-        let reason = state.check_health(&criteria);
+        let reason = state.check_health(&criteria, 301_000);
         assert!(
             reason.is_none(),
             "should skip check with insufficient samples"
@@ -507,6 +732,172 @@ mod tests {
         let json = serde_json::to_string(&event).expect("should serialize");
         assert!(json.contains("rollback"));
         assert!(json.contains("error_rate_exceeded"));
+    }
+
+    #[test]
+    fn health_check_detects_a_slow_tail_hidden_by_a_healthy_mean() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Canary, 1_000);
+        state.set_baseline(100);
+        for _ in 0..98 {
+            state.record_request(100, false);
+        }
+        for _ in 0..2 {
+            state.record_request(1_000, false);
+        }
+
+        assert_eq!(state.avg_latency_us(), 118);
+        assert_eq!(state.p99_latency_us(), Some(1_000));
+        assert_eq!(state.latency_increase_pct(), Some(900.0));
+        let criteria = HealthCriteria::default();
+        assert_eq!(state.check_health(&criteria, 300_999), None);
+        assert!(matches!(
+            state.check_health(&criteria, 301_000),
+            Some(RollbackReason::LatencyRegressionExceeded {
+                observed_pct,
+                threshold_pct,
+            }) if observed_pct == 900.0 && threshold_pct == 25.0
+        ));
+
+        let restored: RolloutState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.p99_latency_us(), Some(1_000));
+        assert_eq!(restored.check_health(&criteria, 300_999), None);
+        assert_eq!(
+            restored.check_health(&criteria, 301_000),
+            state.check_health(&criteria, 301_000)
+        );
+        let metrics = RolloutMetrics::from(&restored);
+        assert_eq!(metrics.latency_sample_count, 100);
+        assert_eq!(metrics.avg_latency_us, 118);
+        assert_eq!(metrics.p99_latency_us, Some(1_000));
+        assert_eq!(metrics.latency_increase_pct, Some(900.0));
+    }
+
+    #[test]
+    fn health_check_waits_for_the_window_and_rejects_a_clock_before_phase_start() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Full, 1_000);
+        state.record_request(100, true);
+        let criteria = HealthCriteria {
+            min_sample_size: 1,
+            observation_window: Duration::from_millis(10),
+            ..Default::default()
+        };
+
+        assert_eq!(state.check_health(&criteria, 999), None);
+        assert_eq!(state.check_health(&criteria, 1_000), None);
+        assert_eq!(state.check_health(&criteria, 1_009), None);
+        assert!(matches!(
+            state.check_health(&criteria, 1_010),
+            Some(RollbackReason::ErrorRateExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn health_check_preserves_sub_millisecond_windows_and_clock_limits() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Full, 1_000);
+        state.record_request(100, true);
+        let mut criteria = HealthCriteria {
+            min_sample_size: 1,
+            observation_window: Duration::from_nanos(1_000_001),
+            ..Default::default()
+        };
+        assert_eq!(state.check_health(&criteria, 1_001), None);
+        assert!(state.check_health(&criteria, 1_002).is_some());
+
+        state.phase_started_at = u64::MAX - 1;
+        criteria.observation_window = Duration::from_millis(2);
+        assert_eq!(state.check_health(&criteria, u64::MAX), None);
+        criteria.observation_window = Duration::from_millis(1);
+        assert!(state.check_health(&criteria, u64::MAX).is_some());
+        criteria.observation_window = Duration::MAX;
+        assert_eq!(state.check_health(&criteria, u64::MAX), None);
+        criteria.observation_window = Duration::ZERO;
+        assert!(state.check_health(&criteria, u64::MAX - 1).is_some());
+        assert_eq!(state.check_health(&criteria, 0), None);
+    }
+
+    #[test]
+    fn health_check_can_require_more_total_requests_than_the_retention_capacity() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Full, 1_000);
+        state.set_baseline(100);
+        let criteria = HealthCriteria {
+            min_sample_size: MAX_LATENCY_SAMPLES + 17,
+            ..Default::default()
+        };
+        for _ in 1..criteria.min_sample_size {
+            state.record_request(1_000, false);
+        }
+        assert_eq!(state.latency_samples.len(), MAX_LATENCY_SAMPLES);
+        assert_eq!(state.check_health(&criteria, 301_000), None);
+        state.record_request(1_000, false);
+        assert!(matches!(
+            state.check_health(&criteria, 301_000),
+            Some(RollbackReason::LatencyRegressionExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_snapshot_collects_fresh_samples_without_inventing_historical_p99() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Canary, 1_000);
+        state.set_baseline(100);
+        for _ in 0..100 {
+            state.record_request(1_000, false);
+        }
+        let mut snapshot = serde_json::to_value(&state).unwrap();
+        let _ = snapshot.as_object_mut().unwrap().remove("latency_samples");
+        let mut restored: RolloutState = serde_json::from_value(snapshot.clone()).unwrap();
+        let criteria = HealthCriteria::default();
+        assert_eq!(restored.avg_latency_us(), 1_000);
+        assert_eq!(restored.p99_latency_us(), None);
+        assert_eq!(restored.latency_increase_pct(), None);
+        assert_eq!(restored.check_health(&criteria, 301_000), None);
+        let metrics = RolloutMetrics::from(&restored);
+        assert_eq!(metrics.latency_sample_count, 0);
+        assert_eq!(metrics.p99_latency_us, None);
+        assert_eq!(metrics.latency_increase_pct, None);
+
+        // Known error counters remain actionable without a percentile history.
+        snapshot["error_count"] = serde_json::json!(3);
+        let with_errors: RolloutState = serde_json::from_value(snapshot).unwrap();
+        assert!(matches!(
+            with_errors.check_health(&criteria, 301_000),
+            Some(RollbackReason::ErrorRateExceeded { .. })
+        ));
+
+        for _ in 0..99 {
+            restored.record_request(1_000, false);
+        }
+        assert_eq!(restored.check_health(&criteria, 301_000), None);
+        restored.record_request(1_000, false);
+        assert!(matches!(
+            restored.check_health(&criteria, 301_000),
+            Some(RollbackReason::LatencyRegressionExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn percentile_health_requires_a_known_nonzero_baseline() {
+        let mut state = RolloutState::new();
+        state.transition_to(RolloutPhase::Full, 1_000);
+        let criteria = HealthCriteria {
+            min_sample_size: 0,
+            ..Default::default()
+        };
+        state.set_baseline(100);
+        assert_eq!(state.latency_increase_pct(), None);
+        assert_eq!(state.check_health(&criteria, 301_000), None);
+        state.record_request(0, false);
+        assert_eq!(state.latency_increase_pct(), Some(-100.0));
+        state.baseline_latency_us = None;
+        assert_eq!(state.latency_increase_pct(), None);
+        state.set_baseline(0);
+        assert_eq!(state.latency_increase_pct(), None);
+        assert_eq!(state.check_health(&criteria, 301_000), None);
     }
 
     #[test]

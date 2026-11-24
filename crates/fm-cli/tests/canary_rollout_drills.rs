@@ -48,7 +48,11 @@ fn rollout_progression_canary_to_partial() {
         state.record_request(100, false);
     }
 
-    assert!(state.check_health(&HealthCriteria::default()).is_none());
+    assert!(
+        state
+            .check_health(&HealthCriteria::default(), timestamp + 300_000)
+            .is_none()
+    );
 
     state.transition_to(RolloutPhase::Partial, timestamp + 300_000);
 
@@ -100,14 +104,15 @@ fn rollback_drill_error_rate_exceeded() {
         ..Default::default()
     };
 
-    let reason = state.check_health(&criteria);
+    let observed_at = timestamp + 300_000;
+    let reason = state.check_health(&criteria, observed_at);
     assert!(matches!(
         reason,
         Some(RollbackReason::ErrorRateExceeded { .. })
     ));
 
     if let Some(reason) = reason {
-        state.rollback(reason.clone(), timestamp + 1000);
+        state.rollback(reason.clone(), observed_at);
 
         assert_eq!(state.phase, RolloutPhase::RolledBack);
         emit_drill_evidence("rollback_error_rate_exceeded", &state, Some(&reason));
@@ -133,18 +138,48 @@ fn rollback_drill_latency_regression() {
         ..Default::default()
     };
 
-    let reason = state.check_health(&criteria);
+    let observed_at = timestamp + 300_000;
+    let reason = state.check_health(&criteria, observed_at);
     assert!(matches!(
         reason,
         Some(RollbackReason::LatencyRegressionExceeded { .. })
     ));
 
     if let Some(reason) = reason {
-        state.rollback(reason.clone(), timestamp + 1000);
+        state.rollback(reason.clone(), observed_at);
 
         assert_eq!(state.phase, RolloutPhase::RolledBack);
         emit_drill_evidence("rollback_latency_regression", &state, Some(&reason));
     }
+}
+
+#[test]
+fn rollback_drill_slow_tail_waits_for_observation_window() {
+    let mut state = RolloutState::new();
+    state.transition_to(RolloutPhase::Canary, 1_000);
+    state.set_baseline(100);
+    for _ in 0..98 {
+        state.record_request(100, false);
+    }
+    for _ in 0..2 {
+        state.record_request(1_000, false);
+    }
+
+    assert_eq!(state.avg_latency_us(), 118);
+    assert_eq!(state.p99_latency_us(), Some(1_000));
+    let criteria = HealthCriteria::default();
+    assert_eq!(state.check_health(&criteria, 300_999), None);
+    let reason = state
+        .check_health(&criteria, 301_000)
+        .expect("the observed slow tail must trigger rollback");
+    assert!(matches!(
+        reason,
+        RollbackReason::LatencyRegressionExceeded { .. }
+    ));
+    state.rollback(reason.clone(), 301_000);
+    assert_eq!(state.phase, RolloutPhase::RolledBack);
+    assert!(!state.should_enable_fnx(100));
+    emit_drill_evidence("rollback_slow_tail_after_window", &state, Some(&reason));
 }
 
 #[test]
@@ -288,6 +323,8 @@ fn determinism_rollout_state_serialization_stable() {
     assert_eq!(restored.phase, state.phase);
     assert_eq!(restored.requests_processed, state.requests_processed);
     assert_eq!(restored.error_count, state.error_count);
+    assert_eq!(restored.latency_samples.len(), state.latency_samples.len());
+    assert_eq!(restored.p99_latency_us(), state.p99_latency_us());
 }
 
 #[test]
@@ -337,6 +374,8 @@ fn emit_drill_evidence(drill_id: &str, state: &RolloutState, reason: Option<&Rol
             "requests_processed": state.requests_processed,
             "error_rate": state.error_rate(),
             "avg_latency_us": state.avg_latency_us(),
+            "latency_sample_count": state.latency_samples.len(),
+            "p99_latency_us": state.p99_latency_us(),
             "latency_increase_pct": state.latency_increase_pct(),
         },
         "pass_fail_reason": "drill_completed",

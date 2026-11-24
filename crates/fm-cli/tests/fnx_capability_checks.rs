@@ -285,7 +285,7 @@ fn capability_canary_rollout_state_available() {
 
     // Check health
     let criteria = HealthCriteria::default();
-    let reason = state.check_health(&criteria);
+    let reason = state.check_health(&criteria, 301_000);
     assert!(
         reason.is_none(),
         "Healthy state should not trigger rollback"
