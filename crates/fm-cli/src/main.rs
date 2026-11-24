@@ -1240,8 +1240,12 @@ fn physical_core_count() -> Option<usize> {
 fn fnx_results_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
-        for byte in part.as_bytes() {
-            hash ^= u64::from(*byte);
+        for byte in (part.len() as u64)
+            .to_le_bytes()
+            .into_iter()
+            .chain(part.bytes())
+        {
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
     }
@@ -5597,12 +5601,7 @@ fn render_parsed_ir_with_pressure(
             .primary_explanation()
             .expect("layout decision ledger should contain a primary entry");
         let layout_decision_ledger_jsonl = layout_decision_ledger.to_jsonl()?;
-        let fnx_witness = build_fnx_witness(
-            &traced_layout,
-            fnx_enabled,
-            options.fnx_projection,
-            options.fnx_fallback,
-        );
+        let fnx_witness = build_fnx_witness(&traced_layout, fnx_enabled);
 
         Some(RenderResult {
             format: format!("{:?}", options.format).to_lowercase(),
@@ -5691,8 +5690,6 @@ fn render_parsed_ir_with_pressure(
 fn build_fnx_witness(
     traced_layout: &fm_layout::TracedLayout,
     fnx_enabled: bool,
-    _fnx_projection: FnxProjectionArg,
-    fnx_fallback: FnxFallbackArg,
 ) -> Option<FnxWitness> {
     if !fnx_enabled {
         return None;
@@ -5727,10 +5724,28 @@ fn build_fnx_witness(
     let crossings_after = traced_layout.layout.stats.crossing_count.to_string();
     // Identity describes the rendered result, so measured time and whether
     // this request recomputed or reused it must not change the hash.
+    let geometry = canonical_layout_f32_bits(&traced_layout.layout);
+    let centrality = traced_layout
+        .layout
+        .extensions
+        .node_centrality
+        .iter()
+        .map(|node| {
+            format!(
+                "{}/{}/{}",
+                node.node_index,
+                node.score,
+                node.tier.css_class_suffix()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let results_hash = fnx_results_hash(&[
+        "layout-v2",
+        &geometry,
+        &centrality,
         layout_selected.as_str(),
         projection_mode,
-        fnx_fallback.as_str(),
         &node_count,
         &edge_count,
         &crossings_before,
@@ -5756,8 +5771,6 @@ fn build_fnx_witness(
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 fn build_fnx_validation_witness(
     fnx_enabled: bool,
-    _fnx_projection: FnxProjectionArg,
-    fnx_fallback: FnxFallbackArg,
     results: Option<&FnxAnalysisResults>,
     analysis_time: std::time::Duration,
 ) -> Option<FnxWitness> {
@@ -5800,9 +5813,8 @@ fn build_fnx_validation_witness(
         .unwrap_or_default();
     let completed_algorithms = algorithms_invoked.join(",");
     let results_hash = fnx_results_hash(&[
-        "enabled",
+        "validation-v2",
         projection_mode,
-        fnx_fallback.as_str(),
         fallback_level,
         fallback_reason,
         &completed_algorithms,
@@ -5865,13 +5877,7 @@ mod fnx_render_witness_tests {
     }
 
     fn witness(traced: &TracedLayout) -> FnxWitness {
-        build_fnx_witness(
-            traced,
-            true,
-            FnxProjectionArg::Directed,
-            FnxFallbackArg::Graceful,
-        )
-        .expect("FNX-enabled renders have a witness")
+        build_fnx_witness(traced, true).expect("FNX-enabled renders have a witness")
     }
 
     #[test]
@@ -5953,15 +5959,7 @@ mod fnx_render_witness_tests {
 
         assert!(traced.trace.fnx.algorithms_invoked.is_empty());
         assert_eq!(traced.trace.fnx.analysis_time, Duration::ZERO);
-        assert!(
-            build_fnx_witness(
-                &traced,
-                false,
-                FnxProjectionArg::Auto,
-                FnxFallbackArg::Graceful,
-            )
-            .is_none()
-        );
+        assert!(build_fnx_witness(&traced, false).is_none());
     }
 
     #[test]
@@ -6019,6 +6017,27 @@ mod fnx_render_witness_tests {
     }
 
     #[test]
+    fn render_witness_detects_changed_geometry_and_centrality_at_equal_counts() {
+        let mut traced = trace(&star_ir(12), LayoutAlgorithm::Tree);
+        let original = witness(&traced).results_hash;
+        Arc::make_mut(&mut traced.layout).nodes[0].bounds.x += 1.0;
+        let moved = witness(&traced).results_hash;
+        assert_ne!(original, moved);
+
+        let scores = &mut Arc::make_mut(&mut traced.layout).extensions.node_centrality;
+        scores.push(fm_layout::NodeCentrality {
+            node_index: 0,
+            score: 19,
+            tier: fm_layout::CentralityTier::High,
+        });
+        assert_ne!(moved, witness(&traced).results_hash);
+        assert_ne!(
+            fnx_results_hash(&["1", "23"]),
+            fnx_results_hash(&["12", "3"])
+        );
+    }
+
+    #[test]
     fn budget_witness_distinguishes_partial_work_from_projection_only() {
         let mut traced = trace(&star_ir(12), LayoutAlgorithm::Tree);
         traced.trace.fnx.budget_exceeded_reason = Some("work_exceeded");
@@ -6058,8 +6077,6 @@ mod fnx_validation_progress_tests {
     fn witness(results: &FnxAnalysisResults) -> FnxWitness {
         build_fnx_validation_witness(
             true,
-            FnxProjectionArg::Undirected,
-            FnxFallbackArg::Graceful,
             Some(results),
             std::time::Duration::from_micros(42),
         )
@@ -6125,8 +6142,6 @@ mod fnx_validation_progress_tests {
         for results in [None, Some(&FnxAnalysisResults::default())] {
             let witness = build_fnx_validation_witness(
                 true,
-                FnxProjectionArg::Undirected,
-                FnxFallbackArg::Graceful,
                 results,
                 std::time::Duration::ZERO,
             )
@@ -6145,8 +6160,6 @@ mod fnx_validation_progress_tests {
 fn build_fnx_witness(
     _traced_layout: &fm_layout::TracedLayout,
     _fnx_enabled: bool,
-    _fnx_projection: FnxProjectionArg,
-    _fnx_fallback: FnxFallbackArg,
 ) -> Option<FnxWitness> {
     // FNX not available, no witness to report
     None
@@ -9713,8 +9726,6 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         fnx_witness: build_fnx_validation_witness(
             fnx_enabled,
-            fnx_projection,
-            fnx_fallback,
             fnx_results.as_ref(),
             fnx_analysis_time,
         ),

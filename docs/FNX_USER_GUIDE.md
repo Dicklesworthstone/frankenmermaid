@@ -231,7 +231,7 @@ fm-cli render input.mmd --fnx-mode disabled
 **Check**:
 ```bash
 # Verify FNX witness in JSON output
-fm-cli render input.mmd --format svg --json --fnx-mode enabled | jq '.fnx_witness'
+fm-cli render input.mmd --format svg --output out.svg --json --fnx-mode enabled | jq '.fnx_witness'
 ```
 
 **Expected output** (when FNX runs):
@@ -243,6 +243,13 @@ fm-cli render input.mmd --format svg --json --fnx-mode enabled | jq '.fnx_witnes
   "algorithms_invoked": ["degree_centrality", "cycle_detection"]
 }
 ```
+
+The render witness's `results_hash` covers the selected layout, node and edge
+geometry, graph bounds, crossing counts, and per-node centrality results.
+Validation hashes the completed structural passes, their counts, and the
+fallback outcome. Replaying the same result under another fallback policy
+preserves the hash. The v2 hash encoding changes earlier recorded digest
+values, so regenerate reference digests when comparing across this change.
 
 ### Layout quality seems worse with FNX enabled
 

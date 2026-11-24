@@ -360,6 +360,54 @@ fn validate_obeys_fallback_policy_and_preserves_the_report() {
 
 #[cfg(feature = "fnx-integration")]
 #[test]
+fn fallback_policy_does_not_change_a_successful_result_hash() {
+    let input = "flowchart LR\nA-->B\nB-->C\n";
+    let mut hashes = Vec::new();
+    for policy in ["graceful", "warn", "strict"] {
+        let (render, stdout) = run_cli_json(
+            &[
+                "render",
+                "-",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                policy,
+            ],
+            input,
+        );
+        assert_success(&render, "render with successful FNX policy");
+        let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let validate = run_cli(
+            &[
+                "validate",
+                "-",
+                "--format",
+                "json",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                policy,
+            ],
+            input,
+        );
+        assert_success(&validate, "validation with successful FNX policy");
+        let validated: serde_json::Value = serde_json::from_slice(&validate.stdout).unwrap();
+        hashes.push((
+            rendered["fnx_witness"]["results_hash"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            validated["fnx_witness"]["results_hash"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ));
+    }
+    assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
 fn strict_render_allows_a_diagram_with_no_applicable_analysis() {
     let output = run_cli(
         &[
