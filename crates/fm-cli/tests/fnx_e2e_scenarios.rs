@@ -323,7 +323,7 @@ fn fnx_fallback_reports_reason_in_witness() {
 #[cfg(feature = "fnx-integration")]
 #[test]
 fn validate_obeys_fallback_policy_and_preserves_the_report() {
-    let input = format!("sequenceDiagram\n{}", "Alice->>Bob: Hello\n".repeat(3_500));
+    let input = "flowchart LR\nA-->B-->C\n";
     for policy in ["warn", "strict"] {
         let artifact = NamedTempFile::new().unwrap();
         let output = run_cli(
@@ -336,12 +336,18 @@ fn validate_obeys_fallback_policy_and_preserves_the_report() {
                 "enabled",
                 "--fnx-fallback",
                 policy,
+                "--layout-algorithm",
+                "tree",
+                "--fnx-work-budget",
+                "10",
+                "--fnx-time-budget-ms",
+                "18446744073709551615",
                 "--fail-on",
                 "none",
                 "--diagnostics-out",
                 artifact.path().to_str().unwrap(),
             ],
-            &input,
+            input,
         );
         let report: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("structured budget report");
@@ -352,6 +358,12 @@ fn validate_obeys_fallback_policy_and_preserves_the_report() {
             "the artifact survives strict command failure"
         );
         assert_eq!(report["fnx_witness"]["budget_exceeded"], true);
+        assert_eq!(
+            report["fnx_witness"]["algorithms_invoked"],
+            serde_json::json!(["connected_components"])
+        );
+        assert_eq!(report["fnx_component_count"], 1);
+        assert!(report.get("fnx_bridge_count").is_none());
         assert_eq!(report["valid"], policy == "warn");
         assert_eq!(output.status.success(), policy == "warn");
         let diagnostics = report["diagnostics"].as_array().unwrap();
@@ -445,6 +457,10 @@ fn strict_render_allows_a_diagram_with_no_applicable_analysis() {
             "enabled",
             "--fnx-fallback",
             "strict",
+            "--fnx-time-budget-ms",
+            "0",
+            "--fnx-work-budget",
+            "0",
         ],
         "pie\n\"A\": 30\n\"B\": 70\n",
     );
@@ -751,6 +767,10 @@ fn fnx_batch_accepts_strict_and_warn_when_analysis_succeeds() {
                 "enabled",
                 "--fnx-fallback",
                 fallback,
+                "--fnx-time-budget-ms",
+                "18446744073709551615",
+                "--fnx-work-budget",
+                "100",
             ],
             "",
         );
@@ -758,4 +778,193 @@ fn fnx_batch_accepts_strict_and_warn_when_analysis_succeeds() {
         let svg = std::fs::read_to_string(out.join("input.svg")).unwrap();
         assert!(svg.contains("<svg"));
     }
+}
+
+#[test]
+fn disabled_mode_accepts_zero_fnx_budgets_on_every_command() {
+    let input = "flowchart LR\nA-->B-->C\n";
+    for command in ["render", "validate"] {
+        let output = run_cli(
+            &[
+                command,
+                "-",
+                "--fnx-mode",
+                "disabled",
+                "--fnx-fallback",
+                "strict",
+                "--fnx-time-budget-ms",
+                "0",
+                "--fnx-work-budget",
+                "0",
+            ],
+            input,
+        );
+        assert_success(&output, command);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("FNX fallback"));
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("input.mmd");
+    let out = directory.path().join("rendered");
+    std::fs::write(&source, input).unwrap();
+    let output = run_cli(
+        &[
+            "render-batch",
+            source.to_str().unwrap(),
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--fnx-mode",
+            "disabled",
+            "--fnx-fallback",
+            "strict",
+            "--fnx-time-budget-ms",
+            "0",
+            "--fnx-work-budget",
+            "0",
+        ],
+        "",
+    );
+    assert_success(&output, "disabled batch with zero budgets");
+    assert!(
+        std::fs::read_to_string(out.join("input.svg"))
+            .unwrap()
+            .contains("<svg")
+    );
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn zero_work_budget_obeys_render_fallback_before_writing_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = "flowchart LR\nA-->B-->C\n";
+    for policy in ["graceful", "warn", "strict"] {
+        let destination = directory.path().join(format!("{policy}.svg"));
+        let output = run_cli(
+            &[
+                "render",
+                "-",
+                "--output",
+                destination.to_str().unwrap(),
+                "--json",
+                "--layout-algorithm",
+                "sugiyama",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                policy,
+                "--fnx-work-budget",
+                "0",
+                "--fnx-time-budget-ms",
+                "18446744073709551615",
+            ],
+            input,
+        );
+        if policy == "strict" {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("strict FNX fallback policy rejected layout: work_exceeded")
+            );
+            assert!(
+                !destination.exists(),
+                "strict failure must not create output"
+            );
+            continue;
+        }
+        assert_success(&output, policy);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["fnx_witness"]["budget_exceeded"], true);
+        assert_eq!(report["fnx_witness"]["fallback_reason"], "work_exceeded");
+        assert_eq!(report["fnx_witness"]["used"], false);
+        assert_eq!(
+            report["fnx_witness"]["algorithms_invoked"],
+            serde_json::json!([])
+        );
+        let warned = report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("FNX fallback"))
+            });
+        assert_eq!(warned, policy == "warn");
+        let svg = std::fs::read_to_string(&destination).unwrap();
+        assert!(svg.contains("<svg") && svg.contains("fm-node"));
+        assert!(!svg.contains("fm-node-centrality-"));
+    }
+}
+
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn batch_budget_changes_invalidate_cached_output_and_preserve_strict_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("input.mmd");
+    let out = directory.path().join("rendered");
+    std::fs::write(&source, "flowchart LR\nA-->B-->C\n").unwrap();
+    let run = |work_budget: &str, fallback: &str| {
+        run_cli(
+            &[
+                "render-batch",
+                source.to_str().unwrap(),
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--jobs",
+                "1",
+                "--layout-algorithm",
+                "sugiyama",
+                "--fnx-mode",
+                "enabled",
+                "--fnx-fallback",
+                fallback,
+                "--fnx-work-budget",
+                work_budget,
+                "--fnx-time-budget-ms",
+                "18446744073709551615",
+            ],
+            "",
+        )
+    };
+
+    assert_success(&run("100", "strict"), "healthy custom batch budget");
+    let destination = out.join("input.svg");
+    let healthy_svg = std::fs::read_to_string(&destination).unwrap();
+    assert!(healthy_svg.contains("fm-node-centrality-"));
+    let cached = run("100", "strict");
+    assert_success(&cached, "same-budget cached batch");
+    assert!(
+        String::from_utf8_lossy(&cached.stderr).contains("1 persistent hits"),
+        "the unchanged healthy result must first demonstrate an actual cache hit"
+    );
+
+    let rejected = run("0", "strict");
+    assert!(
+        !rejected.status.success(),
+        "a changed budget cannot inherit cache success"
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("strict FNX fallback policy rejected layout: work_exceeded")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&destination).unwrap(),
+        healthy_svg,
+        "strict failure preserves the previous complete artifact"
+    );
+
+    let warned = run("0", "warn");
+    assert_success(&warned, "zero-budget batch with visible fallback");
+    assert!(String::from_utf8_lossy(&warned.stderr).contains("FNX fallback"));
+    let fallback_svg = std::fs::read_to_string(&destination).unwrap();
+    assert!(fallback_svg.contains("<svg"));
+    assert!(!fallback_svg.contains("fm-node-centrality-"));
+
+    assert_success(
+        &run("100", "strict"),
+        "restored budget recomputes full analysis",
+    );
+    assert_eq!(std::fs::read_to_string(destination).unwrap(), healthy_svg);
 }

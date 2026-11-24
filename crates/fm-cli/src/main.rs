@@ -54,9 +54,10 @@ use fm_core::{
     StructuredDiagnostic, mermaid_config_schema, mermaid_config_schema_json_pretty,
     mermaid_layout_guard_observability, validate_mermaid_config_value,
 };
+use fm_layout::fnx_budget::AnalysisBudget;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use fm_layout::fnx_diagnostics::{
-    FnxAnalysisPass, FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure,
+    FnxAnalysisPass, FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure_with_budget,
 };
 use fm_layout::{
     CycleStrategy, EdgeRouting, LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout,
@@ -204,6 +205,14 @@ enum Command {
         /// directive in the input and --format svg).
         #[arg(long)]
         deck_manifest_out: Option<String>,
+
+        /// Cooperative FNX time budget per analysis stage, in milliseconds.
+        #[arg(long, default_value_t = AnalysisBudget::default().time_budget_ms)]
+        fnx_time_budget_ms: u64,
+
+        /// FNX work budget per analysis stage; zero skips applicable analysis.
+        #[arg(long, default_value_t = AnalysisBudget::default().work_budget)]
+        fnx_work_budget: u64,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -392,6 +401,14 @@ enum Command {
         #[arg(long, requires = "resident_exact_job_groups")]
         resident_exact_ack64: bool,
 
+        /// Cooperative FNX time budget per diagram and analysis stage, in milliseconds.
+        #[arg(long, default_value_t = AnalysisBudget::default().time_budget_ms)]
+        fnx_time_budget_ms: u64,
+
+        /// FNX work budget per diagram and analysis stage; zero skips applicable analysis.
+        #[arg(long, default_value_t = AnalysisBudget::default().work_budget)]
+        fnx_work_budget: u64,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -493,6 +510,14 @@ enum Command {
         /// Optional path to write machine-readable diagnostics JSON artifact.
         #[arg(long)]
         diagnostics_out: Option<String>,
+
+        /// Cooperative FNX time budget per layout/structural analysis stage, in milliseconds.
+        #[arg(long, default_value_t = AnalysisBudget::default().time_budget_ms)]
+        fnx_time_budget_ms: u64,
+
+        /// FNX work budget per layout/structural analysis stage; zero skips applicable analysis.
+        #[arg(long, default_value_t = AnalysisBudget::default().work_budget)]
+        fnx_work_budget: u64,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -3456,6 +3481,8 @@ fn run() -> Result<()> {
             no_embed_source_spans,
             source_map_out,
             deck_manifest_out,
+            fnx_time_budget_ms,
+            fnx_work_budget,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -3463,7 +3490,10 @@ fn run() -> Result<()> {
             let format = resolve_output_format(format, &loaded_config.file)?;
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
-            let layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            let mut layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            layout_config.fnx_budget = AnalysisBudget::default()
+                .with_time_budget_ms(fnx_time_budget_ms)
+                .with_work_budget(fnx_work_budget);
             let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
             if portable {
                 anyhow::ensure!(
@@ -3480,6 +3510,8 @@ fn run() -> Result<()> {
                 fnx_mode = fnx_mode.as_str(),
                 fnx_projection = fnx_projection.as_str(),
                 fnx_fallback = fnx_fallback.as_str(),
+                fnx_time_budget_ms,
+                fnx_work_budget,
                 fnx_available = cfg!(all(
                     feature = "fnx-integration",
                     not(target_arch = "wasm32")
@@ -3547,6 +3579,8 @@ fn run() -> Result<()> {
             resident_exact_jobs,
             resident_exact_job_groups,
             resident_exact_ack64,
+            fnx_time_budget_ms,
+            fnx_work_budget,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -3554,7 +3588,10 @@ fn run() -> Result<()> {
             let format = resolve_output_format(format, &loaded_config.file)?;
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
-            let layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            let mut layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            layout_config.fnx_budget = AnalysisBudget::default()
+                .with_time_budget_ms(fnx_time_budget_ms)
+                .with_work_budget(fnx_work_budget);
             let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
             if portable {
                 anyhow::ensure!(
@@ -3727,6 +3764,8 @@ fn run() -> Result<()> {
             format,
             fail_on,
             diagnostics_out,
+            fnx_time_budget_ms,
+            fnx_work_budget,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -3736,7 +3775,12 @@ fn run() -> Result<()> {
                 parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
                 parser_config,
                 layout_algorithm: resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?,
-                layout_config: build_layout_config(&loaded_config.file, None)?,
+                layout_config: LayoutConfig {
+                    fnx_budget: AnalysisBudget::default()
+                        .with_time_budget_ms(fnx_time_budget_ms)
+                        .with_work_budget(fnx_work_budget),
+                    ..build_layout_config(&loaded_config.file, None)?
+                },
                 format,
                 fail_on,
                 diagnostics_out: diagnostics_out.as_deref(),
@@ -6171,7 +6215,8 @@ mod fnx_validation_progress_tests {
         assert_eq!(projected_only.fallback_reason, "work_exceeded");
         assert_eq!(projected_only.analysis_time_us, 42);
 
-        let components_only = witness(&analyze(5));
+        // Projection and connected components each reserve five work units.
+        let components_only = witness(&analyze(10));
         assert!(components_only.used);
         assert_eq!(components_only.algorithms_invoked, ["connected_components"]);
         assert!(components_only.budget_exceeded);
@@ -6198,14 +6243,14 @@ mod fnx_validation_progress_tests {
 
     #[test]
     fn cancelled_analysis_produces_an_actionable_validation_warning() {
-        let diagnostics = collect_fnx_diagnostics(&analyze(5));
+        let diagnostics = collect_fnx_diagnostics(&analyze(10));
         let budget = diagnostics
             .iter()
             .find(|diagnostic| diagnostic.payload.rule_id.as_deref() == Some("fnx.budget"))
             .expect("budget warning must survive validation conversion");
         assert_eq!(budget.stage, "fnx");
         assert_eq!(budget.payload.error_code, "mermaid/warning/fnx-budget-001");
-        assert!(budget.payload.message.contains("10 > 5"));
+        assert!(budget.payload.message.contains("15 > 10"));
         assert!(budget.payload.message.contains("connected_components"));
         assert!(budget.payload.remediation_hint.is_some());
         assert!(should_fail_validation(
@@ -9731,6 +9776,8 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    let fnx_budget = layout_config.fnx_budget;
     diagnostics.extend(collect_layout_diagnostics(
         &parsed.ir,
         &traced_layout,
@@ -9742,7 +9789,9 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     let (fnx_results, fnx_analysis_time) = if fnx_enabled {
         let analysis_start = Instant::now();
-        let results = analyze_structure(&parsed.ir);
+        let results = analyze_structure_with_budget(&parsed.ir, fnx_budget)
+            .into_value()
+            .unwrap_or_default();
         let analysis_time = analysis_start.elapsed();
         diagnostics.extend(collect_fnx_diagnostics(&results));
         (Some(results), analysis_time)

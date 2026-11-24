@@ -173,6 +173,50 @@ FNX is automatically disabled in WebAssembly builds due to dependency constraint
 | `directed` | Reserved; rejected while FNX is active (use `undirected`) |
 | `auto` | Reserved; rejected while FNX is active (use `undirected`) |
 
+### `--fnx-time-budget-ms` and `--fnx-work-budget`
+
+Both options are available on `render`, `render-batch`, and `validate`.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--fnx-time-budget-ms <u64>` | `100` | Cooperative elapsed-time limit for each FNX analysis stage |
+| `--fnx-work-budget <u64>` | `10000` | Deterministic work-unit allowance for each FNX analysis stage |
+
+The configured limits cover automatic layout selection, centrality ordering and styling,
+cycle-criticality scoring, and structural validation. Each analysis stage has its own
+allowance. In a batch, each diagram receives its own limits; the values do not cap the
+whole batch or the native layout/rendering pipeline.
+
+Work is admitted before graph projection and backend passes. A work budget of `0`
+prevents applicable FNX analysis and follows the selected fallback policy. Empty inputs
+and diagrams with no applicable layout analysis do not fail merely because the allowance
+is zero. Use `--fnx-mode disabled` to skip FNX without requesting analysis or triggering
+budget fallback.
+
+Time limits are cooperative checks between operations, not hard deadlines that interrupt
+a running backend call. A time budget of `0` is accepted, but it does not guarantee that
+no work runs before elapsed time is observed. Use a zero **work** budget for that behavior.
+Both arguments accept nonnegative integers, including zero; a disabled or unavailable
+automatic FNX mode ignores the analysis limits.
+
+```bash
+# Give a larger diagram more analysis capacity while requiring completion
+fm-cli render large.mmd --fnx-mode enabled --fnx-time-budget-ms 500 \
+    --fnx-work-budget 50000 --fnx-fallback strict --output large.svg
+
+# Apply a smaller independent allowance to every diagram in a batch
+fm-cli render-batch diagrams/*.mmd --out-dir rendered --fnx-time-budget-ms 50 \
+    --fnx-work-budget 5000 --fnx-fallback warn
+
+# Inspect cancellation and unknown metrics in the validation report
+fm-cli validate input.mmd --format json --fnx-work-budget 0 \
+    --fnx-fallback warn --fail-on none
+```
+
+Changing either budget invalidates the corresponding layout and batch cache key, so
+a result computed under a larger allowance cannot satisfy a later strict request with
+a smaller allowance.
+
 ### `--fnx-fallback`
 
 | Value | Description |
@@ -204,7 +248,7 @@ JSON validation output and `--diagnostics-out` retain completed structural metri
 
 ### "FNX analysis timed out"
 
-**Cause**: Budgeted structural analysis or cycle criticality scoring exceeded its default 100 ms or 10,000 work-unit budget. Checks occur between analysis passes and scoring steps; an individual backend call is not preempted at the deadline.
+**Cause**: Automatic selection, centrality, cycle-criticality scoring, or structural validation exceeded its configured budget. The defaults are 100 ms and 10,000 work units per analysis stage. Checks occur before backend passes and between scoring steps; an individual running backend call is not preempted at the deadline.
 
 **Impact**: Graceful and warn policies continue with completed findings and native heuristics. Strict policy fails the command. A missing metric is unknown, not a zero result. Layout quality may differ when advisory analysis is incomplete.
 
@@ -215,9 +259,14 @@ fm-cli render large.mmd --fnx-mode disabled
 
 # Allow fallback while making cancellation visible
 fm-cli validate large.mmd --fnx-fallback warn --format json
+
+# Raise both limits when complete analysis is required
+fm-cli validate large.mmd --fnx-time-budget-ms 500 --fnx-work-budget 50000 \
+    --fnx-fallback strict --format json
 ```
 
-There is no CLI timeout override. Auto layout-selection and centrality-ordering helpers are not currently governed by these cooperative FNX budgets.
+The same limits apply to layout assistance and structural validation. Completed findings
+remain in the report after cancellation; unperformed checks remain unknown.
 
 ### "fnx-integration feature not available"
 
@@ -287,7 +336,7 @@ If you find a case where FNX produces inferior results, please report it with:
 | 200-500 nodes | 20-50ms | Consider `disabled` for batch |
 | > 500 nodes | May exceed a budget | Use `disabled` or an explicit fallback policy |
 
-Budgeted FNX passes use cooperative cancellation, which does not impose a hard wall-clock deadline on every backend call. Auto selection and centrality ordering currently run outside that budget. FNX remains advisory; incomplete analysis falls back according to the selected policy.
+FNX analysis stages use cooperative cancellation, which does not impose a hard wall-clock deadline on a running backend call. Automatic selection and centrality ordering use the configured budgets too. Tune `--fnx-time-budget-ms` and `--fnx-work-budget` to control the allowance; FNX remains advisory and incomplete analysis follows the selected fallback policy.
 
 ---
 
