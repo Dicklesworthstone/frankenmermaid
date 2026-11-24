@@ -145,6 +145,26 @@ pub fn compute_criticality_scores_cached(
     scoring_config: &CriticalityScoringConfig,
     cache: &mut crate::fnx_cache::AnalysisCache,
 ) -> CriticalityScoringResults {
+    compute_criticality_scores_cached_with_budget(
+        ir,
+        proj_config,
+        scoring_config,
+        AnalysisBudget::default(),
+        cache,
+    )
+}
+
+/// Reuse a completed analysis or compute it with the caller's configured stage budget.
+///
+/// A cache hit performs no backend work. Cancelled analyses are never admitted to the cache,
+/// so a later request cannot mistake partial scores for a completed analysis.
+pub fn compute_criticality_scores_cached_with_budget(
+    ir: &MermaidDiagramIr,
+    proj_config: &crate::fnx_adapter::ProjectionConfig,
+    scoring_config: &CriticalityScoringConfig,
+    budget: AnalysisBudget,
+    cache: &mut crate::fnx_cache::AnalysisCache,
+) -> CriticalityScoringResults {
     if let Some(cached) = cache.get_criticality(ir, proj_config, scoring_config) {
         return cached;
     }
@@ -152,7 +172,7 @@ pub fn compute_criticality_scores_cached(
         ir,
         proj_config,
         scoring_config,
-        AnalysisBudget::default(),
+        budget,
     )
     .into_value()
     .unwrap_or_default();
@@ -191,42 +211,49 @@ pub fn compute_criticality_scores_with_budget(
     )
 }
 
-fn compute_criticality_scores_with_projection_and_budget(
+/// Compute criticality using both an explicit projection and a cooperative stage budget.
+#[must_use]
+pub fn compute_criticality_scores_with_projection_and_budget(
     ir: &MermaidDiagramIr,
     projection: &ProjectionConfig,
     config: &CriticalityScoringConfig,
     budget: AnalysisBudget,
 ) -> BudgetResult<CriticalityScoringResults> {
+    if ir.nodes.is_empty() || ir.edges.is_empty() {
+        return BudgetResult::Completed {
+            value: CriticalityScoringResults::default(),
+            elapsed_ms: 0,
+            work_consumed: Some(0),
+        };
+    }
     let mut executor = BudgetExecutor::new(budget);
     let mut outcome = executor.execute_with_progress(|exec| {
-        if ir.nodes.is_empty() || ir.edges.is_empty() {
+        let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
+        if !exec.admit_work(base_work) {
             return CriticalityScoringResults::default();
         }
-
-        let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
         let (graph, table, _) = ir_to_graph_with_policy(ir, projection);
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return CriticalityScoringResults::default();
         }
 
         // Run FNX analyses
         let bridges_result = measure_fnx_algorithm("bridges", || bridges(&graph));
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return CriticalityScoringResults::default();
         }
 
         let articulation_result =
             measure_fnx_algorithm("articulation_points", || articulation_points(&graph));
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return CriticalityScoringResults::default();
         }
 
         let centrality_result =
             measure_fnx_algorithm("degree_centrality", || degree_centrality(&graph));
-        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return CriticalityScoringResults::default();
+        }
 
         let mut results = CriticalityScoringResults {
             fnx_available: true,
@@ -244,10 +271,9 @@ fn compute_criticality_scores_with_projection_and_budget(
         // Score only the edges retained by the projection, preserving every parallel
         // contributor while excluding invalid endpoints and policy-removed self-loops.
         for edge in table.edge_metadata() {
-            if exec.is_exceeded() {
+            if !exec.admit_work(1) {
                 break;
             }
-            exec.record_work(1);
 
             let edge_idx = edge.ir_edge_index;
             let source_idx = edge.source_index;
@@ -809,7 +835,7 @@ mod tests {
         let ir = make_chain_ir();
         let config = CriticalityScoringConfig::default();
         // Projection and three graph analyses consume 20 units. Each scored edge adds one.
-        for (limit, scored) in [(20, 1), (21, 2)] {
+        for (limit, scored) in [(20, 0), (21, 1)] {
             let result = compute_criticality_scores_with_budget(
                 &ir,
                 &config,
@@ -828,7 +854,9 @@ mod tests {
                     consumed: limit + 1,
                 })
             );
-            assert!(partial.get_score(0) > config.base_penalty);
+            if scored > 0 {
+                assert!(partial.get_score(0) > config.base_penalty);
+            }
         }
 
         let result = compute_criticality_scores_with_budget(
@@ -865,6 +893,57 @@ mod tests {
     }
 
     #[test]
+    fn configured_cache_retries_cancellation_and_reuses_only_complete_analysis() {
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let ir = make_chain_ir();
+        let projection = ProjectionConfig::default();
+        let scoring = CriticalityScoringConfig::default();
+        let mut cache = crate::fnx_cache::AnalysisCache::default();
+        let zero = AnalysisBudget::unlimited().with_work_budget(0);
+        for _ in 0..2 {
+            let (scores, trace) = capture_fnx_execution(|| {
+                compute_criticality_scores_cached_with_budget(
+                    &ir,
+                    &projection,
+                    &scoring,
+                    zero,
+                    &mut cache,
+                )
+            });
+            assert!(scores.budget_exceeded.is_some());
+            assert!(scores.scores.is_empty());
+            assert!(trace.algorithms_invoked.is_empty());
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+            assert_eq!(cache.stats().entries, 0);
+        }
+        let complete = compute_criticality_scores_cached_with_budget(
+            &ir,
+            &projection,
+            &scoring,
+            AnalysisBudget::unlimited().with_work_budget(22),
+            &mut cache,
+        );
+        assert!(complete.budget_exceeded.is_none());
+        assert_eq!(complete.scores.len(), 2);
+        let (cached, trace) = capture_fnx_execution(|| {
+            compute_criticality_scores_cached_with_budget(
+                &ir,
+                &projection,
+                &scoring,
+                zero,
+                &mut cache,
+            )
+        });
+        assert_eq!(cached.scores, complete.scores);
+        assert!(cached.budget_exceeded.is_none());
+        assert!(trace.algorithms_invoked.is_empty());
+        assert!(trace.budget_exceeded_reason.is_none());
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 3);
+    }
+
+    #[test]
     fn cycle_aware_layout_does_not_cache_cancelled_criticality() {
         let mut ir = make_triangle_ir();
         // Preserve the directed cycle while forcing criticality projection over its limit.
@@ -872,8 +951,20 @@ mod tests {
         let previous_cache =
             crate::FNX_CYCLE_ANALYSIS_CACHE.with(|cache| std::mem::take(&mut *cache.borrow_mut()));
 
-        let first = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2], true);
-        let second = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2], true);
+        let first = crate::cycle_removal(
+            &ir,
+            crate::CycleStrategy::CycleAware,
+            &[0, 1, 2],
+            true,
+            AnalysisBudget::default(),
+        );
+        let second = crate::cycle_removal(
+            &ir,
+            crate::CycleStrategy::CycleAware,
+            &[0, 1, 2],
+            true,
+            AnalysisBudget::default(),
+        );
         assert!(!first.reversed_edge_indexes.is_empty());
         assert_eq!(first.reversed_edge_indexes, second.reversed_edge_indexes);
         let oriented = crate::oriented_edges(&ir, &first.reversed_edge_indexes);

@@ -25,14 +25,14 @@
 //! }
 //! ```
 
-use std::time::Instant;
+use web_time::Instant;
 
 // ============================================================================
 // Budget Configuration
 // ============================================================================
 
 /// Configuration for analysis time and work budgets.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AnalysisBudget {
     /// Maximum wall-clock time for this operation in milliseconds.
     pub time_budget_ms: u64,
@@ -123,7 +123,7 @@ pub enum BudgetExceededReason {
     WorkExceeded {
         /// Budget in work units.
         budget: u64,
-        /// Actual work units consumed.
+        /// Work units charged, including a stage reservation declined before execution.
         consumed: u64,
     },
     /// Both time and work budgets were exceeded.
@@ -274,6 +274,17 @@ impl BudgetExecutor {
     /// Record work units consumed.
     pub fn record_work(&mut self, units: u64) {
         self.work_consumed = self.work_consumed.saturating_add(units);
+    }
+
+    /// Reserve work before starting a projection, backend pass, or scoring step.
+    ///
+    /// A rejected reservation remains in the counter so the cancellation reason explains
+    /// which limit prevented the next stage. Callers must not launch that stage after `false`,
+    /// and must check again after an admitted backend call to detect cooperative time overruns.
+    #[must_use]
+    pub fn admit_work(&mut self, units: u64) -> bool {
+        self.record_work(units);
+        !self.is_exceeded()
     }
 
     /// Check if time budget is exceeded.
@@ -892,6 +903,38 @@ mod tests {
         executor.record_work(60);
         assert_eq!(executor.work_consumed(), 110);
         assert!(executor.is_work_exceeded());
+    }
+
+    #[test]
+    fn work_admission_allows_exact_limit_and_rejects_next_stage() {
+        let mut executor = BudgetExecutor::new(AnalysisBudget::unlimited().with_work_budget(5));
+        executor.start();
+        assert!(executor.admit_work(2));
+        assert!(executor.admit_work(3));
+        assert!(!executor.admit_work(1));
+        assert_eq!(
+            executor.exceeded_reason(),
+            Some(BudgetExceededReason::WorkExceeded {
+                budget: 5,
+                consumed: 6,
+            })
+        );
+
+        let mut zero = BudgetExecutor::new(AnalysisBudget::unlimited().with_work_budget(0));
+        zero.start();
+        assert!(!zero.admit_work(1));
+    }
+
+    #[test]
+    fn admission_refuses_a_stage_after_the_time_budget_has_expired() {
+        let mut executor = BudgetExecutor::new(AnalysisBudget::unlimited().with_time_budget_ms(0));
+        executor.start();
+        executor.start_time = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!executor.admit_work(1));
+        assert!(matches!(
+            executor.exceeded_reason(),
+            Some(BudgetExceededReason::TimeExceeded { .. })
+        ));
     }
 
     #[test]

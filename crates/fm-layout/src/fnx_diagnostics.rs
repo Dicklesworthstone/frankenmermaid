@@ -24,7 +24,7 @@ use std::time::Instant;
 use fm_core::{IrNodeId, MermaidDiagramIr, Span};
 use fnx_algorithms::{
     ArticulationPointsResult, BridgesResult, ComponentsResult, CycleBasisResult,
-    articulation_points, bridges, connected_components, cycle_basis,
+    articulation_points, bridges, connected_components, cycle_basis, degree_centrality,
 };
 
 use crate::FnxExecutionTrace;
@@ -501,6 +501,92 @@ impl FnxAnalysisResults {
 // Analysis Functions
 // ============================================================================
 
+/// Analyze the advisory signals used by Auto layout selection under one stage budget.
+///
+/// Every projection and backend pass is admitted before it starts. A cancellation produces
+/// no selection adjustment, while the execution trace retains the actual completed work and
+/// reason. Disconnected graphs keep the existing policy of skipping cut analyses; those zero
+/// cut counts are selection sentinels, not structural findings exposed to validation.
+pub(crate) fn analyze_layout_selection_with_budget(
+    ir: &MermaidDiagramIr,
+    projection: &ProjectionConfig,
+    budget: AnalysisBudget,
+) -> BudgetResult<Option<crate::FnxLayoutSelectionSignals>> {
+    if ir.nodes.is_empty() {
+        return BudgetResult::Completed {
+            value: None,
+            elapsed_ms: 0,
+            work_consumed: Some(0),
+        };
+    }
+    let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
+    let mut executor = BudgetExecutor::new(budget);
+    let mut outcome = executor.execute_with_progress(|exec| {
+        if !exec.admit_work(base_work) {
+            return None;
+        }
+        let (graph, _, _) = ir_to_graph_with_policy(ir, projection);
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
+            return None;
+        }
+        let component_count =
+            measure_fnx_algorithm("connected_components", || connected_components(&graph))
+                .components
+                .len();
+        if exec.is_exceeded() {
+            return None;
+        }
+        let (articulation_point_count, bridge_count) = if component_count <= 1 {
+            if !exec.admit_work(base_work) {
+                return None;
+            }
+            let articulation_point_count =
+                measure_fnx_algorithm("articulation_points", || articulation_points(&graph))
+                    .nodes
+                    .len();
+            if exec.is_exceeded() || !exec.admit_work(base_work) {
+                return None;
+            }
+            let bridge_count = measure_fnx_algorithm("bridges", || bridges(&graph))
+                .edges
+                .len();
+            if exec.is_exceeded() {
+                return None;
+            }
+            (articulation_point_count, bridge_count)
+        } else {
+            (0, 0)
+        };
+        if !exec.admit_work(base_work) {
+            return None;
+        }
+        let centrality = measure_fnx_algorithm("degree_centrality", || degree_centrality(&graph));
+        if exec.is_exceeded() {
+            return None;
+        }
+        let mut peak_degree_centrality_permille = 0;
+        for entry in centrality.scores {
+            if !exec.admit_work(1) {
+                return None;
+            }
+            let quantized = crate::fnx_ordering::QuantizedScore::from_normalized(entry.score);
+            peak_degree_centrality_permille =
+                peak_degree_centrality_permille.max((quantized.raw() / 10) as u16);
+        }
+        Some(crate::FnxLayoutSelectionSignals {
+            component_count,
+            articulation_point_count,
+            bridge_count,
+            peak_degree_centrality_permille,
+        })
+    });
+    if let BudgetResult::Cancelled { reason, partial } = &mut outcome {
+        record_fnx_budget_exceeded(reason);
+        *partial = None;
+    }
+    outcome
+}
+
 /// Run all FNX structural analyses on the given IR.
 ///
 /// Returns analysis results with diagnostics that can be surfaced to users. A budget-limited
@@ -545,22 +631,29 @@ pub fn analyze_structure_with_budget(
     analyze_structure_with_projection_and_budget(ir, &ProjectionConfig::default(), budget)
 }
 
-fn analyze_structure_with_projection_and_budget(
+/// Run structural analysis with both a projection policy and an explicit stage budget.
+#[must_use]
+pub fn analyze_structure_with_projection_and_budget(
     ir: &MermaidDiagramIr,
     projection: &ProjectionConfig,
     budget: AnalysisBudget,
 ) -> BudgetResult<FnxAnalysisResults> {
+    if ir.nodes.is_empty() {
+        return BudgetResult::Completed {
+            value: FnxAnalysisResults::default(),
+            elapsed_ms: 0,
+            work_consumed: Some(0),
+        };
+    }
     let mut executor = BudgetExecutor::new(budget);
     let mut outcome = executor.execute_with_progress(|exec| {
-        if ir.nodes.is_empty() {
-            return FnxAnalysisResults::default();
-        }
-
-        let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
-        let (graph, table, _) = ir_to_graph_with_policy(ir, projection);
-        exec.record_work(base_work);
+        let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
         let mut results = FnxAnalysisResults::default();
-        if exec.is_exceeded() {
+        if !exec.admit_work(base_work) {
+            return results;
+        }
+        let (graph, table, _) = ir_to_graph_with_policy(ir, projection);
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return results;
         }
 
@@ -571,8 +664,7 @@ fn analyze_structure_with_projection_and_budget(
         results
             .completed_passes
             .push(FnxAnalysisPass::ConnectedComponents);
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return results;
         }
 
@@ -583,16 +675,14 @@ fn analyze_structure_with_projection_and_budget(
         results
             .completed_passes
             .push(FnxAnalysisPass::ArticulationPoints);
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return results;
         }
 
         let bridge_result = measure_fnx_algorithm("bridges", || bridges(&graph));
         analyze_bridges(ir, &table, &bridge_result, &mut results);
         results.completed_passes.push(FnxAnalysisPass::Bridges);
-        exec.record_work(base_work);
-        if exec.is_exceeded() {
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
             return results;
         }
 
@@ -600,7 +690,6 @@ fn analyze_structure_with_projection_and_budget(
         let cycle_result = measure_fnx_algorithm("cycle_basis", || cycle_basis(&graph, None));
         analyze_cycles(ir, &table, &cycle_result, &mut results);
         results.completed_passes.push(FnxAnalysisPass::CycleBasis);
-        exec.record_work(base_work);
 
         results
     });
@@ -967,7 +1056,7 @@ mod tests {
     fn execution_diagnostics_preserve_budget_evidence_before_and_after_a_pass() {
         let ir = make_simple_chain();
         let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
-        for (work_budget, expected) in [(0, vec![]), (base_work + 1, vec!["connected_components"])]
+        for (work_budget, expected) in [(0, vec![]), (2 * base_work, vec!["connected_components"])]
         {
             let (result, trace) = capture_fnx_execution(|| {
                 analyze_structure_with_budget(
@@ -1000,6 +1089,99 @@ mod tests {
     }
 
     #[test]
+    fn selection_budget_admits_each_backend_pass_before_execution() {
+        let ir = make_simple_chain();
+        let passes = [
+            "connected_components",
+            "articulation_points",
+            "bridges",
+            "degree_centrality",
+        ];
+        // Projection and each pass reserve five units; degree quantization adds three.
+        for (limit, completed) in [(0, 0), (5, 0), (10, 1), (15, 2), (20, 3), (25, 4), (27, 4)] {
+            let (result, trace) = capture_fnx_execution(|| {
+                analyze_layout_selection_with_budget(
+                    &ir,
+                    &ProjectionConfig::default(),
+                    AnalysisBudget::unlimited().with_work_budget(limit),
+                )
+            });
+            assert!(result.is_cancelled(), "limit {limit}");
+            assert!(result.into_value().flatten().is_none());
+            assert_eq!(
+                trace.algorithms_invoked,
+                passes[..completed],
+                "limit {limit}"
+            );
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+        }
+        for _ in 0..5 {
+            let (result, trace) = capture_fnx_execution(|| {
+                analyze_layout_selection_with_budget(
+                    &ir,
+                    &ProjectionConfig::default(),
+                    AnalysisBudget::unlimited().with_work_budget(28),
+                )
+            });
+            assert!(result.is_completed());
+            let signals = result
+                .into_value()
+                .flatten()
+                .expect("complete selection signals");
+            assert_eq!(signals.component_count, 1);
+            assert_eq!(signals.articulation_point_count, 1);
+            assert_eq!(signals.bridge_count, 2);
+            assert_eq!(signals.peak_degree_centrality_permille, 1_000);
+            assert_eq!(trace.algorithms_invoked, passes);
+            assert!(trace.budget_exceeded_reason.is_none());
+        }
+    }
+
+    #[test]
+    fn selection_uses_one_projection_and_skips_unneeded_cut_passes() {
+        let ir = make_disconnected_graph();
+        let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
+        let budget = 3 * base_work + ir.nodes.len() as u64;
+        let (result, trace) = capture_fnx_execution(|| {
+            analyze_layout_selection_with_budget(
+                &ir,
+                &ProjectionConfig::default(),
+                AnalysisBudget::unlimited().with_work_budget(budget),
+            )
+        });
+        assert!(result.is_completed());
+        let signals = result
+            .into_value()
+            .flatten()
+            .expect("fragmented graph signals");
+        assert_eq!(signals.component_count, 2);
+        assert_eq!(signals.articulation_point_count, 0);
+        assert_eq!(signals.bridge_count, 0);
+        assert_eq!(
+            trace.algorithms_invoked,
+            ["connected_components", "degree_centrality"]
+        );
+        assert!(trace.budget_exceeded_reason.is_none());
+    }
+
+    #[test]
+    fn empty_selection_is_successful_without_budget_or_backend_work() {
+        let (result, trace) = capture_fnx_execution(|| {
+            analyze_layout_selection_with_budget(
+                &MermaidDiagramIr::default(),
+                &ProjectionConfig::default(),
+                AnalysisBudget::default()
+                    .with_time_budget_ms(0)
+                    .with_work_budget(0),
+            )
+        });
+        assert!(result.is_completed());
+        assert!(result.into_value().flatten().is_none());
+        assert!(trace.algorithms_invoked.is_empty());
+        assert!(trace.budget_exceeded_reason.is_none());
+    }
+
+    #[test]
     fn execution_criticality_reports_actual_calls_and_partial_budget_work() {
         use crate::fnx_cycle_scorer::{
             CriticalityScoringConfig, compute_criticality_scores_with_budget,
@@ -1018,7 +1200,7 @@ mod tests {
         );
         assert!(full.budget_exceeded_reason.is_none());
 
-        for (work_budget, expected) in [(0, vec![]), (base_work + 1, vec!["bridges"])] {
+        for (work_budget, expected) in [(0, vec![]), (2 * base_work, vec!["bridges"])] {
             let (result, trace) = capture_fnx_execution(|| {
                 compute_criticality_scores_with_budget(
                     &ir,
@@ -1778,9 +1960,9 @@ mod tests {
             FnxAnalysisPass::Bridges,
             FnxAnalysisPass::CycleBasis,
         ];
-        // This graph has three vertices and two edges. Projection and each analysis consume
-        // five work units, so these exact boundaries exercise every possible stopping point.
-        for (limit, completed) in [(0, 0), (5, 1), (10, 2), (15, 3), (20, 4)] {
+        // This graph has three vertices and two edges. Projection and each analysis reserve
+        // five work units before starting, so an unaffordable next pass never executes.
+        for (limit, completed) in [(0, 0), (5, 0), (10, 1), (15, 2), (20, 3)] {
             let result = analyze_structure_with_budget(
                 &ir,
                 AnalysisBudget::unlimited().with_work_budget(limit),
@@ -1825,8 +2007,11 @@ mod tests {
     #[test]
     fn cancelled_analysis_preserves_findings_from_completed_passes() {
         let ir = make_disconnected_graph();
-        let result =
-            analyze_structure_with_budget(&ir, AnalysisBudget::unlimited().with_work_budget(6));
+        let budget = 2 * (ir.nodes.len() + ir.edges.len()) as u64;
+        let result = analyze_structure_with_budget(
+            &ir,
+            AnalysisBudget::unlimited().with_work_budget(budget),
+        );
         assert!(result.is_cancelled());
         let partial = result.into_value().expect("partial analysis");
         assert_eq!(

@@ -12,10 +12,10 @@ use std::hash::Hash;
 
 use fm_core::{IrEndpoint, MermaidDiagramIr};
 use fnx_algorithms::degree_centrality;
-use fnx_classes::Graph;
 
-use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph, ir_to_graph_with_policy};
-use crate::fnx_diagnostics::measure_fnx_algorithm;
+use crate::fnx_adapter::{ProjectionConfig, ir_to_graph_with_policy};
+use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
+use crate::fnx_diagnostics::{measure_fnx_algorithm, record_fnx_budget_exceeded};
 
 // ============================================================================
 // Quantization Policy
@@ -65,6 +65,8 @@ pub struct NodeCentralityScores {
     pub degree: BTreeMap<usize, QuantizedScore>,
     /// Whether centrality computation was successful.
     pub computed: bool,
+    /// Cancellation reason when ordering must use its native tie-breakers instead.
+    pub budget_exceeded: Option<BudgetExceededReason>,
 }
 
 impl NodeCentralityScores {
@@ -91,12 +93,7 @@ impl NodeCentralityScores {
 /// Scores are deterministically quantized to avoid floating-point issues.
 #[must_use]
 pub fn compute_centrality_scores(ir: &MermaidDiagramIr) -> NodeCentralityScores {
-    if ir.nodes.is_empty() {
-        return NodeCentralityScores::default();
-    }
-
-    let (graph, table) = ir_to_graph(ir);
-    quantized_degree_scores(&graph, &table)
+    compute_centrality_scores_with_config(ir, &ProjectionConfig::default())
 }
 
 /// Compute centrality scores with a specific projection configuration.
@@ -110,31 +107,66 @@ pub fn compute_centrality_scores_with_config(
     ir: &MermaidDiagramIr,
     config: &ProjectionConfig,
 ) -> NodeCentralityScores {
-    if ir.nodes.is_empty() {
-        return NodeCentralityScores::default();
-    }
-
-    let (graph, table, _) = ir_to_graph_with_policy(ir, config);
-    quantized_degree_scores(&graph, &table)
+    compute_centrality_scores_with_budget(ir, config, AnalysisBudget::default())
+        .into_value()
+        .unwrap_or_default()
 }
 
-fn quantized_degree_scores(graph: &Graph, table: &ProjectionTable) -> NodeCentralityScores {
-    let centrality_result = measure_fnx_algorithm("degree_centrality", || degree_centrality(graph));
-
-    let mut scores = NodeCentralityScores {
-        degree: BTreeMap::new(),
-        computed: true,
-    };
-
-    for entry in &centrality_result.scores {
-        if let Some(ir_idx) = table.get_ir_node_index(&entry.node) {
-            scores
-                .degree
-                .insert(ir_idx, QuantizedScore::from_normalized(entry.score));
-        }
+/// Compute configured centrality under a cooperative time and work budget.
+///
+/// Projection and the backend pass each reserve `nodes + edges` work units before starting;
+/// quantization reserves one unit per returned score. Cancellation retains its reason and
+/// returns no ordering scores: an incomplete ranking must not bias unprocessed nodes toward zero.
+#[must_use]
+pub fn compute_centrality_scores_with_budget(
+    ir: &MermaidDiagramIr,
+    config: &ProjectionConfig,
+    budget: AnalysisBudget,
+) -> BudgetResult<NodeCentralityScores> {
+    if ir.nodes.is_empty() {
+        return BudgetResult::Completed {
+            value: NodeCentralityScores::default(),
+            elapsed_ms: 0,
+            work_consumed: Some(0),
+        };
     }
-
-    scores
+    let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
+    let mut executor = BudgetExecutor::new(budget);
+    let mut outcome = executor.execute_with_progress(|exec| {
+        let mut scores = NodeCentralityScores::default();
+        if !exec.admit_work(base_work) {
+            return scores;
+        }
+        let (graph, table, _) = ir_to_graph_with_policy(ir, config);
+        if exec.is_exceeded() || !exec.admit_work(base_work) {
+            return scores;
+        }
+        let centrality_result =
+            measure_fnx_algorithm("degree_centrality", || degree_centrality(&graph));
+        if exec.is_exceeded() {
+            return scores;
+        }
+        for entry in &centrality_result.scores {
+            if !exec.admit_work(1) {
+                return scores;
+            }
+            if let Some(ir_idx) = table.get_ir_node_index(&entry.node) {
+                scores
+                    .degree
+                    .insert(ir_idx, QuantizedScore::from_normalized(entry.score));
+            }
+        }
+        scores.computed = true;
+        scores
+    });
+    if let BudgetResult::Cancelled { reason, partial } = &mut outcome {
+        record_fnx_budget_exceeded(reason);
+        let scores = partial.get_or_insert_with(NodeCentralityScores::default);
+        scores.computed = false;
+        scores.degree.clear();
+        scores.budget_exceeded = Some(reason.clone());
+    }
+    outcome
 }
 // ============================================================================
 // Ordering Integration
@@ -696,6 +728,71 @@ mod tests {
 
         assert!(!scores.computed);
         assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn centrality_budget_admits_real_work_and_rejects_incomplete_rankings() {
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let ir = make_chain_ir();
+        let projection = ProjectionConfig::default();
+        // Five units for projection, five for degree centrality, and one per quantized node.
+        for limit in [0, 4, 5, 9, 10, 11, 12] {
+            let (result, trace) = capture_fnx_execution(|| {
+                compute_centrality_scores_with_budget(
+                    &ir,
+                    &projection,
+                    AnalysisBudget::unlimited().with_work_budget(limit),
+                )
+            });
+            assert!(result.is_cancelled(), "limit {limit}");
+            let scores = result
+                .into_value()
+                .expect("cancellation reason is retained");
+            assert!(!scores.computed);
+            assert!(
+                scores.degree.is_empty(),
+                "partial rankings must not bias node order"
+            );
+            assert!(scores.budget_exceeded.is_some());
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+            if limit < 10 {
+                assert!(trace.algorithms_invoked.is_empty());
+                assert!(trace.analysis_time.is_zero());
+            } else {
+                assert_eq!(trace.algorithms_invoked, ["degree_centrality"]);
+            }
+        }
+
+        let result = compute_centrality_scores_with_budget(
+            &ir,
+            &projection,
+            AnalysisBudget::unlimited().with_work_budget(13),
+        );
+        assert!(result.is_completed());
+        let scores = result.into_value().expect("complete centrality");
+        assert!(scores.computed);
+        assert!(scores.budget_exceeded.is_none());
+        assert_eq!(scores.get_degree(0).raw(), 5_000);
+        assert_eq!(scores.get_degree(1).raw(), 10_000);
+        assert_eq!(scores.get_degree(2).raw(), 5_000);
+    }
+
+    #[test]
+    fn empty_centrality_requires_no_budget_or_backend_call() {
+        let (result, trace) = crate::fnx_diagnostics::capture_fnx_execution(|| {
+            compute_centrality_scores_with_budget(
+                &MermaidDiagramIr::default(),
+                &ProjectionConfig::default(),
+                AnalysisBudget::default()
+                    .with_time_budget_ms(0)
+                    .with_work_budget(0),
+            )
+        });
+        assert!(result.is_completed());
+        assert!(trace.algorithms_invoked.is_empty());
+        assert!(trace.budget_exceeded_reason.is_none());
+        assert!(trace.analysis_time.is_zero());
     }
 
     #[test]

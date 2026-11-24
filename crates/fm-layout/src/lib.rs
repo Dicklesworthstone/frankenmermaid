@@ -9,7 +9,6 @@ pub mod infeasible;
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_adapter;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod fnx_budget;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_cache;
@@ -90,13 +89,9 @@ use smallvec::{SmallVec, smallvec};
 use tracing::{debug, info, trace, warn};
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-use crate::fnx_adapter::ir_to_graph;
-#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use crate::fnx_ordering::{
-    NodeCentralityScores, compare_with_centrality, compute_centrality_scores,
+    NodeCentralityScores, compare_with_centrality, compute_centrality_scores_with_budget,
 };
-#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-use fnx_algorithms::{articulation_points, bridges, connected_components};
 
 /// Design contract for subgraph-level incremental invalidation (`bd-20fq.1`).
 ///
@@ -1110,6 +1105,11 @@ pub struct LayoutConfig {
     pub font_metrics: Option<fm_core::FontMetrics>,
     /// Enable FNX-assisted ordering heuristics when available.
     pub fnx_enabled: bool,
+    /// Cooperative time and work limits for each FNX analysis stage.
+    ///
+    /// Exhausted stages retain native layout decisions and record cancellation in the trace.
+    /// The budget is part of the incremental layout key, so changing it recomputes the layout.
+    pub fnx_budget: fnx_budget::AnalysisBudget,
     /// Solve a bounded flowchart layer assignment as a continuous LP after the heuristic pass.
     ///
     /// This is opt-in because the incumbent rank assignment is already deterministic and linear.
@@ -1151,6 +1151,7 @@ impl Default for LayoutConfig {
             edge_routing: EdgeRouting::default(),
             font_metrics: None,
             fnx_enabled: true,
+            fnx_budget: fnx_budget::AnalysisBudget::default(),
             lp_relaxation_layers: false,
             constraint_solver: ConstraintSolverMode::Optimize,
             constraint_solver_wall_clock_valve_ms: CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
@@ -9708,7 +9709,7 @@ fn select_min_loss_algorithm(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct FnxLayoutSelectionSignals {
+pub(crate) struct FnxLayoutSelectionSignals {
     component_count: usize,
     articulation_point_count: usize,
     bridge_count: usize,
@@ -9720,42 +9721,16 @@ fn compute_fnx_layout_selection_signals(
     ir: &MermaidDiagramIr,
     config: &LayoutConfig,
 ) -> Option<FnxLayoutSelectionSignals> {
-    use crate::fnx_diagnostics::measure_fnx_algorithm;
-
     if !config.fnx_enabled || ir.nodes.is_empty() {
         return None;
     }
-
-    let (graph, _) = ir_to_graph(ir);
-    let component_count =
-        measure_fnx_algorithm("connected_components", || connected_components(&graph))
-            .components
-            .len();
-    let (articulation_point_count, bridge_count) = if component_count <= 1 {
-        (
-            measure_fnx_algorithm("articulation_points", || articulation_points(&graph))
-                .nodes
-                .len(),
-            measure_fnx_algorithm("bridges", || bridges(&graph))
-                .edges
-                .len(),
-        )
-    } else {
-        (0, 0)
-    };
-    let peak_degree_centrality_permille = compute_centrality_scores(ir)
-        .degree
-        .values()
-        .map(|score| score.raw() / 10)
-        .max()
-        .unwrap_or(0) as u16;
-
-    Some(FnxLayoutSelectionSignals {
-        component_count,
-        articulation_point_count,
-        bridge_count,
-        peak_degree_centrality_permille,
-    })
+    crate::fnx_diagnostics::analyze_layout_selection_with_budget(
+        ir,
+        &crate::fnx_adapter::ProjectionConfig::default(),
+        config.fnx_budget,
+    )
+    .into_value()
+    .flatten()
 }
 
 #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
@@ -10424,6 +10399,7 @@ pub(crate) fn cycle_preparation(
         config.cycle_strategy,
         &node_priority,
         config.fnx_enabled,
+        config.fnx_budget,
     );
     (node_priority, cycle_result)
 }
@@ -18980,7 +18956,13 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     // a feedback edge can make a tree child precede its parent, invalidating contour alignment.
     let weighted_cycles = ir.edges.iter().any(|edge| edge.min_length() > 1).then(|| {
         let priorities = stable_node_priorities(ir);
-        let cycles = cycle_removal(ir, CycleStrategy::default(), &priorities, false);
+        let cycles = cycle_removal(
+            ir,
+            CycleStrategy::default(),
+            &priorities,
+            false,
+            fnx_budget::AnalysisBudget::default(),
+        );
         (priorities, cycles)
     });
 
@@ -21373,9 +21355,10 @@ fn cycle_removal_fnx_cycle_aware(
     node_priority: &[usize],
     dfs_back_edges: &BTreeSet<usize>,
     fnx_enabled: bool,
+    fnx_budget: fnx_budget::AnalysisBudget,
 ) -> BTreeSet<usize> {
     #[cfg(not(feature = "fnx-integration"))]
-    let _ = fnx_enabled;
+    let _ = (fnx_enabled, fnx_budget);
     if dfs_back_edges.is_empty() {
         return BTreeSet::new();
     }
@@ -21390,16 +21373,13 @@ fn cycle_removal_fnx_cycle_aware(
         FNX_CYCLE_ANALYSIS_CACHE.with(|cache| {
             let proj = crate::fnx_adapter::ProjectionConfig::default();
             let scoring = crate::fnx_cycle_scorer::CriticalityScoringConfig::default();
-            if let Some(hit) = cache.borrow_mut().get_criticality(ir, &proj, &scoring) {
-                return hit;
-            }
-            let computed = crate::fnx_cycle_scorer::compute_criticality_scores(ir, &scoring);
-            if computed.budget_exceeded.is_none() {
-                cache
-                    .borrow_mut()
-                    .put_criticality(ir, &proj, &scoring, computed.clone());
-            }
-            computed
+            crate::fnx_cycle_scorer::compute_criticality_scores_cached_with_budget(
+                ir,
+                &proj,
+                &scoring,
+                fnx_budget,
+                &mut cache.borrow_mut(),
+            )
         })
     } else {
         crate::fnx_cycle_scorer::CriticalityScoringResults::default()
@@ -21474,6 +21454,7 @@ fn cycle_removal_fnx_cycle_aware(
     _node_priority: &[usize],
     dfs_back_edges: &BTreeSet<usize>,
     _fnx_enabled: bool,
+    _fnx_budget: fnx_budget::AnalysisBudget,
 ) -> BTreeSet<usize> {
     dfs_back_edges.clone()
 }
@@ -21483,6 +21464,7 @@ fn cycle_removal(
     cycle_strategy: CycleStrategy,
     node_priority: &[usize],
     fnx_enabled: bool,
+    fnx_budget: fnx_budget::AnalysisBudget,
 ) -> CycleRemovalResult {
     let node_count = ir.nodes.len();
     if node_count == 0 {
@@ -21546,6 +21528,7 @@ fn cycle_removal(
                 node_priority,
                 &dfs_back_edges,
                 fnx_enabled,
+                fnx_budget,
             )
         }
     };
@@ -25346,7 +25329,13 @@ fn build_centrality_assist(ir: &MermaidDiagramIr, config: &LayoutConfig) -> Cent
     if !config.fnx_enabled {
         return CentralityAssist::Disabled;
     }
-    let scores = compute_centrality_scores(ir);
+    let scores = compute_centrality_scores_with_budget(
+        ir,
+        &crate::fnx_adapter::ProjectionConfig::default(),
+        config.fnx_budget,
+    )
+    .into_value()
+    .unwrap_or_default();
     if scores.computed && !scores.is_empty() {
         CentralityAssist::Enabled(scores)
     } else {
@@ -25368,7 +25357,13 @@ fn compute_layout_centrality_tiers(
     if !config.fnx_enabled {
         return Vec::new();
     }
-    let scores = compute_centrality_scores(ir);
+    let scores = compute_centrality_scores_with_budget(
+        ir,
+        &crate::fnx_adapter::ProjectionConfig::default(),
+        config.fnx_budget,
+    )
+    .into_value()
+    .unwrap_or_default();
     if scores.computed && !scores.is_empty() {
         crate::fnx_ordering::classify_centrality_tiers(&scores)
     } else {
@@ -25943,6 +25938,7 @@ pub mod bench_internals {
             config.cycle_strategy,
             &node_priority,
             config.fnx_enabled,
+            config.fnx_budget,
         );
         let mut ranks = super::rank_assignment(ir, &cycle_result, &node_priority);
         super::apply_ir_constraints(ir, &mut ranks);
@@ -42792,7 +42788,13 @@ mod tests {
     fn flowchart_min_length_survives_cycle_orientation_and_lp_layering() {
         let ir = parse("flowchart TB\nA ----> B\nB --> C\nC --> A\nC --> D\n").ir;
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
+        let cycles = super::cycle_removal(
+            &ir,
+            CycleStrategy::default(),
+            &priorities,
+            false,
+            super::fnx_budget::AnalysisBudget::default(),
+        );
         assert!(!cycles.reversed_edge_indexes.is_empty());
         let ranks = super::rank_assignment(&ir, &cycles, &priorities);
         let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &ranks)
@@ -51921,7 +51923,13 @@ mod tests {
             &[(0, 2), (1, 2), (2, 3), (2, 4), (4, 5)],
         );
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
+        let cycles = super::cycle_removal(
+            &ir,
+            CycleStrategy::default(),
+            &priorities,
+            false,
+            super::fnx_budget::AnalysisBudget::default(),
+        );
         let fallback = super::rank_assignment(&ir, &cycles, &priorities);
         let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback)
             .expect("the bounded flowchart LP must have an optimal integral layer assignment");
@@ -51942,7 +51950,13 @@ mod tests {
     fn lp_relaxation_layers_rejects_graphs_above_its_explicit_limit() {
         let ir = graph_ir(DiagramType::Flowchart, 51, &[]);
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
+        let cycles = super::cycle_removal(
+            &ir,
+            CycleStrategy::default(),
+            &priorities,
+            false,
+            super::fnx_budget::AnalysisBudget::default(),
+        );
         let fallback = super::rank_assignment(&ir, &cycles, &priorities);
         assert!(super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback).is_none());
     }
@@ -54067,6 +54081,127 @@ mod tests {
         let ir = graph_ir(DiagramType::State, 12, &edges);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn exhausted_fnx_budget_keeps_native_auto_and_sugiyama_layouts() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            10,
+            &[
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (0, 6),
+                (1, 7),
+                (2, 7),
+                (3, 8),
+                (4, 9),
+            ],
+        );
+        let config = LayoutConfig {
+            cycle_strategy: CycleStrategy::Greedy,
+            fnx_budget: super::fnx_budget::AnalysisBudget::unlimited().with_work_budget(0),
+            ..LayoutConfig::default()
+        };
+        for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Sugiyama] {
+            let native = super::layout_diagram_traced_with_config(
+                &ir,
+                algorithm,
+                LayoutConfig {
+                    fnx_enabled: false,
+                    ..config.clone()
+                },
+            );
+            let cancelled =
+                super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
+            assert_eq!(cancelled.layout.nodes.len(), ir.nodes.len());
+            assert_eq!(cancelled.layout.edges.len(), ir.edges.len());
+            assert_eq!(cancelled.layout, native.layout, "{algorithm:?}");
+            assert_eq!(cancelled.trace.dispatch, native.trace.dispatch);
+            assert!(cancelled.trace.fnx.algorithms_invoked.is_empty());
+            assert!(cancelled.trace.fnx.analysis_time.is_zero());
+            assert_eq!(
+                cancelled.trace.fnx.budget_exceeded_reason,
+                Some("work_exceeded")
+            );
+        }
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_budget_changes_invalidate_memo_and_cancelled_layouts_are_recomputed() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            6,
+            &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (3, 5)],
+        );
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = LayoutConfig {
+            fnx_budget: super::fnx_budget::AnalysisBudget::unlimited(),
+            ..LayoutConfig::default()
+        };
+        let mut run = |config: LayoutConfig| {
+            engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                config,
+                LayoutGuardrails::default(),
+            )
+        };
+        let first = run(config.clone());
+        assert!(first.trace.fnx.budget_exceeded_reason.is_none());
+        assert!(!first.trace.fnx.algorithms_invoked.is_empty());
+        assert!(run(config.clone()).trace.incremental.cache_hit);
+
+        for _ in 0..2 {
+            let cancelled = run(LayoutConfig {
+                fnx_budget: config.fnx_budget.with_work_budget(0),
+                ..config.clone()
+            });
+            assert!(!cancelled.trace.incremental.cache_hit);
+            assert_eq!(
+                cancelled.trace.fnx.budget_exceeded_reason,
+                Some("work_exceeded")
+            );
+            assert!(cancelled.layout.extensions.node_centrality.is_empty());
+        }
+
+        let recovered = run(config.clone());
+        assert!(!recovered.trace.incremental.cache_hit);
+        assert!(recovered.trace.fnx.budget_exceeded_reason.is_none());
+        assert_eq!(recovered.layout, first.layout);
+        assert!(run(config).trace.incremental.cache_hit);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn cycle_aware_scoring_uses_the_configured_budget_and_retries_cancellation() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 0), (2, 3)]);
+        super::FNX_CYCLE_ANALYSIS_CACHE.with(|cache| cache.borrow_mut().clear());
+        let mut config = LayoutConfig {
+            cycle_strategy: CycleStrategy::CycleAware,
+            fnx_budget: super::fnx_budget::AnalysisBudget::unlimited().with_work_budget(0),
+            ..LayoutConfig::default()
+        };
+        for _ in 0..2 {
+            let ((_, cycles), execution) = super::fnx_diagnostics::capture_fnx_execution(|| {
+                super::cycle_preparation(&ir, &config)
+            });
+            assert!(!cycles.reversed_edge_indexes.is_empty());
+            assert!(execution.algorithms_invoked.is_empty());
+            assert_eq!(execution.budget_exceeded_reason, Some("work_exceeded"));
+        }
+        config.fnx_budget = super::fnx_budget::AnalysisBudget::unlimited();
+        let ((_, cycles), execution) = super::fnx_diagnostics::capture_fnx_execution(|| {
+            super::cycle_preparation(&ir, &config)
+        });
+        assert!(!cycles.reversed_edge_indexes.is_empty());
+        assert!(!execution.algorithms_invoked.is_empty());
+        assert!(execution.budget_exceeded_reason.is_none());
     }
 
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
