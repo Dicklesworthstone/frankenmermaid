@@ -2305,6 +2305,12 @@ impl Canvas2dRenderer {
         let base_metrics = self.config.font_metrics();
         let mut header_font: Option<String> = None;
         for node_box in &layout.extensions.sequence_mirror_headers {
+            if self
+                .draw_sequence_participant(node_box, ir, ctx, offset_x, offset_y)
+                .is_some()
+            {
+                continue;
+            }
             let x = f64::from(node_box.bounds.x) + offset_x;
             let y = f64::from(node_box.bounds.y) + offset_y;
             let w = f64::from(node_box.bounds.width);
@@ -3579,6 +3585,104 @@ impl Canvas2dRenderer {
         count
     }
 
+    /// Paint a typed sequence header with the same symbol and caption region on both rows.
+    fn draw_sequence_participant<C: Canvas2dContext>(
+        &mut self,
+        node_box: &fm_layout::LayoutNodeBox,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> Option<usize> {
+        let kind = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index)?;
+        let geometry = fm_layout::shapes::sequence_participant_geometry(node_box.bounds, kind);
+        if geometry.paths.is_empty() {
+            return Some(0);
+        }
+        let (fill, stroke) =
+            resolve_node_colors_with_defaults(ir, node_box.node_index, &self.config);
+        let declared = merged_node_style(ir, node_box.node_index);
+        let opacity = resolve_node_opacity(ir, node_box.node_index).unwrap_or(1.0);
+        let fill_opacity =
+            parse_opacity(declared.get("fill-opacity").map(String::as_str)).unwrap_or(1.0);
+        let stroke_opacity =
+            parse_opacity(declared.get("stroke-opacity").map(String::as_str)).unwrap_or(1.0);
+        let stroke_width = resolve_node_stroke_width(ir, node_box.node_index)
+            .or_else(|| {
+                declared
+                    .get("stroke-width")
+                    .and_then(|value| {
+                        value
+                            .trim()
+                            .trim_end_matches("px")
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                    })
+                    .filter(|width| *width == 0.0)
+            })
+            .unwrap_or(self.config.node_stroke_width);
+        let fill_color = fill.as_deref().unwrap_or(&self.config.node_fill);
+        let stroke_color = stroke.as_deref().unwrap_or(&self.config.node_stroke);
+        let paint_fill = !fill_color.trim().eq_ignore_ascii_case("none");
+        let paint_stroke = stroke_width > 0.0 && !stroke_color.trim().eq_ignore_ascii_case("none");
+        let dash = resolve_node_stroke_dasharray(ir, node_box.node_index).unwrap_or_default();
+        ctx.save();
+        ctx.set_global_alpha(opacity);
+        if paint_fill {
+            ctx.set_fill_style(fill_color);
+        }
+        if paint_stroke {
+            ctx.set_stroke_style(stroke_color);
+            ctx.set_line_width(stroke_width);
+        }
+        ctx.set_line_dash(&dash);
+        for piece in &geometry.paths {
+            ctx.begin_path();
+            self.emit_path_commands(ctx, &piece.commands, offset_x, offset_y);
+            if piece.fill && paint_fill {
+                with_paint_opacity(ctx, opacity, fill_opacity, Canvas2dContext::fill);
+                self.draw_calls += 1;
+            }
+            if piece.stroke && paint_stroke {
+                with_paint_opacity(ctx, opacity, stroke_opacity, Canvas2dContext::stroke);
+                self.draw_calls += 1;
+            }
+        }
+        let base_metrics = self.config.font_metrics();
+        let metrics = ir.effective_node_font_metrics(node_box.node_index, &base_metrics);
+        let label = ir
+            .nodes
+            .get(node_box.node_index)
+            .map(|node| ir.node_layout_text(node, metrics.as_ref()))
+            .unwrap_or_default();
+        let label_color = resolve_node_text_color(ir, node_box.node_index)
+            .as_deref()
+            .and_then(sanitize_canvas_paint);
+        ctx.set_fill_style(label_color.as_deref().unwrap_or(&self.config.label_color));
+        let font = resolve_node_font(ir, node_box.node_index, &self.config)
+            .unwrap_or_else(|| standard_node_font(&self.config));
+        ctx.set_font(&font);
+        ctx.set_text_align(TextAlign::Center);
+        ctx.set_text_baseline(TextBaseline::Middle);
+        let center = geometry.label_bounds.center();
+        let line_height = f64::from(metrics.line_height_px());
+        let first_y = f64::from(center.y) + offset_y
+            - label.lines().count().saturating_sub(1) as f64 * line_height * 0.5;
+        let mut labels_drawn = 0;
+        for (row, text) in label.lines().enumerate() {
+            ctx.fill_text(
+                text,
+                f64::from(center.x) + offset_x,
+                first_y + row as f64 * line_height,
+            );
+            self.draw_calls += 1;
+            labels_drawn += 1;
+        }
+        ctx.restore();
+        Some(labels_drawn)
+    }
+
     /// Draw all nodes.
     fn draw_nodes<C: Canvas2dContext>(
         &mut self,
@@ -3623,6 +3727,13 @@ impl Canvas2dRenderer {
             // Referenced composite states share their cluster's box. The cluster was already
             // painted behind its children; drawing the duplicate node here would cover them.
             if fm_layout::is_composite_state_node(ir, node_box) {
+                continue;
+            }
+            if let Some(labels) =
+                self.draw_sequence_participant(node_box, ir, ctx, offset_x, offset_y)
+            {
+                *labels_drawn += labels;
+                count += 1;
                 continue;
             }
             let ir_node = ir.nodes.get(node_box.node_index);
@@ -5157,12 +5268,13 @@ pub(crate) fn resolve_node_colors_with_defaults(
         );
     }
     let Some(role) = fm_core::mindmap::node_role(ir, node_index) else {
-        let solid_marker = ir.nodes.get(node_index).is_some_and(|node| {
-            matches!(
-                node.shape,
-                NodeShape::FilledCircle | NodeShape::HorizontalBar
-            )
-        });
+        let solid_marker = fm_layout::shapes::sequence_participant_kind(ir, node_index).is_none()
+            && ir.nodes.get(node_index).is_some_and(|node| {
+                matches!(
+                    node.shape,
+                    NodeShape::FilledCircle | NodeShape::HorizontalBar
+                )
+            });
         return (
             fill.or_else(|| solid_marker.then(|| config.edge_stroke.clone())),
             stroke,
@@ -5950,6 +6062,152 @@ mod tests {
             | ArrowType::StickArrowBottomReverseDotted => (1.5, Some(vec![5.0, 5.0])),
             _ => (default_width, None),
         }
+    }
+
+    #[test]
+    fn sequence_participant_symbols_keep_styled_captions_below_both_headers() {
+        for kind in [
+            "actor",
+            "boundary",
+            "control",
+            "entity",
+            "database",
+            "collections",
+            "queue",
+        ] {
+            let declaration = if kind == "actor" {
+                String::from("actor T as Typed")
+            } else {
+                format!("participant T@{{ \"type\": \"{kind}\" }} as Typed")
+            };
+            let parsed = fm_parser::parse(&format!(
+                "sequenceDiagram\n{declaration}\nparticipant P as Plain\nT->>P: hello\n"
+            ));
+            assert!(parsed.warnings.is_empty(), "{kind}: {:?}", parsed.warnings);
+            let mut ir = parsed.ir;
+            ir.meta.init.config.sequence_mirror_actors = Some(true);
+            let index = ir.nodes.iter().position(|node| node.id == "T").unwrap();
+            let label = ir.nodes[index].label.unwrap();
+            ir.labels[label.0].text = String::from("Typed\nCaption");
+            ir.nodes[index].inline_style = Some(Box::new(fm_core::parse_style_string(
+                "fill:#204060;stroke:#c02040;color:#080808;opacity:0.5;font-size:20px;font-family:monospace",
+            )));
+            let config = CanvasRenderConfig::default();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let mut renderer = Canvas2dRenderer::new(config);
+            let mut ctx = MockCanvas2dContext::new(1200.0, 1000.0);
+            let mut labels = 0;
+            assert_eq!(
+                renderer.draw_nodes(&layout, &ir, &mut ctx, 0.0, 0.0, &mut labels),
+                2
+            );
+            renderer.draw_sequence_mirror_headers(&layout, &ir, &mut ctx, 0.0, 0.0);
+            let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+            assert!(
+                fills
+                    .iter()
+                    .any(|fill| fill.paint.fill == "#204060" && fill.paint.alpha == 0.5)
+            );
+            assert_eq!(
+                text.iter().filter(|row| row.text == "Typed").count(),
+                2,
+                "{kind}"
+            );
+            assert_eq!(
+                text.iter().filter(|row| row.text == "Caption").count(),
+                2,
+                "{kind}"
+            );
+            assert_eq!(
+                text.iter().filter(|row| row.text == "Plain").count(),
+                2,
+                "{kind}"
+            );
+            for header in layout
+                .nodes
+                .iter()
+                .chain(&layout.extensions.sequence_mirror_headers)
+                .filter(|node| node.node_index == index)
+            {
+                let kind = fm_layout::shapes::sequence_participant_kind(&ir, index).unwrap();
+                let geometry =
+                    fm_layout::shapes::sequence_participant_geometry(header.bounds, kind);
+                let rows: Vec<_> = text
+                    .iter()
+                    .filter(|row| {
+                        matches!(row.text.as_str(), "Typed" | "Caption")
+                            && row.y >= f64::from(header.bounds.y)
+                            && row.y <= f64::from(header.bounds.y + header.bounds.height)
+                    })
+                    .collect();
+                assert_eq!(rows.len(), 2, "{}: {text:?}", kind.as_str());
+                for row in rows {
+                    assert!(
+                        row.y > f64::from(geometry.symbol_bounds.y + geometry.symbol_bounds.height)
+                    );
+                    assert!((row.x - f64::from(geometry.label_bounds.center().x)).abs() < 0.01);
+                    assert_eq!(row.paint.fill, "#080808");
+                    assert_eq!(row.paint.alpha, 0.5);
+                    assert!(
+                        row.paint.font.contains("20px") && row.paint.font.contains("monospace")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_participant_absent_paints_preserve_captions_and_canvas_state() {
+        for style in [
+            "fill:none;stroke:none",
+            "fill:none;stroke:#123456;stroke-width:0",
+        ] {
+            let mut ir = fm_parser::parse("sequenceDiagram\nactor T as Typed\n").ir;
+            ir.nodes[0].inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+            let layout = layout_diagram(&ir);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+            ctx.set_fill_style("#abcdef");
+            let labels =
+                renderer.draw_sequence_participant(&layout.nodes[0], &ir, &mut ctx, 0.0, 0.0);
+            assert_eq!(labels, Some(1));
+            assert!(
+                ctx.operations().iter().all(|operation| {
+                    !matches!(operation, DrawOperation::Fill | DrawOperation::Stroke)
+                }),
+                "{style}"
+            );
+            assert!(ctx.operations().iter().all(|operation| {
+                !matches!(operation, DrawOperation::SetFillStyle(paint) | DrawOperation::SetStrokeStyle(paint)
+                    if paint == "none")
+            }));
+            ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+            assert_eq!(fills.len(), 1);
+            assert_eq!(fills[0].paint.fill, "#abcdef");
+            assert_eq!(text[0].text, "Typed");
+        }
+
+        let ir =
+            fm_parser::parse("sequenceDiagram\nparticipant Q@{ \"type\": \"queue\" } as Jobs\n").ir;
+        let layout = layout_diagram(&ir);
+        let config = CanvasRenderConfig::default();
+        let mut renderer = Canvas2dRenderer::new(config.clone());
+        let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+        assert_eq!(
+            renderer.draw_sequence_participant(&layout.nodes[0], &ir, &mut ctx, 0.0, 0.0),
+            Some(1)
+        );
+        let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+        assert!(!fills.is_empty());
+        assert!(fills.iter().all(|fill| fill.paint.fill == config.node_fill));
+        assert_eq!(text[0].text, "Jobs");
     }
 
     #[test]
@@ -9229,7 +9487,9 @@ mod tests {
         let paints: Vec<_> = ctx
             .operations()
             .iter()
-            .skip_while(|op| !matches!(op, DrawOperation::SetStrokeStyle(color) if color == "#abcdef"))
+            .skip_while(
+                |op| !matches!(op, DrawOperation::SetStrokeStyle(color) if color == "#abcdef"),
+            )
             .take_while(|op| !matches!(op, DrawOperation::FillText(text, _, _) if text == "Styled"))
             .filter_map(|op| match op {
                 DrawOperation::Fill => Some("bar"),
