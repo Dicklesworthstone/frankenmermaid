@@ -3733,24 +3733,26 @@ impl Canvas2dRenderer {
             if let Some(task) = gantt_task {
                 // Task bounds encode calendar time. A milestone is an instant centered on that
                 // date, so its glyph must not turn the layout's hit box into a duration bar.
-                let commands = if task.flags.milestone {
-                    let center = node_box.bounds.center();
-                    let radius = node_box.bounds.width.min(node_box.bounds.height) * 0.4;
-                    fm_layout::shapes::diamond_path(fm_layout::LayoutRect {
-                        x: center.x - radius,
-                        y: center.y - radius,
-                        width: radius * 2.0,
-                        height: radius * 2.0,
-                    })
-                } else {
-                    fm_layout::shapes::rounded_rect_path(node_box.bounds, 3.0)
-                };
+                let commands = gantt_task_path(node_box.bounds, task.flags.milestone);
                 ctx.set_fill_style(fill.as_deref().unwrap_or(&self.config.node_fill));
                 ctx.set_stroke_style(stroke.as_deref().unwrap_or(&self.config.node_stroke));
                 ctx.set_line_width(stroke_width);
                 ctx.begin_path();
                 self.emit_path_commands(ctx, &commands, offset_x, offset_y);
                 with_paint_opacity(ctx, overall_opacity, fill_opacity, Canvas2dContext::fill);
+                if !task.flags.milestone
+                    && let Some(progress) = task.progress.filter(|p| p.is_finite() && *p > 0.0)
+                {
+                    // Progress covers the bar interior. Stroke afterwards so its paint cannot
+                    // darken the inside half of an authored or critical-path border.
+                    ctx.save();
+                    ctx.clip();
+                    ctx.set_fill_style("#0f172a");
+                    ctx.set_global_alpha(overall_opacity * 0.22);
+                    ctx.fill_rect(x, y, w * f64::from(progress.min(1.0)), h);
+                    ctx.restore();
+                    self.draw_calls += 1;
+                }
                 with_paint_opacity(
                     ctx,
                     overall_opacity,
@@ -3805,23 +3807,6 @@ impl Canvas2dRenderer {
                 ctx.set_line_dash(&[]);
             }
             self.draw_calls += 1;
-
-            if let Some(task) = gantt_task
-                && !task.flags.milestone
-                && let Some(progress) = task
-                    .progress
-                    .filter(|value| value.is_finite() && *value > 0.0)
-            {
-                // The current path is the task bar. Clip the quantitative overlay to its rounded
-                // outline, multiply the node opacity, then restore every paint state for its label.
-                ctx.save();
-                ctx.clip();
-                ctx.set_fill_style("#0f172a");
-                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.22);
-                ctx.fill_rect(x, y, w * f64::from(progress.min(1.0)), h);
-                ctx.restore();
-                self.draw_calls += 1;
-            }
 
             if let Some(step) = layout
                 .extensions
@@ -5682,6 +5667,21 @@ pub(crate) fn canvas_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static st
         entries.push("⬚ Boundary");
     }
     entries
+}
+
+pub(crate) fn gantt_task_path(bounds: fm_layout::LayoutRect, milestone: bool) -> Vec<PathCmd> {
+    if milestone {
+        let center = bounds.center();
+        let radius = bounds.width.min(bounds.height) * 0.4;
+        fm_layout::shapes::diamond_path(fm_layout::LayoutRect {
+            x: center.x - radius,
+            y: center.y - radius,
+            width: radius * 2.0,
+            height: radius * 2.0,
+        })
+    } else {
+        fm_layout::shapes::rounded_rect_path(bounds, 3.0)
+    }
 }
 
 /// A supplied date is projected through the layout's own day axis on every Canvas backend.
@@ -9226,6 +9226,19 @@ mod tests {
         assert!((overlay.paint.alpha - 0.088).abs() < 0.0001);
         assert!(overlay.paint.clipped);
         assert!((overlay.bounds[2] / styled.bounds[2] - 0.5).abs() < 0.002);
+        let paints: Vec<_> = ctx
+            .operations()
+            .iter()
+            .skip_while(|op| !matches!(op, DrawOperation::SetStrokeStyle(color) if color == "#abcdef"))
+            .take_while(|op| !matches!(op, DrawOperation::FillText(text, _, _) if text == "Styled"))
+            .filter_map(|op| match op {
+                DrawOperation::Fill => Some("bar"),
+                DrawOperation::FillRect(..) => Some("progress"),
+                DrawOperation::Stroke => Some("border"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paints, ["bar", "progress", "border"]);
         let label = text.iter().find(|entry| entry.text == "Styled").unwrap();
         assert_eq!(label.paint.fill, "#ff00ff");
         assert_eq!(label.paint.alpha, 0.4);
