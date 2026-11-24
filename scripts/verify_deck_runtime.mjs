@@ -133,9 +133,11 @@ const chrome = element("deck-chrome", "DIV", stage);
 const controls = element("deck-controls", "DIV", chrome);
 const dots = element("deck-dots", "DIV", chrome);
 for (const id of ["deck-num", "deck-title", "deck-caption"]) element(id, "DIV", chrome);
-for (const id of ["deck-prev", "deck-next", "deck-overview-btn"]) element(id, "BUTTON", controls);
+for (const id of ["deck-prev", "deck-next", "deck-overview-btn", "deck-print"]) element(id, "BUTTON", controls);
+const printPages = element("deck-print-pages");
+printPages.replaceChildren = () => { printPages.childElementCount = 0; };
 element("deck-manifest").textContent = JSON.stringify({ slides: [{ id: "a" }, { id: "b" }] });
-const calls = { next: 0, prev: 0, go: 0, gestures: 0 };
+const calls = { next: 0, prev: 0, go: 0, gestures: 0, print: 0 };
 const api = {
   next() { calls.next++; }, prev() { calls.prev++; }, go() { calls.go++; },
   overview() {}, exitFreeCam() {},
@@ -147,6 +149,9 @@ for (const type of ["pointerdown", "wheel", "dblclick"]) {
   stage.addEventListener(type, () => { calls.gestures++; });
 }
 const window = {
+  listeners: {},
+  addEventListener: stage.addEventListener,
+  print() { calls.print++; },
   FmDeckRuntime: { mount(options) {
     options.ui.nextBtn.addEventListener("click", api.next);
     options.ui.prevBtn.addEventListener("click", api.prev);
@@ -159,6 +164,12 @@ if (!bootstrap) throw new Error("Standalone deck bootstrap missing");
 runInNewContext(bootstrap.replace("{{SVG_JS_STRING}}", '"<svg/>"'), {
   window, document: { getElementById: (id) => elements.get(id) }, location: { hash: "" }, history: {},
 });
+elements.get("deck-print").click();
+check("Print deck requests native printing", calls.print === 1);
+check("native print preview prepares the deck", window.listeners.beforeprint?.length === 1);
+printPages.childElementCount = 2;
+for (const listener of window.listeners.afterprint ?? []) listener();
+check("leaving print preview discards its copies", printPages.childElementCount === 0);
 for (const type of ["pointerdown", "wheel", "dblclick"]) dispatch(elements.get("deck-next"), type);
 check("standalone controls do not start camera gestures", calls.gestures === 0);
 const previousSpace = dispatch(elements.get("deck-prev"), "keydown", " ");

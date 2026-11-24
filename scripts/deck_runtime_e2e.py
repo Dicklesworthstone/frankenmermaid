@@ -8,7 +8,7 @@ animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, f
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
 layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
 drag spring-back, self-loop edges gluing to their node, and variant followers. Also drives the
-standalone talk.html golden in fullscreen, with pointer/keyboard navigation and phone layouts.
+standalone talk.html golden in fullscreen, through Chromium PDF printing, and on a phone layout.
 Exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
@@ -24,6 +24,8 @@ except ImportError:
     sys.exit(0)
 
 import threading, functools, sys
+import shutil
+import subprocess
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -234,6 +236,54 @@ with sync_playwright() as p:
     check("talk fullscreen: exit preserves working controls and reveal state",
           page.inner_text("#deck-num") == "02 / 04 · 0/2", page.inner_text("#deck-num"))
     check("talk fullscreen: no page errors", not errors, errors)
+
+    # Print while the second slide still has both reveals hidden. Capture the real print
+    # DOM before afterprint discards it, then check the resulting PDF when Poppler is present.
+    page.evaluate("""() => {
+      window.addEventListener("beforeprint", () => {
+        const slides = Array.from(document.querySelectorAll("#deck-print-pages section"));
+        window.printSnapshot = slides.map(slide => {
+          const svg = slide.querySelector(".deck-print-graph").shadowRoot.querySelector("svg");
+          const viewBox = svg.viewBox.baseVal;
+          const opacity = id => Number(getComputedStyle(svg.querySelector("#" + id)).opacity);
+          return {
+            title: slide.querySelector("h2").textContent,
+            caption: slide.querySelector("p")?.textContent || "",
+            viewBox: [viewBox.x, viewBox.y, viewBox.width, viewBox.height],
+            revealed: opacity("fm-node-core3-4"),
+            edge: opacity("fm-edge-3"),
+          };
+        });
+      }, {once: true});
+    }""")
+    pdf = page.pdf(prefer_css_page_size=True, print_background=True)
+    snapshot = page.evaluate("window.printSnapshot")
+    manifest = page.eval_on_selector("#deck-manifest", "el => JSON.parse(el.textContent)")
+    expected_titles = [slide["title"] for slide in manifest["slides"]]
+    check("talk print: one page per authored slide, in order",
+          [slide["title"] for slide in snapshot] == expected_titles, snapshot)
+    check("talk print: captions retained and final reveal state shown",
+          snapshot[0]["caption"] == "where it starts" and
+          snapshot[1]["revealed"] == snapshot[1]["edge"] == 1 and
+          snapshot[0]["revealed"] == snapshot[2]["edge"] == manifest["options"]["dimOpacity"])
+    for actual, slide in zip(snapshot, manifest["slides"]):
+        bounds, margin = slide["bounds"], slide["fitMargin"]
+        expected = [bounds["x"] - margin, bounds["y"] - margin,
+                    bounds["width"] + 2 * margin, bounds["height"] + 2 * margin]
+        check("talk print: camera frame for " + slide["title"],
+              all(abs(a - b) < 0.001 for a, b in zip(actual["viewBox"], expected)))
+    check("talk print: Chromium emitted a PDF", pdf.startswith(b"%PDF-"))
+    if shutil.which("pdftotext"):
+        pdf_text = subprocess.run(["pdftotext", "-", "-"], input=pdf, capture_output=True,
+                                  check=True).stdout.decode("utf-8")
+        pages = pdf_text.rstrip("\f").split("\f")
+        check("talk print: PDF page count and titles match the authored slides",
+              len(pages) == len(expected_titles) and
+              all(title in content.splitlines() for title, content in zip(expected_titles, pages)),
+              pages)
+    check("talk print: copy cleanup preserves the live slide and reveal position",
+          page.locator("#deck-print-pages section").count() == 0 and
+          page.inner_text("#deck-num") == "02 / 04 · 0/2")
     page.close()
 
     page = browser.new_page(viewport={"width": 390, "height": 844},
