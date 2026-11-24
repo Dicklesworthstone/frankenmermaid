@@ -6805,6 +6805,15 @@ fn render_gantt_cell(
 
     let (cell_width, cell_height) = (buffer.width, buffer.height);
     let ascii = config.glyph_mode == fm_core::MermaidGlyphMode::Ascii;
+    let write_label = |buffer: &mut CellBuffer, x, y, text: &str, width| {
+        let fitted = fit_cell_text(text, width);
+        let fitted = if ascii {
+            fitted.replace('…', "~")
+        } else {
+            fitted
+        };
+        buffer.set_label(x, y, &fitted, width);
+    };
     let label_width = if config.show_labels {
         gantt_meta
             .sections
@@ -6858,7 +6867,7 @@ fn render_gantt_cell(
     if config.show_labels {
         if let Some(title) = &gantt_meta.title {
             let x = cell_width.saturating_sub(title.width()) / 2;
-            buffer.set_label(x, 0, title, cell_width - x);
+            write_label(buffer, x, 0, title, cell_width - x);
         }
         // Row one is reserved for the calendar. Thin dense ticks without shifting the
         // remaining dates away from the task geometry they describe.
@@ -6867,7 +6876,7 @@ fn render_gantt_cell(
             let x = project(tick.position).floor() as usize;
             let width = tick.label.width();
             if width > 0 && x >= next_free && width <= cell_width.saturating_sub(x) {
-                buffer.set_label(x, 1, &tick.label, width);
+                write_label(buffer, x, 1, &tick.label, width);
                 next_free = x + width + 1;
             }
         }
@@ -6880,7 +6889,7 @@ fn render_gantt_cell(
         }
         // Section and task names share a display-cell gutter.
         if config.show_labels {
-            buffer.set_label(0, row, &section.name, label_width);
+            write_label(buffer, 0, row, &section.name, label_width);
         }
         // Separator line
         for col in label_width + 1..cell_width {
@@ -6907,7 +6916,7 @@ fn render_gantt_cell(
                 })
                 .unwrap_or("task");
             if config.show_labels {
-                buffer.set_label(0, row, task_name, label_width);
+                write_label(buffer, 0, row, task_name, label_width);
             }
 
             let node_box = match &layout_nodes_by_index {
@@ -12862,6 +12871,54 @@ mod tests {
             );
             if glyph_mode == fm_core::MermaidGlyphMode::Ascii {
                 assert!(result.output.is_ascii(), "{}", result.output);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_gantt_bounds_truncated_names_and_keeps_ascii_geometry() {
+        let mut ir = fm_parser::parse(
+            "gantt\n\
+             dateFormat YYYY-MM-DD\n\
+             title A calendar whose title exceeds the viewport\n\
+             section A long section name\n\
+             A very long task name :task, 2026-01-01, 8d\n",
+        )
+        .ir;
+        for glyph_mode in [
+            fm_core::MermaidGlyphMode::Ascii,
+            fm_core::MermaidGlyphMode::Unicode,
+        ] {
+            if glyph_mode == fm_core::MermaidGlyphMode::Unicode {
+                let label_id = ir.nodes[ir.gantt_meta.as_ref().unwrap().tasks[0].node.0]
+                    .label
+                    .unwrap();
+                ir.labels[label_id.0].text = "编译接口和验证任务".to_owned();
+                ir.gantt_meta.as_mut().unwrap().sections[0].name = "交付路线".to_owned();
+            }
+            let layout = layout_diagram(&ir);
+            for cols in [18, 24, 40] {
+                let config = TermRenderConfig {
+                    glyph_mode,
+                    tier: MermaidTier::Compact,
+                    render_mode: MermaidRenderMode::CellOnly,
+                    ..Default::default()
+                };
+                let result = render_diagram_with_layout_and_config(&ir, &layout, &config, cols, 20);
+                assert!(
+                    result
+                        .output
+                        .lines()
+                        .all(|line| line.width() <= result.width),
+                    "{cols} columns: {}",
+                    result.output
+                );
+                if glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                    assert!(result.output.is_ascii(), "{}", result.output);
+                    assert!(result.output.contains('~'), "{}", result.output);
+                } else {
+                    assert!(result.output.contains("编译"), "{}", result.output);
+                }
             }
         }
     }
