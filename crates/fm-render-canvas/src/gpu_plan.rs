@@ -2091,7 +2091,8 @@ pub struct GpuRenderPlan {
     pub state_note_leader_segments: Vec<GpuEdgeSegment>,
     /// State-note boxes, after their leaders and before sequence furniture (bd-adabx).
     pub state_note_instances: Vec<GpuNodeInstance>,
-    /// Sequence foot-row participant headers, as rect instances (bd-adabx).
+    /// Plain sequence foot-row participant headers, as rect instances (bd-adabx).
+    /// Typed symbols use `node_fill_triangles` and `node_border_segments`.
     ///
     /// Before the activation bars because `render` draws them first (call order: draw_clusters,
     /// draw_sequence_mirror_headers, draw_activation_bars, draw_edges, draw_nodes). Their labels
@@ -2557,6 +2558,10 @@ impl GpuRenderPlan {
             if node_box.bounds.width <= 0.0 || node_box.bounds.height <= 0.0 {
                 continue;
             }
+            if fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index).is_some() {
+                // Typed mirror symbols are painted through the shared node paths below.
+                continue;
+            }
             mirror_header_instances.push(GpuNodeInstance {
                 center: [
                     node_box.bounds.x + (node_box.bounds.width * 0.5),
@@ -2903,7 +2908,20 @@ impl GpuRenderPlan {
         // Plain SDF nodes need no separate outline allocation. Exact polygon outlines,
         // composite details, and authored dashes populate this foreground buffer.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
-        for node in graph_nodes {
+        for node in
+            graph_nodes
+                .iter()
+                .chain(
+                    layout
+                        .extensions
+                        .sequence_mirror_headers
+                        .iter()
+                        .filter(|node| {
+                            fm_layout::shapes::sequence_participant_kind(ir, node.node_index)
+                                .is_some()
+                        }),
+                )
+        {
             if fm_layout::is_composite_state_node(ir, node) {
                 continue;
             }
@@ -3047,8 +3065,14 @@ impl GpuRenderPlan {
                 }
                 continue;
             }
-            if node_uses_shared_path(authored_shape) {
-                for piece in fm_layout::node_paint_paths(node.bounds, authored_shape) {
+            let participant = fm_layout::shapes::sequence_participant_kind(ir, node.node_index)
+                .map(|kind| fm_layout::shapes::sequence_participant_geometry(node.bounds, kind));
+            if participant.is_some() || node_uses_shared_path(authored_shape) {
+                let paths = participant.map_or_else(
+                    || fm_layout::node_paint_paths(node.bounds, authored_shape),
+                    |geometry| geometry.paths,
+                );
+                for piece in paths {
                     append_node_path(
                         &mut node_fill_triangles,
                         &mut node_border_segments,
@@ -3733,7 +3757,7 @@ impl GpuRenderPlan {
                 if label.is_empty() {
                     continue;
                 }
-                let center = icon_layout.map_or_else(
+                let mut center = icon_layout.map_or_else(
                     || {
                         ir_node
                             .shape
@@ -3748,6 +3772,13 @@ impl GpuRenderPlan {
                     },
                     |icon| icon.label_bounds.center(),
                 );
+                if let Some(kind) =
+                    fm_layout::shapes::sequence_participant_kind(ir, node.node_index)
+                {
+                    center = fm_layout::shapes::sequence_participant_geometry(node.bounds, kind)
+                        .label_bounds
+                        .center();
+                }
                 labelled.push((
                     node.node_index.try_into().unwrap_or(u32::MAX),
                     [center.x, center.y],
@@ -4008,10 +4039,31 @@ impl GpuRenderPlan {
                 ));
             }
         }
-        for node_box in &layout.extensions.sequence_mirror_headers {
+        let mirror_labels: Vec<_> = layout
+            .extensions
+            .sequence_mirror_headers
+            .iter()
+            .map(|node_box| {
+                let node_metrics = ir.effective_node_font_metrics(node_box.node_index, &metrics);
+                if fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index).is_some() {
+                    ir.nodes
+                        .get(node_box.node_index)
+                        .map(|node| ir.node_layout_text(node, node_metrics.as_ref()))
+                        .unwrap_or_else(|| Cow::Borrowed(mirror_header_label(ir, node_box)))
+                } else {
+                    Cow::Borrowed(mirror_header_label(ir, node_box))
+                }
+            })
+            .collect();
+        for (node_box, label) in layout
+            .extensions
+            .sequence_mirror_headers
+            .iter()
+            .zip(&mirror_labels)
+        {
             styled_texts.push((
                 GlyphFace::for_node(&node_fonts, node_box.node_index, &default_face, None, None),
-                mirror_header_label(ir, node_box),
+                label.as_ref(),
             ));
         }
         if let Some(chart) = &treemap_chart {
@@ -4517,10 +4569,13 @@ impl GpuRenderPlan {
             }
         }
 
-        // FOOT-ROW LABELS (bd-adabx). Centred in the box, exactly as draw_sequence_mirror_headers
-        // centres them, and skipped when the box is degenerate or the name is empty -- the raster
-        // pass draws neither.
-        for node_box in &layout.extensions.sequence_mirror_headers {
+        // Mirror captions share the symbol's reserved label region and authored typography.
+        for (node_box, label) in layout
+            .extensions
+            .sequence_mirror_headers
+            .iter()
+            .zip(&mirror_labels)
+        {
             if node_box.bounds.width <= 0.0 || node_box.bounds.height <= 0.0 {
                 continue;
             }
@@ -4528,13 +4583,30 @@ impl GpuRenderPlan {
                 GlyphFace::for_node(&node_fonts, node_box.node_index, &default_face, None, None);
             let node_metrics = ir.effective_node_font_metrics(node_box.node_index, &metrics);
             let mut sink = sink.with_face(&face, node_metrics.as_ref());
+            let kind = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index);
+            let center = kind.map_or_else(
+                || node_box.bounds.center(),
+                |kind| {
+                    fm_layout::shapes::sequence_participant_geometry(node_box.bounds, kind)
+                        .label_bounds
+                        .center()
+                },
+            );
+            let color = if kind.is_some() {
+                let mut color = crate::renderer::resolve_node_text_color(ir, node_box.node_index)
+                    .as_deref()
+                    .and_then(parse_paint_rgba)
+                    .unwrap_or(sequence_label_color);
+                color[3] *= crate::renderer::resolve_node_opacity(ir, node_box.node_index)
+                    .unwrap_or(1.0) as f32;
+                color
+            } else {
+                sequence_label_color
+            };
             sink.push_centred(
-                mirror_header_label(ir, node_box),
-                (
-                    node_box.bounds.x + (node_box.bounds.width * 0.5),
-                    node_box.bounds.y + (node_box.bounds.height * 0.5),
-                ),
-                sequence_label_color,
+                label.as_ref(),
+                (center.x, center.y),
+                color,
                 GpuTextSource::MirrorHeader,
                 node_box.node_index,
             );
@@ -8738,6 +8810,103 @@ mod tests {
     }
 
     /// A declared fill reaches the GPU instance, through the SAME resolver the raster pass uses.
+    #[test]
+    fn typed_sequence_headers_use_paths_and_keep_captions_below_top_and_mirror_symbols() {
+        for kind in [
+            "actor",
+            "boundary",
+            "control",
+            "entity",
+            "database",
+            "collections",
+            "queue",
+        ] {
+            let declaration = if kind == "actor" {
+                String::from("actor T as Typed")
+            } else {
+                format!("participant T@{{ \"type\": \"{kind}\" }} as Typed")
+            };
+            let parsed = fm_parser::parse(&format!(
+                "sequenceDiagram\n{declaration}\nparticipant P as Plain\nT->>P: hello\n"
+            ));
+            assert!(parsed.warnings.is_empty(), "{kind}: {:?}", parsed.warnings);
+            let mut ir = parsed.ir;
+            ir.meta.init.config.sequence_mirror_actors = Some(true);
+            let index = ir.nodes.iter().position(|node| node.id == "T").unwrap();
+            ir.nodes[index].inline_style = Some(Box::new(fm_core::parse_style_string(
+                "fill:#204060;stroke:#c02040;color:#080808;opacity:0.5",
+            )));
+            let config = crate::CanvasRenderConfig::default();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(
+                plan.node_instances.len(),
+                1,
+                "{kind}: only Plain uses an SDF box"
+            );
+            assert_eq!(
+                plan.mirror_header_instances.len(),
+                1,
+                "{kind}: only Plain has a mirrored box"
+            );
+            assert!(
+                plan.node_instances
+                    .iter()
+                    .all(|node| node.node_index as usize != index)
+            );
+            assert!(
+                !plan.node_fill_triangles.is_empty(),
+                "{kind}: symbol fill missing"
+            );
+            assert!(
+                !plan.node_border_segments.is_empty(),
+                "{kind}: symbol outline missing"
+            );
+            assert!(plan.node_fill_triangles.iter().all(|triangle| {
+                (triangle.color[0] - 32.0 / 255.0).abs() < 1e-6 && triangle.color[3] == 0.5
+            }));
+            assert!(plan.node_border_segments.iter().all(|segment| {
+                (segment.color[0] - 192.0 / 255.0).abs() < 1e-6 && segment.color[3] == 0.5
+            }));
+            for (source, headers) in [
+                (GpuTextSource::Node, layout.nodes.as_slice()),
+                (
+                    GpuTextSource::MirrorHeader,
+                    layout.extensions.sequence_mirror_headers.as_slice(),
+                ),
+            ] {
+                let header = headers
+                    .iter()
+                    .find(|node| node.node_index == index)
+                    .unwrap();
+                let kind = fm_layout::shapes::sequence_participant_kind(&ir, index).unwrap();
+                let geometry =
+                    fm_layout::shapes::sequence_participant_geometry(header.bounds, kind);
+                let run = plan
+                    .text_runs
+                    .iter()
+                    .find(|run| run.source == source && run.node_index as usize == index)
+                    .expect("each header keeps its caption");
+                assert_eq!(run.quad_count, 5, "Typed has five glyphs");
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                for quad in quads {
+                    assert!(
+                        quad.center[1] > geometry.symbol_bounds.y + geometry.symbol_bounds.height
+                    );
+                    assert!((quad.center[1] - geometry.label_bounds.center().y).abs() < 0.01);
+                    assert!((quad.color[0] - 8.0 / 255.0).abs() < 1e-6 && quad.color[3] == 0.5);
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_declared_fill_reaches_the_node_instance() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
