@@ -10295,6 +10295,17 @@ impl MermaidDiagramIr {
         if self.diagram_type == DiagramType::GitGraph {
             return false;
         }
+        // The sequence parser uses HorizontalBar as a routing fallback for a declared queue.
+        // Its shared participant symbol has a caption; it is not a state fork/join ornament.
+        if self.diagram_type == DiagramType::Sequence
+            && node.shape == NodeShape::HorizontalBar
+            && node
+                .classes
+                .iter()
+                .any(|class| class == "sequence-participant-queue")
+        {
+            return false;
+        }
         // Every unlabelled node of a Wardley map is a mark — a dot, ring, bar or edge endpoint —
         // whose generated id is plumbing; its text is a separate label node.
         if self.diagram_type == DiagramType::Wardley {
@@ -12193,6 +12204,35 @@ mod tests {
         ir.diagram_type = DiagramType::Journey;
         assert_eq!(ir.kanban_card(0), None);
         assert_eq!(kanban_priority_fill(&ir, 0), None);
+    }
+
+    #[test]
+    fn sequence_queue_captions_are_visible_without_relabeling_state_bars() {
+        use super::*;
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        ir.labels.push(IrLabel {
+            text: "Work\nQueue".to_owned(),
+            ..Default::default()
+        });
+        let mut node = IrNode {
+            id: "jobs".to_owned(),
+            shape: NodeShape::HorizontalBar,
+            label: Some(IrLabelId(0)),
+            classes: vec!["sequence-participant-queue".to_owned()],
+            ..Default::default()
+        };
+        let metrics = FontMetrics::default_metrics();
+        assert!(!ir.is_textless_ornament_node(&node));
+        assert_eq!(ir.node_display_text(&node), "Work\nQueue");
+        assert_eq!(ir.node_layout_text(&node, &metrics), "Work\nQueue");
+        ir.diagram_type = DiagramType::State;
+        assert!(ir.is_textless_ornament_node(&node));
+        assert_eq!(ir.node_display_text(&node), "");
+        ir.diagram_type = DiagramType::Flowchart;
+        assert_eq!(ir.node_display_text(&node), "");
+        ir.diagram_type = DiagramType::Sequence;
+        node.classes.clear();
+        assert_eq!(ir.node_display_text(&node), "");
     }
 
     #[test]
