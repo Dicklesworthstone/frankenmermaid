@@ -826,6 +826,41 @@ fn append_node_path(
     }
 }
 
+/// Clip one triangle of a rounded task bar against the progress cutoff. The intersection
+/// has at most four vertices and retains the disjoint coverage of the original fill.
+fn push_clipped_progress(
+    triangle: GpuTriangleInstance,
+    cutoff: f32,
+    color: [f32; 4],
+    out: &mut Vec<GpuTriangleInstance>,
+) {
+    let mut polygon = [[0.0; 2]; 4];
+    let mut len = 0;
+    let mut previous = triangle.c;
+    for current in [triangle.a, triangle.b, triangle.c] {
+        if (previous[0] < cutoff && current[0] > cutoff)
+            || (current[0] < cutoff && previous[0] > cutoff)
+        {
+            let t = (cutoff - previous[0]) / (current[0] - previous[0]);
+            polygon[len] = [cutoff, (current[1] - previous[1]).mul_add(t, previous[1])];
+            len += 1;
+        }
+        if current[0] <= cutoff {
+            polygon[len] = current;
+            len += 1;
+        }
+        previous = current;
+    }
+    for i in 2..len {
+        out.push(GpuTriangleInstance {
+            a: polygon[0],
+            b: polygon[i - 1],
+            c: polygon[i],
+            color,
+        });
+    }
+}
+
 fn circular_node_bounds(bounds: LayoutRect, shape: NodeShape) -> LayoutRect {
     let radius = match shape {
         NodeShape::Circle
@@ -2850,6 +2885,19 @@ impl GpuRenderPlan {
             });
         }
 
+        let gantt_tasks: std::collections::BTreeMap<_, _> = ir
+            .gantt_meta
+            .iter()
+            .filter(|_| gantt_bands)
+            .flat_map(|meta| &meta.tasks)
+            .map(|task| (task.node.0, task))
+            .collect();
+        let gantt_labels: std::collections::BTreeMap<_, _> = layout
+            .extensions
+            .gantt_task_labels
+            .iter()
+            .map(|label| (label.node_index, label))
+            .collect();
         let mut node_instances = Vec::with_capacity(graph_nodes.len());
         let mut node_fill_triangles = Vec::new();
         // Plain SDF nodes need no separate outline allocation. Exact polygon outlines,
@@ -2877,6 +2925,7 @@ impl GpuRenderPlan {
                 crate::renderer::parse_opacity(authored.get(key).map(String::as_str)).unwrap_or(1.0)
                     as f32
             };
+            let task = gantt_tasks.get(&node.node_index).copied();
             let (declared_fill, declared_stroke) =
                 crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config);
             // Keep intrinsic paint alpha separate from overall and per-channel opacity until
@@ -2885,11 +2934,18 @@ impl GpuRenderPlan {
                 .get("fill")
                 .and_then(|paint| parse_paint_rgba(paint))
                 .or_else(|| declared_fill.as_deref().and_then(parse_paint_rgba))
+                .or_else(|| {
+                    task.and_then(|task| parse_paint_rgba(fm_layout::gantt_task_fill(task.flags)))
+                })
                 .or_else(|| parse_paint_rgba(&config.node_fill))
                 .unwrap_or(DEFAULT_NODE_FILL_RGBA);
             let stroke = declared_stroke
                 .as_deref()
                 .and_then(parse_paint_rgba)
+                .or_else(|| {
+                    task.filter(|task| task.flags.crit)
+                        .and_then(|_| parse_paint_rgba("#dc2626"))
+                })
                 .or_else(|| parse_paint_rgba(&config.node_stroke))
                 .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
             // A declared `opacity` multiplies BOTH alphas, which is what the property means: CSS
@@ -2935,7 +2991,11 @@ impl GpuRenderPlan {
                         .filter(|width| *width == 0.0)
                 })
                 .or_else(|| {
-                    let width = config.node_stroke_width as f32;
+                    let width = if task.is_some_and(|task| task.flags.crit) {
+                        2.0
+                    } else {
+                        config.node_stroke_width as f32
+                    };
                     (width.is_finite() && width >= 0.0).then_some(width)
                 })
                 .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
@@ -2954,6 +3014,39 @@ impl GpuRenderPlan {
             // "some dash is present".
             let dash = crate::renderer::resolve_node_stroke_dasharray(ir, node.node_index)
                 .and_then(|pattern| dash_pair(&pattern));
+            if let Some(task) = task {
+                let commands = crate::renderer::gantt_task_path(node.bounds, task.flags.milestone);
+                let start = node_fill_triangles.len();
+                let progress = task.progress.filter(|p| {
+                    !task.flags.milestone && p.is_finite() && *p > 0.0 && opacity > 0.0
+                });
+                // Progress also paints on transparent task bars. Keep an opaque silhouette
+                // until clipping is complete, then restore the authored base fill.
+                let mut silhouette = fill;
+                if progress.is_some() {
+                    silhouette[3] = 1.0;
+                }
+                append_node_path(
+                    &mut node_fill_triangles,
+                    &mut node_border_segments,
+                    &commands,
+                    Some(silhouette),
+                    Some(stroke),
+                    stroke_width,
+                    dash.unwrap_or([0.0; 2]),
+                    node.node_index,
+                );
+                if let Some(fraction) = progress {
+                    let cutoff = node.bounds.x + node.bounds.width * fraction.min(1.0);
+                    let overlay = [15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, opacity * 0.22];
+                    for index in start..node_fill_triangles.len() {
+                        let triangle = node_fill_triangles[index];
+                        node_fill_triangles[index].color = fill;
+                        push_clipped_progress(triangle, cutoff, overlay, &mut node_fill_triangles);
+                    }
+                }
+                continue;
+            }
             if node_uses_shared_path(authored_shape) {
                 for piece in fm_layout::node_paint_paths(node.bounds, authored_shape) {
                     append_node_path(
@@ -4062,28 +4155,65 @@ impl GpuRenderPlan {
         }
 
         for ((node_index, center, text), node_metrics) in labelled.iter().zip(&run_metrics) {
-            let mut label_rgba = crate::renderer::resolve_node_text_color(
-                ir,
-                usize::try_from(*node_index).unwrap_or(usize::MAX),
-            )
-            .as_deref()
-            .and_then(parse_paint_rgba)
-            .or_else(|| parse_paint_rgba(&config.label_color))
-            .unwrap_or(DEFAULT_LABEL_RGBA);
+            let index = *node_index as usize;
+            let placement = gantt_labels.get(&index).copied();
+            let mut label_rgba = crate::renderer::resolve_node_text_color(ir, index)
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .or_else(|| {
+                    let task = gantt_tasks.get(&index)?;
+                    if placement
+                        .is_some_and(|p| p.placement != fm_layout::GanttLabelPlacement::Inside)
+                    {
+                        return None;
+                    }
+                    let (fill, _) =
+                        crate::renderer::resolve_node_colors_with_defaults(ir, index, config);
+                    parse_paint_rgba(fm_core::readable_label_color(
+                        fill.as_deref()
+                            .unwrap_or_else(|| fm_layout::gantt_task_fill(task.flags)),
+                        &config.label_color,
+                        &config.node_fill,
+                    ))
+                })
+                .or_else(|| parse_paint_rgba(&config.label_color))
+                .unwrap_or(DEFAULT_LABEL_RGBA);
             label_rgba[3] *= crate::renderer::resolve_node_opacity(ir, *node_index as usize)
                 .unwrap_or(1.0) as f32;
             let node_metrics = node_metrics.as_ref();
             let face =
                 GlyphFace::for_node(&node_fonts, *node_index as usize, &default_face, None, None);
             let mut node_sink = sink.with_face(&face, node_metrics);
-            node_sink.push_centred_with_font(
-                text,
-                (center[0], center[1]),
-                node_metrics.font_size(),
-                label_rgba,
-                GpuTextSource::Node,
-                *node_index as usize,
-            );
+            if let Some(entry) = placement {
+                let align = match entry.placement {
+                    fm_layout::GanttLabelPlacement::Inside => crate::TextAlign::Center,
+                    fm_layout::GanttLabelPlacement::OutsideLeft => crate::TextAlign::Right,
+                    fm_layout::GanttLabelPlacement::OutsideRight => crate::TextAlign::Left,
+                };
+                let line_height = node_metrics.font_size() * node_metrics.config().line_height;
+                let first_y =
+                    center[1] - text.lines().count().saturating_sub(1) as f32 * line_height * 0.5;
+                for (row, line) in text.lines().enumerate() {
+                    node_sink.push_line(
+                        line,
+                        (entry.x, first_y + row as f32 * line_height),
+                        node_metrics.font_size(),
+                        label_rgba,
+                        GpuTextSource::Node,
+                        index,
+                        align,
+                    );
+                }
+            } else {
+                node_sink.push_centred_with_font(
+                    text,
+                    (center[0], center[1]),
+                    node_metrics.font_size(),
+                    label_rgba,
+                    GpuTextSource::Node,
+                    index,
+                );
+            }
         }
 
         for (node_index, bounds, card, color) in class_cards {
@@ -10315,6 +10445,129 @@ mod tests {
                 < 0.01,
             "state-note lines must keep the SVG/canvas 16.8px spacing"
         );
+    }
+
+    #[test]
+    fn gantt_gpu_plan_draws_status_milestones_progress_and_outside_labels() {
+        let mut ir = fm_parser::parse(
+            "gantt\n dateFormat YYYY-MM-DD\n section Delivery\n\
+             Design :crit, done, design, 2026-02-06, 5d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n\
+             Release :milestone, release, after build, 0d, 80%\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let tasks = &ir.gantt_meta.as_ref().unwrap().tasks;
+        let [design, build, milestone, verify] = tasks.as_slice() else {
+            panic!("expected four parsed tasks");
+        };
+        let [design, build, milestone, verify] =
+            [design, build, milestone, verify].map(|t| t.node.0);
+        // Authored channel and element opacity affect distinct layers. The bar can be
+        // transparent while its progress remains visible, as with a Canvas clip mask.
+        ir.nodes[build].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:#123456;fill-opacity:0;stroke:#abcdef;stroke-width:4px;opacity:0.5",
+        )));
+        let mut layout = fm_layout::layout_diagram(&ir);
+        layout.nodes.reverse();
+        let config = crate::CanvasRenderConfig::default();
+        let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let bounds = |index| {
+            layout
+                .nodes
+                .iter()
+                .find(|n| n.node_index == index)
+                .unwrap()
+                .bounds
+        };
+        for (index, paint) in [
+            (design, "#86efac"),
+            (milestone, "#c4b5fd"),
+            (verify, "#93c5fd"),
+        ] {
+            let color = super::parse_paint_rgba(paint).unwrap();
+            assert!(plan.node_fill_triangles.iter().any(|t| t.color == color));
+            assert!(
+                plan.node_border_segments
+                    .iter()
+                    .any(|s| s.edge_index == index as u32)
+            );
+        }
+        let critical = super::parse_paint_rgba("#dc2626").unwrap();
+        assert!(
+            plan.node_border_segments.iter().any(|s| {
+                s.edge_index == design as u32 && s.width == 2.0 && s.color == critical
+            })
+        );
+        let marker = bounds(milestone);
+        let r = marker.width.min(marker.height) * 0.4;
+        let c = marker.center();
+        let sides: Vec<_> = plan
+            .node_border_segments
+            .iter()
+            .filter(|s| s.edge_index == milestone as u32)
+            .collect();
+        assert_eq!(sides.len(), 4);
+        for expected in [
+            [c.x - r, c.y],
+            [c.x + r, c.y],
+            [c.x, c.y - r],
+            [c.x, c.y + r],
+        ] {
+            assert!(sides.iter().any(|s| (s.from[0] - expected[0]).abs() < 0.001
+                && (s.from[1] - expected[1]).abs() < 0.001));
+        }
+        let progress_rgb = super::parse_paint_rgba("#0f172a").unwrap();
+        for (index, fraction, alpha) in [
+            (design, 0.5, 0.22),
+            (build, 0.25, 0.11),
+            (milestone, 0.0, 0.0),
+        ] {
+            let bar = bounds(index);
+            let mut right = f32::NEG_INFINITY;
+            for t in &plan.node_fill_triangles {
+                if t.color[..3] == progress_rgb[..3]
+                    && t.a[1] >= bar.y
+                    && t.a[1] <= bar.y + bar.height
+                {
+                    assert!((t.color[3] - alpha).abs() < 1e-6);
+                    right = right.max(t.a[0]).max(t.b[0]).max(t.c[0]);
+                }
+            }
+            if index == milestone {
+                assert_eq!(right, f32::NEG_INFINITY);
+            } else {
+                assert!((right - (bar.x + bar.width * fraction)).abs() < 0.001);
+            }
+        }
+
+        let label = layout
+            .extensions
+            .gantt_task_labels
+            .iter()
+            .find(|p| p.node_index == verify)
+            .unwrap();
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|r| r.source == super::GpuTextSource::Node && r.node_index == verify as u32)
+            .unwrap();
+        let first = plan.text_quads[run.first_quad as usize];
+        let end = plan.text_quads[(run.first_quad + run.quad_count - 1) as usize];
+        let metrics = config.font_metrics();
+        match label.placement {
+            fm_layout::GanttLabelPlacement::OutsideLeft => {
+                assert!((end.center[0] + metrics.estimate_width("e") * 0.5 - label.x).abs() < 0.01);
+            }
+            fm_layout::GanttLabelPlacement::OutsideRight => {
+                assert!(
+                    (first.center[0] - metrics.estimate_width("V") * 0.5 - label.x).abs() < 0.01
+                );
+            }
+            fm_layout::GanttLabelPlacement::Inside => {
+                panic!("expected a short bar and external caption")
+            }
+        }
     }
 
     /// Gantt and xychart ticks reach the GPU plan with the same extension-backed products the SVG
