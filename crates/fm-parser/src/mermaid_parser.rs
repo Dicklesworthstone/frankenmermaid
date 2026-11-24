@@ -3961,25 +3961,15 @@ fn add_node_to_active_groups(
 /// it is the same rule, so the fix rests on the case that WAS measured.
 ///
 /// Returns `true` when the caller must NOT intern the node.
-fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, span: Span) -> bool {
-    let mut depth = 0_i32;
-    let mut unmatched_close = false;
-    for byte in label.bytes() {
-        match byte {
-            b'[' => depth += 1,
-            b']' => {
-                if depth == 0 {
-                    unmatched_close = true;
-                } else {
-                    depth -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    if depth == 0 && !unmatched_close {
+fn warn_if_label_holds_unmatched_bracket(
+    builder: &mut IrBuilder,
+    label: &ParsedLabel,
+    span: Span,
+) -> bool {
+    if !label.unmatched_source_bracket {
         return false;
     }
+    let label = &label.text;
     builder.add_warning(format!(
         "Line {}: unrecognised syntax was DROPPED rather than drawn as a node label: {label:?}. \
          A bracket is unmatched, so an operator on this line was not understood.",
@@ -3990,7 +3980,7 @@ fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, s
 
 fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> Option<IrNodeId> {
     if let Some(label) = node.label.as_ref()
-        && warn_if_label_holds_unmatched_bracket(builder, &label.text, span)
+        && warn_if_label_holds_unmatched_bracket(builder, label, span)
     {
         return None;
     }
@@ -4025,7 +4015,7 @@ fn intern_flow_ast_node(
     span: Span,
 ) -> Option<IrNodeId> {
     if let Some(label) = node.label.as_ref()
-        && warn_if_label_holds_unmatched_bracket(builder, &label.text, span)
+        && warn_if_label_holds_unmatched_bracket(builder, label, span)
     {
         return None;
     }
@@ -9272,6 +9262,7 @@ fn parse_event_model(content: &str, builder: &mut IrBuilder) {
             found.map(|(_, block)| *block)
         });
         let mut label = ParsedLabel {
+            unmatched_source_bracket: false,
             text: name.to_string(),
             segments: vec![IrLabelSegment::Text {
                 text: name.to_string(),
@@ -17242,6 +17233,43 @@ fn parse_label_pretrimmed(raw: &str) -> Option<ParsedLabel> {
 }
 
 fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
+    let mut label = parse_label_content(raw, pretrimmed)?;
+    label.unmatched_source_bracket = unmatched_source_bracket(raw);
+    Some(label)
+}
+
+/// Validate the token before normalization strips string delimiters and decodes entities.
+/// A whole quoted caption can contain either bracket. Two quoted captions separated
+/// by stray syntax are still malformed, even when the token starts and ends in quotes.
+fn unmatched_source_bracket(raw: &str) -> bool {
+    let mut depth = 0_usize;
+    let mut unmatched_close = false;
+    for index in memchr::memchr2_iter(b'[', b']', raw.as_bytes()) {
+        if raw.as_bytes()[index] == b'[' {
+            depth += 1;
+        } else if depth == 0 {
+            unmatched_close = true;
+            break;
+        } else {
+            depth -= 1;
+        }
+    }
+    if depth == 0 && !unmatched_close {
+        return false;
+    }
+
+    let raw = trim_fast(raw);
+    // Markdown strings can contain ordinary double quotes in their bodies.
+    if let Some(body) = raw.strip_prefix("\"`") {
+        return !body.split_once("`\"").is_some_and(|(_, tail)| tail.is_empty());
+    }
+    if let Some(body) = raw.strip_prefix('`') {
+        return !body.split_once('`').is_some_and(|(_, tail)| tail.is_empty());
+    }
+    !extract_quoted_value(raw).is_some_and(|(_, tail)| tail.is_empty())
+}
+
+fn parse_label_content(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, HTML entity
     // (`&` `#`), or line-break tag (`<`) reduces to a plain trimmed copy -- the quote-stripping,
     // markdown, `<br>` and entity-decode passes below all leave it unchanged. Byte-identical: for
@@ -17288,7 +17316,11 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
         if text.trim().is_empty() {
             return None;
         }
-        return Some(ParsedLabel { text, segments });
+        return Some(ParsedLabel {
+            text,
+            segments,
+            unmatched_source_bracket: false,
+        });
     }
 
     // ⚠️ THE SAME CONVERSION AS THE MARKDOWN BRANCH ABOVE (bd-kmtia). `replace_br_with_newlines` has
@@ -32331,6 +32363,46 @@ Rel_Back(db, app, "Responds")"#,
                 .collect();
             assert_eq!(edges, [("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")]);
         }
+    }
+
+    #[test]
+    fn literal_square_brackets_in_captions_keep_nodes_and_links() {
+        let source = r#"flowchart LR
+            A["open ["] --> B["close ]"] --> C["`**prefix** [`"]
+            C --> D[#93;] --> E@{ shape: rect, label: "wait [" }"#;
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 5);
+        assert_eq!(parsed.ir.edges.len(), 4);
+        for (id, caption) in [
+            ("A", "open ["),
+            ("B", "close ]"),
+            ("C", "prefix ["),
+            ("D", "]"),
+            ("E", "wait ["),
+        ] {
+            let node = parsed.ir.nodes.iter().find(|node| node.id == id).expect(id);
+            assert_eq!(parsed.ir.node_display_text(node), caption);
+        }
+    }
+
+    #[test]
+    fn malformed_separators_between_quoted_nodes_still_report_unmatched_brackets() {
+        let parsed = parse_mermaid(
+            r#"flowchart LR
+            A["first"] ~~> B["second"]
+            X --> Y"#,
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("bracket is unmatched"))
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].id, "X");
+        assert_eq!(parsed.ir.nodes[1].id, "Y");
     }
 
     #[test]

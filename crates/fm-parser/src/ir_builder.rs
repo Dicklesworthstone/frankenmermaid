@@ -266,6 +266,9 @@ struct ReusablePrefixGuard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLabel {
+    /// Unmatched bracket syntax observed in the original Mermaid label token.
+    /// Rendered text can contain literal brackets from quoting or entity decoding.
+    pub(crate) unmatched_source_bracket: bool,
     pub(crate) text: String,
     pub(crate) segments: Vec<IrLabelSegment>,
 }
@@ -282,6 +285,7 @@ enum NodeLabelInput<'a> {
 impl ParsedLabel {
     pub(crate) fn plain(text: impl Into<String>) -> Self {
         Self {
+            unmatched_source_bracket: false,
             text: text.into(),
             segments: Vec::new(),
         }
@@ -3201,7 +3205,7 @@ impl IrBuilder {
         }
 
         let label_id = IrLabelId(self.ir.labels.len());
-        let ParsedLabel { text, segments } = label;
+        let ParsedLabel { text, segments, .. } = label;
         let has_segments = !segments.is_empty();
         self.ir.labels.push(IrLabel { text, span });
         if has_segments {
