@@ -311,6 +311,273 @@ impl NodePaintPath {
     }
 }
 
+/// A sequence participant's declared symbol, independent of its generic routing shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceParticipantKind {
+    Actor,
+    Boundary,
+    Control,
+    Entity,
+    Database,
+    Collections,
+    Queue,
+}
+
+impl SequenceParticipantKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Actor => "actor",
+            Self::Boundary => "boundary",
+            Self::Control => "control",
+            Self::Entity => "entity",
+            Self::Database => "database",
+            Self::Collections => "collections",
+            Self::Queue => "queue",
+        }
+    }
+
+    const fn symbol_width(self) -> f32 {
+        match self {
+            Self::Actor => 40.0,
+            Self::Boundary => 72.0,
+            Self::Control | Self::Entity => 48.0,
+            Self::Database | Self::Collections => 56.0,
+            Self::Queue => 64.0,
+        }
+    }
+}
+
+/// Resolve only parser-preserved sequence classes; similarly named flowchart classes are ordinary
+/// author styles and must not change a node's geometry.
+#[must_use]
+pub fn sequence_participant_kind(
+    ir: &fm_core::MermaidDiagramIr,
+    node_index: usize,
+) -> Option<SequenceParticipantKind> {
+    if ir.diagram_type != fm_core::DiagramType::Sequence {
+        return None;
+    }
+    ir.nodes
+        .get(node_index)?
+        .classes
+        .iter()
+        .find_map(|class| match class.as_str() {
+            "sequence-participant-actor" => Some(SequenceParticipantKind::Actor),
+            "sequence-participant-boundary" => Some(SequenceParticipantKind::Boundary),
+            "sequence-participant-control" => Some(SequenceParticipantKind::Control),
+            "sequence-participant-entity" => Some(SequenceParticipantKind::Entity),
+            "sequence-participant-database" => Some(SequenceParticipantKind::Database),
+            "sequence-participant-collections" => Some(SequenceParticipantKind::Collections),
+            "sequence-participant-queue" => Some(SequenceParticipantKind::Queue),
+            _ => None,
+        })
+}
+
+const SEQUENCE_SYMBOL_HEIGHT: f32 = 48.0;
+const SEQUENCE_LABEL_GAP: f32 = 6.0;
+const SEQUENCE_PADDING_X: f32 = 12.0;
+const SEQUENCE_PADDING_Y: f32 = 4.0;
+
+/// Space for a fixed-size symbol above the complete measured caption.
+#[must_use]
+pub fn sequence_participant_min_size(
+    kind: SequenceParticipantKind,
+    label_width: f32,
+    label_height: f32,
+) -> (f32, f32) {
+    let label_width = if label_width.is_finite() {
+        label_width.max(0.0)
+    } else {
+        0.0
+    };
+    let label_height = if label_height.is_finite() {
+        label_height.max(0.0)
+    } else {
+        0.0
+    };
+    (
+        (label_width.max(kind.symbol_width()) + SEQUENCE_PADDING_X * 2.0).max(80.0),
+        SEQUENCE_SYMBOL_HEIGHT
+            + SEQUENCE_LABEL_GAP
+            + SEQUENCE_PADDING_Y * 2.0
+            + label_height.max(1.0),
+    )
+}
+
+/// Shared symbol paint and caption placement for direct and scene-based renderers.
+///
+/// Caption placement depends only on the already measured layout box, so renderer-specific font
+/// defaults cannot move a label into the symbol. Mirror and creation headers use the same geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SequenceParticipantGeometry {
+    pub paths: Vec<NodePaintPath>,
+    pub symbol_bounds: LayoutRect,
+    pub label_bounds: LayoutRect,
+}
+
+#[must_use]
+pub fn sequence_participant_geometry(
+    bounds: LayoutRect,
+    kind: SequenceParticipantKind,
+) -> SequenceParticipantGeometry {
+    let bounds = canonical_bounds(bounds);
+    if ![
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+        bounds.x + bounds.width,
+        bounds.y + bounds.height,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
+        || bounds.width <= 0.0
+        || bounds.height <= 0.0
+    {
+        let empty = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        return SequenceParticipantGeometry {
+            paths: Vec::new(),
+            symbol_bounds: empty,
+            label_bounds: empty,
+        };
+    }
+    // Normally one: only an externally supplied undersized box scales the symbol and its padding.
+    // Leave a positive caption band even in that case, rather than emitting inverted geometry.
+    let scale = (bounds.width / (kind.symbol_width() + SEQUENCE_PADDING_X * 2.0))
+        .min(
+            bounds.height
+                / (SEQUENCE_SYMBOL_HEIGHT + SEQUENCE_LABEL_GAP + SEQUENCE_PADDING_Y * 2.0 + 1.0),
+        )
+        .min(1.0);
+    let symbol_bounds = LayoutRect {
+        x: bounds.x + (bounds.width - kind.symbol_width() * scale) * 0.5,
+        y: bounds.y + SEQUENCE_PADDING_Y * scale,
+        width: kind.symbol_width() * scale,
+        height: SEQUENCE_SYMBOL_HEIGHT * scale,
+    };
+    let label_top = symbol_bounds.y + symbol_bounds.height + SEQUENCE_LABEL_GAP * scale;
+    let label_bounds = LayoutRect {
+        x: bounds.x + SEQUENCE_PADDING_X * scale,
+        y: label_top,
+        width: (bounds.width - SEQUENCE_PADDING_X * 2.0 * scale).max(0.0),
+        height: (bounds.y + bounds.height - SEQUENCE_PADDING_Y * scale - label_top).max(0.0),
+    };
+    let x = |value: f32| symbol_bounds.x + value * scale;
+    let y = |value: f32| symbol_bounds.y + value * scale;
+    let ellipse = |left: f32, top: f32, width: f32, height: f32| {
+        NodePaintPath::body(ellipse_paint_path(LayoutRect {
+            x: x(left),
+            y: y(top),
+            width: width * scale,
+            height: height * scale,
+        }))
+    };
+    let paths = match kind {
+        SequenceParticipantKind::Actor => vec![
+            ellipse(13.0, 0.0, 14.0, 14.0),
+            NodePaintPath::outline(vec![
+                PathCmd::MoveTo {
+                    x: x(20.0),
+                    y: y(14.0),
+                },
+                PathCmd::LineTo {
+                    x: x(20.0),
+                    y: y(31.0),
+                },
+                PathCmd::MoveTo {
+                    x: x(0.0),
+                    y: y(22.0),
+                },
+                PathCmd::LineTo {
+                    x: x(40.0),
+                    y: y(22.0),
+                },
+                PathCmd::MoveTo {
+                    x: x(4.0),
+                    y: y(48.0),
+                },
+                PathCmd::LineTo {
+                    x: x(20.0),
+                    y: y(31.0),
+                },
+                PathCmd::LineTo {
+                    x: x(36.0),
+                    y: y(48.0),
+                },
+            ]),
+        ],
+        SequenceParticipantKind::Boundary => vec![
+            ellipse(32.0, 4.0, 40.0, 40.0),
+            NodePaintPath::outline(vec![
+                PathCmd::MoveTo {
+                    x: x(0.0),
+                    y: y(8.0),
+                },
+                PathCmd::LineTo {
+                    x: x(0.0),
+                    y: y(40.0),
+                },
+                PathCmd::MoveTo {
+                    x: x(0.0),
+                    y: y(24.0),
+                },
+                PathCmd::LineTo {
+                    x: x(32.0),
+                    y: y(24.0),
+                },
+            ]),
+        ],
+        SequenceParticipantKind::Control => vec![
+            ellipse(3.0, 6.0, 42.0, 42.0),
+            NodePaintPath::outline(vec![
+                PathCmd::MoveTo {
+                    x: x(30.0),
+                    y: y(0.0),
+                },
+                PathCmd::LineTo {
+                    x: x(22.0),
+                    y: y(6.0),
+                },
+                PathCmd::LineTo {
+                    x: x(29.0),
+                    y: y(13.0),
+                },
+            ]),
+        ],
+        SequenceParticipantKind::Entity => vec![
+            ellipse(2.0, 0.0, 44.0, 44.0),
+            NodePaintPath::outline(vec![
+                PathCmd::MoveTo {
+                    x: x(0.0),
+                    y: y(47.0),
+                },
+                PathCmd::LineTo {
+                    x: x(48.0),
+                    y: y(47.0),
+                },
+            ]),
+        ],
+        SequenceParticipantKind::Database => node_paint_paths(symbol_bounds, NodeShape::Cylinder),
+        SequenceParticipantKind::Collections => {
+            node_paint_paths(symbol_bounds, NodeShape::StackedRect)
+        }
+        SequenceParticipantKind::Queue => {
+            node_paint_paths(symbol_bounds, NodeShape::HorizontalCylinder)
+        }
+    };
+    SequenceParticipantGeometry {
+        paths,
+        symbol_bounds,
+        label_bounds,
+    }
+}
+
 /// Position of a node's icon relative to its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NodeIconPosition {
@@ -2100,6 +2367,116 @@ pub fn polygon_ellipse_path(bounds: LayoutRect, segments: usize) -> Vec<PathCmd>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_participant_symbols_are_distinct_and_leave_complete_caption_space() {
+        let kinds = [
+            SequenceParticipantKind::Actor,
+            SequenceParticipantKind::Boundary,
+            SequenceParticipantKind::Control,
+            SequenceParticipantKind::Entity,
+            SequenceParticipantKind::Database,
+            SequenceParticipantKind::Collections,
+            SequenceParticipantKind::Queue,
+        ];
+        let mut previous = Vec::new();
+        for kind in kinds {
+            let (width, height) = sequence_participant_min_size(kind, 180.0, 72.0);
+            let bounds = LayoutRect {
+                x: 20.0,
+                y: 35.0,
+                width,
+                height,
+            };
+            let geometry = sequence_participant_geometry(bounds, kind);
+            assert!(geometry.label_bounds.width >= 180.0);
+            assert!(geometry.label_bounds.height >= 72.0);
+            assert!(
+                geometry.label_bounds.y > geometry.symbol_bounds.y + geometry.symbol_bounds.height
+            );
+            assert!(
+                geometry.label_bounds.y + geometry.label_bounds.height <= bounds.y + bounds.height
+            );
+            assert!(geometry.paths.iter().any(|path| path.fill));
+            if kind != SequenceParticipantKind::Collections {
+                assert!(geometry.paths.iter().any(|path| !path.fill && path.stroke));
+            }
+            for path in &geometry.paths {
+                for point in coordinates(&path.commands).as_chunks::<2>().0 {
+                    assert!(point[0].is_finite() && point[1].is_finite());
+                    assert!(
+                        point[0] >= bounds.x - 0.001 && point[0] <= bounds.x + bounds.width + 0.001
+                    );
+                    assert!(point[1] >= bounds.y - 0.001 && point[1] < geometry.label_bounds.y);
+                }
+            }
+            assert!(
+                previous.iter().all(|paths| paths != &geometry.paths),
+                "{} lost its distinct symbol",
+                kind.as_str()
+            );
+            previous.push(geometry.paths);
+        }
+    }
+
+    #[test]
+    fn sequence_participant_geometry_rejects_invalid_bounds_and_scales_small_headers() {
+        for bounds in [
+            LayoutRect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 80.0,
+                height: 80.0,
+            },
+            LayoutRect {
+                x: 0.0,
+                y: f32::INFINITY,
+                width: 80.0,
+                height: 80.0,
+            },
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: -1.0,
+                height: 80.0,
+            },
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 0.0,
+            },
+            LayoutRect {
+                x: f32::MAX,
+                y: 0.0,
+                width: f32::MAX,
+                height: 80.0,
+            },
+        ] {
+            let geometry = sequence_participant_geometry(bounds, SequenceParticipantKind::Boundary);
+            assert!(geometry.paths.is_empty());
+            assert_eq!(geometry.label_bounds.width, 0.0);
+        }
+        let bounds = LayoutRect {
+            x: -2.0,
+            y: -3.0,
+            width: 8.0,
+            height: 6.0,
+        };
+        let geometry = sequence_participant_geometry(bounds, SequenceParticipantKind::Boundary);
+        assert!(!geometry.paths.is_empty());
+        assert!(geometry.label_bounds.width > 0.0 && geometry.label_bounds.height > 0.0);
+        for path in geometry.paths {
+            for point in coordinates(&path.commands).as_chunks::<2>().0 {
+                assert!(
+                    point[0] >= bounds.x - 0.001 && point[0] <= bounds.x + bounds.width + 0.001
+                );
+                assert!(
+                    point[1] >= bounds.y - 0.001 && point[1] <= bounds.y + bounds.height + 0.001
+                );
+            }
+        }
+    }
 
     #[test]
     fn node_icons_preserve_symbols_aliases_and_distinct_named_geometry() {
