@@ -18951,115 +18951,34 @@ fn visit_ir_source_spans(ir: &mut fm_core::MermaidDiagramIr, mut visit: impl FnM
     }
 }
 
-/// Read the `---` YAML front matter block: the diagram `title` and any `config:` it carries.
-///
-/// ⚠️ THIS USED TO DISCARD THE WHOLE BLOCK ON wasm32, TITLE INCLUDED. The early return warned that
-/// "YAML config is unavailable in wasm32 builds", which was true of the CONFIG and not of the
-/// title — so in the BROWSER, the surface the demo site and every embedder actually run,
-/// `---\ntitle: … \n---` drew no title at all. Measured against the pinned mermaid 11.15.0 bundle in
-/// Chromium 151: it draws that title for fifteen diagram families, and we drew it for none of them.
-/// A title is a scalar on one line; it never needed a YAML engine.
-///
-/// ⚠️ `config:` REMAINS NATIVE-ONLY, DELIBERATELY, AND STILL WARNS. `serde_yaml` is excluded from
-/// the wasm build by `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`, and that exclusion
-/// is load-bearing: `build-wasm.sh` enforces a 700 KiB gzip ceiling that the bundle currently sits
-/// 2,104 bytes under, so linking a YAML scanner into every browser payload would need a budget
-/// raise of a different order than the ~5 KiB a whole diagram family costs. Reading the one scalar
-/// the gap was actually about costs nothing; the rest keeps the honest diagnostic it always had.
-/// The `title:` scalar of a front matter block, without a YAML parser.
-///
-/// ⚠️ TOP LEVEL ONLY, WHICH IS THE WHOLE DIFFICULTY. `title:` is also a legal key INSIDE `config:`
-/// and inside the deck blocks, where it means something else entirely; a scan that took the first
-/// `title:` anywhere would caption a diagram with a slide's name. An unindented line is the one
-/// thing that distinguishes the document's own title, so indentation is the test — the same rule
-/// YAML itself applies.
-///
-/// Handles the spellings mermaid's own docs use: bare, single- and double-quoted. Anything else
-/// (block scalars, anchors, flow mappings) is left to the native path, which has a real parser.
-#[cfg(target_arch = "wasm32")]
-fn front_matter_scalar_title(payload: &str) -> Option<&str> {
-    payload.lines().find_map(|line| {
-        if line.starts_with([' ', '\t', '#', '-']) {
-            return None;
-        }
-        let value = trim_fast(line.strip_prefix("title:")?);
-        if value.is_empty() {
-            return None;
-        }
-        // A quoted scalar keeps its inner text; an unquoted one keeps everything but a trailing
-        // comment, which YAML would strip.
-        let unquoted = value
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .or_else(|| {
-                value
-                    .strip_prefix('\'')
-                    .and_then(|rest| rest.strip_suffix('\''))
-            });
-        Some(unquoted.unwrap_or(value))
-    })
-}
-
-/// Whether the block carries a top-level key other than `title:`, i.e. something the scalar scan
-/// above cannot honour and the reader should be told about.
-#[cfg(target_arch = "wasm32")]
-fn front_matter_has_non_title_key(payload: &str) -> bool {
-    payload.lines().any(|line| {
-        let trimmed = trim_fast(line);
-        !line.starts_with([' ', '\t'])
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && !trimmed.starts_with("title:")
-    })
-}
-
+/// Parse the same YAML document on every target so browser and native renderers receive
+/// identical titles, configuration values, and diagnostics.
 fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder) {
     let span = Span::at_line(1, front_matter_payload.chars().count());
-    #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(title) = front_matter_scalar_title(front_matter_payload)
-            && let Some(title) = clean_label(Some(title))
-        {
-            builder.set_front_matter_title(title);
-        }
-        // Only complain when there is something a scalar scan cannot carry. A front matter block
-        // that is nothing but a title is now fully honoured here, and warning about it would report
-        // a loss that no longer happens.
-        if front_matter_has_non_title_key(front_matter_payload) {
-            let message = String::from(
-                "Front matter: YAML config is unavailable in wasm32 builds; the title is applied \
-                 and the remaining config keys are ignored",
-            );
+    let yaml_value = match serde_yaml::from_str::<Value>(front_matter_payload) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = format!("Front matter: invalid YAML config: {error}");
             builder.add_warning(message.clone());
             builder.add_init_error(message, span);
+            return;
         }
-        return;
-    }
+    };
 
-    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(title) = yaml_value.get("title").and_then(Value::as_str)
+        && let Some(title) = clean_label(Some(title))
     {
-        let yaml_value = match serde_yaml::from_str::<Value>(front_matter_payload) {
-            Ok(value) => value,
-            Err(error) => {
-                let message = format!("Front matter: invalid YAML config: {error}");
-                builder.add_warning(message.clone());
-                builder.add_init_error(message, span);
-                return;
-            }
-        };
-
-        if let Some(title) = yaml_value.get("title").and_then(Value::as_str)
-            && let Some(title) = clean_label(Some(title))
-        {
-            builder.set_front_matter_title(title);
-        }
-
-        let config_value = yaml_value
-            .get("config")
-            .cloned()
-            .unwrap_or_else(|| yaml_value.clone());
-        apply_mermaid_config_value(&config_value, "Front matter", span, builder);
+        builder.set_front_matter_title(title);
     }
+
+    let config_value = match yaml_value {
+        Value::Object(mut fields) => {
+            fields.remove("title");
+            fields.remove("config").unwrap_or(Value::Object(fields))
+        }
+        other => other,
+    };
+    apply_mermaid_config_value(&config_value, "Front matter", span, builder);
 }
 
 fn apply_mermaid_config_value(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
@@ -25835,6 +25754,70 @@ mod tests {
             Some(true)
         );
         assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn front_matter_yaml_titles_and_aliases_share_the_configuration_path() {
+        for (title, expected) in [
+            ("'Owner''s release' # comment", "Owner's release"),
+            ("\"Deployment #1\"", "Deployment #1"),
+            (">-\n  Deployment\n  overview", "Deployment overview"),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "---\ntitle: {title}\n---\nflowchart LR\nA --> B\n"
+            ));
+            assert_eq!(parsed.ir.meta.title.as_deref(), Some(expected));
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert!(parsed.ir.meta.init.errors.is_empty());
+        }
+
+        let parsed = parse_mermaid(
+            "---
+config:
+  theme: dark
+  themeVariables:
+    primaryColor: &accent '#123456'
+    lineColor: *accent
+  flowchart: {nodeSpacing: 80, rankSpacing: 100, curve: linear}
+---
+flowchart LR
+A --> B
+",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert_eq!(parsed.ir.meta.node_spacing, Some(80));
+        assert_eq!(parsed.ir.meta.rank_spacing, Some(100));
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_curve.as_deref(),
+            Some("linear")
+        );
+        for key in ["primaryColor", "lineColor"] {
+            assert_eq!(
+                parsed
+                    .ir
+                    .meta
+                    .theme_overrides
+                    .theme_variables
+                    .get(key)
+                    .map(String::as_str),
+                Some("#123456")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_front_matter_preserves_diagram_body_and_diagnostics() {
+        let parsed = parse_mermaid("---\nconfig: [unclosed\n---\nflowchart LR\nA --> B\n");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("invalid YAML"))
+        );
+        assert!(!parsed.ir.meta.init.errors.is_empty());
     }
 
     #[test]

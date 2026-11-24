@@ -90,37 +90,56 @@ const FRONT_MATTER_CASES = [
     "---\ntitle: FMTITLE\n---\nflowchart LR\n  A --> B",
     (ir) => (ir.meta?.title === "FMTITLE" ? null : `title=${JSON.stringify(ir.meta?.title)}`),
   ],
-  // A `title:` nested under `config:` is NOT the document title -- an indentation-blind scan would
-  // caption the diagram with it.
   [
     "nested title is not the title",
     "---\nconfig:\n  title: NESTED\n---\nflowchart LR\n  A --> B",
-    (ir) =>
-      ir.meta?.title === undefined || ir.meta?.title === null
-        ? null
-        : `a nested key became the document title: ${JSON.stringify(ir.meta?.title)}`,
+    (ir) => ir.meta?.title == null ? null : `nested document title=${JSON.stringify(ir.meta?.title)}`,
   ],
-  // ⚠️ ASSERTS THE DIAGNOSTIC, NOT AN `init` RECORD. `config:` is deliberately still native-only
-  // here (serde_yaml is excluded from the wasm build to hold the gzip ceiling), so the contract
-  // this case pins is that the reader is TOLD. An earlier draft checked `ir.meta.init` existed --
-  // which passes even with the config ignored, because recording the diagnostic itself creates
-  // that record. It would have gone green whether or not anything worked.
   [
-    "front matter config notice",
-    "---\nconfig:\n  theme: dark\n---\nflowchart LR\n  A --> B",
+    "front matter configuration",
+    "---\ntitle: 'Deployment #1'\nconfig:\n  theme: dark\n  themeVariables:\n    primaryColor: &accent '#123456'\n    lineColor: *accent\n  flowchart:\n    nodeSpacing: 80\n    rankSpacing: 100\n    curve: linear\n---\nflowchart LR\n  A --> B",
     (ir, warnings) =>
-      warnings.some((w) => w.includes("wasm32"))
+      ir.meta?.title === "Deployment #1" &&
+      ir.meta?.init?.config?.theme === "dark" &&
+      ir.meta?.theme_overrides?.theme_variables?.primaryColor === "#123456" &&
+      ir.meta?.theme_overrides?.theme_variables?.lineColor === "#123456" &&
+      ir.meta?.node_spacing === 80 && ir.meta?.rank_spacing === 100 &&
+      ir.meta?.init?.config?.flowchart_curve === "linear" && warnings.length === 0
         ? null
-        : `config keys dropped with no warning: ${JSON.stringify(warnings)}`,
+        : `configuration did not reach the IR: ${JSON.stringify({meta: ir.meta, warnings})}`,
   ],
-  // The title-only block must NOT draw that warning: there is nothing left to ignore.
+  [
+    "front matter sequence flags",
+    "---\nconfig:\n  sequence: {showSequenceNumbers: true, mirrorActors: false}\n---\nsequenceDiagram\n  A->>B: Hello",
+    (ir, warnings) =>
+      ir.sequence_meta?.autonumber === true &&
+      ir.meta?.init?.config?.sequence_mirror_actors === false && warnings.length === 0
+        ? null
+        : `sequence flags ignored: ${JSON.stringify({meta: ir.meta, warnings})}`,
+  ],
+  [
+    "front matter folded title",
+    "---\ntitle: >-\n  Deployment\n  overview\n---\nflowchart LR\n  A --> B",
+    (ir) => ir.meta?.title === "Deployment overview" ? null : `title=${JSON.stringify(ir.meta?.title)}`,
+  ],
+  [
+    "front matter escaped title",
+    "---\ntitle: 'Owner''s release' # comment\n---\nflowchart LR\n  A --> B",
+    (ir) => ir.meta?.title === "Owner's release" ? null : `title=${JSON.stringify(ir.meta?.title)}`,
+  ],
+  [
+    "malformed YAML recovery",
+    "---\nconfig: [unclosed\n---\nflowchart LR\n  A --> B",
+    (ir, warnings) =>
+      ir.nodes.length === 2 && ir.edges.length === 1 &&
+      warnings.some((warning) => warning.includes("invalid YAML"))
+        ? null
+        : `malformed configuration lost its diagnostic or diagram: ${JSON.stringify(warnings)}`,
+  ],
   [
     "front matter title is silent",
     "---\ntitle: FMTITLE\n---\nflowchart LR\n  A --> B",
-    (ir, warnings) =>
-      warnings.some((w) => w.includes("wasm32"))
-        ? `a title-only block warned about ignored config: ${JSON.stringify(warnings)}`
-        : null,
+    (ir, warnings) => warnings.length === 0 ? null : JSON.stringify(warnings),
   ],
 ];
 
