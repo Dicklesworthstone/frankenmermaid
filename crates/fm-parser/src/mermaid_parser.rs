@@ -5086,14 +5086,11 @@ fn lower_sequence_statement(
 
 fn parse_class(input: &str, builder: &mut IrBuilder) {
     let mut in_block: Option<String> = None; // Currently open class block name
-    // Stack of (namespace_name, subgraph_index, cluster_index) for nested namespace blocks.
-    //
-    // ⚠️ THE CLUSTER INDEX IS CARRIED BECAUSE MEMBERSHIP HAS TO BE WRITTEN TWICE, and writing only
-    // the subgraph is what made `namespace` invisible. `build_cluster_boxes` wraps
-    // `ir.clusters[i].members`; the subgraph list is a different index that it never reads. This
-    // path registered the classes as subgraph members only, so every namespace produced a cluster
-    // that owned nothing, no box was built for it, and the name the author wrote was never drawn.
-    let mut namespace_stack: Vec<(String, usize, Option<usize>)> = Vec::new();
+    let mut namespace_path: Vec<ClassNamespace> = Vec::new();
+    // One syntactic block can introduce multiple dotted ancestors. Its closing
+    // brace restores exactly the path that was active before the declaration.
+    let mut namespace_blocks = Vec::new();
+    let mut class_owners = BTreeMap::new();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -5118,38 +5115,26 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Handle namespace blocks: `namespace Name {`
-        if trimmed.starts_with("namespace ") && trimmed.ends_with('{') {
-            let ns_name = trimmed
-                .strip_prefix("namespace")
-                .unwrap_or("")
-                .trim()
-                .trim_end_matches('{')
-                .trim();
-            if !ns_name.is_empty() {
-                let span = span_for(line_number, line);
-                let parent = namespace_stack.last().map(|(_, sg_idx, _)| *sg_idx);
-                let cluster_index = builder.ensure_cluster(ns_name, Some(ns_name), span);
-                if let Some(sg_idx) = builder.ensure_subgraph(
-                    ns_name,
-                    ns_name,
-                    Some(ns_name),
-                    span,
-                    parent,
-                    cluster_index,
-                ) {
-                    namespace_stack.push((ns_name.to_string(), sg_idx, cluster_index));
-                }
-            }
+        if in_block.is_none()
+            && let Some(body) = trimmed.strip_prefix("namespace")
+            && body.starts_with(char::is_whitespace)
+            && let Some(header) = body.strip_suffix('{')
+        {
+            namespace_blocks.push((namespace_path.len(), Vec::new()));
+            open_class_namespace(
+                header,
+                span_for(line_number, line),
+                &mut namespace_path,
+                builder,
+            );
             continue;
         }
 
-        // Close namespace or class block
         if trimmed == "}" {
             if in_block.is_some() {
                 in_block = None;
-            } else if !namespace_stack.is_empty() {
-                namespace_stack.pop();
+            } else if let Some(block) = namespace_blocks.pop() {
+                close_class_namespace(block, &mut namespace_path, &mut class_owners);
             }
             continue;
         }
@@ -5199,7 +5184,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             }
 
             // If inside a namespace, track node key to add to subgraph after lowering.
-            let ns_node_key = match (&statement, namespace_stack.last()) {
+            let ns_node_key = match (&statement, namespace_path.last()) {
                 (
                     ClassStatement::Node(node) | ClassStatement::NodeWithGenerics(node, _),
                     Some(_),
@@ -5209,27 +5194,135 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
                 }
                 _ => None,
             };
-            let ns_indices = namespace_stack
-                .last()
-                .map(|(_, sg_idx, cluster_idx)| (*sg_idx, *cluster_idx));
-
             lower_class_statement(statement, line_number, line, builder);
 
-            if let (Some(key), Some((sg_idx, cluster_idx))) = (ns_node_key, ns_indices)
-                && let Some(node_id) = builder.node_id_by_key(&key)
+            if let Some(node_id) = ns_node_key.and_then(|key| builder.node_id_by_key(&key))
+                && let Some((_, declarations)) = namespace_blocks.last_mut()
             {
-                builder.add_node_to_subgraph(sg_idx, node_id);
-                // ⚠️ BOTH, NOT EITHER. The subgraph list and the cluster list are separate indices
-                // and only the CLUSTER one is read by `build_cluster_boxes`, so registering the
-                // subgraph alone left the namespace owning no members: no box was ever built, and
-                // the namespace name never reached the SVG. mermaid 11.15.0 draws a labelled
-                // cluster per namespace, measured in Chromium 151 against the pinned bundle.
-                if let Some(cluster_idx) = cluster_idx {
-                    builder.add_node_to_cluster(cluster_idx, node_id);
-                }
+                declarations.push(node_id);
             }
         }
     }
+
+    // Preserve incomplete documents in recovery mode by unwinding open scopes at EOF.
+    while let Some(block) = namespace_blocks.pop() {
+        close_class_namespace(block, &mut namespace_path, &mut class_owners);
+    }
+    let mut ancestors = Vec::new();
+    for (node, owner) in class_owners {
+        ancestors.clear();
+        let mut current = Some(owner);
+        while let Some(index) = current {
+            let namespace = &builder.ir().graph.subgraphs[index];
+            ancestors.push((index, namespace.cluster));
+            current = namespace.parent.map(|id| id.0);
+        }
+        // Layout needs descendants in every enclosing cluster, and routing reads the
+        // final node membership as the innermost subgraph.
+        for &(index, cluster) in ancestors.iter().rev() {
+            builder.add_node_to_subgraph(index, node);
+            if let Some(cluster) = cluster {
+                builder.add_node_to_cluster(cluster.0, node);
+            }
+        }
+    }
+}
+
+/// The upstream class DB assigns ownership at block close. Delay attaching membership
+/// until every declaration has been read so a later owner does not leave stale boxes.
+fn close_class_namespace(
+    (previous_depth, declarations): (usize, Vec<IrNodeId>),
+    path: &mut Vec<ClassNamespace>,
+    owners: &mut BTreeMap<IrNodeId, usize>,
+) {
+    if let Some(namespace) = path.last() {
+        owners.extend(declarations.into_iter().map(|node| (node, namespace.subgraph)));
+    }
+    path.truncate(previous_depth);
+}
+
+struct ClassNamespace {
+    key: String,
+    subgraph: usize,
+}
+
+/// Resolve a Mermaid class namespace relative to the enclosing namespace. Both
+/// dotted declarations and syntactically nested declarations share these keys.
+fn open_class_namespace(
+    header: &str,
+    span: Span,
+    path: &mut Vec<ClassNamespace>,
+    builder: &mut IrBuilder,
+) {
+    let Some((name, label)) = class_namespace_header(header) else {
+        builder.add_warning(format!(
+            "Line {}: invalid class namespace: {header}",
+            span.start.line
+        ));
+        return;
+    };
+    let limit = builder.parser_config().max_nesting_depth;
+    let mut key = path.last().map_or_else(String::new, |ns| ns.key.clone());
+    let mut segments = name.split('.').peekable();
+    while let Some(segment) = segments.next() {
+        if path.len() >= limit {
+            builder.add_warning(format!(
+                "Line {}: class namespace exceeds the nesting limit of {limit}; deeper levels flattened",
+                span.start.line
+            ));
+            break;
+        }
+        if !key.is_empty() {
+            key.push('.');
+        }
+        key.push_str(segment);
+        let parent = path.last().map(|ns| ns.subgraph);
+        let Some(cluster) = builder.ensure_cluster(&key, Some(segment), span) else {
+            break;
+        };
+        let Some(subgraph) =
+            builder.ensure_subgraph(&key, &key, Some(segment), span, parent, Some(cluster))
+        else {
+            break;
+        };
+        // A later declaration can give an implicit (or previously declared) namespace a label.
+        if segments.peek().is_none()
+            && let Some(label) = label.as_deref()
+        {
+            builder.set_cluster_title(cluster, label, span);
+            builder.set_subgraph_title(subgraph, label, span);
+        }
+        path.push(ClassNamespace {
+            key: key.clone(),
+            subgraph,
+        });
+    }
+}
+
+fn class_namespace_header(header: &str) -> Option<(&str, Option<String>)> {
+    let header = trim_fast(header);
+    let (name, suffix) = if let Some(quoted) = header.strip_prefix('`') {
+        quoted.split_once('`')?
+    } else {
+        let end = header.find('[').unwrap_or(header.len());
+        header.split_at(end)
+    };
+    let name = trim_fast(name);
+    if name.split('.').any(|segment| segment.trim().is_empty()) {
+        return None;
+    }
+    let suffix = trim_fast(suffix);
+    let label = if suffix.is_empty() {
+        None
+    } else {
+        let body = suffix.strip_prefix('[')?.strip_suffix(']')?;
+        let (label, rest) = extract_quoted_value(body)?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        Some(label)
+    };
+    Some((name, label))
 }
 
 /// Extract generic type parameters from a class name using `~T~` syntax.
@@ -36061,6 +36154,118 @@ classDef hot color: #ff0000, stroke-color: #111111, radius: 9
         assert!(!parsed.ir.clusters.is_empty(), "should have clusters");
         let cluster = &parsed.ir.clusters[0];
         assert!(cluster.title.is_some());
+    }
+
+    #[test]
+    fn class_namespaces_resolve_dotted_and_nested_declarations_to_one_hierarchy() {
+        // Mermaid 11.15 classDiagram syntax: dotted names create parent namespaces.
+        // A later explicit declaration can label and populate any of those ancestors.
+        let parsed = parse_mermaid(
+            r#"classDiagram
+namespace Platform.Services.Auth["Identity"] {
+    class Login
+}
+namespace Platform {
+    namespace Services["Application services"] {
+        class Router
+    }
+    class Gateway
+}
+namespace Other {
+    namespace Services.Auth {
+        class Token
+    }
+}
+class Outside
+Gateway --> Login"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(ir.graph.subgraphs.len(), 6);
+        assert_eq!(ir.clusters.len(), 6);
+        for (key, parent, title, members) in [
+            ("Platform", None, "Platform", &["Login", "Router", "Gateway"][..]),
+            ("Platform.Services", Some("Platform"), "Application services", &["Login", "Router"][..]),
+            ("Platform.Services.Auth", Some("Platform.Services"), "Identity", &["Login"][..]),
+            ("Other", None, "Other", &["Token"][..]),
+            ("Other.Services", Some("Other"), "Services", &["Token"][..]),
+            ("Other.Services.Auth", Some("Other.Services"), "Auth", &["Token"][..]),
+        ] {
+            let ns = ir.graph.subgraphs.iter().find(|ns| ns.key == key).expect(key);
+            let parent_key = ns.parent.map(|id| ir.graph.subgraphs[id.0].key.as_str());
+            assert_eq!(parent_key, parent, "{key}");
+            if let Some(id) = ns.parent {
+                assert!(ir.graph.subgraphs[id.0].children.contains(&ns.id));
+            }
+            let cluster = &ir.clusters[ns.cluster.expect(key).0];
+            assert_eq!(ir.labels[cluster.title.expect(key).0].text, title);
+            assert_eq!(cluster.title, ns.title);
+            assert_eq!(cluster.members, ns.members);
+            let names: Vec<_> = ns.members.iter().map(|id| ir.nodes[id.0].id.as_str()).collect();
+            assert_eq!(names.as_slice(), members, "{key}");
+        }
+        let outside = ir.nodes.iter().position(|node| node.id == "Outside").unwrap();
+        assert!(ir.graph.nodes[outside].clusters.is_empty());
+        assert_eq!(ir.edges.len(), 1);
+        let edge = &ir.edges[0];
+        assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.from).unwrap().0].id, "Gateway");
+        assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.to).unwrap().0].id, "Login");
+    }
+
+    #[test]
+    fn repeated_class_declarations_keep_the_owner_of_the_last_closing_namespace() {
+        let parsed = parse_mermaid(
+            r#"classDiagram
+namespace A {
+    class First
+    namespace Inner {
+        class First
+        class Second
+    }
+}
+namespace B {
+    class Second
+}
+namespace A["Renamed"] {
+    class Third
+}
+namespace A {
+    class Fourth
+}"#,
+        );
+        let ir = &parsed.ir;
+        let names: Vec<_> = ir.graph.subgraphs.iter().map(|ns| ns.key.as_str()).collect();
+        assert_eq!(names, ["A", "A.Inner", "B"]);
+        let a = &ir.graph.subgraphs[0];
+        assert_eq!(ir.labels[a.title.unwrap().0].text, "Renamed");
+        let owned: Vec<_> = a.members.iter().map(|id| ir.nodes[id.0].id.as_str()).collect();
+        assert_eq!(owned, ["First", "Third", "Fourth"]);
+        assert!(ir.graph.subgraphs[1].members.is_empty());
+        let b = &ir.graph.subgraphs[2];
+        assert_eq!(b.members.len(), 1);
+        let second = b.members[0];
+        assert_eq!(ir.nodes[second.0].id, "Second");
+        assert_eq!(ir.graph.nodes[second.0].subgraphs, [b.id]);
+    }
+
+    #[test]
+    fn class_namespace_depth_limit_preserves_members_and_closing_brace_scope() {
+        let parsed = parse_with_mode_and_config(
+            "classDiagram\nnamespace A.B.C.D {\nclass Deep\n}\nnamespace Z {\nclass Peer\n}",
+            MermaidParseMode::Compat,
+            &ParserConfig {
+                max_nesting_depth: 2,
+                ..ParserConfig::default()
+            },
+        );
+        assert!(parsed.warnings.iter().any(|w| w.contains("nesting limit")));
+        let keys: Vec<_> = parsed.ir.graph.subgraphs.iter().map(|ns| ns.key.as_str()).collect();
+        assert_eq!(keys, ["A", "A.B", "Z"]);
+        let deep = &parsed.ir.graph.subgraphs[1];
+        let peer = &parsed.ir.graph.subgraphs[2];
+        assert_eq!(parsed.ir.nodes[deep.members[0].0].id, "Deep");
+        assert_eq!(parsed.ir.nodes[peer.members[0].0].id, "Peer");
+        assert!(peer.parent.is_none());
     }
 
     // ── State diagram notes, guards, and actions ─────────────────────
