@@ -2,6 +2,7 @@
 // Regenerate: fm-cli config-schema --typescript <path>
 
 export interface MermaidConfig {
+  class?: ClassConfig;
   flowchart?: FlowchartConfig;
   gantt?: GanttConfig;
   /** Case-insensitive sanitization level: strict, antiscript, or loose. */
@@ -31,6 +32,11 @@ export interface FlowchartConfig {
   /** Case-insensitive rank direction: LR, RL, TB, TD, or BT. Alias of direction. */
   rankDir?: "lr" | "rl" | "tb" | "td" | "bt";
   rankSpacing?: number;
+}
+
+export interface ClassConfig {
+  /** Draw nested namespace groups (default true); false draws only explicit namespaces with fully qualified captions. */
+  hierarchicalNamespaces?: boolean;
 }
 
 /** One-line Mermaid directive: %%{constraints: <object>}%%. */

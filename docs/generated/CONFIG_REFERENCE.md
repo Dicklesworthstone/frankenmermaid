@@ -9,6 +9,7 @@ Strict contract for `%%{init: …}%%` payloads and API consumers (schema version
 
 | Key | Type | Notes |
 |---|---|---|
+| `class` | object — see [`class`](#class) |  |
 | `flowchart` | object — see [`flowchart`](#flowchart) |  |
 | `gantt` | object — see [`gantt`](#gantt) |  |
 | `securityLevel` | string — one of `strict` \| `antiscript` \| `loose` (case-insensitive) | Case-insensitive sanitization level: strict, antiscript, or loose. |
@@ -16,6 +17,12 @@ Strict contract for `%%{init: …}%%` payloads and API consumers (schema version
 | `startOnLoad` | boolean | Accepted for compatibility; currently has no runtime effect |
 | `theme` | string |  |
 | `themeVariables` | object (free-form) |  |
+
+### class
+
+| Key | Type | Notes |
+|---|---|---|
+| `class.hierarchicalNamespaces` | boolean | Draw nested namespace groups (default true); false draws only explicit namespaces with fully qualified captions. |
 
 ### flowchart
 

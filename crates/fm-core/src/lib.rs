@@ -5504,6 +5504,9 @@ pub struct MermaidConfig {
     pub sequence_mirror_actors: Option<bool>,
     /// Mermaid-style sequence message numbering toggle.
     pub sequence_show_sequence_numbers: Option<bool>,
+    /// Render nested class namespaces hierarchically, or as explicitly declared flat groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_hierarchical_namespaces: Option<bool>,
     /// Mermaid-style Gantt top axis toggle.
     pub gantt_top_axis: Option<bool>,
 }
@@ -5543,6 +5546,7 @@ impl Default for MermaidConfig {
             rank_spacing: None,
             sequence_mirror_actors: None,
             sequence_show_sequence_numbers: None,
+            class_hierarchical_namespaces: None,
             gantt_top_axis: None,
         }
     }
@@ -5602,6 +5606,16 @@ pub fn mermaid_config_schema() -> Value {
             "themeVariables": {
                 "type": "object",
                 "additionalProperties": { "type": ["string", "number", "boolean"] }
+            },
+            "class": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "hierarchicalNamespaces": {
+                        "type": "boolean",
+                        "description": "Draw nested namespace groups (default true); false draws only explicit namespaces with fully qualified captions."
+                    }
+                }
             },
             "flowchart": {
                 "type": "object",
@@ -6019,6 +6033,8 @@ pub struct MermaidInitConfig {
     pub rank_spacing: Option<u32>,
     pub sequence_mirror_actors: Option<bool>,
     pub sequence_show_sequence_numbers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_hierarchical_namespaces: Option<bool>,
     pub gantt_top_axis: Option<bool>,
     pub sanitize_mode: MermaidSanitizeMode,
 }
@@ -6083,6 +6099,7 @@ pub fn parse_mermaid_js_config_value(value: &Value) -> MermaidConfigParse {
                     );
                 }
             }
+            "class" => parse_class_config(raw_value, &mut parsed),
             "flowchart" => parse_flowchart_config(raw_value, &mut parsed),
             "sequence" => parse_sequence_config(raw_value, &mut parsed),
             "gantt" => parse_gantt_config(raw_value, &mut parsed),
@@ -6145,6 +6162,7 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         rank_spacing: parsed_config.config.rank_spacing,
         sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
         sequence_show_sequence_numbers: parsed_config.config.sequence_show_sequence_numbers,
+        class_hierarchical_namespaces: parsed_config.config.class_hierarchical_namespaces,
         gantt_top_axis: parsed_config.config.gantt_top_axis,
         sanitize_mode: parsed_config.config.sanitize_mode,
     };
@@ -6163,6 +6181,34 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         config: init_config,
         warnings: parsed_config.warnings,
         errors,
+    }
+}
+
+fn parse_class_config(value: &Value, parsed: &mut MermaidConfigParse) {
+    let Some(obj) = value.as_object() else {
+        push_type_error(parsed, "class", value, "must be an object");
+        return;
+    };
+
+    for (key, raw_value) in obj {
+        match key.as_str() {
+            "hierarchicalNamespaces" => {
+                if let Some(enabled) = raw_value.as_bool() {
+                    parsed.config.class_hierarchical_namespaces = Some(enabled);
+                } else {
+                    push_type_error(
+                        parsed,
+                        "class.hierarchicalNamespaces",
+                        raw_value,
+                        "must be a boolean",
+                    );
+                }
+            }
+            other => push_warning(
+                parsed,
+                format!("Unsupported class config key '{other}' ignored"),
+            ),
+        }
     }
 }
 
@@ -13853,6 +13899,38 @@ mod tests {
         assert_eq!(parsed.config.sequence_mirror_actors, Some(true));
         assert_eq!(parsed.config.sequence_show_sequence_numbers, Some(true));
         assert_eq!(parsed.config.sanitize_mode, MermaidSanitizeMode::Lenient);
+    }
+
+    #[test]
+    fn class_namespace_config_is_validated_and_projected() {
+        for enabled in [false, true] {
+            let value = json!({ "class": { "hierarchicalNamespaces": enabled } });
+            assert!(super::validate_mermaid_config_value(&value).is_valid());
+            let parsed = to_init_parse(parse_mermaid_js_config_value(&value));
+            assert!(parsed.warnings.is_empty());
+            assert!(parsed.errors.is_empty());
+            assert_eq!(parsed.config.class_hierarchical_namespaces, Some(enabled));
+            let serialized = serde_json::to_value(&parsed.config).unwrap();
+            let decoded: super::MermaidInitConfig = serde_json::from_value(serialized).unwrap();
+            assert_eq!(decoded.class_hierarchical_namespaces, Some(enabled));
+        }
+
+        for value in [json!("false"), json!(0), json!(null)] {
+            let config = json!({ "class": { "hierarchicalNamespaces": value } });
+            let parsed = parse_mermaid_js_config_value(&config);
+            assert_eq!(parsed.config.class_hierarchical_namespaces, None);
+            assert_eq!(parsed.errors.len(), 1);
+            assert_eq!(parsed.errors[0].field, "class.hierarchicalNamespaces");
+            assert!(!super::validate_mermaid_config_value(&config).is_valid());
+        }
+        let invalid_group = super::validate_mermaid_config_value(&json!({ "class": false }));
+        assert_eq!(invalid_group.errors[0].field, "class");
+        let unknown = super::validate_mermaid_config_value(&json!({
+            "class": { "hierarchicalNamespace": false }
+        }));
+        assert_eq!(unknown.errors[0].field, "class.hierarchicalNamespace");
+        let default = serde_json::to_value(super::MermaidInitConfig::default()).unwrap();
+        assert!(default.get("class_hierarchical_namespaces").is_none());
     }
 
     #[test]

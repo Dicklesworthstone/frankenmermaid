@@ -5235,15 +5235,15 @@ fn close_class_namespace(
     path: &mut Vec<ClassNamespace>,
     owners: &mut BTreeMap<IrNodeId, usize>,
 ) {
-    if let Some(namespace) = path.last() {
-        owners.extend(declarations.into_iter().map(|node| (node, namespace.subgraph)));
+    if let Some(subgraph) = path.iter().rev().find_map(|namespace| namespace.subgraph) {
+        owners.extend(declarations.into_iter().map(|node| (node, subgraph)));
     }
     path.truncate(previous_depth);
 }
 
 struct ClassNamespace {
     key: String,
-    subgraph: usize,
+    subgraph: Option<usize>,
 }
 
 /// Resolve a Mermaid class namespace relative to the enclosing namespace. Both
@@ -5262,6 +5262,13 @@ fn open_class_namespace(
         return;
     };
     let limit = builder.parser_config().max_nesting_depth;
+    let hierarchical = builder
+        .ir()
+        .meta
+        .init
+        .config
+        .class_hierarchical_namespaces
+        .unwrap_or(true);
     let mut key = path.last().map_or_else(String::new, |ns| ns.key.clone());
     let mut segments = name.split('.').peekable();
     while let Some(segment) = segments.next() {
@@ -5276,22 +5283,35 @@ fn open_class_namespace(
             key.push('.');
         }
         key.push_str(segment);
-        let parent = path.last().map(|ns| ns.subgraph);
-        let Some(cluster) = builder.ensure_cluster(&key, Some(segment), span) else {
-            break;
+        let explicit = segments.peek().is_none();
+        let subgraph = if hierarchical || explicit {
+            let parent = if hierarchical {
+                path.last().and_then(|ns| ns.subgraph)
+            } else {
+                None
+            };
+            let title = if hierarchical { segment } else { &key };
+            let Some(cluster) = builder.ensure_cluster(&key, Some(title), span) else {
+                break;
+            };
+            let Some(subgraph) =
+                builder.ensure_subgraph(&key, &key, Some(title), span, parent, Some(cluster))
+            else {
+                break;
+            };
+            // Compact mode captions each explicit box with its full namespace ID. In
+            // hierarchical mode, later declarations may label implicit ancestor groups.
+            if hierarchical
+                && explicit
+                && let Some(label) = label.as_deref()
+            {
+                builder.set_cluster_title(cluster, label, span);
+                builder.set_subgraph_title(subgraph, label, span);
+            }
+            Some(subgraph)
+        } else {
+            None
         };
-        let Some(subgraph) =
-            builder.ensure_subgraph(&key, &key, Some(segment), span, parent, Some(cluster))
-        else {
-            break;
-        };
-        // A later declaration can give an implicit (or previously declared) namespace a label.
-        if segments.peek().is_none()
-            && let Some(label) = label.as_deref()
-        {
-            builder.set_cluster_title(cluster, label, span);
-            builder.set_subgraph_title(subgraph, label, span);
-        }
         path.push(ClassNamespace {
             key: key.clone(),
             subgraph,
@@ -19078,6 +19098,9 @@ fn apply_mermaid_config_value(value: &Value, context: &str, span: Span, builder:
     }
     if let Some(show_numbers) = parsed.config.sequence_show_sequence_numbers {
         builder.set_init_sequence_show_sequence_numbers(show_numbers);
+    }
+    if let Some(enabled) = parsed.config.class_hierarchical_namespaces {
+        builder.set_init_class_hierarchical_namespaces(enabled);
     }
     if let Some(top_axis) = parsed.config.gantt_top_axis {
         builder.set_init_gantt_top_axis(top_axis);
@@ -36210,6 +36233,185 @@ Gateway --> Login"#,
         let edge = &ir.edges[0];
         assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.from).unwrap().0].id, "Gateway");
         assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.to).unwrap().0].id, "Login");
+    }
+
+    #[test]
+    fn compact_class_namespaces_keep_explicit_boxes_and_qualified_captions() {
+        let parsed = parse_mermaid(
+            r#"%%{init: {class: {hierarchicalNamespaces: false}}}%%
+classDiagram
+namespace Company.Engineering.Backend["Services"] {
+    class Developer
+}
+namespace Company {
+    namespace Engineering.Frontend["User interface"] {
+        class Designer
+    }
+    class CEO
+}
+namespace Company.Engineering {
+    class Lead
+}
+namespace Company.Engineering.Backend["Renamed"] {
+    class Tester
+}
+CEO --> Developer
+Lead --> Designer"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        assert_eq!(
+            ir.meta.init.config.class_hierarchical_namespaces,
+            Some(false)
+        );
+        let expected = [
+            ("Company.Engineering.Backend", &["Developer", "Tester"][..]),
+            ("Company", &["CEO"][..]),
+            ("Company.Engineering.Frontend", &["Designer"][..]),
+            ("Company.Engineering", &["Lead"][..]),
+        ];
+        assert_eq!(ir.graph.subgraphs.len(), expected.len());
+        assert_eq!(ir.clusters.len(), expected.len());
+        for (namespace, (key, members)) in ir.graph.subgraphs.iter().zip(expected) {
+            assert_eq!(namespace.key, key);
+            assert_eq!(ir.labels[namespace.title.unwrap().0].text, key);
+            assert!(namespace.parent.is_none(), "{key}");
+            assert!(namespace.children.is_empty(), "{key}");
+            let cluster = &ir.clusters[namespace.cluster.unwrap().0];
+            assert_eq!(cluster.title, namespace.title);
+            assert_eq!(cluster.members, namespace.members);
+            let names: Vec<_> = namespace
+                .members
+                .iter()
+                .map(|node| ir.nodes[node.0].id.as_str())
+                .collect();
+            assert_eq!(names, members, "{key}");
+            for node in &namespace.members {
+                assert_eq!(ir.graph.nodes[node.0].subgraphs, [namespace.id]);
+                assert_eq!(
+                    ir.graph.nodes[node.0].clusters,
+                    [namespace.cluster.unwrap()]
+                );
+            }
+        }
+        assert_eq!(ir.edges.len(), 2);
+        for (edge, target) in ir.edges.iter().zip(["Developer", "Designer"]) {
+            assert_eq!(
+                ir.nodes[ir.resolve_endpoint_node(edge.to).unwrap().0].id,
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn compact_class_namespaces_preserve_class_redeclarations_and_depth_recovery() {
+        let parsed = parse_mermaid(
+            "%%{init: {class: {hierarchicalNamespaces: false}}}%%\n\
+             classDiagram\nnamespace Outer {\nclass Shared\n\
+             namespace Inner {\nclass Shared\nclass Nested\n}\n}\n\
+             namespace Outer.Inner {\nclass Last\n}\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let namespaces = &parsed.ir.graph.subgraphs;
+        assert_eq!(namespaces.len(), 2);
+        for (namespace, expected) in namespaces
+            .iter()
+            .zip([&["Shared"][..], &["Nested", "Last"][..]])
+        {
+            let names: Vec<_> = namespace
+                .members
+                .iter()
+                .map(|node| parsed.ir.nodes[node.0].id.as_str())
+                .collect();
+            assert_eq!(names, expected);
+        }
+
+        let bounded = parse_with_mode_and_config(
+            "%%{init: {class: {hierarchicalNamespaces: false}}}%%\n\
+             classDiagram\nnamespace A {\nnamespace B.C {\nclass Deep\n}\n}\n\
+             namespace Z {\nclass Peer\n}\nclass Outside\n",
+            MermaidParseMode::Compat,
+            &ParserConfig {
+                max_nesting_depth: 2,
+                ..ParserConfig::default()
+            },
+        );
+        assert!(
+            bounded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nesting limit"))
+        );
+        assert_eq!(bounded.ir.graph.subgraphs.len(), 2);
+        for (namespace, (name, member)) in bounded
+            .ir
+            .graph
+            .subgraphs
+            .iter()
+            .zip([("A", "Deep"), ("Z", "Peer")])
+        {
+            assert_eq!(namespace.key, name);
+            assert!(namespace.parent.is_none());
+            assert_eq!(namespace.members.len(), 1);
+            assert_eq!(bounded.ir.nodes[namespace.members[0].0].id, member);
+        }
+        let outside = bounded
+            .ir
+            .nodes
+            .iter()
+            .position(|node| node.id == "Outside")
+            .unwrap();
+        assert!(bounded.ir.graph.nodes[outside].subgraphs.is_empty());
+    }
+
+    #[test]
+    fn class_namespace_config_defaults_and_directive_precedence() {
+        let body = "classDiagram\nnamespace A.B[\"Display\"] {\nclass Item\n}\n";
+        for config in [
+            "",
+            "%%{init: {class: {hierarchicalNamespaces: true}}}%%\n",
+            "%%{init: {class: {hierarchicalNamespaces: false}}}%%\n%%{init: {class: {hierarchicalNamespaces: true}}}%%\n",
+        ] {
+            let parsed = parse_mermaid(&format!("{config}{body}"));
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
+            let child = &parsed.ir.graph.subgraphs[1];
+            assert_eq!(child.parent, Some(parsed.ir.graph.subgraphs[0].id));
+            assert_eq!(parsed.ir.labels[child.title.unwrap().0].text, "Display");
+        }
+
+        let bad = parse_mermaid(&format!(
+            "%%{{init: {{class: {{hierarchicalNamespaces: 'false'}}}}}}%%\n{body}"
+        ));
+        assert_eq!(bad.ir.graph.subgraphs.len(), 2);
+        assert!(
+            bad.warnings
+                .iter()
+                .any(|warning| warning.contains("class.hierarchicalNamespaces"))
+        );
+        assert!(
+            !validate_init_directives("%%{init: {class: {hierarchicalNamespaces: 'false'}}}%%")
+                .is_valid()
+        );
+        assert!(
+            validate_init_directives("%%{init: {class: {hierarchicalNamespaces: false}}}%%")
+                .is_valid()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn class_namespaces_honor_flattening_from_front_matter() {
+        let parsed = parse_mermaid(
+            "---\nconfig:\n  class:\n    hierarchicalNamespaces: false\n---\n\
+             classDiagram\nnamespace A.B.C {\nclass Item\n}\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 1);
+        let namespace = &parsed.ir.graph.subgraphs[0];
+        assert_eq!(namespace.key, "A.B.C");
+        assert_eq!(parsed.ir.labels[namespace.title.unwrap().0].text, "A.B.C");
+        assert!(namespace.parent.is_none());
     }
 
     #[test]

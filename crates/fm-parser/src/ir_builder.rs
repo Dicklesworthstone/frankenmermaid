@@ -945,6 +945,10 @@ impl IrBuilder {
         self.ir.meta.init.config.gantt_top_axis = Some(top_axis);
     }
 
+    pub(crate) const fn set_init_class_hierarchical_namespaces(&mut self, enabled: bool) {
+        self.ir.meta.init.config.class_hierarchical_namespaces = Some(enabled);
+    }
+
     pub(crate) const fn set_init_sanitize_mode(&mut self, sanitize_mode: MermaidSanitizeMode) {
         self.ir.meta.init.config.sanitize_mode = sanitize_mode;
     }

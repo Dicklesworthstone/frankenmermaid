@@ -490,6 +490,7 @@ struct RuntimeInitConfig {
     // Mermaid initialization sections belong to the shared parser, where source directives
     // and explicit diagram syntax can override them without changing source spans.
     theme_variables: Option<Value>,
+    class: Option<Value>,
     flowchart: Option<Value>,
     sequence: Option<Value>,
     gantt: Option<Value>,
@@ -528,6 +529,7 @@ impl RuntimeInitConfig {
         let mut merged = base.clone();
         for (key, value) in [
             ("themeVariables", &self.theme_variables),
+            ("class", &self.class),
             ("flowchart", &self.flowchart),
             ("sequence", &self.sequence),
             ("gantt", &self.gantt),
@@ -3975,6 +3977,61 @@ mod tests {
         assert_eq!(next.canvas.node_fill, "#112233");
         assert_eq!(next.canvas.edge_stroke, "#334455");
         assert_eq!(read_runtime_config().pressure.frame_budget_ms, Some(200));
+    }
+
+    #[test]
+    fn mermaid_runtime_class_namespace_options_reach_layout_and_worker_rendering() {
+        let _serial = config_guard();
+        let _restore = DefaultRuntimeGuard::new();
+        let initial: RuntimeInitConfig = serde_json::from_value(serde_json::json!({
+            "class": {"hierarchicalNamespaces": false}
+        }))
+        .unwrap();
+        apply_runtime_init_config(&initial).unwrap();
+        let source = "classDiagram\nnamespace Product.Domain {\nclass Entity\n}\n\
+                      namespace Product.Tests {\nclass Spec\n}\nSpec --> Entity\n";
+        let flat = build_diagram_geometry(source, None).unwrap();
+        assert_eq!(flat.ir.graph.subgraphs.len(), 2);
+        assert_eq!(flat.layout.clusters.len(), 2);
+        assert!(
+            flat.ir
+                .graph
+                .subgraphs
+                .iter()
+                .all(|namespace| namespace.parent.is_none())
+        );
+        let flat_svg = render_svg_js(source, None).unwrap();
+        assert!(flat_svg.contains("Product.Domain"));
+        assert!(flat_svg.contains("Product.Tests"));
+
+        let override_value = serde_json::json!({"class": {"hierarchicalNamespaces": true}});
+        let overrides: RuntimeInitConfig = serde_json::from_value(override_value.clone()).unwrap();
+        let nested = build_diagram_geometry_with_overrides(source, &overrides).unwrap();
+        assert_eq!(nested.ir.graph.subgraphs.len(), 3);
+        assert_eq!(nested.layout.clusters.len(), 3);
+        assert!(nested.ir.graph.subgraphs[1].parent.is_some());
+        let prepared = prepare_svg_render_with_overrides(source, &overrides).unwrap();
+        let expected_svg = fm_render_svg::render_svg_with_layout(
+            &prepared.parsed.ir,
+            &prepared.traced_layout.layout,
+            &prepared.svg_config,
+        );
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 82,
+            input: source.into(),
+            config_json: Some(override_value.to_string()),
+        });
+        let WorkerRenderResponse::Completed { svg, .. } = response else {
+            panic!("class worker render failed: {response:?}");
+        };
+        assert_eq!(svg, expected_svg);
+
+        let authored =
+            format!("%%{{init: {{class: {{hierarchicalNamespaces: false}}}}}}%%\n{source}");
+        let explicit = build_diagram_geometry_with_overrides(&authored, &overrides).unwrap();
+        assert_eq!(explicit.ir.graph.subgraphs.len(), 2);
+        assert_eq!(explicit.ir.source_map(), parse(&authored).ir.source_map());
+        assert_eq!(render_svg_js(source, None).unwrap(), flat_svg);
     }
 
     #[test]
