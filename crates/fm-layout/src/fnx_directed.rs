@@ -37,7 +37,7 @@ pub struct StronglyConnectedComponent {
 }
 
 /// Result of SCC decomposition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SccResult {
     /// All SCCs, sorted by first node index for determinism.
     pub components: Vec<StronglyConnectedComponent>,
@@ -53,18 +53,60 @@ pub struct SccResult {
 /// result can influence layout. Invalid caller input falls back without executing the backend;
 /// projection and partition failures are reported to the rollout controller as failed attempts.
 #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FnxSccError {
-    InvalidEndpoint { edge_index: usize },
+    InvalidEndpoint {
+        edge_index: usize,
+    },
     ProjectionMismatch,
     InvalidPartition,
+    BudgetExceeded {
+        reason: crate::fnx_budget::BudgetExceededReason,
+        backend_invoked: bool,
+    },
 }
 
 /// Execute the actual FNX directed backend, preserving numeric IR ordering rather than the
 /// backend's string ordering (`n10` must not precede `n2` in the public result).
+/// Projection/verification, backend SCC, and result normalization each reserve `nodes + edges`
+/// work units before starting. Time cancellation is cooperative at those stage boundaries.
 #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
-pub(crate) fn compute_scc_with_fnx(ir: &MermaidDiagramIr) -> Result<SccResult, FnxSccError> {
+pub(crate) fn compute_scc_with_fnx(
+    ir: &MermaidDiagramIr,
+    budget: crate::fnx_budget::AnalysisBudget,
+) -> Result<SccResult, FnxSccError> {
     use crate::fnx_adapter::{ProjectedId, ir_to_digraph};
+    use crate::fnx_budget::BudgetExecutor;
+    use crate::fnx_diagnostics::{measure_fnx_algorithm, record_fnx_budget_exceeded};
+
+    if ir.nodes.is_empty() && ir.edges.is_empty() {
+        return Ok(SccResult::default());
+    }
+    let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
+    let mut executor = BudgetExecutor::new(budget);
+    executor.start();
+    let check_budget = |executor: &BudgetExecutor, backend_invoked| {
+        if let Some(reason) = executor.exceeded_reason() {
+            if budget.trace_enabled {
+                tracing::warn!(
+                    reason = reason.reason_code(),
+                    elapsed_ms = executor.elapsed_ms(),
+                    work_consumed = executor.work_consumed(),
+                    backend_invoked,
+                    "FNX directed SCC budget exceeded"
+                );
+            }
+            record_fnx_budget_exceeded(&reason);
+            Err(FnxSccError::BudgetExceeded {
+                reason,
+                backend_invoked,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    executor.record_work(base_work);
+    check_budget(&executor, false)?;
 
     // Reject malformed caller data before constructing or executing an FNX graph. Such input is
     // handled by native best-effort analysis, not charged to the backend's health error rate.
@@ -78,7 +120,9 @@ pub(crate) fn compute_scc_with_fnx(ir: &MermaidDiagramIr) -> Result<SccResult, F
                 .ok_or(FnxSccError::InvalidEndpoint { edge_index })
         })
         .collect::<Result<_, _>>()?;
+    check_budget(&executor, false)?;
     let (graph, table) = ir_to_digraph(ir);
+    check_budget(&executor, false)?;
     if !table.verify_counts(ir.nodes.len(), ir.edges.len()) || graph.node_count() != ir.nodes.len()
     {
         return Err(FnxSccError::ProjectionMismatch);
@@ -107,12 +151,24 @@ pub(crate) fn compute_scc_with_fnx(ir: &MermaidDiagramIr) -> Result<SccResult, F
         return Err(FnxSccError::ProjectionMismatch);
     }
 
-    normalize_fnx_scc(
-        fnx_algorithms::strongly_connected_components(&graph),
-        &table,
-        ir.nodes.len(),
-        &pairs,
-    )
+    executor.record_work(base_work);
+    check_budget(&executor, false)?;
+    let backend_components = measure_fnx_algorithm("strongly_connected_components", || {
+        fnx_algorithms::strongly_connected_components(&graph)
+    });
+    check_budget(&executor, true)?;
+    executor.record_work(base_work);
+    check_budget(&executor, true)?;
+    let result = normalize_fnx_scc(backend_components, &table, ir.nodes.len(), &pairs)?;
+    check_budget(&executor, true)?;
+    if budget.trace_enabled {
+        tracing::debug!(
+            elapsed_ms = executor.elapsed_ms(),
+            work_consumed = executor.work_consumed(),
+            "FNX directed SCC completed within budget"
+        );
+    }
+    Ok(result)
 }
 
 #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
@@ -380,12 +436,31 @@ pub fn compute_scc_with_budget(
     ir: &MermaidDiagramIr,
     budget: crate::fnx_budget::AnalysisBudget,
 ) -> crate::fnx_budget::BudgetResult<SccResult> {
+    use crate::fnx_budget::BudgetResult;
+
+    if ir.nodes.is_empty() {
+        return BudgetResult::Completed {
+            value: SccResult::default(),
+            elapsed_ms: 0,
+            work_consumed: Some(0),
+        };
+    }
     let mut executor = crate::fnx_budget::BudgetExecutor::new(budget);
-    executor.execute_with_progress(|exec| {
-        let work_units = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
-        exec.record_work(work_units);
+    let mut executed = false;
+    let mut outcome = executor.execute_with_progress(|exec| {
+        let work_units = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
+        if !exec.admit_work(work_units) {
+            return SccResult::default();
+        }
+        executed = true;
         compute_scc(ir)
-    })
+    });
+    // The closure's empty placeholder is never an observed partition: a rejected stage
+    // performed no SCC analysis, so callers receive no partial result at all.
+    if !executed && let BudgetResult::Cancelled { partial, .. } = &mut outcome {
+        *partial = None;
+    }
+    outcome
 }
 
 // ============================================================================
@@ -830,6 +905,144 @@ mod tests {
     }
 
     // SCC Tests
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_rejects_unaffordable_stages_before_backend_execution() {
+        use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason};
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
+        for (work_budget, consumed) in [(0, 6), (6, 12)] {
+            let (result, trace) = capture_fnx_execution(|| {
+                compute_scc_with_fnx(
+                    &ir,
+                    AnalysisBudget::unlimited().with_work_budget(work_budget),
+                )
+            });
+            assert_eq!(
+                result,
+                Err(FnxSccError::BudgetExceeded {
+                    reason: BudgetExceededReason::WorkExceeded {
+                        budget: work_budget,
+                        consumed,
+                    },
+                    backend_invoked: false,
+                })
+            );
+            assert!(trace.algorithms_invoked.is_empty());
+            assert_eq!(trace.analysis_time, std::time::Duration::ZERO);
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_reports_actual_backend_attempt_when_normalization_is_rejected() {
+        use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason};
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
+        let (result, trace) = capture_fnx_execution(|| {
+            compute_scc_with_fnx(&ir, AnalysisBudget::unlimited().with_work_budget(12))
+        });
+        assert_eq!(
+            result,
+            Err(FnxSccError::BudgetExceeded {
+                reason: BudgetExceededReason::WorkExceeded {
+                    budget: 12,
+                    consumed: 18,
+                },
+                backend_invoked: true,
+            })
+        );
+        assert_eq!(trace.algorithms_invoked, ["strongly_connected_components"]);
+        assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_exact_budget_preserves_ports_parallel_edges_and_numeric_ordering() {
+        use crate::fnx_budget::AnalysisBudget;
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let mut ir =
+            make_test_ir_with_edges(&[(0, 1), (1, 0), (1, 10), (10, 11), (11, 10), (5, 5), (0, 1)]);
+        ir.ports = (0..ir.nodes.len())
+            .map(|node| IrPort {
+                node: IrNodeId(node),
+                name: format!("port-{node}"),
+                ..Default::default()
+            })
+            .collect();
+        for edge in &mut ir.edges {
+            let IrEndpoint::Node(from) = edge.from else {
+                unreachable!()
+            };
+            let IrEndpoint::Node(to) = edge.to else {
+                unreachable!()
+            };
+            edge.from = IrEndpoint::Port(IrPortId(from.0));
+            edge.to = IrEndpoint::Port(IrPortId(to.0));
+        }
+        let expected = compute_scc(&ir);
+        let budget = AnalysisBudget::unlimited()
+            .with_work_budget(3 * (ir.nodes.len() + ir.edges.len()) as u64);
+        for _ in 0..3 {
+            let (result, trace) = capture_fnx_execution(|| compute_scc_with_fnx(&ir, budget));
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(trace.algorithms_invoked, ["strongly_connected_components"]);
+            assert_eq!(trace.budget_exceeded_reason, None);
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_invalid_endpoints_do_not_invoke_the_backend() {
+        use crate::fnx_budget::AnalysisBudget;
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let mut ir = make_test_ir_with_edges(&[(0, 1)]);
+        ir.ports.push(IrPort {
+            node: IrNodeId(usize::MAX),
+            ..Default::default()
+        });
+        for invalid in [
+            IrEndpoint::Unresolved,
+            IrEndpoint::Node(IrNodeId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(0)),
+        ] {
+            ir.edges[0].to = invalid;
+            let (result, trace) =
+                capture_fnx_execution(|| compute_scc_with_fnx(&ir, AnalysisBudget::unlimited()));
+            assert_eq!(result, Err(FnxSccError::InvalidEndpoint { edge_index: 0 }));
+            assert!(trace.algorithms_invoked.is_empty());
+            assert_eq!(trace.analysis_time, std::time::Duration::ZERO);
+            assert_eq!(trace.budget_exceeded_reason, None);
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_scc_empty_graph_needs_no_budget_or_backend() {
+        use crate::fnx_budget::AnalysisBudget;
+        use crate::fnx_diagnostics::capture_fnx_execution;
+
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let (result, trace) = capture_fnx_execution(|| {
+            compute_scc_with_fnx(
+                &ir,
+                AnalysisBudget::default()
+                    .with_work_budget(0)
+                    .with_time_budget_ms(0),
+            )
+        });
+        assert_eq!(result, Ok(SccResult::default()));
+        assert!(trace.algorithms_invoked.is_empty());
+        assert_eq!(trace.analysis_time, std::time::Duration::ZERO);
+        assert_eq!(trace.budget_exceeded_reason, None);
+    }
 
     #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
     #[test]
@@ -1362,10 +1575,62 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn compute_scc_with_budget_enforces_work_limit() {
+        use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetResult};
+
         let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
-        let tight = crate::fnx_budget::AnalysisBudget::default().with_work_budget(1);
-        let result = compute_scc_with_budget(&ir, tight);
-        assert!(result.is_cancelled());
-        assert_eq!(result.into_value().unwrap().non_trivial_count, 1);
+        for work_budget in [0, 1, 5] {
+            let result = compute_scc_with_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(work_budget),
+            );
+            assert!(matches!(
+                result,
+                BudgetResult::Cancelled {
+                    reason: BudgetExceededReason::WorkExceeded { budget, consumed: 6 },
+                    partial: None,
+                } if budget == work_budget
+            ));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn compute_scc_with_budget_accepts_exact_work_limit() {
+        use crate::fnx_budget::{AnalysisBudget, BudgetResult};
+
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
+        let result = compute_scc_with_budget(&ir, AnalysisBudget::unlimited().with_work_budget(6));
+        let BudgetResult::Completed {
+            value,
+            work_consumed,
+            ..
+        } = result
+        else {
+            panic!("the exact native SCC work allowance must be admitted");
+        };
+        assert_eq!(value, compute_scc(&ir));
+        assert_eq!(work_consumed, Some(6));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn compute_scc_with_budget_empty_graph_needs_no_work() {
+        use crate::fnx_budget::{AnalysisBudget, BudgetResult};
+
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let result = compute_scc_with_budget(
+            &ir,
+            AnalysisBudget::default()
+                .with_work_budget(0)
+                .with_time_budget_ms(0),
+        );
+        assert!(matches!(
+            result,
+            BudgetResult::Completed {
+                value,
+                elapsed_ms: 0,
+                work_consumed: Some(0),
+            } if value == SccResult::default()
+        ));
     }
 }

@@ -4,7 +4,10 @@ use fm_core::canary::{RolloutPhase, RolloutState};
 use fm_core::{
     DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, IrPort, IrPortId, MermaidDiagramIr,
 };
-use fm_layout::{analyze_cycles_with_fnx_canary, fnx_directed::compute_scc};
+use fm_layout::{
+    analyze_cycles_with_fnx_canary, analyze_cycles_with_fnx_canary_and_budget,
+    fnx_budget::AnalysisBudget, fnx_directed::compute_scc,
+};
 
 const DIRECTED_BACKEND_AVAILABLE: bool = cfg!(all(
     feature = "fnx-experimental-directed",
@@ -88,11 +91,74 @@ fn selected_backend_preserves_the_empty_graph_partition() {
         analyze_cycles_with_fnx_canary(&ir, &mut rollout, 1),
         compute_scc(&ir)
     );
-    assert_eq!(
-        rollout.requests_processed,
-        u64::from(DIRECTED_BACKEND_AVAILABLE)
-    );
+    assert_eq!(rollout.requests_processed, 0);
     assert_eq!(rollout.error_count, 0);
+    assert!(rollout.latency_samples.is_empty());
+}
+
+#[test]
+fn empty_and_budget_rejected_requests_preserve_a_restored_unhealthy_window() {
+    let empty = MermaidDiagramIr::empty(DiagramType::Flowchart);
+    let ir = graph();
+    let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
+    for (input, work_budget) in [(&empty, 0), (&ir, 0), (&ir, base_work)] {
+        let mut rollout = RolloutState::new();
+        rollout.transition_to(RolloutPhase::Full, 1_000);
+        for _ in 0..100 {
+            rollout.record_request(1_000, true);
+        }
+        let before = serde_json::to_string(&rollout).unwrap();
+
+        assert_eq!(
+            analyze_cycles_with_fnx_canary_and_budget(
+                input,
+                &mut rollout,
+                100,
+                AnalysisBudget::unlimited().with_work_budget(work_budget),
+            ),
+            compute_scc(input)
+        );
+        assert_eq!(serde_json::to_string(&rollout).unwrap(), before);
+    }
+}
+
+#[test]
+fn cancellation_after_backend_execution_falls_back_and_larger_budget_recovers() {
+    let ir = graph();
+    let expected = compute_scc(&ir);
+    let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
+    let mut rollout = RolloutState::new();
+    rollout.transition_to(RolloutPhase::Full, 1_000);
+
+    // Projection and SCC fit, but normalization does not. This is a real backend request,
+    // even though the native fallback supplies the complete partition to the caller.
+    assert_eq!(
+        analyze_cycles_with_fnx_canary_and_budget(
+            &ir,
+            &mut rollout,
+            1,
+            AnalysisBudget::unlimited().with_work_budget(2 * base_work),
+        ),
+        expected
+    );
+    let attempted = u64::from(DIRECTED_BACKEND_AVAILABLE);
+    assert_eq!(rollout.requests_processed, attempted);
+    assert_eq!(rollout.error_count, attempted);
+    assert_eq!(rollout.latency_samples.len() as u64, attempted);
+
+    assert_eq!(
+        analyze_cycles_with_fnx_canary_and_budget(
+            &ir,
+            &mut rollout,
+            2,
+            AnalysisBudget::unlimited().with_work_budget(3 * base_work),
+        ),
+        expected
+    );
+    assert_eq!(rollout.requests_processed, 2 * attempted);
+    assert_eq!(rollout.error_count, attempted);
+    assert_eq!(rollout.latency_samples.len() as u64, 2 * attempted);
+    assert_eq!(rollout.phase, RolloutPhase::Full);
 }
 
 #[test]

@@ -21299,29 +21299,65 @@ std::thread_local! {
 
 /// Evaluate directed Strongly Connected Components under an FNX canary rollout controller.
 ///
-/// Selected requests use the real directed backend when `fnx-experimental-directed` is enabled
-/// on native targets. Disabled, unsampled, rolled-back, and unavailable requests use the native
-/// SCC implementation without adding fictitious FNX telemetry. Malformed caller endpoints are
-/// rejected before entering FNX and do not affect backend health. A failed projection of valid
-/// input or an invalid SCC partition records an error and falls back for the current request.
-/// Health failures roll subsequent requests back; rollback timestamps are epoch milliseconds,
-/// independent of the request ID used for deterministic traffic sampling.
-/// Health evaluation waits for the configured observation window and minimum sample count.
+/// Uses the default analysis budget. See [`analyze_cycles_with_fnx_canary_and_budget`] for
+/// explicit limits and cancellation behavior.
 #[must_use]
 pub fn analyze_cycles_with_fnx_canary(
     ir: &MermaidDiagramIr,
     rollout: &mut fm_core::canary::RolloutState,
     request_id: u64,
 ) -> crate::fnx_directed::SccResult {
+    analyze_cycles_with_fnx_canary_and_budget(
+        ir,
+        rollout,
+        request_id,
+        fnx_budget::AnalysisBudget::default(),
+    )
+}
+
+/// Evaluate directed components with explicit limits on optional FNX analysis.
+///
+/// Selected requests use the real directed backend when `fnx-experimental-directed` is enabled
+/// on native targets. Disabled, unsampled, rolled-back, and unavailable requests use the native
+/// SCC implementation without adding fictitious FNX telemetry. Empty graphs, malformed caller
+/// endpoints, and budget rejection before backend execution do not affect backend health.
+/// Cancellation after backend execution, a failed projection of valid input, or an invalid SCC
+/// partition records an error and falls back for the current request. Time cancellation is
+/// cooperative at stage boundaries; the native fallback still produces a complete SCC result.
+/// Health failures roll subsequent requests back; rollback timestamps are epoch milliseconds,
+/// independent of the request ID used for deterministic traffic sampling.
+/// Health evaluation waits for the configured observation window and minimum sample count.
+#[must_use]
+pub fn analyze_cycles_with_fnx_canary_and_budget(
+    ir: &MermaidDiagramIr,
+    rollout: &mut fm_core::canary::RolloutState,
+    request_id: u64,
+    budget: fnx_budget::AnalysisBudget,
+) -> crate::fnx_directed::SccResult {
+    if ir.nodes.is_empty() && ir.edges.is_empty() {
+        return crate::fnx_directed::compute_scc(ir);
+    }
     #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
     if rollout.should_enable_fnx(request_id) {
         let start = Instant::now();
-        let result = crate::fnx_directed::compute_scc_with_fnx(ir);
+        let result = crate::fnx_directed::compute_scc_with_fnx(ir, budget);
         if let Err(crate::fnx_directed::FnxSccError::InvalidEndpoint { edge_index }) = &result {
             tracing::debug!(
                 edge_index,
                 request_id,
                 "layout.fnx_scc.invalid_input_native_fallback"
+            );
+            return crate::fnx_directed::compute_scc(ir);
+        }
+        if let Err(crate::fnx_directed::FnxSccError::BudgetExceeded {
+            reason,
+            backend_invoked: false,
+        }) = &result
+        {
+            tracing::debug!(
+                ?reason,
+                request_id,
+                "layout.fnx_scc.budget_rejected_before_backend"
             );
             return crate::fnx_directed::compute_scc(ir);
         }
@@ -21343,7 +21379,7 @@ pub fn analyze_cycles_with_fnx_canary(
         }
     }
     #[cfg(not(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32"))))]
-    let _ = (rollout, request_id);
+    let _ = (rollout, request_id, budget);
     crate::fnx_directed::compute_scc(ir)
 }
 
