@@ -1160,6 +1160,19 @@ impl TermRenderer {
                 .chain(edge_foreground.into_iter().map(|(x, y, _)| (x, y)))
                 .map(|(x, y)| (x, y, x.saturating_add(1), y.saturating_add(1))),
         );
+        if self.config.show_labels
+            && matches!(
+                ir.diagram_type,
+                fm_core::DiagramType::Class | fm_core::DiagramType::Er
+            )
+        {
+            // A blank cell inside a class or entity belongs to its body. Keep endpoint
+            // multiplicities in the corridor between boxes, even for a bundled shaft.
+            for node in &layout.nodes {
+                let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+                protected.push((x, y, x.saturating_add(w), y.saturating_add(h)));
+            }
+        }
         for path in &layout.edges {
             self.overlay_edge_cardinalities(
                 &mut grid,
@@ -4626,7 +4639,16 @@ impl TermRenderer {
             let width = text.width();
             // Place the full run to the left of a vertical shaft if its right side is occupied.
             let left = -(width as isize);
-            for (dx, dy) in [(1, 0), (left, 0), (2, 0), (left - 1, 0), (0, 1), (0, -1)] {
+            for (dx, dy) in [
+                (1, 0),
+                (left, 0),
+                (2, 0),
+                (left - 1, 0),
+                (0, 1),
+                (0, -1),
+                (left + 1, 1),
+                (left + 1, -1),
+            ] {
                 let (Some(x), Some(y)) = (bx.checked_add_signed(dx), by.checked_add_signed(dy))
                 else {
                     continue;
@@ -4634,7 +4656,11 @@ impl TermRenderer {
                 let Some(row) = grid.get_mut(y) else {
                     continue;
                 };
-                if width > row.len().saturating_sub(x) {
+                if width > row.len().saturating_sub(x)
+                    || protected.iter().any(|&(left, top, right, bottom)| {
+                        y >= top && y < bottom && x < right && x.saturating_add(width) > left
+                    })
+                {
                     continue;
                 }
                 if stage_cell_label(row, labels, (x, y), &text, width, true) {
@@ -10475,6 +10501,46 @@ mod tests {
             "the stereotype displaced the name"
         );
         assert!(!renderer.use_cell_compartments(ir.nodes.first(), 20, 3));
+    }
+
+    #[test]
+    fn bundled_cardinalities_stay_outside_blank_node_interiors() {
+        let mut ir = fm_parser::parse("classDiagram\nA \"one\" --> B\n").ir;
+        let mut layout = layout_diagram(&ir);
+        for (node, x) in layout.nodes.iter_mut().zip([10.0, 36.0]) {
+            node.bounds = LayoutRect {
+                x,
+                y: 2.0,
+                width: 14.0,
+                height: 10.0,
+            };
+        }
+        // The first candidate starts inside A at (11, 5). The entire run fits on its left.
+        let mut path = terminal_edge_test_path(&[(10.0, 4.0), (10.0, 8.0), (36.0, 8.0)]);
+        path.bundled = true;
+        layout.edges[0] = path;
+        let config = TermRenderConfig {
+            padding: 0,
+            ..TermRenderConfig::rich()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 20));
+        for hidden in [false, true] {
+            if hidden {
+                ir.edges[0].arrow = ArrowType::Invisible;
+            }
+            let cell = renderer.render_cell_mode(&ir, &layout, 60, 20, 1.0, 1.0);
+            let grid = vec![vec![' '; 60]; 20];
+            let (subcell, _) = renderer.overlay_labels(grid, &ir, &layout, 60, 20, 1.0, 1.0, &[]);
+            for output in [&cell.output, &subcell] {
+                if hidden {
+                    assert!(!output.contains("one"), "{output}");
+                } else {
+                    let row = output.lines().nth(5).unwrap();
+                    assert_eq!(row.chars().skip(7).take(3).collect::<String>(), "one");
+                    assert_eq!(output.matches("one").count(), 1, "{output}");
+                }
+            }
+        }
     }
 
     #[test]
