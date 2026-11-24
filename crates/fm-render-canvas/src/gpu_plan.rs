@@ -5241,6 +5241,12 @@ impl GpuRenderPlan {
         use fm_core::IrXySeriesKind;
 
         let font_px = metrics.font_size();
+        // The caller has already applied source theme variables, just as Canvas2D does
+        // before drawing chart axes and series. Keep intrinsic paint alpha in every channel;
+        // the bar and area passes apply their own coverage below.
+        let label_color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+        let edge_color = parse_paint_rgba(&config.edge_stroke).unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+        let point_outline = parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
         let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
         let (left, top) = (plot.x, plot.y);
         let (right, bottom) = (left + plot.width, top + plot.height);
@@ -5286,13 +5292,7 @@ impl GpuRenderPlan {
                 1.0,
                 [4.0, 4.0],
             ));
-            axes.push(xy_segment(
-                from,
-                tick_end,
-                DEFAULT_LABEL_RGBA,
-                1.0,
-                [0.0, 0.0],
-            ));
+            axes.push(xy_segment(from, tick_end, label_color, 1.0, [0.0, 0.0]));
             label(
                 fm_layout::format_xychart_tick_value(value),
                 text_anchor,
@@ -5305,7 +5305,7 @@ impl GpuRenderPlan {
         axes.push(xy_segment(
             [left, top],
             [left, bottom],
-            DEFAULT_EDGE_STROKE_RGBA,
+            edge_color,
             1.5,
             [0.0, 0.0],
         ));
@@ -5313,7 +5313,7 @@ impl GpuRenderPlan {
         axes.push(xy_segment(
             [left, axis_y],
             [right, axis_y],
-            DEFAULT_EDGE_STROKE_RGBA,
+            edge_color,
             1.5,
             [0.0, 0.0],
         ));
@@ -5343,7 +5343,7 @@ impl GpuRenderPlan {
                     TextAlign::Center,
                 )
             };
-            axes.push(xy_segment(from, to, DEFAULT_LABEL_RGBA, 1.0, [0.0, 0.0]));
+            axes.push(xy_segment(from, to, label_color, 1.0, [0.0, 0.0]));
             label(
                 category,
                 anchor,
@@ -5434,7 +5434,7 @@ impl GpuRenderPlan {
                     &label.text,
                     anchor,
                     label.font_size,
-                    DEFAULT_LABEL_RGBA,
+                    label_color,
                     label.source,
                     label.index,
                 ),
@@ -5442,7 +5442,7 @@ impl GpuRenderPlan {
                     &label.text,
                     anchor,
                     label.font_size,
-                    DEFAULT_LABEL_RGBA,
+                    label_color,
                     label.source,
                     label.index,
                 ),
@@ -5450,7 +5450,7 @@ impl GpuRenderPlan {
                     &label.text,
                     anchor,
                     label.font_size,
-                    DEFAULT_LABEL_RGBA,
+                    label_color,
                     label.source,
                     label.index,
                 ),
@@ -5475,9 +5475,8 @@ impl GpuRenderPlan {
         } else {
             fm_layout::xychart_value_to_y(baseline, min, max, plot)
         };
-        let accents = crate::CanvasRenderConfig::default().accents;
         for (series_index, series) in meta.series.iter().enumerate() {
-            let color = parse_paint_rgba(&accents[series_index % accents.len()])
+            let color = parse_paint_rgba(&config.accents[series_index % config.accents.len()])
                 .unwrap_or(DEFAULT_NODE_FILL_RGBA);
             let nodes: Vec<_> = series
                 .nodes
@@ -5494,11 +5493,7 @@ impl GpuRenderPlan {
                         GpuNodeShape::Circle
                     },
                     color,
-                    if is_bar {
-                        color
-                    } else {
-                        DEFAULT_NODE_FILL_RGBA
-                    },
+                    if is_bar { color } else { point_outline },
                     if is_bar { 1.0 } else { 2.0 },
                 );
                 mark.node_index = u32::try_from(node.node_index).unwrap_or(u32::MAX);

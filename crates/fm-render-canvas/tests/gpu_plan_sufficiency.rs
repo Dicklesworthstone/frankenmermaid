@@ -1324,6 +1324,203 @@ mod xychart {
         ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0
     }
 
+    fn three_series_source(orientation: &str) -> String {
+        format!(
+            "xychart-beta{orientation}\n title Revenue & Costs\n x-axis \"Month\" [Jan, Feb, Mar]\n y-axis \"Net\" -20 --> 30\n bar \"Sales\" [20, -10, 30]\n line \"Trend\" [10, 0, -10]\n area \"Cash\" [-10, 20, -5]\n"
+        )
+    }
+
+    fn configured_palette() -> CanvasRenderConfig {
+        CanvasRenderConfig {
+            label_color: "rgba(12,34,56,0.6)".to_owned(),
+            edge_stroke: "rgba(78,90,123,0.7)".to_owned(),
+            node_fill: "rgba(145,167,189,0.8)".to_owned(),
+            accents: [
+                "rgba(200,10,20,0.5)",
+                "rgba(30,210,40,0.4)",
+                "rgba(50,60,220,0.3)",
+                "#441122",
+                "#552233",
+                "#663344",
+                "#774455",
+                "#885566",
+            ]
+            .map(String::from),
+            ..Default::default()
+        }
+    }
+
+    fn assert_three_series_palette(plan: &GpuRenderPlan, expected: &CanvasRenderConfig) {
+        let rgba = |paint: &str| fm_render_canvas::parse_paint_rgba(paint).unwrap();
+        let label = rgba(&expected.label_color);
+        let edge = rgba(&expected.edge_stroke);
+        let outline = rgba(&expected.node_fill);
+        let accents = expected.accents.each_ref().map(|paint| rgba(paint));
+        assert!(
+            !plan.text_quads.is_empty(),
+            "the chart must retain its labels"
+        );
+        assert!(plan.text_quads.iter().all(|quad| quad.color == label));
+        let mut main_axes = 0;
+        let mut ticks = 0;
+        for segment in &plan.xy_axis_segments {
+            if segment.dash == [4.0, 4.0] {
+                assert_eq!(
+                    segment.color,
+                    [148.0 / 255.0, 163.0 / 255.0, 184.0 / 255.0, 0.35]
+                );
+            } else if segment.width == 1.5 {
+                main_axes += 1;
+                assert_eq!(segment.color, edge);
+            } else {
+                ticks += 1;
+                assert_eq!(segment.color, label);
+            }
+        }
+        assert_eq!(main_axes, 2);
+        assert!(ticks > 3, "both value and category ticks must be tested");
+        assert_eq!(plan.xy_bar_instances.len(), 3);
+        let mut bar_fill = accents[0];
+        bar_fill[3] *= 0.78;
+        for bar in &plan.xy_bar_instances {
+            assert_eq!(bar.fill, bar_fill);
+            assert_eq!(bar.stroke, accents[0]);
+        }
+        assert_eq!(plan.node_instances.len(), 6);
+        for (index, point) in plan.node_instances.iter().enumerate() {
+            assert_eq!(point.fill, accents[if index < 3 { 1 } else { 2 }]);
+            assert_eq!(point.stroke, outline);
+        }
+        assert_eq!(plan.edge_segments.len(), 4);
+        for (index, segment) in plan.edge_segments.iter().enumerate() {
+            assert_eq!(segment.color, accents[if index < 2 { 1 } else { 2 }]);
+        }
+        assert!(!plan.xy_area_triangles.is_empty());
+        let mut area_fill = accents[2];
+        area_fill[3] *= 0.16;
+        assert!(
+            plan.xy_area_triangles
+                .iter()
+                .all(|triangle| triangle.color == area_fill)
+        );
+        assert!(
+            plan.arrowheads.is_empty(),
+            "series are not directed graph edges"
+        );
+    }
+
+    #[test]
+    fn configured_chart_paints_and_alpha_reach_every_gpu_channel() {
+        let config = configured_palette();
+        for orientation in ["", " horizontal"] {
+            let ir = fm_parser::parse(&three_series_source(orientation)).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let scene = fm_layout::build_render_scene(&ir, &layout);
+            let plan =
+                GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config);
+            assert_three_series_palette(&plan, &config);
+            assert_eq!(
+                plan,
+                GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+
+            // Compare real text and bar paint operations to the planned colors, including
+            // Canvas2D's global alpha rather than just checking that a style was assigned.
+            let mut canvas = MockCanvas2dContext::new(1200.0, 900.0);
+            fm_render_canvas::render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
+            let mut fill = [0.0, 0.0, 0.0, 1.0];
+            let mut alpha = 1.0;
+            let mut stack = Vec::new();
+            let mut rect_fills = Vec::new();
+            let mut text_fills = Vec::new();
+            for operation in canvas.operations() {
+                match operation {
+                    DrawOperation::Save => stack.push((fill, alpha)),
+                    DrawOperation::Restore => (fill, alpha) = stack.pop().unwrap(),
+                    DrawOperation::SetFillStyle(paint) => {
+                        fill = fm_render_canvas::parse_paint_rgba(paint).unwrap();
+                    }
+                    DrawOperation::SetGlobalAlpha(value) => alpha = *value as f32,
+                    DrawOperation::FillRect(..) | DrawOperation::FillText(..) => {
+                        let mut effective = fill;
+                        effective[3] *= alpha;
+                        if matches!(operation, DrawOperation::FillRect(..)) {
+                            rect_fills.push(effective);
+                        } else {
+                            text_fills.push(effective);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                rect_fills.len(),
+                4,
+                "plot background followed by three bars"
+            );
+            assert_eq!(rect_fills[0], plan.xy_plot_instances[0].fill);
+            assert_eq!(
+                rect_fills[1..],
+                plan.xy_bar_instances
+                    .iter()
+                    .map(|bar| bar.fill)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(text_fills.len(), plan.text_runs.len());
+            assert!(
+                text_fills
+                    .iter()
+                    .all(|fill| *fill == plan.text_quads[0].color)
+            );
+        }
+    }
+
+    #[test]
+    fn source_chart_palette_overrides_config_without_leaking_into_the_next_plan() {
+        let config = configured_palette();
+        let directive = "%%{init: {'themeVariables': {'primaryTextColor': '#aabbcc80', 'textColor': '#ff00ff', 'lineColor': '#11223366', 'primaryColor': '#44556640', 'pie1': '#cc112280', 'pie2': '#33dd4440', 'pie3': '#5566ee20'}}}%%\n";
+        let mut expected = config.clone();
+        expected.label_color = "#aabbcc80".to_owned();
+        expected.edge_stroke = "#11223366".to_owned();
+        expected.node_fill = "#44556640".to_owned();
+        expected.accents[0] = "#cc112280".to_owned();
+        expected.accents[1] = "#33dd4440".to_owned();
+        expected.accents[2] = "#5566ee20".to_owned();
+        for orientation in ["", " horizontal"] {
+            let source = three_series_source(orientation);
+            let ir = fm_parser::parse(&format!("{directive}{source}")).ir;
+            assert_eq!(ir.meta.theme_overrides.theme_variables.len(), 7);
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_three_series_palette(&plan, &expected);
+
+            let plain_ir = fm_parser::parse(&source).ir;
+            let plain_layout = fm_layout::layout_diagram(&plain_ir);
+            let plain_plan =
+                GpuRenderPlan::from_layout_with_config(&plain_ir, &plain_layout, &config);
+            assert_three_series_palette(&plain_plan, &config);
+        }
+        assert_eq!(config.label_color, "rgba(12,34,56,0.6)");
+        assert_eq!(config.accents[0], "rgba(200,10,20,0.5)");
+    }
+
+    #[test]
+    fn transparent_chart_paints_stay_disabled_after_unsafe_theme_overrides() {
+        let config = CanvasRenderConfig {
+            label_color: "transparent".to_owned(),
+            edge_stroke: "transparent".to_owned(),
+            node_fill: "transparent".to_owned(),
+            accents: std::array::from_fn(|_| "transparent".to_owned()),
+            ..Default::default()
+        };
+        let directive = "%%{init: {'themeVariables': {'primaryTextColor': 'url(#text)', 'lineColor': 'url(#axis)', 'primaryColor': 'url(#outline)', 'pie1': 'url(#bar)', 'pie2': 'url(#line)', 'pie3': 'url(#area)'}}}%%\n";
+        let ir = fm_parser::parse(&format!("{directive}{}", three_series_source(""))).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let plan = GpuRenderPlan::from_layout_and_scene_with_config(&ir, &layout, &scene, &config);
+        assert_three_series_palette(&plan, &config);
+    }
+
     #[test]
     fn both_orientations_preserve_canvas_axes_text_and_measured_marks() {
         for orientation in ["", " horizontal"] {
@@ -1349,6 +1546,7 @@ mod xychart {
 
             let mut canvas = MockCanvas2dContext::new(1200.0, 900.0);
             let config = CanvasRenderConfig::default();
+            assert_three_series_palette(&plan, &config);
             fm_render_canvas::render_to_canvas_with_layout(&ir, &layout, &mut canvas, &config);
             let mut drawn: Vec<_> = canvas
                 .operations()
