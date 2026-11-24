@@ -10568,8 +10568,8 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
             || kw.double_border
             || class.eq_ignore_ascii_case("c4-external")
             || class.eq_ignore_ascii_case("block-beta-space")
-            // Drawn as a stick figure by the slow path, never as the fragment's plain shape.
-            || class == "sequence-participant-actor"
+            // Participant symbols use shared compound paths, never the plain-shape fragment.
+            || class.starts_with("sequence-participant-")
         {
             return None;
         }
@@ -12806,66 +12806,74 @@ fn render_node(
         }
     }
 
-    // A sequence `actor` is a stick figure with its name beneath it, as mermaid draws it — the
-    // box it used to be drawn as is what a plain `participant` looks like, so the two read alike.
-    if ir.diagram_type == DiagramType::Sequence
-        && ir_node.is_some_and(|node| {
-            node.classes
-                .iter()
-                .any(|class| class == "sequence-participant-actor")
-        })
-    {
-        let label_band = node_font_size + 6.0;
-        let figure_h = (h - label_band).max(24.0);
-        let head_r = (figure_h * 0.17).max(5.0);
-        let head_cy = y + 2.0 + head_r;
-        let neck = head_cy + head_r;
-        let hips = neck + figure_h * 0.33;
-        let arms = neck + figure_h * 0.12;
-        let feet = y + figure_h;
-        let reach = head_r * 1.35;
-        let limbs = PathBuilder::new()
-            .move_to(cx, neck)
-            .line_to(cx, hips)
-            .move_to(cx - reach, arms)
-            .line_to(cx + reach, arms)
-            .move_to(cx - reach, feet)
-            .line_to(cx, hips)
-            .line_to(cx + reach, feet)
-            .build();
-        let figure = Element::group()
-            .class("fm-sequence-actor-figure")
-            .child(
-                Element::circle()
-                    .cx(cx)
-                    .cy(head_cy)
-                    .r(head_r)
-                    .fill(&colors.node_fill)
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6),
-            )
-            .child(
-                Element::path()
-                    .d(&limbs)
-                    .fill("none")
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6),
-            );
-        let label = render_node_label_text(
-            ir,
-            label_id,
-            &label_text,
-            cx,
-            y + h - 4.0,
-            node_font_size,
-            fit_width((w + 40.0).max(node_font_size)),
-            label_band,
-            config,
-            colors,
-            text_style.as_deref(),
-            emit_classdef_classes,
+    if let Some(kind) = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index) {
+        let geometry = fm_layout::shapes::sequence_participant_geometry(
+            fm_layout::LayoutRect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            kind,
         );
-        return group.child(figure).child(label);
+        let mut figure = Element::group().class(&format!("fm-sequence-{}-figure", kind.as_str()));
+        for piece in &geometry.paths {
+            let mut path = Element::path()
+                .d(&path_cmds_to_d(&piece.commands))
+                .fill(if piece.fill {
+                    &colors.node_fill
+                } else {
+                    "none"
+                })
+                .stroke(if piece.stroke {
+                    &colors.node_stroke
+                } else {
+                    "none"
+                })
+                .stroke_width(1.6)
+                .attr("stroke-linecap", "round")
+                .attr("stroke-linejoin", "round");
+            // Keep open symbol details unfilled even when a theme or class declares fill.
+            let mut style = shape_style.clone().unwrap_or_default();
+            if !piece.fill {
+                style.push_str(";fill:none");
+            }
+            if !piece.stroke {
+                style.push_str(";stroke:none");
+            }
+            if !style.is_empty() {
+                path = path.attr("style", &style);
+            }
+            figure = figure.child(path);
+        }
+        group = group.child(figure);
+        if detail.show_node_labels && !label_text.is_empty() {
+            let center = geometry.label_bounds.center();
+            let text_span = label_text.lines().count().saturating_sub(1) as f32
+                * node_font_size
+                * config.line_height;
+            group = group.child(render_node_label_text(
+                ir,
+                label_id,
+                &label_text,
+                center.x,
+                center.y - text_span * 0.5 + node_font_size / 3.0,
+                node_font_size,
+                fit_width(geometry.label_bounds.width),
+                geometry.label_bounds.height,
+                config,
+                colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
+            ));
+        }
+        if let Some(node) = ir_node {
+            if config.a11y.text_alternatives {
+                group = group.child(Element::title(&describe_node(node, ir)));
+            }
+            return finish_node_interactions(group, node, ir, config);
+        }
+        return group;
     }
 
     // Create shape element based on node type
@@ -28552,7 +28560,22 @@ marker#arrow-open path {
             .find(|group| group.contains("fm-node-user-sequence-participant-actor"))
             .unwrap_or_else(|| panic!("no actor group: {svg}"));
         assert!(actor.contains("fm-sequence-actor-figure"), "{actor}");
-        assert!(actor.contains("<circle"), "a head: {actor}");
+        let figure = actor
+            .split("fm-sequence-actor-figure")
+            .nth(1)
+            .unwrap()
+            .split("</g>")
+            .next()
+            .unwrap();
+        assert_eq!(
+            figure.matches("<path ").count(),
+            2,
+            "head and limbs: {actor}"
+        );
+        assert!(
+            figure.contains('C'),
+            "the head retains its curved outline: {actor}"
+        );
         assert!(actor.contains(">User</text>"), "its name: {actor}");
         assert!(!actor.contains("<rect"), "no box for an actor: {actor}");
         let participant = svg
@@ -28560,6 +28583,81 @@ marker#arrow-open path {
             .find(|group| group.contains(">Web</text>") && group.contains("fm-node"))
             .expect("participant group");
         assert!(!participant.contains("fm-sequence-actor-figure"));
+    }
+
+    #[test]
+    fn sequence_typed_participants_have_symbols_and_mirrored_captions_on_both_svg_backends() {
+        let parsed = fm_parser::parse(
+            r#"sequenceDiagram
+actor A as Actor
+participant B@{ "type": "boundary" } as Boundary
+participant C@{ "type": "control" } as Control
+participant E@{ "type": "entity" } as Entity
+participant D@{ "type": "database" } as Database
+participant L@{ "type": "collections" } as Collections
+participant Q@{ "type": "queue" } as Queue
+participant P as Plain
+A->>P: request
+"#,
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let mut ir = parsed.ir;
+        ir.meta.init.config.sequence_mirror_actors = Some(true);
+        for node in &mut ir.nodes {
+            node.inline_style = Some(Box::new(fm_core::parse_style_string(
+                "fill:#204060;stroke:#c02040;color:#080808",
+            )));
+        }
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                embed_theme_css: false,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            assert!(!svg.contains("NaN") && !svg.contains("Infinity"));
+            for name in [
+                "Actor",
+                "Boundary",
+                "Control",
+                "Entity",
+                "Database",
+                "Collections",
+                "Queue",
+                "Plain",
+            ] {
+                assert_eq!(
+                    svg.matches(&format!(">{name}</text>")).count(),
+                    2,
+                    "{backend:?}: {name}"
+                );
+            }
+            if backend == SvgBackend::LegacyLayout {
+                for kind in [
+                    "actor",
+                    "boundary",
+                    "control",
+                    "entity",
+                    "database",
+                    "collections",
+                    "queue",
+                ] {
+                    assert_eq!(
+                        svg.matches(&format!("fm-sequence-{kind}-figure")).count(),
+                        2,
+                        "{kind}"
+                    );
+                }
+            }
+            assert!(svg.contains("#204060") && svg.contains("#c02040") && svg.contains("#080808"));
+        }
     }
 
     #[test]
