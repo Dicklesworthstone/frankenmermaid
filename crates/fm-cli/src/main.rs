@@ -1337,6 +1337,11 @@ impl BatchRenderPlan {
         use_cache: bool,
         options: &RenderCommandOptions<'_>,
     ) -> Result<Self> {
+        validate_fnx_options(
+            options.fnx_mode,
+            options.fnx_projection,
+            options.fnx_fallback,
+        )?;
         if options.format == OutputFormat::Png {
             anyhow::bail!(
                 "render-batch does not support --format png; rasterization is not batch-safe here"
@@ -6135,6 +6140,39 @@ fn build_fnx_witness(
     None
 }
 
+fn validate_fnx_options(
+    fnx_mode: FnxModeArg,
+    fnx_projection: FnxProjectionArg,
+    fnx_fallback: FnxFallbackArg,
+) -> Result<()> {
+    if matches!(fnx_mode, FnxModeArg::Enabled)
+        && !cfg!(all(
+            feature = "fnx-integration",
+            not(target_arch = "wasm32")
+        ))
+    {
+        anyhow::bail!("--fnx-mode enabled requires fnx-integration feature");
+    }
+    if fnx_mode.should_use_fnx() {
+        if matches!(
+            fnx_projection,
+            FnxProjectionArg::Directed | FnxProjectionArg::Auto
+        ) {
+            anyhow::bail!(
+                "--fnx-projection {} is not yet supported (use undirected)",
+                fnx_projection.as_str()
+            );
+        }
+        if matches!(fnx_fallback, FnxFallbackArg::Strict | FnxFallbackArg::Warn) {
+            anyhow::bail!(
+                "--fnx-fallback {} is not yet supported (use graceful)",
+                fnx_fallback.as_str()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let RenderCommandOptions {
         parse_mode,
@@ -6170,31 +6208,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     if deck_manifest_out.is_some() && format != OutputFormat::Svg {
         anyhow::bail!("--deck-manifest-out is only supported with --format svg");
     }
-    if matches!(fnx_mode, FnxModeArg::Enabled)
-        && !cfg!(all(
-            feature = "fnx-integration",
-            not(target_arch = "wasm32")
-        ))
-    {
-        anyhow::bail!("--fnx-mode enabled requires fnx-integration feature");
-    }
-    if fnx_mode.should_use_fnx() {
-        if matches!(
-            fnx_projection,
-            FnxProjectionArg::Directed | FnxProjectionArg::Auto
-        ) {
-            anyhow::bail!(
-                "--fnx-projection {} is not yet supported (use undirected)",
-                fnx_projection.as_str()
-            );
-        }
-        if matches!(fnx_fallback, FnxFallbackArg::Strict | FnxFallbackArg::Warn) {
-            anyhow::bail!(
-                "--fnx-fallback {} is not yet supported (use graceful)",
-                fnx_fallback.as_str()
-            );
-        }
-    }
+    validate_fnx_options(fnx_mode, fnx_projection, fnx_fallback)?;
 
     let source = load_input(input, max_input_bytes)?;
     let outcome = render_source(
@@ -9507,31 +9521,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         fnx_projection,
         fnx_fallback,
     } = options;
-    if matches!(fnx_mode, FnxModeArg::Enabled)
-        && !cfg!(all(
-            feature = "fnx-integration",
-            not(target_arch = "wasm32")
-        ))
-    {
-        anyhow::bail!("--fnx-mode enabled requires fnx-integration feature");
-    }
-    if fnx_mode.should_use_fnx() {
-        if matches!(
-            fnx_projection,
-            FnxProjectionArg::Directed | FnxProjectionArg::Auto
-        ) {
-            anyhow::bail!(
-                "--fnx-projection {} is not yet supported (use undirected)",
-                fnx_projection.as_str()
-            );
-        }
-        if matches!(fnx_fallback, FnxFallbackArg::Strict | FnxFallbackArg::Warn) {
-            anyhow::bail!(
-                "--fnx-fallback {} is not yet supported (use graceful)",
-                fnx_fallback.as_str()
-            );
-        }
-    }
+    validate_fnx_options(fnx_mode, fnx_projection, fnx_fallback)?;
 
     let source = load_input(input, max_input_bytes)?;
     let total_start = Instant::now();

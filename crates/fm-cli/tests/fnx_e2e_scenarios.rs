@@ -567,3 +567,34 @@ fn auto_mode_selects_appropriate_algorithm() {
     );
     assert!(json.get("node_count").is_some(), "should report node count");
 }
+
+#[test]
+fn batch_checks_fnx_requirements_before_creating_output() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let source = directory.path().join("input.mmd");
+    let out = directory.path().join("rendered");
+    std::fs::write(&source, "flowchart LR\nA-->B\n").unwrap();
+    let args = [
+        "render-batch",
+        source.to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+        "--fnx-mode",
+        "enabled",
+        "--fnx-projection",
+        "directed",
+    ];
+    let output = run_cli(&args, "");
+    assert!(!output.status.success());
+    let expected = if cfg!(feature = "fnx-integration") {
+        "--fnx-projection directed is not yet supported"
+    } else {
+        "--fnx-mode enabled requires fnx-integration feature"
+    };
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(expected),
+        "unexpected error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!out.exists());
+}
