@@ -1372,26 +1372,11 @@ struct CachedTracedLayout {
     traced: TracedLayout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LayoutMemoKey {
     algorithm: LayoutAlgorithm,
-    cycle_strategy: CycleStrategy,
-    collapse_cycle_clusters: bool,
-    fnx_enabled: bool,
-    edge_routing: EdgeRouting,
-    constraint_solver: ConstraintSolverMode,
-    constraint_solver_wall_clock_valve_ms: u64,
-    node_spacing_bits: u32,
-    rank_spacing_bits: u32,
-    cluster_padding_bits: u32,
-    sequence_participant_gap_extra_bits: u32,
-    sequence_min_message_gap_bits: u32,
-    font_size_bits: u32,
-    avg_char_width_bits: u32,
-    line_height_bits: u32,
-    max_layout_time_ms: usize,
-    max_layout_iterations: usize,
-    max_route_ops: usize,
+    config: LayoutConfig,
+    guardrails: LayoutGuardrails,
 }
 
 /// Coarse-grained incremental engine for repeated layout requests.
@@ -8567,7 +8552,11 @@ impl IncrementalLayoutEngine {
         guardrails: LayoutGuardrails,
     ) -> TracedLayout {
         let start = Instant::now();
-        let key = layout_memo_key(algorithm, &config, guardrails);
+        let key = LayoutMemoKey {
+            algorithm,
+            config: config.clone(),
+            guardrails,
+        };
 
         if let Some(cached) = &self.cached
             && cached.key == key
@@ -8608,9 +8597,7 @@ impl IncrementalLayoutEngine {
         };
         incremental_state.begin_pass();
         let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
-        if let Some(mut traced) =
-            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails, key)
-        {
+        if let Some(mut traced) = self.try_incremental_subgraph_relayout(ir, &key) {
             let selective_recomputed_nodes = traced.trace.incremental.recomputed_nodes.max(1);
             let mut incremental_state = state_guard.finish();
             let snapshot = incremental_state
@@ -8904,20 +8891,29 @@ impl IncrementalLayoutEngine {
     fn try_incremental_subgraph_relayout(
         &self,
         ir: &MermaidDiagramIr,
-        algorithm: LayoutAlgorithm,
-        config: &LayoutConfig,
-        guardrails: LayoutGuardrails,
-        key: LayoutMemoKey,
+        key: &LayoutMemoKey,
     ) -> Option<TracedLayout> {
         let cached_layout = self.cached.as_ref()?;
         let cached_graph = self.dependency_graph_cache.as_ref()?;
         if ir.nodes.len() < INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD {
             return None;
         }
-        if ir.diagram_type != DiagramType::Flowchart {
+        // Region edits describe local graph changes. A simultaneous change to a global layout
+        // input invalidates the clean regions too, including on the size-stable label path.
+        let previous = &cached_layout.ir;
+        if cached_layout.key != *key
+            || ir.diagram_type != DiagramType::Flowchart
+            || previous.diagram_type != ir.diagram_type
+            || previous.direction != ir.direction
+            || previous.meta.node_spacing != ir.meta.node_spacing
+            || previous.meta.rank_spacing != ir.meta.rank_spacing
+            || previous.meta.edge_routing != ir.meta.edge_routing
+            || previous.constraints != ir.constraints
+        {
             return None;
         }
 
+        let config = &key.config;
         if ir.nodes.len() != cached_graph.ir.nodes.len() {
             return None;
         }
@@ -8955,7 +8951,7 @@ impl IncrementalLayoutEngine {
         // in its trace) is exactly what recomputing would produce. Serving it keeps size-stable
         // label edits cheap even on graphs large enough that guardrails re-route the pipeline
         // off Sugiyama, where the selective region relayout below is unavailable.
-        if all_node_changes && cached_layout.key == key && !size_stable_fast_path_disabled() {
+        if all_node_changes && !size_stable_fast_path_disabled() {
             let dirty_node_indexes: BTreeSet<usize> = edits
                 .iter()
                 .filter_map(|e| match e {
@@ -9104,8 +9100,8 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let dispatch = dispatch_layout_algorithm_with_config(ir, algorithm, config);
-        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
+        let dispatch = dispatch_layout_algorithm_with_config(ir, key.algorithm, config);
+        let guard = evaluate_layout_guardrails(ir, dispatch.selected, key.guardrails);
         // A FORCED BUDGET disqualifies selective relayout too (bd-s6tkz), for the same reason a
         // fallback or a non-Sugiyama dispatch already does one line below: the result would not be
         // the layout this IR actually has.
@@ -9376,41 +9372,6 @@ impl IncrementalLayoutEngine {
                 ..trace
             },
         })
-    }
-}
-
-fn layout_memo_key(
-    algorithm: LayoutAlgorithm,
-    config: &LayoutConfig,
-    guardrails: LayoutGuardrails,
-) -> LayoutMemoKey {
-    let metrics = config
-        .font_metrics
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
-    LayoutMemoKey {
-        algorithm,
-        cycle_strategy: config.cycle_strategy,
-        collapse_cycle_clusters: config.collapse_cycle_clusters,
-        fnx_enabled: config.fnx_enabled,
-        edge_routing: config.edge_routing,
-        constraint_solver: config.constraint_solver,
-        constraint_solver_wall_clock_valve_ms: config.constraint_solver_wall_clock_valve_ms,
-        node_spacing_bits: config.spacing.node_spacing.to_bits(),
-        rank_spacing_bits: config.spacing.rank_spacing.to_bits(),
-        cluster_padding_bits: config.spacing.cluster_padding.to_bits(),
-        sequence_participant_gap_extra_bits: config
-            .spacing
-            .sequence_participant_gap_extra
-            .to_bits(),
-        sequence_min_message_gap_bits: config.spacing.sequence_min_message_gap.to_bits(),
-        font_size_bits: metrics.font_size().to_bits(),
-        avg_char_width_bits: metrics.avg_char_width().to_bits(),
-        line_height_bits: metrics.line_height_px().to_bits(),
-        max_layout_time_ms: guardrails.max_layout_time_ms,
-        max_layout_iterations: guardrails.max_layout_iterations,
-        max_route_ops: guardrails.max_route_ops,
     }
 }
 
@@ -32874,6 +32835,66 @@ mod tests {
         // that guardrails re-route off Sugiyama — proving the fast path fires ahead of dispatch
         // and still matches the (full-recompute) slow-path fallback there.
         assert_size_stable_fast_path_matches_slow_path(500);
+    }
+
+    #[test]
+    fn incremental_layout_recomputes_for_global_changes_alongside_a_local_edit() {
+        let baseline = sized_subgraph_dependency_ir(32);
+        let guardrails = LayoutGuardrails::default();
+        for change in ["direction", "source spacing", "configured spacing"] {
+            let mut engine = IncrementalLayoutEngine::default();
+            let mut config = LayoutConfig::default();
+            let algorithm = LayoutAlgorithm::Sugiyama;
+            let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+                &baseline,
+                algorithm,
+                config.clone(),
+                guardrails,
+            );
+
+            let mut edited = baseline.clone();
+            let label = edited.nodes[5].label.unwrap();
+            edited.labels[label.0].text = "Node 6".to_owned();
+            match change {
+                "direction" => edited.direction = GraphDirection::LR,
+                "source spacing" => edited.meta.rank_spacing = Some(180),
+                _ => config.spacing.rank_spacing = 180.0,
+            }
+            let fresh =
+                super::layout_diagram_traced_with_config(&edited, algorithm, config.clone());
+            let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+                &edited, algorithm, config, guardrails,
+            );
+            assert_ne!(warm.layout.bounds, fresh.layout.bounds, "{change}");
+            assert_eq!(updated.layout.nodes, fresh.layout.nodes, "{change}");
+            assert_eq!(updated.layout.edges, fresh.layout.edges, "{change}");
+            assert_eq!(updated.layout.bounds, fresh.layout.bounds, "{change}");
+        }
+    }
+
+    #[test]
+    fn incremental_sequence_self_loop_resizes_on_config_only_edit() {
+        let ir = parse("sequenceDiagram\nA->>A: ping\nA->>B: pong").ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut config = LayoutConfig::default();
+        let algorithm = LayoutAlgorithm::Sequence;
+        let guardrails = LayoutGuardrails::default();
+        let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
+        );
+
+        config.spacing.sequence_self_loop_width = 300.0;
+        let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
+        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir, algorithm, config, guardrails,
+        );
+        assert_ne!(warm.layout.edges, fresh.layout.edges);
+        assert_eq!(updated.layout.edges, fresh.layout.edges);
+        assert_eq!(updated.layout.nodes, fresh.layout.nodes);
+        assert!(!updated.trace.incremental.cache_hit);
     }
 
     #[test]
