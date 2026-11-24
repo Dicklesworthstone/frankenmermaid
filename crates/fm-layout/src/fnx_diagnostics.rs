@@ -18,14 +18,97 @@
 //! - Rationale explaining why this is suggested
 //! - Concrete action steps
 
+use std::cell::RefCell;
+use std::time::Instant;
+
 use fm_core::{IrNodeId, MermaidDiagramIr, Span};
 use fnx_algorithms::{
     ArticulationPointsResult, BridgesResult, ComponentsResult, CycleBasisResult,
     articulation_points, bridges, connected_components, cycle_basis,
 };
 
+use crate::FnxExecutionTrace;
 use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph_with_policy};
 use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
+
+thread_local! {
+    /// Evidence belongs to the current layout call, never to a later request on this thread.
+    static FNX_EXECUTION: RefCell<Option<FnxExecutionTrace>> = const { RefCell::new(None) };
+}
+
+struct ExecutionCaptureGuard {
+    previous: Option<FnxExecutionTrace>,
+}
+
+impl Drop for ExecutionCaptureGuard {
+    fn drop(&mut self) {
+        FNX_EXECUTION.with(|execution| {
+            execution.replace(self.previous.take());
+        });
+    }
+}
+
+/// Capture only algorithms invoked within this call, restoring any outer capture on unwind.
+pub(crate) fn capture_fnx_execution<T>(f: impl FnOnce() -> T) -> (T, FnxExecutionTrace) {
+    let previous =
+        FNX_EXECUTION.with(|execution| execution.replace(Some(FnxExecutionTrace::default())));
+    let guard = ExecutionCaptureGuard { previous };
+    let result = f();
+    let trace = FNX_EXECUTION.with(|execution| execution.borrow_mut().take().unwrap_or_default());
+    drop(guard);
+    (result, trace)
+}
+
+struct AlgorithmTimer {
+    started: Instant,
+}
+
+impl Drop for AlgorithmTimer {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        FNX_EXECUTION.with(|execution| {
+            if let Some(trace) = execution.borrow_mut().as_mut() {
+                // Preserve sub-microsecond contributions until the final evidence conversion.
+                trace.analysis_time = trace.analysis_time.saturating_add(elapsed);
+            }
+        });
+    }
+}
+
+/// Record an actual FNX invocation and its duration without holding a borrow across the call.
+pub(crate) fn measure_fnx_algorithm<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    let capturing = FNX_EXECUTION.with(|execution| {
+        let mut execution = execution.borrow_mut();
+        let Some(trace) = execution.as_mut() else {
+            return false;
+        };
+        if !trace.algorithms_invoked.contains(&name) {
+            trace.algorithms_invoked.push(name);
+        }
+        true
+    });
+    if !capturing {
+        return f();
+    }
+
+    let timer = AlgorithmTimer {
+        started: Instant::now(),
+    };
+    let result = f();
+    drop(timer);
+    result
+}
+
+/// Preserve the first observed cancellation, including cancellation before any algorithm ran.
+pub(crate) fn record_fnx_budget_exceeded(reason: &BudgetExceededReason) {
+    FNX_EXECUTION.with(|execution| {
+        if let Some(trace) = execution.borrow_mut().as_mut() {
+            trace
+                .budget_exceeded_reason
+                .get_or_insert(reason.reason_code());
+        }
+    });
+}
 
 // ============================================================================
 // Diagnostic Codes
@@ -482,7 +565,8 @@ fn analyze_structure_with_projection_and_budget(
         }
 
         // Run connected components analysis
-        let comp_result = connected_components(&graph);
+        let comp_result =
+            measure_fnx_algorithm("connected_components", || connected_components(&graph));
         analyze_components(ir, &table, &comp_result, &mut results);
         results
             .completed_passes
@@ -493,7 +577,8 @@ fn analyze_structure_with_projection_and_budget(
         }
 
         // Articulation points and bridges remain meaningful within disconnected components.
-        let art_result = articulation_points(&graph);
+        let art_result =
+            measure_fnx_algorithm("articulation_points", || articulation_points(&graph));
         analyze_articulation_points(ir, &table, &art_result, &mut results);
         results
             .completed_passes
@@ -503,7 +588,7 @@ fn analyze_structure_with_projection_and_budget(
             return results;
         }
 
-        let bridge_result = bridges(&graph);
+        let bridge_result = measure_fnx_algorithm("bridges", || bridges(&graph));
         analyze_bridges(ir, &table, &bridge_result, &mut results);
         results.completed_passes.push(FnxAnalysisPass::Bridges);
         exec.record_work(base_work);
@@ -512,7 +597,7 @@ fn analyze_structure_with_projection_and_budget(
         }
 
         // Run cycle analysis
-        let cycle_result = cycle_basis(&graph, None);
+        let cycle_result = measure_fnx_algorithm("cycle_basis", || cycle_basis(&graph, None));
         analyze_cycles(ir, &table, &cycle_result, &mut results);
         results.completed_passes.push(FnxAnalysisPass::CycleBasis);
         exec.record_work(base_work);
@@ -520,6 +605,7 @@ fn analyze_structure_with_projection_and_budget(
         results
     });
     if let BudgetResult::Cancelled { reason, partial } = &mut outcome {
+        record_fnx_budget_exceeded(reason);
         // Preserve cancellation in the value itself: the default entry point and cache return
         // this value directly, and `.into_value()` must not erase an incomplete-analysis warning.
         partial
@@ -762,6 +848,215 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn execution_capture_deduplicates_invocations_and_accumulates_time() {
+        use std::time::Duration;
+
+        measure_fnx_algorithm("outside_capture", || 7);
+        let (first_duration, trace) = capture_fnx_execution(|| {
+            measure_fnx_algorithm("first", || std::thread::sleep(Duration::from_millis(1)));
+            let first_duration =
+                FNX_EXECUTION.with(|execution| execution.borrow().as_ref().unwrap().analysis_time);
+            measure_fnx_algorithm("second", || std::thread::sleep(Duration::from_millis(1)));
+            assert_eq!(measure_fnx_algorithm("first", || 42), 42);
+            first_duration
+        });
+        assert_eq!(trace.algorithms_invoked, ["first", "second"]);
+        assert!(first_duration >= Duration::from_millis(1));
+        assert!(trace.analysis_time >= first_duration + Duration::from_millis(1));
+
+        let mut other_timing = trace.clone();
+        other_timing.analysis_time += Duration::from_secs(1);
+        assert_eq!(trace, other_timing, "elapsed time is not trace identity");
+        other_timing.algorithms_invoked.push("another_pass");
+        assert_ne!(trace, other_timing);
+
+        let (_, next) = capture_fnx_execution(|| ());
+        assert!(next.algorithms_invoked.is_empty());
+        assert!(next.analysis_time.is_zero());
+        assert!(next.budget_exceeded_reason.is_none());
+    }
+
+    #[test]
+    fn execution_captures_restore_outer_scope_after_nesting_and_unwind() {
+        let (inner, outer) = capture_fnx_execution(|| {
+            measure_fnx_algorithm("outer_before", || ());
+            let (_, inner) = capture_fnx_execution(|| {
+                measure_fnx_algorithm("inner", || ());
+            });
+            let aborted = std::panic::catch_unwind(|| {
+                capture_fnx_execution(|| {
+                    measure_fnx_algorithm::<()>("aborted_inner", || panic!("test unwind"));
+                });
+            });
+            assert!(aborted.is_err());
+            let attempted = std::panic::catch_unwind(|| {
+                measure_fnx_algorithm::<()>("attempted", || panic!("test algorithm unwind"));
+            });
+            assert!(attempted.is_err());
+            measure_fnx_algorithm("outer_after", || ());
+            inner
+        });
+        assert_eq!(inner.algorithms_invoked, ["inner"]);
+        assert_eq!(
+            outer.algorithms_invoked,
+            ["outer_before", "attempted", "outer_after"]
+        );
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                capture_fnx_execution(|| panic!("test outer unwind"));
+            })
+            .is_err()
+        );
+        let (_, next) = capture_fnx_execution(|| ());
+        assert!(next.algorithms_invoked.is_empty());
+        assert!(next.analysis_time.is_zero());
+    }
+
+    #[test]
+    fn execution_captures_keep_concurrent_threads_independent() {
+        let (worker_trace, main_trace) = capture_fnx_execution(|| {
+            measure_fnx_algorithm("main_before", || ());
+            let worker = std::thread::spawn(|| {
+                measure_fnx_algorithm("uncaptured_worker", || ());
+                capture_fnx_execution(|| measure_fnx_algorithm("worker", || ())).1
+            });
+            measure_fnx_algorithm("main_after", || ());
+            worker.join().unwrap()
+        });
+        assert_eq!(main_trace.algorithms_invoked, ["main_before", "main_after"]);
+        assert_eq!(worker_trace.algorithms_invoked, ["worker"]);
+    }
+
+    #[test]
+    fn execution_diagnostics_report_actual_passes_and_skip_cache_hits() {
+        let ir = make_simple_chain();
+        let (result, trace) = capture_fnx_execution(|| {
+            analyze_structure_with_budget(&ir, AnalysisBudget::unlimited())
+        });
+        assert!(result.is_completed());
+        assert_eq!(
+            trace.algorithms_invoked,
+            [
+                "connected_components",
+                "articulation_points",
+                "bridges",
+                "cycle_basis"
+            ]
+        );
+        assert!(trace.budget_exceeded_reason.is_none());
+
+        let mut cache = crate::fnx_cache::AnalysisCache::default();
+        let projection = ProjectionConfig::default();
+        let results = result.into_value().unwrap();
+        cache.put_diagnostics(&ir, &projection, results);
+        let (cached, trace) =
+            capture_fnx_execution(|| analyze_structure_cached(&ir, &projection, &mut cache));
+        assert_eq!(cached.completed_passes.len(), 4);
+        assert!(
+            trace.algorithms_invoked.is_empty(),
+            "cached results are not new invocations"
+        );
+        assert!(trace.analysis_time.is_zero());
+    }
+
+    #[test]
+    fn execution_diagnostics_preserve_budget_evidence_before_and_after_a_pass() {
+        let ir = make_simple_chain();
+        let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
+        for (work_budget, expected) in [(0, vec![]), (base_work + 1, vec!["connected_components"])]
+        {
+            let (result, trace) = capture_fnx_execution(|| {
+                analyze_structure_with_budget(
+                    &ir,
+                    AnalysisBudget::unlimited().with_work_budget(work_budget),
+                )
+            });
+            assert!(result.is_cancelled());
+            assert_eq!(trace.algorithms_invoked, expected);
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+            if expected.is_empty() {
+                assert!(trace.analysis_time.is_zero());
+            }
+        }
+    }
+
+    #[test]
+    fn execution_ordering_reports_only_invoked_centrality() {
+        let ir = make_simple_chain();
+        let (scores, trace) =
+            capture_fnx_execution(|| crate::fnx_ordering::compute_centrality_scores(&ir));
+        assert!(scores.computed);
+        assert_eq!(trace.algorithms_invoked, ["degree_centrality"]);
+
+        let (_, empty) = capture_fnx_execution(|| {
+            crate::fnx_ordering::compute_centrality_scores(&MermaidDiagramIr::default())
+        });
+        assert!(empty.algorithms_invoked.is_empty());
+        assert!(empty.analysis_time.is_zero());
+    }
+
+    #[test]
+    fn execution_criticality_reports_actual_calls_and_partial_budget_work() {
+        use crate::fnx_cycle_scorer::{
+            CriticalityScoringConfig, compute_criticality_scores_with_budget,
+        };
+
+        let ir = make_simple_chain();
+        let config = CriticalityScoringConfig::default();
+        let base_work = (ir.nodes.len() + ir.edges.len()) as u64;
+        let (result, full) = capture_fnx_execution(|| {
+            compute_criticality_scores_with_budget(&ir, &config, AnalysisBudget::unlimited())
+        });
+        assert!(result.is_completed());
+        assert_eq!(
+            full.algorithms_invoked,
+            ["bridges", "articulation_points", "degree_centrality"]
+        );
+        assert!(full.budget_exceeded_reason.is_none());
+
+        for (work_budget, expected) in [(0, vec![]), (base_work + 1, vec!["bridges"])] {
+            let (result, trace) = capture_fnx_execution(|| {
+                compute_criticality_scores_with_budget(
+                    &ir,
+                    &config,
+                    AnalysisBudget::unlimited().with_work_budget(work_budget),
+                )
+            });
+            assert!(result.is_cancelled());
+            assert_eq!(trace.algorithms_invoked, expected);
+            assert_eq!(trace.budget_exceeded_reason, Some("work_exceeded"));
+            assert!(result.into_value().unwrap().scores.is_empty());
+        }
+    }
+
+    #[test]
+    fn execution_budget_reason_is_first_observed_and_scoped() {
+        let work = BudgetExceededReason::WorkExceeded {
+            budget: 0,
+            consumed: 1,
+        };
+        let time = BudgetExceededReason::TimeExceeded {
+            budget_ms: 0,
+            elapsed_ms: 1,
+        };
+        record_fnx_budget_exceeded(&work);
+        let (inner, outer) = capture_fnx_execution(|| {
+            record_fnx_budget_exceeded(&work);
+            let (_, inner) = capture_fnx_execution(|| record_fnx_budget_exceeded(&time));
+            record_fnx_budget_exceeded(&time);
+            inner
+        });
+        assert_eq!(inner.budget_exceeded_reason, Some("time_exceeded"));
+        assert_eq!(outer.budget_exceeded_reason, Some("work_exceeded"));
+        assert!(outer.algorithms_invoked.is_empty());
+        assert!(outer.analysis_time.is_zero());
+        let (_, next) = capture_fnx_execution(|| ());
+        assert!(next.budget_exceeded_reason.is_none());
+        assert_ne!(outer, next, "budget cancellation is part of trace identity");
     }
 
     fn make_disconnected_graph() -> MermaidDiagramIr {

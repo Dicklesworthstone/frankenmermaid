@@ -15,6 +15,7 @@ use fnx_algorithms::degree_centrality;
 use fnx_classes::Graph;
 
 use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph, ir_to_graph_with_policy};
+use crate::fnx_diagnostics::measure_fnx_algorithm;
 
 // ============================================================================
 // Quantization Policy
@@ -118,7 +119,7 @@ pub fn compute_centrality_scores_with_config(
 }
 
 fn quantized_degree_scores(graph: &Graph, table: &ProjectionTable) -> NodeCentralityScores {
-    let centrality_result = degree_centrality(graph);
+    let centrality_result = measure_fnx_algorithm("degree_centrality", || degree_centrality(graph));
 
     let mut scores = NodeCentralityScores {
         degree: BTreeMap::new(),

@@ -1145,7 +1145,7 @@ struct RenderResult {
 struct FnxWitness {
     /// Whether FNX integration was enabled for this render.
     enabled: bool,
-    /// Whether FNX analysis was actually used (may be disabled by config).
+    /// Whether this request actually invoked an FNX algorithm.
     used: bool,
     /// Projection mode used for graph analysis.
     projection_mode: String,
@@ -5680,22 +5680,26 @@ fn build_fnx_witness(
     if !fnx_enabled {
         return None;
     }
-    let layout_selected = traced_layout.trace.dispatch.selected;
-    let uses_sugiyama = layout_selected == fm_layout::LayoutAlgorithm::Sugiyama;
-    // fnx_enabled is always true here (early return above), so `used` simplifies to `uses_sugiyama`
-    let used = uses_sugiyama;
-    let algorithms_invoked = if used {
-        vec!["degree_centrality".to_string()]
-    } else {
-        Vec::new()
-    };
-    // fnx_enabled is always true here (early return above)
-    let (fallback_level, fallback_reason) = if !uses_sugiyama {
+    let execution = &traced_layout.trace.fnx;
+    let used = !execution.algorithms_invoked.is_empty();
+    let algorithms_invoked = execution
+        .algorithms_invoked
+        .iter()
+        .map(|algorithm| (*algorithm).to_string())
+        .collect();
+    let (fallback_level, fallback_reason) = if let Some(reason) = execution.budget_exceeded_reason {
+        (if used { "fnx_partial" } else { "fnx_disabled" }, reason)
+    } else if traced_layout.trace.incremental.cache_hit {
+        ("layout_cached", "layout_cache_hit")
+    } else if !used {
         ("fnx_disabled", "not_applicable")
     } else {
         ("fnx_full", "none")
     };
+    // The current render analyses use the undirected adapter, regardless of
+    // the requested projection. Native SCC helpers are not FNX executions.
     let projection_mode = "undirected";
+    let layout_selected = traced_layout.trace.dispatch.selected;
     let node_count = traced_layout.layout.stats.node_count.to_string();
     let edge_count = traced_layout.layout.stats.edge_count.to_string();
     let crossings_before = traced_layout
@@ -5704,9 +5708,10 @@ fn build_fnx_witness(
         .crossing_count_before_refinement
         .to_string();
     let crossings_after = traced_layout.layout.stats.crossing_count.to_string();
+    // Identity describes the rendered result, so measured time and whether
+    // this request recomputed or reused it must not change the hash.
     let results_hash = fnx_results_hash(&[
         layout_selected.as_str(),
-        if used { "used" } else { "unused" },
         projection_mode,
         fnx_fallback.as_str(),
         &node_count,
@@ -5720,8 +5725,11 @@ fn build_fnx_witness(
         used,
         projection_mode: projection_mode.to_string(),
         algorithms_invoked,
-        analysis_time_us: 0,
-        budget_exceeded: false,
+        analysis_time_us: execution
+            .analysis_time
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+        budget_exceeded: execution.budget_exceeded_reason.is_some(),
         fallback_level: fallback_level.to_string(),
         fallback_reason: fallback_reason.to_string(),
         results_hash,
@@ -5798,6 +5806,220 @@ fn build_fnx_validation_witness(
         fallback_reason: fallback_reason.to_string(),
         results_hash,
     })
+}
+
+#[cfg(all(test, feature = "fnx-integration", not(target_arch = "wasm32")))]
+mod fnx_render_witness_tests {
+    use super::*;
+    use fm_core::{ArrowType, GraphDirection, IrEdge, IrEndpoint, IrNode, IrNodeId};
+    use fm_layout::IncrementalLayoutEngine;
+    use std::time::Duration;
+
+    fn star_ir(node_count: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for index in 0..node_count {
+            ir.nodes.push(IrNode {
+                id: format!("node_{index}"),
+                ..IrNode::default()
+            });
+            if index > 0 {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(0)),
+                    to: IrEndpoint::Node(IrNodeId(index)),
+                    arrow: ArrowType::Arrow,
+                    ..IrEdge::default()
+                });
+            }
+        }
+        ir
+    }
+
+    fn trace(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> TracedLayout {
+        layout_diagram_traced_with_config_and_guardrails(
+            ir,
+            algorithm,
+            LayoutConfig {
+                fnx_enabled: true,
+                ..LayoutConfig::default()
+            },
+            LayoutGuardrails::default(),
+        )
+    }
+
+    fn witness(traced: &TracedLayout) -> FnxWitness {
+        build_fnx_witness(
+            traced,
+            true,
+            FnxProjectionArg::Directed,
+            FnxFallbackArg::Graceful,
+        )
+        .expect("FNX-enabled renders have a witness")
+    }
+
+    #[test]
+    fn auto_tree_reports_the_algorithms_that_selected_it() {
+        let traced = trace(&star_ir(12), LayoutAlgorithm::Auto);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+
+        let report = witness(&traced);
+        let mut algorithms = report.algorithms_invoked.clone();
+        algorithms.sort();
+        assert_eq!(
+            algorithms,
+            [
+                "articulation_points",
+                "bridges",
+                "connected_components",
+                "degree_centrality",
+            ]
+        );
+        assert!(report.enabled);
+        assert!(report.used);
+        assert_eq!(report.projection_mode, "undirected");
+        assert_eq!(report.fallback_level, "fnx_full");
+        assert_eq!(report.fallback_reason, "none");
+        assert!(!report.budget_exceeded);
+        assert_eq!(
+            report.analysis_time_us,
+            traced
+                .trace
+                .fnx
+                .analysis_time
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64
+        );
+    }
+
+    #[test]
+    fn explicit_tree_and_empty_sugiyama_do_not_invent_fnx_calls() {
+        let cases = [
+            (star_ir(12), LayoutAlgorithm::Tree),
+            (
+                MermaidDiagramIr::empty(DiagramType::Flowchart),
+                LayoutAlgorithm::Sugiyama,
+            ),
+        ];
+        for (ir, algorithm) in cases {
+            let traced = trace(&ir, algorithm);
+            let report = witness(&traced);
+            assert!(!report.used);
+            assert!(report.algorithms_invoked.is_empty());
+            assert_eq!(traced.trace.fnx.analysis_time, Duration::ZERO);
+            assert_eq!(report.analysis_time_us, 0);
+            assert!(!report.budget_exceeded);
+            assert_eq!(report.fallback_level, "fnx_disabled");
+            assert_eq!(report.fallback_reason, "not_applicable");
+        }
+    }
+
+    #[test]
+    fn disabled_cycle_aware_render_does_not_call_the_backend() {
+        let mut ir = star_ir(3);
+        ir.edges[1].from = IrEndpoint::Node(IrNodeId(1));
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(2)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let traced = layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            LayoutConfig {
+                fnx_enabled: false,
+                cycle_strategy: CycleStrategy::CycleAware,
+                ..LayoutConfig::default()
+            },
+            LayoutGuardrails::default(),
+        );
+
+        assert!(traced.trace.fnx.algorithms_invoked.is_empty());
+        assert_eq!(traced.trace.fnx.analysis_time, Duration::ZERO);
+        assert!(
+            build_fnx_witness(
+                &traced,
+                false,
+                FnxProjectionArg::Auto,
+                FnxFallbackArg::Graceful,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_hits_report_no_current_analysis_and_preserve_result_identity() {
+        let ir = star_ir(12);
+        for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+            let mut engine = IncrementalLayoutEngine::default();
+            let mut render = || {
+                engine.layout_diagram_traced_with_config_and_guardrails(
+                    &ir,
+                    algorithm,
+                    LayoutConfig {
+                        fnx_enabled: true,
+                        ..LayoutConfig::default()
+                    },
+                    LayoutGuardrails::default(),
+                )
+            };
+            let first = render();
+            let cached = render();
+            assert!(!first.trace.incremental.cache_hit);
+            assert!(cached.trace.incremental.cache_hit);
+
+            let first_report = witness(&first);
+            let cached_report = witness(&cached);
+            assert_eq!(first_report.used, algorithm == LayoutAlgorithm::Auto);
+            assert!(!cached_report.used);
+            assert!(cached_report.algorithms_invoked.is_empty());
+            assert_eq!(cached.trace.fnx.analysis_time, Duration::ZERO);
+            assert_eq!(cached_report.analysis_time_us, 0);
+            assert!(!cached_report.budget_exceeded);
+            assert_eq!(cached_report.fallback_level, "layout_cached");
+            assert_eq!(cached_report.fallback_reason, "layout_cache_hit");
+            assert_eq!(first_report.results_hash, cached_report.results_hash);
+        }
+    }
+
+    #[test]
+    fn timing_is_telemetry_and_large_durations_saturate() {
+        let mut first = trace(&star_ir(12), LayoutAlgorithm::Auto);
+        first.trace.fnx.analysis_time = Duration::from_micros(42);
+        let mut second = first.clone();
+        second.trace.fnx.analysis_time = Duration::MAX;
+
+        assert_eq!(first, second);
+        let first_report = witness(&first);
+        let second_report = witness(&second);
+        assert_eq!(first_report.analysis_time_us, 42);
+        assert_eq!(second_report.analysis_time_us, u64::MAX);
+        assert_eq!(first_report.results_hash, second_report.results_hash);
+        assert_eq!(
+            first_report.algorithms_invoked,
+            second_report.algorithms_invoked
+        );
+    }
+
+    #[test]
+    fn budget_witness_distinguishes_partial_work_from_projection_only() {
+        let mut traced = trace(&star_ir(12), LayoutAlgorithm::Tree);
+        traced.trace.fnx.budget_exceeded_reason = Some("work_exceeded");
+        let projection_only = witness(&traced);
+        assert!(!projection_only.used);
+        assert!(projection_only.algorithms_invoked.is_empty());
+        assert!(projection_only.budget_exceeded);
+        assert_eq!(projection_only.fallback_level, "fnx_disabled");
+        assert_eq!(projection_only.fallback_reason, "work_exceeded");
+
+        traced.trace.fnx.algorithms_invoked = vec!["connected_components"];
+        let partial = witness(&traced);
+        assert!(partial.used);
+        assert_eq!(partial.algorithms_invoked, ["connected_components"]);
+        assert!(partial.budget_exceeded);
+        assert_eq!(partial.fallback_level, "fnx_partial");
+        assert_eq!(partial.fallback_reason, "work_exceeded");
+    }
 }
 
 #[cfg(all(test, feature = "fnx-integration", not(target_arch = "wasm32")))]

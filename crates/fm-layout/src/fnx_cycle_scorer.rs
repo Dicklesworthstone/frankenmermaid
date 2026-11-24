@@ -21,6 +21,7 @@ use fnx_algorithms::{
 
 use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph_with_policy};
 use crate::fnx_budget::{AnalysisBudget, BudgetExceededReason, BudgetExecutor, BudgetResult};
+use crate::fnx_diagnostics::{measure_fnx_algorithm, record_fnx_budget_exceeded};
 
 // ============================================================================
 // Scoring Configuration
@@ -210,19 +211,21 @@ fn compute_criticality_scores_with_projection_and_budget(
         }
 
         // Run FNX analyses
-        let bridges_result = bridges(&graph);
+        let bridges_result = measure_fnx_algorithm("bridges", || bridges(&graph));
         exec.record_work(base_work);
         if exec.is_exceeded() {
             return CriticalityScoringResults::default();
         }
 
-        let articulation_result = articulation_points(&graph);
+        let articulation_result =
+            measure_fnx_algorithm("articulation_points", || articulation_points(&graph));
         exec.record_work(base_work);
         if exec.is_exceeded() {
             return CriticalityScoringResults::default();
         }
 
-        let centrality_result = degree_centrality(&graph);
+        let centrality_result =
+            measure_fnx_algorithm("degree_centrality", || degree_centrality(&graph));
         exec.record_work(base_work);
 
         let mut results = CriticalityScoringResults {
@@ -294,6 +297,7 @@ fn compute_criticality_scores_with_projection_and_budget(
         results
     });
     if let BudgetResult::Cancelled { reason, partial } = &mut outcome {
+        record_fnx_budget_exceeded(reason);
         partial
             .get_or_insert_with(CriticalityScoringResults::default)
             .budget_exceeded = Some(reason.clone());
@@ -868,8 +872,8 @@ mod tests {
         let previous_cache =
             crate::FNX_CYCLE_ANALYSIS_CACHE.with(|cache| std::mem::take(&mut *cache.borrow_mut()));
 
-        let first = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2]);
-        let second = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2]);
+        let first = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2], true);
+        let second = crate::cycle_removal(&ir, crate::CycleStrategy::CycleAware, &[0, 1, 2], true);
         assert!(!first.reversed_edge_indexes.is_empty());
         assert_eq!(first.reversed_edge_indexes, second.reversed_edge_indexes);
         let oriented = crate::oriented_edges(&ir, &first.reversed_edge_indexes);

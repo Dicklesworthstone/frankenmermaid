@@ -1310,7 +1310,27 @@ pub struct LayoutTrace {
     pub guard: LayoutGuardDecision,
     pub snapshots: Vec<LayoutStageSnapshot>,
     pub incremental: IncrementalRecomputeTrace,
+    pub fnx: FnxExecutionTrace,
 }
+
+/// FNX operations executed by this layout request, excluding cached work.
+///
+/// Elapsed time is telemetry and does not participate in deterministic trace equality.
+#[derive(Debug, Clone, Default)]
+pub struct FnxExecutionTrace {
+    pub algorithms_invoked: Vec<&'static str>,
+    pub analysis_time: std::time::Duration,
+    pub budget_exceeded_reason: Option<&'static str>,
+}
+
+impl PartialEq for FnxExecutionTrace {
+    fn eq(&self, other: &Self) -> bool {
+        self.algorithms_invoked == other.algorithms_invoked
+            && self.budget_exceeded_reason == other.budget_exceeded_reason
+    }
+}
+
+impl Eq for FnxExecutionTrace {}
 
 #[derive(Debug, Clone)]
 pub struct IncrementalRecomputeTrace {
@@ -7726,8 +7746,9 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
     let start = Instant::now();
-    let mut traced =
-        compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
+    let mut traced = trace_fnx_layout(|| {
+        compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails)
+    });
     let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
     traced.trace.incremental = IncrementalRecomputeTrace {
         query_type: "layout_full_recompute",
@@ -7745,6 +7766,19 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
         "incremental.recompute"
     );
     traced
+}
+
+fn trace_fnx_layout(layout: impl FnOnce() -> TracedLayout) -> TracedLayout {
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    {
+        let (mut traced, execution) = crate::fnx_diagnostics::capture_fnx_execution(layout);
+        traced.trace.fnx = execution;
+        traced
+    }
+    #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+    {
+        layout()
+    }
 }
 
 #[must_use]
@@ -8522,6 +8556,16 @@ impl IncrementalLayoutEngine {
         config: LayoutConfig,
         guardrails: LayoutGuardrails,
     ) -> TracedLayout {
+        trace_fnx_layout(|| self.compute_traced_layout(ir, algorithm, config, guardrails))
+    }
+
+    fn compute_traced_layout(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        algorithm: LayoutAlgorithm,
+        config: LayoutConfig,
+        guardrails: LayoutGuardrails,
+    ) -> TracedLayout {
         let start = Instant::now();
         let key = layout_memo_key(algorithm, &config, guardrails);
 
@@ -9060,7 +9104,7 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let dispatch = dispatch_layout_algorithm(ir, algorithm);
+        let dispatch = dispatch_layout_algorithm_with_config(ir, algorithm, config);
         let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
         // A FORCED BUDGET disqualifies selective relayout too (bd-s6tkz), for the same reason a
         // fallback or a non-Sugiyama dispatch already does one line below: the result would not be
@@ -9374,6 +9418,7 @@ fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
+#[cfg(test)]
 fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) -> LayoutDispatch {
     dispatch_layout_algorithm_with_config(ir, requested, &LayoutConfig::default())
 }
@@ -9656,16 +9701,25 @@ fn compute_fnx_layout_selection_signals(
     ir: &MermaidDiagramIr,
     config: &LayoutConfig,
 ) -> Option<FnxLayoutSelectionSignals> {
+    use crate::fnx_diagnostics::measure_fnx_algorithm;
+
     if !config.fnx_enabled || ir.nodes.is_empty() {
         return None;
     }
 
     let (graph, _) = ir_to_graph(ir);
-    let component_count = connected_components(&graph).components.len();
+    let component_count =
+        measure_fnx_algorithm("connected_components", || connected_components(&graph))
+            .components
+            .len();
     let (articulation_point_count, bridge_count) = if component_count <= 1 {
         (
-            articulation_points(&graph).nodes.len(),
-            bridges(&graph).edges.len(),
+            measure_fnx_algorithm("articulation_points", || articulation_points(&graph))
+                .nodes
+                .len(),
+            measure_fnx_algorithm("bridges", || bridges(&graph))
+                .edges
+                .len(),
         )
     } else {
         (0, 0)
@@ -10346,7 +10400,12 @@ pub(crate) fn cycle_preparation(
     config: &LayoutConfig,
 ) -> (Vec<usize>, CycleRemovalResult) {
     let node_priority = stable_node_priorities(ir);
-    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
+    let cycle_result = cycle_removal(
+        ir,
+        config.cycle_strategy,
+        &node_priority,
+        config.fnx_enabled,
+    );
     (node_priority, cycle_result)
 }
 
@@ -18745,7 +18804,7 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     // a feedback edge can make a tree child precede its parent, invalidating contour alignment.
     let weighted_cycles = ir.edges.iter().any(|edge| edge.min_length() > 1).then(|| {
         let priorities = stable_node_priorities(ir);
-        let cycles = cycle_removal(ir, CycleStrategy::default(), &priorities);
+        let cycles = cycle_removal(ir, CycleStrategy::default(), &priorities, false);
         (priorities, cycles)
     });
 
@@ -21158,7 +21217,10 @@ fn cycle_removal_fnx_cycle_aware(
     edges: &[OrientedEdge],
     node_priority: &[usize],
     dfs_back_edges: &BTreeSet<usize>,
+    fnx_enabled: bool,
 ) -> BTreeSet<usize> {
+    #[cfg(not(feature = "fnx-integration"))]
+    let _ = fnx_enabled;
     if dfs_back_edges.is_empty() {
         return BTreeSet::new();
     }
@@ -21169,20 +21231,24 @@ fn cycle_removal_fnx_cycle_aware(
     }
 
     #[cfg(feature = "fnx-integration")]
-    let criticality = FNX_CYCLE_ANALYSIS_CACHE.with(|cache| {
-        let proj = crate::fnx_adapter::ProjectionConfig::default();
-        let scoring = crate::fnx_cycle_scorer::CriticalityScoringConfig::default();
-        if let Some(hit) = cache.borrow_mut().get_criticality(ir, &proj, &scoring) {
-            return hit;
-        }
-        let computed = crate::fnx_cycle_scorer::compute_criticality_scores(ir, &scoring);
-        if computed.budget_exceeded.is_none() {
-            cache
-                .borrow_mut()
-                .put_criticality(ir, &proj, &scoring, computed.clone());
-        }
-        computed
-    });
+    let criticality = if fnx_enabled {
+        FNX_CYCLE_ANALYSIS_CACHE.with(|cache| {
+            let proj = crate::fnx_adapter::ProjectionConfig::default();
+            let scoring = crate::fnx_cycle_scorer::CriticalityScoringConfig::default();
+            if let Some(hit) = cache.borrow_mut().get_criticality(ir, &proj, &scoring) {
+                return hit;
+            }
+            let computed = crate::fnx_cycle_scorer::compute_criticality_scores(ir, &scoring);
+            if computed.budget_exceeded.is_none() {
+                cache
+                    .borrow_mut()
+                    .put_criticality(ir, &proj, &scoring, computed.clone());
+            }
+            computed
+        })
+    } else {
+        crate::fnx_cycle_scorer::CriticalityScoringResults::default()
+    };
 
     let mut candidate_reversals = BTreeSet::new();
     for component in scc.components.iter().filter(|c| !c.is_trivial) {
@@ -21252,6 +21318,7 @@ fn cycle_removal_fnx_cycle_aware(
     _edges: &[OrientedEdge],
     _node_priority: &[usize],
     dfs_back_edges: &BTreeSet<usize>,
+    _fnx_enabled: bool,
 ) -> BTreeSet<usize> {
     dfs_back_edges.clone()
 }
@@ -21260,6 +21327,7 @@ fn cycle_removal(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
     node_priority: &[usize],
+    fnx_enabled: bool,
 ) -> CycleRemovalResult {
     let node_count = ir.nodes.len();
     if node_count == 0 {
@@ -21313,10 +21381,17 @@ fn cycle_removal(
             cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
         }
         CycleStrategy::CycleAware => {
-            // For CycleAware, break cycles for the ranking phase using FNX SCC + criticality
+            // For CycleAware, break cycles using native SCCs and optional FNX criticality
             // scoring (with deterministic fallback to DFS back-edges) while keeping original
             // orientation for downstream phases that handle cycles explicitly (`bd-qsjjb`).
-            cycle_removal_fnx_cycle_aware(ir, node_count, &edges, node_priority, &dfs_back_edges)
+            cycle_removal_fnx_cycle_aware(
+                ir,
+                node_count,
+                &edges,
+                node_priority,
+                &dfs_back_edges,
+                fnx_enabled,
+            )
         }
     };
 
@@ -25708,7 +25783,12 @@ pub mod bench_internals {
     #[must_use]
     pub fn prepare_ranks(ir: &MermaidDiagramIr, config: &LayoutConfig) -> BTreeMap<usize, usize> {
         let node_priority = super::stable_node_priorities(ir);
-        let cycle_result = super::cycle_removal(ir, config.cycle_strategy, &node_priority);
+        let cycle_result = super::cycle_removal(
+            ir,
+            config.cycle_strategy,
+            &node_priority,
+            config.fnx_enabled,
+        );
         let mut ranks = super::rank_assignment(ir, &cycle_result, &node_priority);
         super::apply_ir_constraints(ir, &mut ranks);
         ranks
@@ -32894,6 +32974,41 @@ mod tests {
 
         assert_eq!(dx, 180.0);
         assert_eq!(dy, 160.0);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn incremental_selective_relayout_respects_disabled_fnx() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = large_subgraph_dependency_ir();
+        let config = super::LayoutConfig {
+            fnx_enabled: false,
+            ..Default::default()
+        };
+        let guardrails = LayoutGuardrails::default();
+        let initial = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        assert!(initial.trace.fnx.algorithms_invoked.is_empty());
+
+        let mut edited = baseline.clone();
+        toggle_edge(&mut edited, 5, 20);
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_incremental_subgraph_relayout"
+        );
+        assert!(rerun.trace.fnx.algorithms_invoked.is_empty());
+        assert!(rerun.trace.fnx.analysis_time.is_zero());
+        assert!(rerun.trace.fnx.budget_exceeded_reason.is_none());
     }
 
     #[test]
@@ -42102,7 +42217,7 @@ mod tests {
     fn flowchart_min_length_survives_cycle_orientation_and_lp_layering() {
         let ir = parse("flowchart TB\nA ----> B\nB --> C\nC --> A\nC --> D\n").ir;
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
         assert!(!cycles.reversed_edge_indexes.is_empty());
         let ranks = super::rank_assignment(&ir, &cycles, &priorities);
         let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &ranks)
@@ -51079,7 +51194,7 @@ mod tests {
             &[(0, 2), (1, 2), (2, 3), (2, 4), (4, 5)],
         );
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
         let fallback = super::rank_assignment(&ir, &cycles, &priorities);
         let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback)
             .expect("the bounded flowchart LP must have an optimal integral layer assignment");
@@ -51100,7 +51215,7 @@ mod tests {
     fn lp_relaxation_layers_rejects_graphs_above_its_explicit_limit() {
         let ir = graph_ir(DiagramType::Flowchart, 51, &[]);
         let priorities = super::stable_node_priorities(&ir);
-        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities, false);
         let fallback = super::rank_assignment(&ir, &cycles, &priorities);
         assert!(super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback).is_none());
     }
