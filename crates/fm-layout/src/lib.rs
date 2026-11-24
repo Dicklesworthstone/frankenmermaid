@@ -8573,7 +8573,15 @@ impl IncrementalLayoutEngine {
         config: LayoutConfig,
         guardrails: LayoutGuardrails,
     ) -> TracedLayout {
-        trace_fnx_layout(|| self.compute_traced_layout(ir, algorithm, config, guardrails))
+        let traced =
+            trace_fnx_layout(|| self.compute_traced_layout(ir, algorithm, config, guardrails));
+        // A cooperative cancellation produces usable fallback geometry, but it must not
+        // become a successful memoized request. The next caller may require strict FNX
+        // completion, and a memo hit intentionally reports no new backend work.
+        if traced.trace.fnx.budget_exceeded_reason.is_some() {
+            self.cached = None;
+        }
+        traced
     }
 
     fn compute_traced_layout(
