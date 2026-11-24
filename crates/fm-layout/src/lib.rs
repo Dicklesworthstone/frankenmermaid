@@ -2208,17 +2208,17 @@ fn cluster_layout_inputs_changed(previous: &MermaidDiagramIr, current: &MermaidD
     if current.clusters.is_empty() {
         return false;
     }
-    let cluster_style = |style: &&fm_core::IrStyleRef| {
-        matches!(style.target, fm_core::IrStyleTarget::Cluster(_))
-    };
+    let cluster_style =
+        |style: &&fm_core::IrStyleRef| matches!(style.target, fm_core::IrStyleTarget::Cluster(_));
     previous
         .style_refs
         .iter()
         .filter(cluster_style)
         .ne(current.style_refs.iter().filter(cluster_style))
-        || current.clusters.iter().any(|cluster| {
-            label_contents_differ(previous, cluster.title, current, cluster.title)
-        })
+        || current
+            .clusters
+            .iter()
+            .any(|cluster| label_contents_differ(previous, cluster.title, current, cluster.title))
 }
 
 /// Region construction uses resolved edge endpoints, node memberships, and the subgraph tree.
@@ -6649,10 +6649,11 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                 .then_some("#475569")
             })
             .unwrap_or("#ffffff");
-        for (piece_index, piece) in node_paint_paths(node_box.bounds, shape)
-            .into_iter()
-            .enumerate()
-        {
+        let paths = shapes::sequence_participant_kind(ir, node_box.node_index).map_or_else(
+            || node_paint_paths(node_box.bounds, shape),
+            |kind| shapes::sequence_participant_geometry(node_box.bounds, kind).paths,
+        );
+        for (piece_index, piece) in paths.into_iter().enumerate() {
             // A flowchart double circle has two hollow rings; a terminal state has a solid
             // inner disc. The geometry is shared, while this meaning belongs to the diagram.
             let terminal_disc = ir.diagram_type == DiagramType::State
@@ -7393,7 +7394,9 @@ fn build_label_layer_with_icon_position(
         let Some(node) = ir.nodes.get(node_box.node_index) else {
             continue;
         };
-        let label_text = display_node_label(ir, node);
+        let styled_metrics = ir.effective_node_font_metrics(node_box.node_index, metrics);
+        let metrics = styled_metrics.as_ref();
+        let label_text = ir.node_layout_text(node, metrics);
         if label_text.is_empty() {
             continue;
         }
@@ -7607,7 +7610,11 @@ fn append_sequence_participant_text(
         .get("color")
         .and_then(|value| scene_paint(value))
         .unwrap_or_else(|| String::from("#0f172a"));
-    let center = node.bounds.center();
+    let center = shapes::sequence_participant_kind(ir, node.node_index)
+        .map_or(node.bounds, |kind| {
+            shapes::sequence_participant_geometry(node.bounds, kind).label_bounds
+        })
+        .center();
     let lines: Vec<&str> = label.split('\n').collect();
     for (row, text) in lines.iter().enumerate() {
         layer.children.push(RenderItem::Text(RenderText {
@@ -12413,29 +12420,7 @@ fn layout_diagram_sequence_traced_with_metrics(
     spacing: LayoutSpacing,
 ) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, metrics);
-    // An `actor` is drawn as a stick figure with its name beneath: it needs a taller header.
-    for (index, (size, node)) in node_sizes.iter_mut().zip(&ir.nodes).enumerate() {
-        if let Some(font_size) = ir
-            .resolved_node_style(index)
-            .get("font-size")
-            .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
-            .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
-        {
-            let participant_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
-                font_size,
-                ..metrics.config().clone()
-            });
-            *size = compute_node_size(ir, node, &participant_metrics, index);
-        }
-        if node
-            .classes
-            .iter()
-            .any(|class| class == "sequence-participant-actor")
-        {
-            size.1 = size.1.max(76.0);
-        }
-    }
+    let node_sizes = compute_node_sizes(ir, metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -12645,6 +12630,30 @@ fn layout_diagram_sequence_traced_with_metrics(
         fragment_order.as_deref(),
     );
 
+    // Creation arrows align with the symbol, while the caption extends below it. Reserve that
+    // complete header before placing subsequent messages, notes, or fragment boundaries.
+    let mut created_header_clearance = vec![0.0_f32; ir.edges.len()];
+    if let Some(meta) = &ir.sequence_meta {
+        for event in &meta.lifecycle_events {
+            if event.kind == fm_core::LifecycleEventKind::Create
+                && let Some(clearance) = created_header_clearance.get_mut(event.at_edge)
+                && let Some(kind) = shapes::sequence_participant_kind(ir, event.participant.0)
+                && let Some(&(width, height)) = node_sizes.get(event.participant.0)
+            {
+                let header = shapes::sequence_participant_geometry(
+                    LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width,
+                        height,
+                    },
+                    kind,
+                );
+                *clearance = clearance.max(height - header.symbol_bounds.center().y);
+            }
+        }
+    }
+
     // With notes or fragments, the source-order timeline gives each its own rows; without them
     // (or for a hand-built IR) every message gets one row, as it always has.
     let timeline_rows = ir.sequence_meta.as_ref().and_then(|meta| {
@@ -12658,6 +12667,7 @@ fn layout_diagram_sequence_traced_with_metrics(
             &sequence_messages,
             &sequence_fragments,
             fragment_order.as_deref()?,
+            &created_header_clearance,
         )
     });
     let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
@@ -12673,18 +12683,19 @@ fn layout_diagram_sequence_traced_with_metrics(
             let y =
                 floor + message_gap.max(caption_height + LayoutSequenceMessage::ARROW_GAP + 8.0);
             message_y_positions.push(y);
-            floor = y + if is_self_message(ir, edge) {
+            let message_height = if is_self_message(ir, edge) {
                 message_gap * 0.6
             } else {
                 0.0
             };
+            floor = y + message_height.max(created_header_clearance[edge_index]);
         }
         // Total sequence content height before optional mirrored participant headers.
         (message_y_positions, message_gap.mul_add(1.5, floor))
     };
 
-    // A participant `create`d mid-diagram is drawn where it is created, as mermaid draws it: its box
-    // centred on the creating message, which stops at the box's edge.
+    // A participant `create`d mid-diagram is drawn where it is created. Plain boxes are centered
+    // on the message; a typed participant aligns its symbol and keeps the caption below it.
     let mut creation_edge: Vec<Option<usize>> = vec![None; node_count];
     if let Some(meta) = &ir.sequence_meta {
         for event in &meta.lifecycle_events {
@@ -12702,8 +12713,26 @@ fn layout_diagram_sequence_traced_with_metrics(
         .map(|participant_order| {
             let (width, height) = node_sizes[participant_order];
             let cx = participant_x_centers[participant_order];
-            let y = creation_edge[participant_order]
-                .map_or(header_y, |edge| message_y_positions[edge] - height / 2.0);
+            let y = creation_edge[participant_order].map_or(header_y, |edge| {
+                let anchor_y = shapes::sequence_participant_kind(ir, participant_order).map_or(
+                    height / 2.0,
+                    |kind| {
+                        shapes::sequence_participant_geometry(
+                            LayoutRect {
+                                x: 0.0,
+                                y: 0.0,
+                                width,
+                                height,
+                            },
+                            kind,
+                        )
+                        .symbol_bounds
+                        .center()
+                        .y
+                    },
+                );
+                message_y_positions[edge] - anchor_y
+            });
             LayoutNodeBox {
                 node_index: participant_order,
                 node_id: ir.nodes[participant_order].id.clone(),
@@ -12796,8 +12825,22 @@ fn layout_diagram_sequence_traced_with_metrics(
                 && creation_edge.get(target_index) == Some(&Some(edge_index))
                 && !connection.is_some_and(fm_core::SequenceCentralConnection::has_target)
             {
-                let half_width = node_sizes[target_index].0 / 2.0;
-                target_x = target_center - half_width.copysign(target_center - source_center);
+                target_x = shapes::sequence_participant_kind(ir, target_index).map_or_else(
+                    || {
+                        let half_width = node_sizes[target_index].0 / 2.0;
+                        target_center - half_width.copysign(target_center - source_center)
+                    },
+                    |kind| {
+                        let target_bounds =
+                            shapes::sequence_participant_geometry(nodes[target_index].bounds, kind)
+                                .symbol_bounds;
+                        if rightward {
+                            target_bounds.x
+                        } else {
+                            target_bounds.x + target_bounds.width
+                        }
+                    },
+                );
             }
 
             let points = if is_self_loop {
@@ -12925,7 +12968,13 @@ fn layout_diagram_sequence_traced_with_metrics(
             match event.kind {
                 fm_core::LifecycleEventKind::Create => {
                     // Below the box drawn at the creating message, when there is one.
-                    let below_box = event_y + node_sizes[participant_index].1 / 2.0;
+                    let below_box = if shapes::sequence_participant_kind(ir, participant_index)
+                        .is_some()
+                    {
+                        nodes[participant_index].bounds.y + nodes[participant_index].bounds.height
+                    } else {
+                        event_y + node_sizes[participant_index].1 / 2.0
+                    };
                     if let Some(start_y) = lifeline_start_y.get_mut(participant_index) {
                         *start_y = (*start_y).max(below_box);
                     }
@@ -13550,6 +13599,7 @@ fn sequence_timeline_rows(
     messages: &[LayoutSequenceMessage],
     fragments: &[LayoutSequenceFragment],
     open_fragment: &[usize],
+    created_header_clearance: &[f32],
 ) -> Option<SequenceTimelineRows> {
     use fm_core::IrSequenceStep as Step;
     let timeline = &meta.timeline;
@@ -13582,11 +13632,12 @@ fn sequence_timeline_rows(
                 let y = floor + pitch.max(caption_height + LayoutSequenceMessage::ARROW_GAP + 8.0);
                 let edge = &ir.edges[rows.message_y.len()];
                 rows.message_y.push(y);
-                floor = if is_self_message(ir, edge) {
+                let message_bottom = if is_self_message(ir, edge) {
                     message_gap.mul_add(0.6, y)
                 } else {
                     y
                 };
+                floor = message_bottom.max(y + created_header_clearance[edge_index]);
                 // A message opens/closes activations at its arrow, even when its self-loop
                 // reserves additional space underneath it for subsequent content.
                 rows.boundary_y.push(y);
@@ -18381,7 +18432,10 @@ fn row_worst_ratio(
 ///
 /// Reached only when [`architecture_declares_a_side`] holds, so a side-less architecture diagram
 /// still takes the general path and is unchanged.
-fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr, config: &LayoutConfig) -> TracedLayout {
+fn layout_diagram_architecture_traced(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> TracedLayout {
     let metrics = config
         .font_metrics
         .clone()
@@ -18397,8 +18451,10 @@ fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr, config: &LayoutConf
     let layout = Arc::make_mut(&mut traced.layout);
     route_architecture_sides(ir, layout, &metrics);
     layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
-    (layout.stats.total_edge_length, layout.stats.reversed_edge_total_length) =
-        compute_edge_length_metrics(&layout.edges);
+    (
+        layout.stats.total_edge_length,
+        layout.stats.reversed_edge_total_length,
+    ) = compute_edge_length_metrics(&layout.edges);
     traced
 }
 
@@ -20724,6 +20780,16 @@ fn compute_node_size(
         metrics.estimate_preserved_width(text, metrics.font_size(), metrics.avg_char_width())
     });
 
+    if let Some(kind) = shapes::sequence_participant_kind(ir, node_index) {
+        let (label_width, label_height) = metrics.estimate_dimensions(text);
+        let label_width = label_width.max(metrics.estimate_preserved_width(
+            text,
+            metrics.font_size(),
+            metrics.avg_char_width(),
+        ));
+        return shapes::sequence_participant_min_size(kind, label_width, label_height);
+    }
+
     match node.shape {
         fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
         fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
@@ -21007,6 +21073,12 @@ fn node_size_cache_key(
         }
     }
     hash_u64(&mut hash, node.shape as u64);
+    // Boundary and collections declarations retain the same generic routing shape, but their
+    // symbols need different widths. A type-only edit must invalidate the cached header size.
+    hash_u64(
+        &mut hash,
+        shapes::sequence_participant_kind(ir, node_index).map_or(0, |kind| kind as u64 + 1),
+    );
     hash_str(&mut hash, display_node_label_ref(ir, node));
     hash_str(&mut hash, node.icon().unwrap_or_default());
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
@@ -32996,7 +33068,10 @@ mod tests {
             let algorithm = LayoutAlgorithm::Sugiyama;
             let guardrails = LayoutGuardrails::default();
             let warm = engine.layout_diagram_traced_with_config_and_guardrails(
-                &baseline, algorithm, config.clone(), guardrails,
+                &baseline,
+                algorithm,
+                config.clone(),
+                guardrails,
             );
             let mut edited = baseline.clone();
             let label = edited.nodes[40].label.unwrap();
@@ -33037,7 +33112,10 @@ mod tests {
         let guardrails = LayoutGuardrails::default();
         let mut engine = IncrementalLayoutEngine::default();
         let warm = engine.layout_diagram_traced_with_config_and_guardrails(
-            &ir, algorithm, config.clone(), guardrails,
+            &ir,
+            algorithm,
+            config.clone(),
+            guardrails,
         );
         let mut edited = ir.clone();
         edited.ports[0].node = IrNodeId(40);
@@ -33046,8 +33124,14 @@ mod tests {
 
         let diff = super::derive_layout_diff(&ir, &edited);
         assert!(!diff.topology_equal);
-        assert!(diff.edits.contains(&LayoutEdit::EdgeRemoved { edge_index: 0 }));
-        assert!(diff.edits.contains(&LayoutEdit::EdgeAdded { edge_index: 0 }));
+        assert!(
+            diff.edits
+                .contains(&LayoutEdit::EdgeRemoved { edge_index: 0 })
+        );
+        assert!(
+            diff.edits
+                .contains(&LayoutEdit::EdgeAdded { edge_index: 0 })
+        );
         let fresh = super::layout_diagram_traced_with_config(&edited, algorithm, config.clone());
         let updated = engine.layout_diagram_traced_with_config_and_guardrails(
             &edited, algorithm, config, guardrails,
@@ -33075,9 +33159,8 @@ mod tests {
 
         config.spacing.sequence_self_loop_width = 300.0;
         let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
-        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
-            &ir, algorithm, config, guardrails,
-        );
+        let updated = engine
+            .layout_diagram_traced_with_config_and_guardrails(&ir, algorithm, config, guardrails);
         assert_ne!(warm.layout.edges, fresh.layout.edges);
         assert_eq!(updated.layout.edges, fresh.layout.edges);
         assert_eq!(updated.layout.nodes, fresh.layout.nodes);
@@ -34118,27 +34201,45 @@ mod tests {
             let points = &layout.edges[index].points;
             let first = points[0];
             let last = points[points.len() - 1];
-            assert_eq!(first, LayoutPoint { x: source_x, y: a.center().y });
-            assert_eq!(last, LayoutPoint { x: c.x, y: c.center().y });
+            assert_eq!(
+                first,
+                LayoutPoint {
+                    x: source_x,
+                    y: a.center().y
+                }
+            );
+            assert_eq!(
+                last,
+                LayoutPoint {
+                    x: c.x,
+                    y: c.center().y
+                }
+            );
             assert!(departure * (points[1].x - first.x) > 0.0);
             assert_eq!(points[1].y, first.y);
             assert!(points[points.len() - 2].x < last.x);
             assert_eq!(points[points.len() - 2].y, last.y);
             for point in points {
                 assert!(point.x.is_finite() && point.y.is_finite());
-                assert!(point.x >= layout.bounds.x && point.x <= layout.bounds.x + layout.bounds.width);
-                assert!(point.y >= layout.bounds.y && point.y <= layout.bounds.y + layout.bounds.height);
+                assert!(
+                    point.x >= layout.bounds.x && point.x <= layout.bounds.x + layout.bounds.width
+                );
+                assert!(
+                    point.y >= layout.bounds.y && point.y <= layout.bounds.y + layout.bounds.height
+                );
             }
             for pair in points.windows(2) {
                 assert!(pair[0].x == pair[1].x || pair[0].y == pair[1].y);
                 for rect in [a, b, c] {
                     // Midpoints alone miss a long segment through a narrow service.
                     let crosses = if pair[0].x == pair[1].x {
-                        pair[0].x > rect.x && pair[0].x < rect.x + rect.width
+                        pair[0].x > rect.x
+                            && pair[0].x < rect.x + rect.width
                             && pair[0].y.max(pair[1].y) > rect.y
                             && pair[0].y.min(pair[1].y) < rect.y + rect.height
                     } else {
-                        pair[0].y > rect.y && pair[0].y < rect.y + rect.height
+                        pair[0].y > rect.y
+                            && pair[0].y < rect.y + rect.height
                             && pair[0].x.max(pair[1].x) > rect.x
                             && pair[0].x.min(pair[1].x) < rect.x + rect.width
                     };
@@ -50012,6 +50113,158 @@ mod tests {
     }
 
     #[test]
+    fn sequence_participant_symbols_keep_styled_captions_and_mirrors_below_the_ink() {
+        use super::shapes::{
+            SequenceParticipantKind, sequence_participant_geometry, sequence_participant_kind,
+        };
+        let kinds = [
+            SequenceParticipantKind::Actor,
+            SequenceParticipantKind::Boundary,
+            SequenceParticipantKind::Control,
+            SequenceParticipantKind::Entity,
+            SequenceParticipantKind::Database,
+            SequenceParticipantKind::Collections,
+            SequenceParticipantKind::Queue,
+        ];
+        let base_metrics = fm_core::FontMetrics::default_metrics();
+        for kind in kinds {
+            let mut ir = parse(&format!(
+                "sequenceDiagram\nparticipant P@{{\"type\":\"{}\"}} as First<br/>Second\nP->>P: work\nstyle P font-size:28px,font-family:monospace,fill:#123456,stroke:#abcdef,stroke-width:3px\n",
+                kind.as_str(),
+            )).ir;
+            ir.meta.init.config.sequence_mirror_actors = Some(true);
+            assert_eq!(sequence_participant_kind(&ir, 0), Some(kind));
+            let layout = layout_diagram_sequence(&ir);
+            let metrics = ir.effective_node_font_metrics(0, &base_metrics);
+            let label = ir.node_layout_text(&ir.nodes[0], &metrics);
+            assert_eq!(label, "First\nSecond");
+            let label_height = metrics.estimate_dimensions(&label).1;
+            let scene = build_render_scene(&ir, &layout);
+            let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+            let texts = scene_texts(gantt_scene_group(&scene, "labels"));
+            let labels: Vec<_> = texts
+                .into_iter()
+                .filter(|text| text.source == RenderSource::Node(0))
+                .collect();
+            assert_eq!(labels.len(), 4);
+            assert_eq!(layout.extensions.sequence_mirror_headers.len(), 1);
+            let headers = [
+                &layout.nodes[0],
+                &layout.extensions.sequence_mirror_headers[0],
+            ];
+            let geometry = sequence_participant_geometry(headers[0].bounds, kind);
+            assert_eq!(paths.len(), geometry.paths.len() * 2);
+            for (header_index, header) in headers.into_iter().enumerate() {
+                let geometry = sequence_participant_geometry(header.bounds, kind);
+                assert!(geometry.label_bounds.height + 0.001 >= label_height);
+                for text in &labels[header_index * 2..header_index * 2 + 2] {
+                    assert_eq!(text.font_size, 28.0);
+                    assert_eq!(text.x, geometry.label_bounds.center().x);
+                    assert!(
+                        text.y - metrics.line_height_px() * 0.5 >= geometry.label_bounds.y - 0.001
+                    );
+                    assert!(
+                        text.y + metrics.line_height_px() * 0.5
+                            <= geometry.label_bounds.y + geometry.label_bounds.height + 0.001
+                    );
+                }
+                for path in &paths
+                    [header_index * geometry.paths.len()..(header_index + 1) * geometry.paths.len()]
+                {
+                    assert_eq!(path.source, RenderSource::Node(0));
+                    if let Some(stroke) = &path.stroke {
+                        assert_eq!(stroke.color, "#abcdef");
+                        assert_eq!(stroke.width, 3.0);
+                    }
+                    if let Some(super::FillStyle::Solid { color, .. }) = &path.fill {
+                        assert_eq!(color, "#123456");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_participant_type_changes_invalidate_size_without_affecting_flowchart_classes() {
+        use super::shapes::sequence_participant_kind;
+        let boundary = parse("sequenceDiagram\nparticipant P@{\"type\":\"boundary\"}\n").ir;
+        let collections = parse("sequenceDiagram\nparticipant P@{\"type\":\"collections\"}\n").ir;
+        let metrics = fm_core::FontMetrics::default_metrics();
+        assert_eq!(boundary.nodes[0].shape, collections.nodes[0].shape);
+        assert_ne!(
+            super::compute_node_sizes(&boundary, &metrics),
+            super::compute_node_sizes(&collections, &metrics)
+        );
+        assert_ne!(
+            node_size_cache_key(&boundary, &boundary.nodes[0], &metrics, 0),
+            node_size_cache_key(&collections, &collections.nodes[0], &metrics, 0),
+        );
+        let mut ordinary = boundary.clone();
+        ordinary.diagram_type = DiagramType::Flowchart;
+        assert_eq!(sequence_participant_kind(&ordinary, 0), None);
+        let original_size = super::compute_node_sizes(&ordinary, &metrics);
+        ordinary.nodes[0].classes.clear();
+        assert_eq!(
+            super::compute_node_sizes(&ordinary, &metrics),
+            original_size
+        );
+        assert_eq!(
+            sequence_participant_kind(&parse("sequenceDiagram\nparticipant P\n").ir, 0),
+            None
+        );
+        assert_eq!(sequence_participant_kind(&boundary, usize::MAX), None);
+    }
+
+    #[test]
+    fn sequence_created_symbols_align_arrows_and_reserve_the_complete_caption() {
+        use super::shapes::{sequence_participant_geometry, sequence_participant_kind};
+        let source = "sequenceDiagram\nparticipant A\nA->>A: before\ncreate participant B@{\"type\":\"boundary\"} as Created<br/>Service\nA->>B: create\nNote over B: ready\nB->>A: reply\nstyle B font-size:28px\n";
+        let ir = parse(source).ir;
+        for with_timeline in [true, false] {
+            let mut ir = ir.clone();
+            if !with_timeline {
+                let meta = ir.sequence_meta.as_mut().unwrap();
+                meta.timeline.clear();
+                meta.notes.clear();
+            }
+            let layout = layout_diagram_sequence(&ir);
+            let created = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "B")
+                .unwrap();
+            let geometry = sequence_participant_geometry(
+                created.bounds,
+                sequence_participant_kind(&ir, created.node_index).unwrap(),
+            );
+            let arrow = layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == 1)
+                .unwrap();
+            assert!((arrow.points[1].y - geometry.symbol_bounds.center().y).abs() < 0.001);
+            assert!((arrow.points[1].x - geometry.symbol_bounds.x).abs() < 0.001);
+            let bottom = created.bounds.y + created.bounds.height;
+            let lifeline = layout
+                .extensions
+                .bands
+                .iter()
+                .find(|band| {
+                    band.kind == super::LayoutBandKind::Lane
+                        && (band.bounds.center().x - created.bounds.center().x).abs() < 0.001
+                })
+                .unwrap();
+            assert!((lifeline.bounds.y - bottom).abs() < 0.001);
+            let reply = layout.extensions.sequence_message(2).unwrap();
+            assert!(reply.bounds.y > bottom);
+            if with_timeline {
+                assert!(layout.extensions.sequence_notes[0].bounds.y > bottom);
+            }
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    #[test]
     fn sequence_layout_single_participant() {
         let ir = sequence_ir(&["Alice"], &[]);
         let layout = layout_diagram_sequence(&ir);
@@ -56170,9 +56423,8 @@ mod tests {
         card.technology = Some("APIGateway".to_owned());
         card.description = None;
         let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
-        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
-            &ir, algorithm, config, guardrails,
-        );
+        let updated = engine
+            .layout_diagram_traced_with_config_and_guardrails(&ir, algorithm, config, guardrails);
         assert!(fresh.layout.nodes[0].bounds.height < before.layout.nodes[0].bounds.height);
         assert_eq!(updated.layout.nodes, fresh.layout.nodes);
     }
@@ -56199,9 +56451,8 @@ mod tests {
         ir.diagram_type = DiagramType::Er;
         ir.meta.diagram_type = DiagramType::Er;
         let fresh = super::layout_diagram_traced_with_config(&ir, algorithm, config.clone());
-        let updated = engine.layout_diagram_traced_with_config_and_guardrails(
-            &ir, algorithm, config, guardrails,
-        );
+        let updated = engine
+            .layout_diagram_traced_with_config_and_guardrails(&ir, algorithm, config, guardrails);
         assert!(fresh.layout.nodes[0].bounds.width > wrapped.layout.nodes[0].bounds.width);
         assert_eq!(updated.layout.nodes, fresh.layout.nodes);
         assert_eq!(updated.layout.edges, fresh.layout.edges);
