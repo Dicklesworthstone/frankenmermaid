@@ -170,20 +170,25 @@ FNX is automatically disabled in WebAssembly builds due to dependency constraint
 | Value | Description |
 |-------|-------------|
 | `undirected` | Project directed edges to undirected graph (default) |
-| `directed` | Use directed graph analysis (future, not yet supported) |
+| `directed` | Reserved; rejected while FNX is active (use `undirected`) |
+| `auto` | Reserved; rejected while FNX is active (use `undirected`) |
 
 ### `--fnx-fallback`
 
 | Value | Description |
 |-------|-------------|
-| `graceful` | Continue with native engine if FNX fails (default) |
-| `warn` | Report budget cancellation on stderr and continue with available results |
+| `graceful` | Continue with available analysis and native heuristics after a budget cancellation (default) |
+| `warn` | Report budget cancellation on stderr and in JSON warnings, then continue with available results |
 | `strict` | Fail the affected render or validation when an FNX analysis exceeds its budget |
 
 A diagram with no applicable FNX pass can render successfully under all three policies.
 Use `--fnx-mode enabled` to require a build with FNX support. During validation,
 `strict` preserves the diagnostic report and returns a failing exit status even with
 `--fail-on none`.
+
+These policies apply to `render`, `render-batch`, and `validate`. A successful layout cache hit or `--fnx-mode disabled` does not trigger strict failure. Layouts with cancelled FNX analysis are not retained as successful full-layout cache entries, so a later strict request must still evaluate its analysis.
+
+JSON validation output and `--diagnostics-out` retain completed structural metrics. The validation witness combines actual layout and structural executions and preserves the first cancellation reason if a later stage succeeds. Warn mode adds a `fnx.fallback.warn` diagnostic with remediation guidance; the usual `--fail-on` threshold still applies. Render warnings are also retained in JSON metadata.
 
 ---
 
@@ -195,19 +200,24 @@ Use `--fnx-mode enabled` to require a build with FNX support. During validation,
 
 **Impact**: Minimal. Most structural metrics (centrality, connectivity, cycles) are meaningful even without direction.
 
-**Workaround**: None needed. This is informational. Directed analysis (SCC, WCC, reachability) ships behind the `fnx-experimental-directed` feature flag, currently in canary rollout.
+**Workaround**: Use `--fnx-projection undirected`. Experimental directed helpers exist in the library, but the CLI does not yet dispatch to them; `directed` and `auto` projections are rejected while FNX is active.
 
 ### "FNX analysis timed out"
 
-**Cause**: The graph is very large (1000+ nodes) or highly connected, exceeding the 50ms analysis budget.
+**Cause**: Budgeted structural analysis or cycle criticality scoring exceeded its default 100 ms or 10,000 work-unit budget. Checks occur between analysis passes and scoring steps; an individual backend call is not preempted at the deadline.
 
-**Impact**: Layout proceeds normally using native heuristics. Output quality is unchanged.
+**Impact**: Graceful and warn policies continue with completed findings and native heuristics. Strict policy fails the command. A missing metric is unknown, not a zero result. Layout quality may differ when advisory analysis is incomplete.
 
 **Workaround**:
 ```bash
-# Increase timeout (not recommended for interactive use)
-fm-cli render large.mmd --fnx-timeout-ms 200
+# Skip FNX for this diagram
+fm-cli render large.mmd --fnx-mode disabled
+
+# Allow fallback while making cancellation visible
+fm-cli validate large.mmd --fnx-fallback warn --format json
 ```
+
+There is no CLI timeout override. Auto layout-selection and centrality-ordering helpers are not currently governed by these cooperative FNX budgets.
 
 ### "fnx-integration feature not available"
 
@@ -275,9 +285,9 @@ If you find a case where FNX produces inferior results, please report it with:
 | < 50 nodes | < 5ms | Always use `auto` |
 | 50-200 nodes | 5-20ms | `auto` is fine |
 | 200-500 nodes | 20-50ms | Consider `disabled` for batch |
-| > 500 nodes | May timeout | Use `disabled` or increase timeout |
+| > 500 nodes | May exceed a budget | Use `disabled` or an explicit fallback policy |
 
-FNX analysis is single-threaded and bounded by the timeout budget. Layout quality impact is typically neutral to positive for graphs with complex structure.
+Budgeted FNX passes use cooperative cancellation, which does not impose a hard wall-clock deadline on every backend call. Auto selection and centrality ordering currently run outside that budget. FNX remains advisory; incomplete analysis falls back according to the selected policy.
 
 ---
 
