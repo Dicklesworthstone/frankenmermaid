@@ -2240,6 +2240,68 @@ impl TermRenderer {
         }
     }
 
+    /// Keep participant names in the shared caption band rather than through the UML symbol.
+    /// The same placement is used for initial, creation, and mirrored headers in every mode.
+    fn sequence_participant_label_placements(
+        &self,
+        ir: &MermaidDiagramIr,
+        node_box: &LayoutNodeBox,
+        bounds: fm_layout::LayoutRect,
+        scale: (f32, f32),
+    ) -> Vec<(usize, usize, String)> {
+        if !self.config.show_labels || bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return Vec::new();
+        }
+        let node = ir.nodes.get(node_box.node_index);
+        let Some(label) = self.node_display_label(ir, node, &node_box.node_id) else {
+            return Vec::new();
+        };
+        let (x, y) = self.point_to_cells(
+            &fm_layout::LayoutPoint {
+                x: bounds.x,
+                y: bounds.y,
+            },
+            scale.0,
+            scale.1,
+        );
+        let width = ((bounds.width * scale.0) as usize).max(1);
+        let height = ((bounds.height * scale.1) as usize).max(1);
+        let lines: Vec<_> = label.lines().take(height).collect();
+        let first_row = y + height.saturating_sub(lines.len()) / 2;
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(offset, line)| {
+                let text = self.fit_node_label_line(ir, node, line, width);
+                let column = x + width.saturating_sub(text.width()) / 2;
+                (column, first_row + offset, text)
+            })
+            .collect()
+    }
+
+    fn overlay_sequence_participant_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        labels: &mut Vec<CellLabel>,
+        ir: &MermaidDiagramIr,
+        node_box: &LayoutNodeBox,
+        scale: (f32, f32),
+    ) -> bool {
+        let Some(kind) = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index)
+        else {
+            return false;
+        };
+        let geometry = fm_layout::shapes::sequence_participant_geometry(node_box.bounds, kind);
+        for (column, row, text) in
+            self.sequence_participant_label_placements(ir, node_box, geometry.label_bounds, scale)
+        {
+            if let Some(cells) = grid.get_mut(row) {
+                stage_cell_label(cells, labels, (column, row), &text, text.width(), false);
+            }
+        }
+        true
+    }
+
     fn render_node_cell(
         &self,
         buffer: &mut CellBuffer,
@@ -2257,6 +2319,61 @@ impl TermRenderer {
         if let Some(glyph) = self.state_marker_cell_glyph(ir, node_box.node_index) {
             let (cx, cy) = self.point_to_cells(&node_box.bounds.center(), scale_x, scale_y);
             buffer.set(cx, cy, glyph);
+            return;
+        }
+
+        if let Some(kind) = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index) {
+            let geometry = fm_layout::shapes::sequence_participant_geometry(node_box.bounds, kind);
+            if geometry.paths.is_empty() {
+                return;
+            }
+            let (x, y, width, _) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let label_top = self
+                .point_to_cells(
+                    &fm_layout::LayoutPoint {
+                        x: geometry.label_bounds.x,
+                        y: geometry.label_bounds.y,
+                    },
+                    scale_x,
+                    scale_y,
+                )
+                .1;
+            let symbol_row = self
+                .point_to_cells(&geometry.symbol_bounds.center(), scale_x, scale_y)
+                .1
+                .min(label_top.saturating_sub(1))
+                .max(y);
+            // At cell resolution a named stereotype is more legible than a compressed UML
+            // outline. Narrow headers retain distinct symbols without replacing their names.
+            let stereotype = format!("[{}]", kind.as_str());
+            let symbol = if stereotype.len() <= width {
+                stereotype.as_str()
+            } else {
+                use fm_layout::shapes::SequenceParticipantKind;
+                match kind {
+                    SequenceParticipantKind::Actor => "o/\\",
+                    SequenceParticipantKind::Boundary => "|o",
+                    SequenceParticipantKind::Control => "^o",
+                    SequenceParticipantKind::Entity => "o_",
+                    SequenceParticipantKind::Database => "[=]",
+                    SequenceParticipantKind::Collections => "[+]",
+                    SequenceParticipantKind::Queue => "(=)",
+                }
+            };
+            buffer.set_label(
+                x + width.saturating_sub(symbol.len()) / 2,
+                symbol_row,
+                symbol,
+                symbol.len(),
+            );
+            for (column, row, text) in self.sequence_participant_label_placements(
+                ir,
+                node_box,
+                geometry.label_bounds,
+                (scale_x, scale_y),
+            ) {
+                buffer.set_label(column, row, &text, text.width());
+            }
             return;
         }
 
@@ -2782,6 +2899,17 @@ impl TermRenderer {
     ) {
         let ir_node = ir.nodes.get(node_box.node_index);
         if ir_node.is_some_and(is_block_beta_space_node) {
+            return;
+        }
+
+        if let Some(kind) = fm_layout::shapes::sequence_participant_kind(ir, node_box.node_index) {
+            let geometry = fm_layout::shapes::sequence_participant_geometry(node_box.bounds, kind);
+            raster_sequence_participant(
+                canvas,
+                &geometry.paths,
+                (scale_x, scale_y),
+                (padding_x as f32, padding_y as f32),
+            );
             return;
         }
 
@@ -3534,6 +3662,16 @@ impl TermRenderer {
                 continue;
             }
 
+            if self.overlay_sequence_participant_labels(
+                &mut lines,
+                &mut text_labels,
+                ir,
+                node_box,
+                (scale_x, scale_y),
+            ) {
+                continue;
+            }
+
             if let Some(node) = ir_node
                 && self.overlay_node_compartments(
                     &mut lines,
@@ -3632,6 +3770,16 @@ impl TermRenderer {
             let ir_node = ir.nodes.get(node_box.node_index);
 
             if ir_node.is_some_and(is_block_beta_space_node) {
+                continue;
+            }
+
+            if self.overlay_sequence_participant_labels(
+                &mut lines,
+                &mut text_labels,
+                ir,
+                node_box,
+                (scale_x, scale_y),
+            ) {
                 continue;
             }
 
@@ -7689,6 +7837,88 @@ impl TermRenderer {
     }
 }
 
+/// Draw shared participant outlines at subcell resolution. The clipped stroke helpers also
+/// bound work for external layouts whose symbols lie partly or entirely outside the viewport.
+fn raster_sequence_participant(
+    canvas: &mut Canvas,
+    paths: &[fm_layout::NodePaintPath],
+    scale: (f32, f32),
+    offset: (f32, f32),
+) {
+    use fm_layout::PathCmd;
+
+    if !scale.0.is_finite() || !scale.1.is_finite() || scale.0 <= 0.0 || scale.1 <= 0.0 {
+        return;
+    }
+    let project = |x: f32, y: f32| {
+        (
+            f64::from(x) * f64::from(scale.0) + f64::from(offset.0),
+            f64::from(y) * f64::from(scale.1) + f64::from(offset.1),
+        )
+    };
+    let radius = (0.75, 0.75);
+    for path in paths.iter().filter(|path| path.stroke) {
+        let mut current = None;
+        let mut first = None;
+        for command in &path.commands {
+            match *command {
+                PathCmd::MoveTo { x, y } => {
+                    let point = project(x, y);
+                    current = Some(point);
+                    first = Some(point);
+                }
+                PathCmd::LineTo { x, y } => {
+                    let next = project(x, y);
+                    if let Some(previous) = current {
+                        raster_sankey_segment(canvas, previous, next, radius);
+                    }
+                    current = Some(next);
+                }
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    let next = project(x, y);
+                    if let Some(previous) = current {
+                        raster_sankey_curve(
+                            canvas,
+                            [previous, project(c1x, c1y), project(c2x, c2y), next],
+                            radius,
+                        );
+                    }
+                    current = Some(next);
+                }
+                PathCmd::QuadTo { cx, cy, x, y } => {
+                    let next = project(x, y);
+                    let control = project(cx, cy);
+                    if let Some(previous) = current {
+                        let c1 = (
+                            previous.0 + (control.0 - previous.0) * (2.0 / 3.0),
+                            previous.1 + (control.1 - previous.1) * (2.0 / 3.0),
+                        );
+                        let c2 = (
+                            next.0 + (control.0 - next.0) * (2.0 / 3.0),
+                            next.1 + (control.1 - next.1) * (2.0 / 3.0),
+                        );
+                        raster_sankey_curve(canvas, [previous, c1, c2, next], radius);
+                    }
+                    current = Some(next);
+                }
+                PathCmd::Close => {
+                    if let (Some(previous), Some(next)) = (current, first) {
+                        raster_sankey_segment(canvas, previous, next, radius);
+                    }
+                    current = first;
+                }
+            }
+        }
+    }
+}
+
 /// Rasterize the same connector commands used by SVG and Canvas. Sampling is bounded by the
 /// displayed curve length; offscreen or malformed coordinates cannot trigger an unbounded walk.
 fn raster_sankey_edge(
@@ -9433,13 +9663,18 @@ mod tests {
                     renderer.render_edge_canvas(&mut canvas, &ir, path, mx as f32, my as f32, 0, 0);
                     canvas.render_char_grid()
                 };
-                assert!(expected.iter().flatten().any(|&ch| !blank_terminal_cell(ch)));
+                assert!(
+                    expected
+                        .iter()
+                        .flatten()
+                        .any(|&ch| !blank_terminal_cell(ch))
+                );
                 let own =
                     renderer.edge_label_route_grid(&ir, &layout, path, false, 60, 20, 1.0, 1.0);
                 assert_eq!(own, expected, "{mode:?}/{arrow:?}");
                 if arrow == ArrowType::ThickLine {
-                    let foreign =
-                        renderer.edge_label_route_grid(&ir, &layout, &other, true, 60, 20, 1.0, 1.0);
+                    let foreign = renderer
+                        .edge_label_route_grid(&ir, &layout, &other, true, 60, 20, 1.0, 1.0);
                     assert_eq!(foreign, expected, "{mode:?}: protect the full crossing");
                 }
             }
@@ -9562,7 +9797,11 @@ mod tests {
                     "one",
                     "many",
                 ),
-                ("erDiagram\nCUSTOMER }o--o| ORDER : places\n", "0..*", "0..1"),
+                (
+                    "erDiagram\nCUSTOMER }o--o| ORDER : places\n",
+                    "0..*",
+                    "0..1",
+                ),
             ] {
                 let ir = fm_parser::parse(source).ir;
                 let out = render_diagram_with_config(&ir, &config, 160, 60).output;
@@ -11758,6 +11997,190 @@ mod tests {
         let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 40, 20);
 
         assert!(result.output.contains('X'));
+    }
+
+    #[test]
+    fn typed_sequence_participants_keep_names_in_initial_creation_and_mirror_headers() {
+        for kind in [
+            "actor",
+            "boundary",
+            "control",
+            "entity",
+            "database",
+            "collections",
+            "queue",
+        ] {
+            let source = format!(
+                "sequenceDiagram\nparticipant A {{\"type\":\"{kind}\",\"alias\":\"Requester\"}}\n\
+                 create participant B {{\"type\":\"{kind}\",\"alias\":\"Worker\"}}\n\
+                 A->>B: start\n"
+            );
+            let mut ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.nodes.len(), 2, "{kind} must parse as two participants");
+            ir.meta.init.config.sequence_mirror_actors = Some(true);
+            let layout = layout_diagram(&ir);
+            assert_eq!(layout.extensions.sequence_mirror_headers.len(), 2);
+            let initial = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "A")
+                .unwrap();
+            let created = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "B")
+                .unwrap();
+            assert!(
+                created.bounds.y > initial.bounds.y,
+                "{kind}: creation header is deferred"
+            );
+
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    tier: MermaidTier::Normal,
+                    render_mode: mode,
+                    max_label_chars: 64,
+                    ..Default::default()
+                };
+                let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 120, 60);
+                for name in ["Requester", "Worker"] {
+                    assert_eq!(
+                        result.output.matches(name).count(),
+                        2,
+                        "{kind} {mode:?}: initial/created name and its mirror must survive:\n{}",
+                        result.output
+                    );
+                }
+                if mode == MermaidRenderMode::CellOnly {
+                    assert_eq!(
+                        result.output.matches(&format!("[{kind}]")).count(),
+                        4,
+                        "each cell header must disclose its type:\n{}",
+                        result.output
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_sequence_participants_have_distinct_subcell_symbols() {
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::rich()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 160, 60));
+            let mut symbols = std::collections::BTreeSet::new();
+            for kind in [
+                "actor",
+                "boundary",
+                "control",
+                "entity",
+                "database",
+                "collections",
+                "queue",
+            ] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+                ir.nodes.push(IrNode {
+                    id: "Alice".to_owned(),
+                    classes: vec![format!("sequence-participant-{kind}")],
+                    ..Default::default()
+                });
+                let node = LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "Alice".to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Default::default(),
+                    bounds: LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 120.0,
+                        height: 100.0,
+                    },
+                };
+                let mut canvas = Canvas::new(160, 60, mode);
+                renderer.render_node_canvas(&mut canvas, &ir, &node, 1.0, 1.0, 0, 0, 0);
+                let grid = canvas.render_char_grid();
+                assert!(
+                    grid.iter().flatten().any(|ch| !blank_terminal_cell(*ch)),
+                    "{kind} {mode:?}: empty symbol"
+                );
+                assert!(
+                    !canvas.get_pixel(0, 0),
+                    "{kind} must not retain the generic box border"
+                );
+                assert!(
+                    symbols.insert(grid),
+                    "{kind} {mode:?}: duplicate participant symbol"
+                );
+            }
+            assert_eq!(symbols.len(), 7);
+        }
+    }
+
+    #[test]
+    fn typed_sequence_compact_cells_keep_distinct_symbols_and_unicode_names() {
+        let config = TermRenderConfig {
+            max_label_chars: 64,
+            ..TermRenderConfig::compact()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        for (kind, symbol) in [
+            ("actor", "o/\\"),
+            ("boundary", "|o"),
+            ("control", "^o"),
+            ("entity", "o_"),
+            ("database", "[=]"),
+            ("collections", "[+]"),
+            ("queue", "(=)"),
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+            ir.labels.push(IrLabel {
+                text: "界e\u{301}".to_owned(),
+                ..Default::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "User".to_owned(),
+                label: Some(IrLabelId(0)),
+                classes: vec![format!("sequence-participant-{kind}")],
+                ..Default::default()
+            });
+            let node = LayoutNodeBox {
+                node_index: 0,
+                node_id: "User".to_owned(),
+                rank: 0,
+                order: 0,
+                span: Default::default(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 120.0,
+                    height: 100.0,
+                },
+            };
+            let mut buffer = CellBuffer::new(20, 24);
+            renderer.render_node_cell(&mut buffer, &ir, &node, 0.04, 0.15, false);
+            let output = buffer.to_output_string();
+            assert!(
+                output.contains(symbol),
+                "{kind}: compact symbol lost:\n{output}"
+            );
+            assert!(
+                output.contains("界e\u{301}"),
+                "{kind}: Unicode name lost:\n{output}"
+            );
+        }
     }
 
     #[test]
