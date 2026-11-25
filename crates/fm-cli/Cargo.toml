@@ -46,7 +46,7 @@ highs = ["fm-layout/highs"]
 # the fm-render-canvas link out of the default build (bd-53p4); the gauntlet enables it.
 support-matrix = ["dep:fm-render-canvas"]
 fnx-integration = ["fm-layout/fnx-integration"]
-fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
+fnx-experimental-directed = ["fnx-integration", "fm-layout/fnx-experimental-directed"]
 
 [dependencies]
 anyhow.workspace = true

@@ -59,6 +59,8 @@ use fm_layout::fnx_budget::AnalysisBudget;
 use fm_layout::fnx_diagnostics::{
     FnxAnalysisPass, FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure_with_budget,
 };
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+use fm_layout::fnx_directed::{FnxDirectedAnalysis, analyze_directed_with_fnx_budget};
 use fm_layout::{
     CycleStrategy, EdgeRouting, LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout,
     build_layout_decision_ledger, build_layout_guard_report_with_pressure,
@@ -969,7 +971,7 @@ enum FnxProjectionArg {
     /// Use undirected graph projection (ignore edge direction).
     #[default]
     Undirected,
-    /// Use directed graph projection (preserve edge direction).
+    /// Validate directed topology (validate only; requires fnx-experimental-directed).
     Directed,
     /// Automatically select projection based on diagram type.
     Auto,
@@ -3263,6 +3265,38 @@ struct ValidateResult {
     fnx_cycle_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fnx_witness: Option<FnxWitness>,
+    /// Directed validation has distinct metrics; undirected bridge/cycle counts are not reused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_directed: Option<DirectedValidationAnalysis>,
+}
+
+/// Linear-size directed results. Missing fields mean a stage did not complete, not zero findings.
+#[derive(Debug, Serialize)]
+struct DirectedValidationAnalysis {
+    complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strongly_connected_component_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strongly_connected_components: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cyclic_component_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_cycles: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weakly_connected_component_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_weakly_connected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cyclic_nodes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cyclic_edge_indices: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sources: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sinks: Option<Vec<String>>,
+    native_algorithms_invoked: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5911,6 +5945,100 @@ fn build_fnx_validation_witness(
     })
 }
 
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn directed_node_names(
+    ir: &MermaidDiagramIr,
+    indices: impl IntoIterator<Item = usize>,
+) -> Vec<String> {
+    indices
+        .into_iter()
+        .filter_map(|index| ir.nodes.get(index).map(|node| node.id.clone()))
+        .collect()
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn build_directed_validation_report(
+    ir: &MermaidDiagramIr,
+    analysis: &FnxDirectedAnalysis,
+) -> DirectedValidationAnalysis {
+    DirectedValidationAnalysis {
+        complete: analysis.failure_reason.is_none(),
+        failure_reason: analysis.failure_reason.map(str::to_string),
+        strongly_connected_component_count: analysis.scc.as_ref().map(|scc| scc.components.len()),
+        strongly_connected_components: analysis.scc.as_ref().map(|scc| {
+            scc.components
+                .iter()
+                .map(|component| directed_node_names(ir, component.nodes.iter().copied()))
+                .collect()
+        }),
+        cyclic_component_count: analysis.scc.as_ref().map(|scc| scc.non_trivial_count),
+        has_cycles: analysis.scc.as_ref().map(|scc| scc.non_trivial_count > 0),
+        weakly_connected_component_count: analysis.wcc.as_ref().map(|wcc| wcc.components.len()),
+        is_weakly_connected: analysis.wcc.as_ref().map(|wcc| wcc.is_connected),
+        cyclic_nodes: analysis
+            .edges
+            .as_ref()
+            .map(|edges| directed_node_names(ir, edges.cyclic_nodes.iter().copied())),
+        cyclic_edge_indices: analysis
+            .edges
+            .as_ref()
+            .map(|edges| edges.cyclic_edges.iter().copied().collect()),
+        sources: analysis
+            .edges
+            .as_ref()
+            .map(|edges| directed_node_names(ir, edges.sources.iter().copied())),
+        sinks: analysis
+            .edges
+            .as_ref()
+            .map(|edges| directed_node_names(ir, edges.sinks.iter().copied())),
+        native_algorithms_invoked: analysis
+            .native_passes
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+    }
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn build_fnx_directed_validation_witness(
+    analysis: &FnxDirectedAnalysis,
+    report: &DirectedValidationAnalysis,
+) -> Result<FnxWitness> {
+    let execution = &analysis.execution;
+    let used = !execution.algorithms_invoked.is_empty();
+    let fallback_reason =
+        analysis
+            .failure_reason
+            .unwrap_or(if used { "none" } else { "not_applicable" });
+    let fallback_level = if analysis.failure_reason.is_some() {
+        if used { "fnx_partial" } else { "fnx_disabled" }
+    } else if used {
+        "fnx_full"
+    } else {
+        "fnx_disabled"
+    };
+    // Component membership and directed edge indices are identity; elapsed time is telemetry.
+    let results = serde_json::to_string(report)?;
+    Ok(FnxWitness {
+        enabled: true,
+        used,
+        projection_mode: "directed".to_string(),
+        algorithms_invoked: execution
+            .algorithms_invoked
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        analysis_time_us: execution
+            .analysis_time
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+        budget_exceeded: analysis.budget_exceeded.is_some(),
+        fallback_level: fallback_level.to_string(),
+        fallback_reason: fallback_reason.to_string(),
+        results_hash: fnx_results_hash(&["directed-validation-v1", &results]),
+    })
+}
+
 #[cfg(all(test, feature = "fnx-integration", not(target_arch = "wasm32")))]
 mod fnx_render_witness_tests {
     use super::*;
@@ -6369,6 +6497,27 @@ fn validate_fnx_options(fnx_mode: FnxModeArg, fnx_projection: FnxProjectionArg) 
         anyhow::bail!(
             "--fnx-projection {} is not yet supported (use undirected)",
             fnx_projection.as_str()
+        );
+    }
+    Ok(())
+}
+
+fn validate_fnx_validation_options(
+    fnx_mode: FnxModeArg,
+    fnx_projection: FnxProjectionArg,
+) -> Result<()> {
+    if fnx_projection != FnxProjectionArg::Directed {
+        return validate_fnx_options(fnx_mode, fnx_projection);
+    }
+    validate_fnx_options(fnx_mode, FnxProjectionArg::Undirected)?;
+    if fnx_mode != FnxModeArg::Disabled
+        && !cfg!(all(
+            feature = "fnx-experimental-directed",
+            not(target_arch = "wasm32")
+        ))
+    {
+        anyhow::bail!(
+            "validate --fnx-projection directed requires fnx-experimental-directed feature"
         );
     }
     Ok(())
@@ -9722,7 +9871,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         fnx_projection,
         fnx_fallback,
     } = options;
-    validate_fnx_options(fnx_mode, fnx_projection)?;
+    validate_fnx_validation_options(fnx_mode, fnx_projection)?;
 
     let source = load_input(input, max_input_bytes)?;
     let total_start = Instant::now();
@@ -9735,8 +9884,11 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
     let fnx_enabled = fnx_mode.should_use_fnx();
+    let directed_validation = fnx_enabled && fnx_projection == FnxProjectionArg::Directed;
     let mut layout_config = layout_config;
-    layout_config.fnx_enabled = fnx_enabled;
+    // Directed validation is advisory and explicitly requested. Keep the layout native-only:
+    // its existing FNX hints use undirected projection and must not masquerade as directed work.
+    layout_config.fnx_enabled = fnx_enabled && !directed_validation;
     let layout_start = Instant::now();
     let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
@@ -9787,7 +9939,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 
     // FNX structural analysis (when feature is enabled)
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-    let (fnx_results, fnx_analysis_time) = if fnx_enabled {
+    let (fnx_results, fnx_analysis_time) = if fnx_enabled && !directed_validation {
         let analysis_start = Instant::now();
         let results = analyze_structure_with_budget(&parsed.ir, fnx_budget)
             .into_value()
@@ -9802,13 +9954,50 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let (_fnx_results, _fnx_analysis_time): (Option<()>, std::time::Duration) =
         (None, std::time::Duration::ZERO);
 
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    let directed_results =
+        directed_validation.then(|| analyze_directed_with_fnx_budget(&parsed.ir, fnx_budget));
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    let (fnx_directed, directed_witness) = if let Some(analysis) = &directed_results {
+        diagnostics.extend(collect_fnx_directed_diagnostics(&parsed.ir, analysis));
+        let report = build_directed_validation_report(&parsed.ir, analysis);
+        let witness = build_fnx_directed_validation_witness(analysis, &report)?;
+        (Some(report), Some(witness))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32"))))]
+    let (fnx_directed, directed_witness): (
+        Option<DirectedValidationAnalysis>,
+        Option<FnxWitness>,
+    ) = (None, None);
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    let directed_failure_reason = directed_results
+        .as_ref()
+        .and_then(|analysis| analysis.failure_reason);
+    #[cfg(not(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32"))))]
+    let directed_failure_reason: Option<&str> = None;
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     let structural_budget_reason = fnx_results
         .as_ref()
         .and_then(|result| result.budget_exceeded.as_ref())
-        .map(|reason| reason.reason_code());
+        .map(|reason| reason.reason_code())
+        .or(directed_failure_reason);
     #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-    let structural_budget_reason: Option<&str> = None;
+    let structural_budget_reason = directed_failure_reason;
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    let fnx_witness = directed_witness.or_else(|| {
+        build_fnx_validation_witness(
+            fnx_enabled,
+            &traced_layout.trace.fnx,
+            fnx_results.as_ref(),
+            fnx_analysis_time,
+        )
+    });
+    #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+    let fnx_witness = directed_witness;
 
     // Preserve the structured validation report even when the caller requires FNX to finish.
     let fallback =
@@ -9940,13 +10129,8 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
             .as_ref()
             .filter(|result| result.completed(FnxAnalysisPass::CycleBasis))
             .map(|r| r.cycle_count),
-        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-        fnx_witness: build_fnx_validation_witness(
-            fnx_enabled,
-            &traced_layout.trace.fnx,
-            fnx_results.as_ref(),
-            fnx_analysis_time,
-        ),
+        fnx_witness,
+        fnx_directed,
         #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
         fnx_enabled: None,
         #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
@@ -9959,8 +10143,6 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         fnx_bridge_count: None,
         #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
         fnx_cycle_count: None,
-        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-        fnx_witness: None,
     };
     let _total_time = total_start.elapsed();
 
@@ -10119,6 +10301,97 @@ fn collect_structural_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<Valida
         });
     }
 
+    diagnostics
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn collect_fnx_directed_diagnostics(
+    ir: &MermaidDiagramIr,
+    analysis: &FnxDirectedAnalysis,
+) -> Vec<ValidationDiagnostic> {
+    let diagnostic = |code: &str,
+                      severity: &str,
+                      message: String,
+                      span: Option<fm_core::Span>,
+                      rule_id: &str,
+                      hint: &str| ValidationDiagnostic {
+        stage: "fnx".to_string(),
+        payload: StructuredDiagnostic {
+            error_code: format!("mermaid/{severity}/{code}"),
+            severity: severity.to_string(),
+            message,
+            span,
+            source_line: span.map(|span| span.start.line as usize),
+            source_column: span.map(|span| span.start.col as usize),
+            rule_id: Some(rule_id.to_string()),
+            confidence: None,
+            remediation_hint: Some(hint.to_string()),
+        },
+    };
+    let mut diagnostics = Vec::new();
+    if let Some(reason) = analysis.failure_reason {
+        let (code, rule, message) = if let Some(budget) = &analysis.budget_exceeded {
+            (
+                "fnx-budget-001",
+                "fnx.budget",
+                format!(
+                    "Directed structural analysis is incomplete: {}",
+                    budget.as_diagnostic()
+                ),
+            )
+        } else {
+            (
+                "fnx-directed-analysis",
+                "fnx.directed.analysis",
+                format!("Directed structural analysis could not verify its result: {reason}"),
+            )
+        };
+        diagnostics.push(diagnostic(
+            code,
+            "warning",
+            message,
+            None,
+            rule,
+            "Inspect graph endpoints or increase the FNX work/time budget; omitted metrics were not computed",
+        ));
+    }
+    if let Some(wcc) = &analysis.wcc
+        && !wcc.is_connected
+    {
+        diagnostics.push(diagnostic(
+            "fnx-directed-connectivity",
+            "warning",
+            format!(
+                "Directed graph contains {} weakly connected components",
+                wcc.components.len()
+            ),
+            None,
+            "fnx.directed.connectivity",
+            "Connect isolated components if they are intended to describe one system",
+        ));
+    }
+    if let Some(scc) = &analysis.scc {
+        for component in scc
+            .components
+            .iter()
+            .filter(|component| !component.is_trivial)
+        {
+            let names = directed_node_names(ir, component.nodes.iter().copied());
+            let span = component
+                .nodes
+                .first()
+                .and_then(|&index| ir.nodes.get(index))
+                .map(|node| node.span_primary);
+            diagnostics.push(diagnostic(
+                "fnx-directed-cycle",
+                "info",
+                format!("Directed cycle component with {} node(s): [{}]", names.len(), names.join(", ")),
+                span,
+                "fnx.directed.cycle",
+                "Review feedback loops if the diagram is intended to describe an acyclic dependency graph",
+            ));
+        }
+    }
     diagnostics
 }
 
@@ -10408,6 +10681,25 @@ fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
     }
     println!("  Diagnostics: {}", result.diagnostics.len());
     println!("  Fail threshold: {fail_on:?}");
+    if let Some(directed) = &result.fnx_directed {
+        println!(
+            "  Directed analysis: {}",
+            if directed.complete {
+                "complete"
+            } else {
+                "incomplete"
+            }
+        );
+        if let Some(count) = directed.strongly_connected_component_count {
+            println!("  Strongly connected components: {count}");
+        }
+        if let Some(count) = directed.weakly_connected_component_count {
+            println!("  Weakly connected components: {count}");
+        }
+        if let Some(count) = directed.cyclic_component_count {
+            println!("  Directed cyclic components: {count}");
+        }
+    }
 
     if result.diagnostics.is_empty() {
         return;

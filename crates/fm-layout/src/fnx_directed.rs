@@ -75,16 +75,32 @@ pub(crate) fn compute_scc_with_fnx(
     ir: &MermaidDiagramIr,
     budget: crate::fnx_budget::AnalysisBudget,
 ) -> Result<SccResult, FnxSccError> {
-    use crate::fnx_adapter::{ProjectedId, ir_to_digraph};
+    let mut executor = crate::fnx_budget::BudgetExecutor::new(budget);
+    executor.start();
+    compute_scc_with_fnx_executor(
+        ir,
+        budget,
+        &mut executor,
+        crate::fnx_adapter::DirectedGraphSemantics::LayoutConstraints,
+    )
+    .map(|(scc, _)| scc)
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+fn compute_scc_with_fnx_executor(
+    ir: &MermaidDiagramIr,
+    budget: crate::fnx_budget::AnalysisBudget,
+    executor: &mut crate::fnx_budget::BudgetExecutor,
+    semantics: crate::fnx_adapter::DirectedGraphSemantics,
+) -> Result<(SccResult, u64), FnxSccError> {
+    use crate::fnx_adapter::{ProjectedId, ir_to_digraph_with_semantics};
     use crate::fnx_budget::BudgetExecutor;
     use crate::fnx_diagnostics::{measure_fnx_algorithm, record_fnx_budget_exceeded};
 
     if ir.nodes.is_empty() && ir.edges.is_empty() {
-        return Ok(SccResult::default());
+        return Ok((SccResult::default(), 0));
     }
     let base_work = ir.nodes.len().saturating_add(ir.edges.len()).max(1) as u64;
-    let mut executor = BudgetExecutor::new(budget);
-    executor.start();
     let check_budget = |executor: &BudgetExecutor, backend_invoked| {
         if let Some(reason) = executor.exceeded_reason() {
             if budget.trace_enabled {
@@ -106,7 +122,7 @@ pub(crate) fn compute_scc_with_fnx(
         }
     };
     executor.record_work(base_work);
-    check_budget(&executor, false)?;
+    check_budget(executor, false)?;
 
     // Reject malformed caller data before constructing or executing an FNX graph. Such input is
     // handled by native best-effort analysis, not charged to the backend's health error rate.
@@ -114,16 +130,33 @@ pub(crate) fn compute_scc_with_fnx(
         .edges
         .iter()
         .enumerate()
+        .filter(|(_, edge)| semantics.includes_edge(edge))
         .map(|(edge_index, edge)| {
-            endpoint_node_index(ir, edge.from)
+            let (source, target) = endpoint_node_index(ir, edge.from)
                 .zip(endpoint_node_index(ir, edge.to))
-                .ok_or(FnxSccError::InvalidEndpoint { edge_index })
+                .ok_or(FnxSccError::InvalidEndpoint { edge_index })?;
+            Ok((
+                edge_index,
+                source,
+                target,
+                source != target && semantics.adds_reverse_arc(edge),
+            ))
         })
-        .collect::<Result<_, _>>()?;
-    check_budget(&executor, false)?;
-    let (graph, table) = ir_to_digraph(ir);
-    check_budget(&executor, false)?;
-    if !table.verify_counts(ir.nodes.len(), ir.edges.len()) || graph.node_count() != ir.nodes.len()
+        .collect::<Result<_, FnxSccError>>()?;
+    // The original nodes+edges reservation bounds the scan before any expansion. Charge
+    // reverse arcs before graph allocation and include them in each subsequent stage too.
+    let reverse_arcs = resolved_edges
+        .iter()
+        .filter(|(_, _, _, reverse)| *reverse)
+        .count() as u64;
+    executor.record_work(reverse_arcs);
+    let base_work = base_work.saturating_add(reverse_arcs);
+    check_budget(executor, false)?;
+    let (graph, table) = ir_to_digraph_with_semantics(ir, semantics);
+    check_budget(executor, false)?;
+    if !table.verify_counts(ir.nodes.len(), ir.edges.len())
+        || graph.node_count() != ir.nodes.len()
+        || table.edge_metadata().count() != resolved_edges.len()
     {
         return Err(FnxSccError::ProjectionMismatch);
     }
@@ -131,7 +164,7 @@ pub(crate) fn compute_scc_with_fnx(
     // Counts alone cannot detect a dropped edge. Check every resolved endpoint and its edge
     // provenance too; parallel directed edges intentionally share one simple-graph edge.
     let mut pairs = BTreeSet::new();
-    for (edge_index, (source, target)) in resolved_edges.into_iter().enumerate() {
+    for (edge_index, source, target, reverse) in resolved_edges {
         let source_id = table
             .get_fnx_id(&ProjectedId::Node(source))
             .ok_or(FnxSccError::ProjectionMismatch)?;
@@ -146,21 +179,29 @@ pub(crate) fn compute_scc_with_fnx(
             return Err(FnxSccError::ProjectionMismatch);
         }
         pairs.insert((source, target));
+        if reverse {
+            if !graph.has_edge(target_id, source_id)
+                || !table.has_edge_meta_index(target_id, source_id, edge_index)
+            {
+                return Err(FnxSccError::ProjectionMismatch);
+            }
+            pairs.insert((target, source));
+        }
     }
     if graph.edge_count() != pairs.len() {
         return Err(FnxSccError::ProjectionMismatch);
     }
 
     executor.record_work(base_work);
-    check_budget(&executor, false)?;
+    check_budget(executor, false)?;
     let backend_components = measure_fnx_algorithm("strongly_connected_components", || {
         fnx_algorithms::strongly_connected_components(&graph)
     });
-    check_budget(&executor, true)?;
+    check_budget(executor, true)?;
     executor.record_work(base_work);
-    check_budget(&executor, true)?;
+    check_budget(executor, true)?;
     let result = normalize_fnx_scc(backend_components, &table, ir.nodes.len(), &pairs)?;
-    check_budget(&executor, true)?;
+    check_budget(executor, true)?;
     if budget.trace_enabled {
         tracing::debug!(
             elapsed_ms = executor.elapsed_ms(),
@@ -168,7 +209,172 @@ pub(crate) fn compute_scc_with_fnx(
             "FNX directed SCC completed within budget"
         );
     }
-    Ok(result)
+    Ok((result, base_work))
+}
+
+/// Linear-size directed edge summaries. Self-loops participate in cycles but do not remove a
+/// node from the source/sink sets, which describe connections to other nodes.
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DirectedEdgeSummary {
+    pub cyclic_nodes: BTreeSet<usize>,
+    pub cyclic_edges: BTreeSet<usize>,
+    pub sources: BTreeSet<usize>,
+    pub sinks: BTreeSet<usize>,
+}
+
+/// Observed directed analyses, with absent fields for stages that did not complete.
+///
+/// Only SCC is executed by FNX. WCC and edge summaries are native helpers and are reported
+/// separately from [`crate::FnxExecutionTrace`]. No all-pairs reachability is materialized.
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Default)]
+pub struct FnxDirectedAnalysis {
+    pub scc: Option<SccResult>,
+    pub wcc: Option<WccResult>,
+    pub edges: Option<DirectedEdgeSummary>,
+    pub native_passes: Vec<&'static str>,
+    pub execution: crate::FnxExecutionTrace,
+    pub failure_reason: Option<&'static str>,
+    pub budget_exceeded: Option<crate::fnx_budget::BudgetExceededReason>,
+}
+
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+impl FnxDirectedAnalysis {
+    fn record_failure(&mut self, error: FnxSccError) {
+        self.failure_reason = Some(match error {
+            FnxSccError::InvalidEndpoint { .. } => "invalid_endpoint",
+            FnxSccError::ProjectionMismatch => "projection_mismatch",
+            FnxSccError::InvalidPartition => "invalid_partition",
+            FnxSccError::BudgetExceeded { reason, .. } => {
+                crate::fnx_diagnostics::record_fnx_budget_exceeded(&reason);
+                let code = reason.reason_code();
+                self.budget_exceeded = Some(reason);
+                code
+            }
+        });
+    }
+
+    fn within_budget(&mut self, executor: &crate::fnx_budget::BudgetExecutor) -> bool {
+        if let Some(reason) = executor.exceeded_reason() {
+            self.record_failure(FnxSccError::BudgetExceeded {
+                reason,
+                backend_invoked: true,
+            });
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// Run experimental directed validation without changing layout or global rollout state.
+///
+/// The caller explicitly opts into this native-only, feature-gated API. One shared clock and
+/// work budget cover verified FNX SCC (three reservations), native WCC (one), and native edge
+/// summaries (one). Each reserves `nodes + original edges + added reverse arcs`; invisible
+/// layout links are excluded from results but still charged for scanning. Stages are admitted
+/// before execution; a declined stage
+/// leaves its metrics absent. Elapsed-time limits are cooperative at stage boundaries.
+#[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+#[must_use]
+pub fn analyze_directed_with_fnx_budget(
+    ir: &MermaidDiagramIr,
+    budget: crate::fnx_budget::AnalysisBudget,
+) -> FnxDirectedAnalysis {
+    use crate::fnx_adapter::DirectedGraphSemantics;
+    use crate::fnx_budget::BudgetExecutor;
+    use crate::fnx_diagnostics::capture_fnx_execution;
+
+    let (mut analysis, execution) = capture_fnx_execution(|| {
+        let mut analysis = FnxDirectedAnalysis::default();
+        let mut executor = BudgetExecutor::new(budget);
+        executor.start();
+        let semantics = DirectedGraphSemantics::Structural;
+        let (scc, base_work) =
+            match compute_scc_with_fnx_executor(ir, budget, &mut executor, semantics) {
+                Ok(result) => result,
+                Err(error) => {
+                    analysis.record_failure(error);
+                    return analysis;
+                }
+            };
+        analysis.scc = Some(scc);
+        if ir.nodes.is_empty() {
+            analysis.wcc = Some(compute_wcc(ir));
+            analysis.edges = Some(DirectedEdgeSummary::default());
+            return analysis;
+        }
+
+        executor.record_work(base_work);
+        if !analysis.within_budget(&executor) {
+            return analysis;
+        }
+        analysis.wcc = Some(compute_wcc_from_pairs(
+            ir.nodes.len(),
+            ir.edges
+                .iter()
+                .filter(|edge| semantics.includes_edge(edge))
+                .filter_map(|edge| {
+                    endpoint_node_index(ir, edge.from).zip(endpoint_node_index(ir, edge.to))
+                }),
+        ));
+        analysis.native_passes.push("weakly_connected_components");
+        if !analysis.within_budget(&executor) {
+            return analysis;
+        }
+
+        executor.record_work(base_work);
+        if !analysis.within_budget(&executor) {
+            return analysis;
+        }
+        let scc = analysis
+            .scc
+            .as_ref()
+            .expect("verified SCC precedes summaries");
+        let mut edges = DirectedEdgeSummary {
+            cyclic_nodes: scc
+                .components
+                .iter()
+                .filter(|component| !component.is_trivial)
+                .flat_map(|component| component.nodes.iter().copied())
+                .collect(),
+            sources: (0..ir.nodes.len()).collect(),
+            sinks: (0..ir.nodes.len()).collect(),
+            ..DirectedEdgeSummary::default()
+        };
+        for (index, edge) in ir.edges.iter().enumerate() {
+            if !semantics.includes_edge(edge) {
+                continue;
+            }
+            // The same endpoint resolution was verified before executing FNX SCC.
+            let (Some(from), Some(to)) = (
+                endpoint_node_index(ir, edge.from),
+                endpoint_node_index(ir, edge.to),
+            ) else {
+                continue;
+            };
+            if from != to {
+                edges.sources.remove(&to);
+                edges.sinks.remove(&from);
+                if semantics.adds_reverse_arc(edge) {
+                    edges.sources.remove(&from);
+                    edges.sinks.remove(&to);
+                }
+            }
+            if scc.node_to_component.get(&from) == scc.node_to_component.get(&to)
+                && edges.cyclic_nodes.contains(&from)
+            {
+                edges.cyclic_edges.insert(index);
+            }
+        }
+        analysis.edges = Some(edges);
+        analysis.native_passes.push("directed_edge_summary");
+        analysis.within_budget(&executor);
+        analysis
+    });
+    analysis.execution = execution;
+    analysis
 }
 
 #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
@@ -496,7 +702,15 @@ pub struct WccResult {
 /// - Nodes within each component are sorted by index
 #[must_use]
 pub fn compute_wcc(ir: &MermaidDiagramIr) -> WccResult {
-    let n = ir.nodes.len();
+    compute_wcc_from_pairs(
+        ir.nodes.len(),
+        ir.edges.iter().filter_map(|edge| {
+            endpoint_node_index(ir, edge.from).zip(endpoint_node_index(ir, edge.to))
+        }),
+    )
+}
+
+fn compute_wcc_from_pairs(n: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> WccResult {
     if n == 0 {
         return WccResult {
             components: Vec::new(),
@@ -509,13 +723,7 @@ pub fn compute_wcc(ir: &MermaidDiagramIr) -> WccResult {
     // Build undirected adjacency list (sorted for determinism)
     let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
 
-    for edge in &ir.edges {
-        let (Some(from_idx), Some(to_idx)) = (
-            endpoint_node_index(ir, edge.from),
-            endpoint_node_index(ir, edge.to),
-        ) else {
-            continue;
-        };
+    for (from_idx, to_idx) in edges {
         if from_idx < n && to_idx < n && from_idx != to_idx {
             adj[from_idx].insert(to_idx);
             adj[to_idx].insert(from_idx);
@@ -905,6 +1113,229 @@ mod tests {
     }
 
     // SCC Tests
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_validation_expands_two_way_arrows_without_changing_layout_constraints() {
+        use crate::fnx_budget::AnalysisBudget;
+        use fm_core::ArrowType;
+
+        for arrow in [
+            ArrowType::DoubleArrow,
+            ArrowType::DoubleThickArrow,
+            ArrowType::DoubleDottedArrow,
+        ] {
+            let mut ir = make_test_ir_with_edges(&[(0, 1)]);
+            ir.edges[0].arrow = arrow;
+            let declined = analyze_directed_with_fnx_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(3),
+            );
+            assert!(declined.execution.algorithms_invoked.is_empty());
+            assert_eq!(declined.failure_reason, Some("work_exceeded"));
+            let partial = analyze_directed_with_fnx_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(19),
+            );
+            assert!(partial.scc.is_some() && partial.wcc.is_some() && partial.edges.is_none());
+            let result = analyze_directed_with_fnx_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(20),
+            );
+            assert_eq!(result.failure_reason, None);
+            assert_eq!(result.scc.unwrap().non_trivial_count, 1);
+            let edges = result.edges.unwrap();
+            assert_eq!(edges.cyclic_nodes, BTreeSet::from([0, 1]));
+            assert_eq!(edges.cyclic_edges, BTreeSet::from([0]));
+            assert!(edges.sources.is_empty() && edges.sinks.is_empty());
+
+            // Layout-facing SCC and its canary backend keep the authored orientation contract.
+            let layout = compute_scc_with_fnx(&ir, AnalysisBudget::unlimited()).unwrap();
+            assert_eq!(layout, compute_scc(&ir));
+            assert_eq!(layout.non_trivial_count, 0);
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_validation_filters_invisible_edges_without_losing_original_indices() {
+        use crate::fnx_budget::AnalysisBudget;
+        use fm_core::ArrowType;
+
+        let mut ir = make_test_ir_with_edges(&[(0, 1), (0, 1), (1, 0)]);
+        ir.edges[0].arrow = ArrowType::Invisible;
+        ir.edges[1].arrow = ArrowType::DoubleArrow;
+        let result =
+            analyze_directed_with_fnx_budget(&ir, AnalysisBudget::unlimited().with_work_budget(30));
+        assert_eq!(result.failure_reason, None);
+        assert_eq!(result.scc.unwrap().non_trivial_count, 1);
+        assert_eq!(result.edges.unwrap().cyclic_edges, BTreeSet::from([1, 2]));
+
+        let mut one_way = make_test_ir_with_edges(&[(0, 1), (1, 0)]);
+        one_way.edges[1].arrow = ArrowType::Invisible;
+        let result = analyze_directed_with_fnx_budget(&one_way, AnalysisBudget::unlimited());
+        assert_eq!(result.scc.unwrap().non_trivial_count, 0);
+        assert!(result.wcc.unwrap().is_connected);
+        let edges = result.edges.unwrap();
+        assert!(edges.cyclic_nodes.is_empty() && edges.cyclic_edges.is_empty());
+        assert_eq!(edges.sources, BTreeSet::from([0]));
+        assert_eq!(edges.sinks, BTreeSet::from([1]));
+        assert_eq!(compute_scc(&one_way).non_trivial_count, 1);
+
+        one_way.edges[0].arrow = ArrowType::Invisible;
+        let result = analyze_directed_with_fnx_budget(&one_way, AnalysisBudget::unlimited());
+        assert_eq!(result.wcc.unwrap().components.len(), 2);
+        let edges = result.edges.unwrap();
+        assert_eq!(edges.sources, BTreeSet::from([0, 1]));
+        assert_eq!(edges.sinks, BTreeSet::from([0, 1]));
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_validation_keeps_circle_and_cross_markers_as_decorations() {
+        use crate::fnx_budget::AnalysisBudget;
+        use fm_core::ArrowType;
+
+        for arrow in [ArrowType::CircleBoth, ArrowType::CrossBoth] {
+            let mut ir = make_test_ir_with_edges(&[(0, 1)]);
+            ir.edges[0].arrow = arrow;
+            let result = analyze_directed_with_fnx_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(15),
+            );
+            assert_eq!(result.failure_reason, None);
+            assert_eq!(result.scc.unwrap().non_trivial_count, 0);
+            assert!(result.edges.unwrap().cyclic_edges.is_empty());
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_analysis_shares_one_budget_and_reports_only_completed_stages() {
+        use crate::fnx_budget::AnalysisBudget;
+
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2)]);
+        // Each stage costs 3 nodes + 2 edges. SCC has projection, backend, and verification;
+        // WCC and edge summaries then consume one stage each from the same budget.
+        for work_budget in [0, 5, 10, 14, 15, 19, 20, 24, 25] {
+            let result = analyze_directed_with_fnx_budget(
+                &ir,
+                AnalysisBudget::unlimited().with_work_budget(work_budget),
+            );
+            assert_eq!(
+                result.scc.is_some(),
+                work_budget >= 15,
+                "budget={work_budget}"
+            );
+            assert_eq!(
+                result.wcc.is_some(),
+                work_budget >= 20,
+                "budget={work_budget}"
+            );
+            assert_eq!(
+                result.edges.is_some(),
+                work_budget >= 25,
+                "budget={work_budget}"
+            );
+            assert_eq!(
+                result.failure_reason,
+                (work_budget < 25).then_some("work_exceeded")
+            );
+            assert_eq!(result.budget_exceeded.is_some(), work_budget < 25);
+            assert_eq!(
+                result.execution.algorithms_invoked,
+                if work_budget >= 10 {
+                    vec!["strongly_connected_components"]
+                } else {
+                    vec![]
+                },
+            );
+            assert_eq!(
+                result.native_passes.len(),
+                usize::from(work_budget >= 20) + usize::from(work_budget >= 25),
+            );
+            if let Some(scc) = result.scc {
+                assert_eq!(scc.components.len(), 3);
+                assert_eq!(scc.non_trivial_count, 0);
+            }
+        }
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_analysis_preserves_ports_feedback_parallel_edges_and_isolates() {
+        use crate::fnx_budget::AnalysisBudget;
+
+        let mut ir = make_test_ir_with_edges(&[(0, 1), (1, 0), (1, 2), (1, 2), (3, 3)]);
+        ir.nodes.push(IrNode {
+            id: "N4".to_string(),
+            ..Default::default()
+        });
+        ir.ports = (0..ir.nodes.len())
+            .map(|node| IrPort {
+                node: IrNodeId(node),
+                ..Default::default()
+            })
+            .collect();
+        for edge in &mut ir.edges {
+            let IrEndpoint::Node(from) = edge.from else {
+                unreachable!()
+            };
+            let IrEndpoint::Node(to) = edge.to else {
+                unreachable!()
+            };
+            edge.from = IrEndpoint::Port(IrPortId(from.0));
+            edge.to = IrEndpoint::Port(IrPortId(to.0));
+        }
+        let result =
+            analyze_directed_with_fnx_budget(&ir, AnalysisBudget::unlimited().with_work_budget(50));
+        assert_eq!(result.failure_reason, None);
+        let scc = result.scc.unwrap();
+        assert_eq!(scc.components.len(), 4);
+        assert_eq!(scc.non_trivial_count, 2);
+        let wcc = result.wcc.unwrap();
+        assert_eq!(wcc.components.len(), 3);
+        assert!(!wcc.is_connected);
+        let edges = result.edges.unwrap();
+        assert_eq!(edges.cyclic_nodes, BTreeSet::from([0, 1, 3]));
+        assert_eq!(edges.cyclic_edges, BTreeSet::from([0, 1, 4]));
+        assert_eq!(edges.sources, BTreeSet::from([3, 4]));
+        assert_eq!(edges.sinks, BTreeSet::from([2, 3, 4]));
+        assert_eq!(
+            result.execution.algorithms_invoked,
+            ["strongly_connected_components"]
+        );
+        assert_eq!(
+            result.native_passes,
+            ["weakly_connected_components", "directed_edge_summary"]
+        );
+    }
+
+    #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_directed_analysis_distinguishes_empty_results_from_invalid_input() {
+        use crate::fnx_budget::AnalysisBudget;
+
+        let empty = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let result = analyze_directed_with_fnx_budget(
+            &empty,
+            AnalysisBudget::unlimited().with_work_budget(0),
+        );
+        assert!(result.scc.unwrap().components.is_empty());
+        assert!(result.wcc.unwrap().is_connected);
+        assert_eq!(result.edges, Some(DirectedEdgeSummary::default()));
+        assert!(result.execution.algorithms_invoked.is_empty());
+        assert_eq!(result.failure_reason, None);
+
+        let mut malformed = make_test_ir_with_edges(&[(0, 1)]);
+        malformed.edges[0].to = IrEndpoint::Unresolved;
+        let result = analyze_directed_with_fnx_budget(&malformed, AnalysisBudget::unlimited());
+        assert!(result.scc.is_none() && result.wcc.is_none() && result.edges.is_none());
+        assert!(result.execution.algorithms_invoked.is_empty());
+        assert!(result.native_passes.is_empty());
+        assert_eq!(result.failure_reason, Some("invalid_endpoint"));
+        assert!(result.budget_exceeded.is_none());
+    }
 
     #[cfg(all(feature = "fnx-experimental-directed", not(target_arch = "wasm32")))]
     #[test]

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use fm_core::{IrEndpoint, IrLabelId, MermaidDiagramIr};
+use fm_core::{ArrowType, IrEdge, IrEndpoint, IrLabelId, MermaidDiagramIr};
 use fnx_classes::Graph;
 use fnx_classes::digraph::DiGraph;
 use fnx_runtime::CgseValue;
@@ -445,12 +445,22 @@ impl ProjectionTable {
     pub fn add_edge_meta(&mut self, source: &str, target: &str, meta: ProjectedEdgeMeta) {
         self.edge_meta_by_index
             .insert(meta.ir_edge_index, meta.clone());
+        self.add_edge_pair_index(source, target, meta.ir_edge_index);
+    }
+
+    fn add_edge_pair_index(&mut self, source: &str, target: &str, index: usize) {
         let indices = self
             .edge_indices_by_pair
             .entry((source.to_string(), target.to_string()))
             .or_default();
-        indices.push(meta.ir_edge_index);
-        indices.sort_unstable();
+        // Projection visits original edges in increasing index order, including reverse
+        // aliases. Keep that common path linear even for many parallel edges.
+        if indices.last().is_none_or(|&last| last <= index) {
+            indices.push(index);
+        } else {
+            let position = indices.partition_point(|&existing| existing <= index);
+            indices.insert(position, index);
+        }
     }
 
     /// Get edge metadata.
@@ -478,6 +488,14 @@ impl ProjectionTable {
     #[must_use]
     pub fn get_edge_meta_by_index(&self, ir_edge_index: usize) -> Option<&ProjectedEdgeMeta> {
         self.edge_meta_by_index.get(&ir_edge_index)
+    }
+
+    /// Check an arc's original edge provenance without scanning its parallel edges.
+    #[cfg(feature = "fnx-experimental-directed")]
+    pub(crate) fn has_edge_meta_index(&self, source: &str, target: &str, index: usize) -> bool {
+        self.edge_indices_by_pair
+            .get(&(source.to_string(), target.to_string()))
+            .is_some_and(|indices| indices.binary_search(&index).is_ok())
     }
 
     /// Iterate the retained IR edges in stable index order.
@@ -525,11 +543,41 @@ fn resolve_label(ir: &MermaidDiagramIr, label_id: Option<IrLabelId>) -> Option<S
     label_id.and_then(|id| ir.labels.get(id.0).map(|l| l.text.clone()))
 }
 
+/// Layout constraints retain their authored orientation, including invisible positioning links.
+/// Structural validation instead describes visible relationships and expands explicit two-way
+/// arrowheads. Endpoint circles and crosses are decorations, not reverse arrows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectedGraphSemantics {
+    LayoutConstraints,
+    Structural,
+}
+
+impl DirectedGraphSemantics {
+    pub(crate) fn includes_edge(self, edge: &IrEdge) -> bool {
+        self == Self::LayoutConstraints || edge.arrow != ArrowType::Invisible
+    }
+
+    pub(crate) fn adds_reverse_arc(self, edge: &IrEdge) -> bool {
+        self == Self::Structural
+            && matches!(
+                edge.arrow,
+                ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow
+            )
+    }
+}
+
 /// Build fnx DiGraph from MermaidDiagramIr with full metadata preservation.
 ///
 /// Returns the graph and projection table for bidirectional lookup.
 #[must_use]
 pub fn ir_to_digraph(ir: &MermaidDiagramIr) -> (DiGraph, ProjectionTable) {
+    ir_to_digraph_with_semantics(ir, DirectedGraphSemantics::LayoutConstraints)
+}
+
+pub(crate) fn ir_to_digraph_with_semantics(
+    ir: &MermaidDiagramIr,
+    semantics: DirectedGraphSemantics,
+) -> (DiGraph, ProjectionTable) {
     let mut graph = DiGraph::hardened();
     let mut table = ProjectionTable::from_ir(ir);
 
@@ -554,6 +602,9 @@ pub fn ir_to_digraph(ir: &MermaidDiagramIr) -> (DiGraph, ProjectionTable) {
 
     // Add edges with metadata
     for (idx, edge) in ir.edges.iter().enumerate() {
+        if !semantics.includes_edge(edge) {
+            continue;
+        }
         let Some(source_idx) = endpoint_node_index(ir, edge.from) else {
             continue;
         };
@@ -572,6 +623,13 @@ pub fn ir_to_digraph(ir: &MermaidDiagramIr) -> (DiGraph, ProjectionTable) {
             attrs.insert("label".to_string(), CgseValue::String(label.clone()));
         }
         attrs.insert("weight".to_string(), CgseValue::Float(1.0));
+
+        if source_idx != target_idx && semantics.adds_reverse_arc(edge) {
+            let _ = graph.add_edge_with_attrs(&target_fnx, &source_fnx, attrs.clone());
+            // Both arcs refer to the same original edge. Do not overwrite its authored
+            // source/target metadata or renumber it when invisible links were filtered.
+            table.add_edge_pair_index(&target_fnx, &source_fnx, idx);
+        }
 
         // Ignore result - edge might fail in hardened mode
         let _ = graph.add_edge_with_attrs(&source_fnx, &target_fnx, attrs);

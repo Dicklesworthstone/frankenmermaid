@@ -747,6 +747,323 @@ fn batch_checks_fnx_requirements_before_creating_output() {
     assert!(!out.exists());
 }
 
+#[cfg(not(feature = "fnx-experimental-directed"))]
+#[test]
+fn directed_validation_requires_the_experimental_feature() {
+    let output = run_cli(
+        &["validate", "-", "--fnx-projection", "directed"],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "validate --fnx-projection directed requires fnx-experimental-directed feature"
+        )
+    );
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+fn run_directed_validation(
+    input: &str,
+    work_budget: &str,
+    fallback: &str,
+) -> (Output, serde_json::Value) {
+    let output = run_cli(
+        &[
+            "validate",
+            "-",
+            "--format",
+            "json",
+            "--fnx-mode",
+            "enabled",
+            "--fnx-projection",
+            "directed",
+            "--fnx-work-budget",
+            work_budget,
+            "--fnx-time-budget-ms",
+            "18446744073709551615",
+            "--fnx-fallback",
+            fallback,
+            "--fail-on",
+            "none",
+        ],
+        input,
+    );
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid validation JSON: {error}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output, report)
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_distinguishes_a_dag_from_an_undirected_cycle() {
+    let input = "flowchart LR\nA-->B\nA-->C\nB-->D\nC-->D\n";
+    let (output, report) = run_directed_validation(input, "40", "strict");
+    assert_success(&output, "directed diamond DAG");
+    let directed = &report["fnx_directed"];
+    assert_eq!(directed["complete"], true);
+    assert_eq!(directed["strongly_connected_component_count"], 4);
+    assert_eq!(directed["weakly_connected_component_count"], 1);
+    assert_eq!(directed["is_weakly_connected"], true);
+    assert_eq!(directed["has_cycles"], false);
+    assert_eq!(directed["cyclic_component_count"], 0);
+    assert_eq!(directed["cyclic_nodes"], serde_json::json!([]));
+    assert_eq!(directed["cyclic_edge_indices"], serde_json::json!([]));
+    assert_eq!(directed["sources"], serde_json::json!(["A"]));
+    assert_eq!(directed["sinks"], serde_json::json!(["D"]));
+    assert!(report.get("fnx_cycle_count").is_none());
+    assert!(report.get("fnx_component_count").is_none());
+    assert!(report.get("fnx_articulation_point_count").is_none());
+    assert!(report.get("fnx_bridge_count").is_none());
+    let witness = &report["fnx_witness"];
+    assert_eq!(witness["projection_mode"], "directed");
+    assert_eq!(witness["used"], true);
+    assert_eq!(
+        witness["algorithms_invoked"],
+        serde_json::json!(["strongly_connected_components"])
+    );
+    assert_eq!(
+        directed["native_algorithms_invoked"],
+        serde_json::json!(["weakly_connected_components", "directed_edge_summary"])
+    );
+    assert!(
+        !report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["rule_id"] == "fnx.directed.cycle"
+                    || diagnostic["rule_id"] == "fnx.cycle"
+            })
+    );
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_honors_two_way_arrowheads_and_original_edge_indices() {
+    for arrow in ["<-->", "<==>", "<-.->"] {
+        let input = format!("flowchart LR\nA{arrow}B\n");
+        let (output, report) = run_directed_validation(&input, "20", "strict");
+        assert_success(&output, "bidirectional dependency");
+        let directed = &report["fnx_directed"];
+        assert_eq!(directed["has_cycles"], true);
+        assert_eq!(
+            directed["strongly_connected_components"],
+            serde_json::json!([["A", "B"]])
+        );
+        assert_eq!(directed["cyclic_edge_indices"], serde_json::json!([0]));
+        assert_eq!(directed["sources"], serde_json::json!([]));
+        assert_eq!(directed["sinks"], serde_json::json!([]));
+        assert_eq!(
+            report["fnx_witness"]["algorithms_invoked"],
+            serde_json::json!(["strongly_connected_components"])
+        );
+    }
+    // Filtering the first link and expanding the second must not shift authored edge indices.
+    let (output, report) =
+        run_directed_validation("flowchart LR\nA~~~B\nA<-->B\nB-->A\n", "30", "strict");
+    assert_success(&output, "mixed projected edge provenance");
+    assert_eq!(
+        report["fnx_directed"]["cyclic_edge_indices"],
+        serde_json::json!([1, 2])
+    );
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_excludes_invisible_layout_constraints_from_topology() {
+    let (output, report) = run_directed_validation("flowchart LR\nA-->B\nB~~~A\n", "20", "strict");
+    assert_success(&output, "one-way graph with invisible return constraint");
+    let directed = &report["fnx_directed"];
+    assert_eq!(directed["has_cycles"], false);
+    assert_eq!(directed["strongly_connected_component_count"], 2);
+    assert_eq!(directed["weakly_connected_component_count"], 1);
+    assert_eq!(directed["cyclic_edge_indices"], serde_json::json!([]));
+    assert_eq!(directed["sources"], serde_json::json!(["A"]));
+    assert_eq!(directed["sinks"], serde_json::json!(["B"]));
+
+    let (output, report) = run_directed_validation("flowchart LR\nA~~~B\n", "15", "strict");
+    assert_success(&output, "nodes joined only for layout");
+    assert_eq!(
+        report["fnx_directed"]["weakly_connected_component_count"],
+        2
+    );
+    assert_eq!(report["fnx_directed"]["is_weakly_connected"], false);
+    assert_eq!(
+        report["fnx_directed"]["sources"],
+        serde_json::json!(["A", "B"])
+    );
+    assert_eq!(
+        report["fnx_directed"]["sinks"],
+        serde_json::json!(["A", "B"])
+    );
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_reports_feedback_loops_parallel_edges_and_isolated_nodes() {
+    let input = "flowchart LR\nA-->B\nB-->A\nB-->C\nB-->C\nD-->D\nE\n";
+    let (output, first) = run_directed_validation(input, "50", "strict");
+    assert_success(&output, "directed feedback graph");
+    let directed = &first["fnx_directed"];
+    assert_eq!(
+        directed["strongly_connected_components"],
+        serde_json::json!([["A", "B"], ["C"], ["D"], ["E"]])
+    );
+    assert_eq!(directed["strongly_connected_component_count"], 4);
+    assert_eq!(directed["weakly_connected_component_count"], 3);
+    assert_eq!(directed["is_weakly_connected"], false);
+    assert_eq!(directed["has_cycles"], true);
+    assert_eq!(directed["cyclic_component_count"], 2);
+    assert_eq!(directed["cyclic_nodes"], serde_json::json!(["A", "B", "D"]));
+    assert_eq!(
+        directed["cyclic_edge_indices"],
+        serde_json::json!([0, 1, 4])
+    );
+    assert_eq!(directed["sources"], serde_json::json!(["D", "E"]));
+    assert_eq!(directed["sinks"], serde_json::json!(["C", "D", "E"]));
+    let diagnostics = first["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["rule_id"] == "fnx.directed.cycle")
+            .count(),
+        2
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["rule_id"] == "fnx.directed.connectivity")
+    );
+
+    let (output, second) = run_directed_validation(input, "50", "strict");
+    assert_success(&output, "repeated directed feedback graph");
+    assert_eq!(first["fnx_directed"], second["fnx_directed"]);
+    assert_eq!(
+        first["fnx_witness"]["results_hash"],
+        second["fnx_witness"]["results_hash"]
+    );
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_budget_keeps_unobserved_metrics_absent() {
+    for budget in [0, 10, 15, 20, 25] {
+        let (output, report) =
+            run_directed_validation("flowchart LR\nA-->B-->C\n", &budget.to_string(), "graceful");
+        assert_success(&output, "budgeted directed analysis");
+        let directed = &report["fnx_directed"];
+        assert_eq!(directed["complete"], budget >= 25);
+        assert_eq!(
+            directed.get("strongly_connected_component_count").is_some(),
+            budget >= 15
+        );
+        assert_eq!(directed.get("has_cycles").is_some(), budget >= 15);
+        assert_eq!(
+            directed.get("weakly_connected_component_count").is_some(),
+            budget >= 20
+        );
+        assert_eq!(directed.get("cyclic_edge_indices").is_some(), budget >= 25);
+        assert_eq!(directed.get("sources").is_some(), budget >= 25);
+        assert_eq!(report["fnx_witness"]["used"], budget >= 10);
+        assert_eq!(report["fnx_witness"]["budget_exceeded"], budget < 25);
+        if budget < 25 {
+            assert_eq!(directed["failure_reason"], "work_exceeded");
+            assert!(
+                report["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| diagnostic["rule_id"] == "fnx.budget")
+            );
+        }
+    }
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_preserves_warn_and_strict_reports_after_partial_analysis() {
+    for policy in ["graceful", "warn", "strict"] {
+        let (output, report) = run_directed_validation("flowchart LR\nA-->B-->C\n", "15", policy);
+        assert_eq!(output.status.success(), policy != "strict");
+        assert_eq!(report["valid"], policy != "strict");
+        assert_eq!(
+            report["fnx_directed"]["strongly_connected_component_count"],
+            3
+        );
+        assert!(
+            report["fnx_directed"]
+                .get("weakly_connected_component_count")
+                .is_none()
+        );
+        assert_eq!(report["fnx_witness"]["fallback_level"], "fnx_partial");
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["rule_id"] == "fnx.fallback.warn"),
+            policy == "warn"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["rule_id"] == "fnx.fallback.strict"),
+            policy == "strict"
+        );
+    }
+}
+
+#[cfg(feature = "fnx-experimental-directed")]
+#[test]
+fn directed_validation_is_explicit_and_does_not_enable_directed_rendering() {
+    let input = "flowchart LR\nA-->B\n";
+    let disabled = run_cli(
+        &[
+            "validate",
+            "-",
+            "--format",
+            "json",
+            "--fnx-mode",
+            "disabled",
+            "--fnx-projection",
+            "directed",
+        ],
+        input,
+    );
+    assert_success(&disabled, "disabled directed analysis");
+    let report: serde_json::Value = serde_json::from_slice(&disabled.stdout).unwrap();
+    assert!(report.get("fnx_directed").is_none());
+    assert!(report.get("fnx_witness").is_none());
+
+    let render = run_cli(
+        &[
+            "render",
+            "-",
+            "--fnx-mode",
+            "enabled",
+            "--fnx-projection",
+            "directed",
+        ],
+        input,
+    );
+    assert!(!render.status.success());
+    assert!(
+        String::from_utf8_lossy(&render.stderr)
+            .contains("--fnx-projection directed is not yet supported")
+    );
+
+    let text = run_cli(&["validate", "-", "--fnx-projection", "directed"], input);
+    assert_success(&text, "directed text report");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("Directed analysis: complete"));
+    assert!(text.contains("Strongly connected components: 2"));
+    assert!(text.contains("Directed cyclic components: 0"));
+}
+
 #[cfg(feature = "fnx-integration")]
 #[test]
 fn fnx_batch_accepts_strict_and_warn_when_analysis_succeeds() {

@@ -170,8 +170,31 @@ FNX is automatically disabled in WebAssembly builds due to dependency constraint
 | Value | Description |
 |-------|-------------|
 | `undirected` | Project directed edges to undirected graph (default) |
-| `directed` | Reserved; rejected while FNX is active (use `undirected`) |
+| `directed` | Directed structural analysis for `validate`, requiring the `fnx-experimental-directed` build feature |
 | `auto` | Reserved; rejected while FNX is active (use `undirected`) |
+
+Directed validation preserves edge direction when finding strongly connected components
+and feedback loops. For example, the diamond `A --> B --> D` and `A --> C --> D` has an
+undirected cycle but no directed cycle. Two-way arrowheads (`<-->`, `<==>`, `<-.->`)
+contribute both directions; invisible `~~~` positioning links do not contribute structural
+relationships. Cyclic edge indices always refer to the original input IR, including when
+earlier links were invisible or one authored link contributes two arcs.
+
+```bash
+cargo build -p frankenmermaid-cli --features fnx-experimental-directed
+fm-cli validate dependencies.mmd --fnx-projection directed --format json
+```
+
+The JSON `fnx_directed` object reports strong and weak component counts, strong component
+membership, cyclic nodes and edge indices, and source/sink nodes. Source and sink sets
+describe connections to other nodes, so an isolated self-loop remains both a source and a
+sink. Missing metric fields mean their stage did not complete; they do not imply zero.
+The witness records actual FNX SCC execution and timing. Native weak-connectivity and
+edge-summary passes appear separately in `native_algorithms_invoked`.
+
+This explicit validation mode uses native layout and does not change rollout state or
+enable directed rendering. `render` and `render-batch` still reject directed projection
+while FNX is active. `--fnx-mode disabled` suppresses directed analysis as well.
 
 ### `--fnx-time-budget-ms` and `--fnx-work-budget`
 
@@ -186,6 +209,15 @@ The configured limits cover automatic layout selection, centrality ordering and 
 cycle-criticality scoring, and structural validation. Each analysis stage has its own
 allowance. In a batch, each diagram receives its own limits; the values do not cap the
 whole batch or the native layout/rendering pipeline.
+
+Directed validation shares one allowance across SCC projection, backend execution,
+verification, native weak connectivity, and native edge summaries. Each reserves
+`nodes + original edges + added reverse arcs` work units before starting, so a complete
+nonempty analysis uses five such reservations. Invisible links remain charged for scanning;
+reverse arcs are admitted before constructing the expanded graph. It does not compute
+all-pairs reachability. Graceful and warn modes
+retain completed directed metrics when a later stage exhausts the budget; strict mode
+fails while still producing the validation report.
 
 Work is admitted before graph projection and backend passes. A work budget of `0`
 prevents applicable FNX analysis and follows the selected fallback policy. Empty inputs
@@ -244,7 +276,9 @@ JSON validation output and `--diagnostics-out` retain completed structural metri
 
 **Impact**: Minimal. Most structural metrics (centrality, connectivity, cycles) are meaningful even without direction.
 
-**Workaround**: Use `--fnx-projection undirected`. Experimental directed helpers exist in the library, but the CLI does not yet dispatch to them; `directed` and `auto` projections are rejected while FNX is active.
+**Workaround**: Build with `fnx-experimental-directed` and use `validate --fnx-projection directed`
+to inspect directed connectivity and feedback loops. Rendering continues to use `undirected`;
+the `auto` projection remains reserved.
 
 ### "FNX analysis timed out"
 
