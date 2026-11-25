@@ -385,11 +385,23 @@ fn sequence_layout_at_origin(layout: &DiagramLayout) -> Option<DiagramLayout> {
     Some(shifted)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EdgeStroke {
     Solid,
     Dotted,
     Thick,
+    ThickDotted,
+}
+
+impl EdgeStroke {
+    const fn with_dashes(self, dashed: bool) -> Self {
+        match (matches!(self, Self::Thick | Self::ThickDotted), dashed) {
+            (false, false) => Self::Solid,
+            (false, true) => Self::Dotted,
+            (true, false) => Self::Thick,
+            (true, true) => Self::ThickDotted,
+        }
+    }
 }
 
 const fn arrow_stroke(arrow: ArrowType) -> EdgeStroke {
@@ -425,18 +437,66 @@ fn edge_stroke(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> EdgeStroke {
     let Some(edge) = ir.edges.get(path.edge_index) else {
         return EdgeStroke::Solid;
     };
-    if let Some(notation) = edge.er_notation() {
-        return if notation.contains("..") {
+    let base = if let Some(notation) = edge.er_notation() {
+        if notation.contains("..") {
             EdgeStroke::Dotted
         } else {
             EdgeStroke::Solid
-        };
-    }
-    if fm_layout::edge_uses_feedback_marker(edge, path.reversed) {
+        }
+    } else if fm_layout::edge_uses_feedback_marker(edge, path.reversed) {
         EdgeStroke::Dotted
     } else {
         arrow_stroke(edge.arrow)
+    };
+
+    // Class realization, dotted aggregation and lollipop relations carry their line type in
+    // inline_style while ArrowType carries their endpoint symbol. Consume the same cascade as
+    // the vector renderers so link defaults, edge classes and explicit solid overrides agree.
+    if edge.inline_style.is_none() && ir.style_refs.is_empty() {
+        return base;
     }
+    let style = fm_layout::edge_labels::edge_label_style(ir, path.edge_index);
+    style
+        .get("stroke-dasharray")
+        .and_then(|raw| terminal_dash_pattern(raw))
+        .map_or(base, |dashed| base.with_dashes(dashed))
+}
+
+/// Terminal fidelity chooses the visible cadence; CSS supplies whether the line has gaps.
+/// Invalid declarations preserve the semantic default. Odd-length lists repeat, so each
+/// positive interval becomes a gap on the second repetition; all-zero lists remain solid.
+fn terminal_dash_pattern(raw: &str) -> Option<bool> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("none") {
+        return Some(false);
+    }
+    if raw.split(',').any(|part| part.trim().is_empty()) {
+        return None;
+    }
+
+    let mut count = 0_usize;
+    let mut positive_interval = false;
+    let mut positive_gap = false;
+    for part in raw
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        let value = part
+            .strip_suffix("px")
+            .unwrap_or(part)
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)?;
+        positive_interval |= value > 0.0;
+        positive_gap |= !count.is_multiple_of(2) && value > 0.0;
+        count += 1;
+    }
+    (count > 0).then_some(if !count.is_multiple_of(2) {
+        positive_interval
+    } else {
+        positive_gap
+    })
 }
 
 /// Cell rows a C4 boundary's caption needs beyond its border: the label row and the bracketed
@@ -1964,8 +2024,12 @@ impl TermRenderer {
     fn draw_raster_line_cell(&self, buffer: &mut CellBuffer, line: RasterLine, stroke: EdgeStroke) {
         let glyphs = &self.edge_glyphs;
         let (dx, dy) = line.delta();
-        let line_char = if stroke == EdgeStroke::Dotted {
-            if dx == 0 {
+        let line_char = if matches!(stroke, EdgeStroke::Dotted | EdgeStroke::ThickDotted) {
+            if stroke == EdgeStroke::ThickDotted
+                && !matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii)
+            {
+                if dx == 0 { '┋' } else { '┉' }
+            } else if dx == 0 {
                 glyphs.dotted_v
             } else {
                 glyphs.dotted_h
@@ -2795,19 +2859,20 @@ impl TermRenderer {
         match stroke {
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
             EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
-            EdgeStroke::Thick => {
+            EdgeStroke::Thick | EdgeStroke::ThickDotted => {
                 let (ox, oy) = if x1.abs_diff(x0) >= y1.abs_diff(y0) {
                     (0, 1)
                 } else {
                     (1, 0)
                 };
                 for offset in -1..=1 {
-                    canvas.draw_line(
-                        x0.saturating_add(ox * offset),
-                        y0.saturating_add(oy * offset),
-                        x1.saturating_add(ox * offset),
-                        y1.saturating_add(oy * offset),
-                    );
+                    let from = (x0.saturating_add(ox * offset), y0.saturating_add(oy * offset));
+                    let to = (x1.saturating_add(ox * offset), y1.saturating_add(oy * offset));
+                    if stroke == EdgeStroke::ThickDotted {
+                        Self::draw_dashed_segment(canvas, from.0, from.1, to.0, to.1);
+                    } else {
+                        canvas.draw_line(from.0, from.1, to.0, to.1);
+                    }
                 }
             }
         }
@@ -5137,8 +5202,8 @@ impl TermRenderer {
                     // A clipped foreign segment may start in the middle of its dash cycle.
                     // Protect its corridor through the gaps as well. On our own route only
                     // the actual painted cells may be cleared for a caption.
-                    let stroke = if foreign && stroke == EdgeStroke::Dotted {
-                        EdgeStroke::Solid
+                    let stroke = if foreign {
+                        stroke.with_dashes(false)
                     } else {
                         stroke
                     };
@@ -9641,6 +9706,175 @@ mod tests {
     }
 
     #[test]
+    fn terminal_uml_realization_and_dotted_relations_keep_their_line_type_in_every_mode() {
+        for (dotted, solid, marker) in [
+            ("..|>", "--|>", '▷'),
+            ("<|..", "<|--", '◁'),
+            ("o..", "o--", '◇'),
+            ("*..", "*--", '◆'),
+            ("()..", "()--", '○'),
+            ("o..*", "o--*", '◇'),
+        ] {
+            let parse = |operator| {
+                fm_parser::parse(&format!(
+                    "classDiagram\ndirection LR\nAlpha {operator} Bravo\n"
+                ))
+                .ir
+            };
+            let dotted_ir = parse(dotted);
+            let solid_ir = parse(solid);
+            assert_eq!(dotted_ir.edges.len(), 1, "{dotted}");
+            assert_eq!(solid_ir.edges.len(), 1, "{solid}");
+            assert_eq!(dotted_ir.edges[0].arrow, solid_ir.edges[0].arrow);
+            assert_eq!(dotted_ir.edges[0].co_arrow(), solid_ir.edges[0].co_arrow());
+            let layout = layout_diagram(&solid_ir);
+            for (mode, compact) in [
+                (MermaidRenderMode::CellOnly, true),
+                (MermaidRenderMode::CellOnly, false),
+                (MermaidRenderMode::Braille, false),
+                (MermaidRenderMode::Block, false),
+                (MermaidRenderMode::HalfBlock, false),
+            ] {
+                let config = if compact {
+                    TermRenderConfig::compact()
+                } else {
+                    TermRenderConfig {
+                        render_mode: mode,
+                        fidelity_override: Some(fm_core::MermaidFidelity::Rich),
+                        ..TermRenderConfig::rich()
+                    }
+                };
+                let render = |ir| {
+                    render_diagram_with_layout_and_config(ir, &layout, &config, 160, 60).output
+                };
+                let plain = render(&solid_ir);
+                let dashed = render(&dotted_ir);
+                assert!(plain.contains("Alpha") && plain.contains("Bravo"));
+                assert!(dashed.contains("Alpha") && dashed.contains("Bravo"));
+                assert!(
+                    plain.contains(marker) && dashed.contains(marker),
+                    "{dotted}/{mode:?}"
+                );
+                assert_ne!(
+                    dashed, plain,
+                    "{dotted} lost its dashed line in {mode:?}/{compact}"
+                );
+                assert_eq!(
+                    dashed,
+                    render(&dotted_ir),
+                    "terminal output must be deterministic"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_edge_dash_styles_follow_the_shared_cascade_and_validate_intervals() {
+        let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0)]);
+        for (source, expected) in [
+            (
+                "flowchart LR\nA --> B\nlinkStyle default stroke-dasharray:5",
+                EdgeStroke::Dotted,
+            ),
+            (
+                "flowchart LR\nA --> B\nlinkStyle default stroke-dasharray:5\nlinkStyle 0 stroke-dasharray:none",
+                EdgeStroke::Solid,
+            ),
+            (
+                "flowchart LR\nA -.-> B\nlinkStyle 0 stroke-dasharray:0 0",
+                EdgeStroke::Solid,
+            ),
+            (
+                "flowchart LR\nA e@--> B\nclassDef dashed stroke-dasharray:5\nclass e dashed",
+                EdgeStroke::Dotted,
+            ),
+            (
+                "flowchart LR\nA ==> B\nlinkStyle 0 stroke-dasharray:5px 3px",
+                EdgeStroke::ThickDotted,
+            ),
+            (
+                "classDiagram\nAlpha ..|> Bravo\nlinkStyle default stroke-dasharray:none",
+                EdgeStroke::Dotted,
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.edges.len(), 1, "{source}");
+            assert_eq!(edge_stroke(&ir, &path), expected, "{source}");
+        }
+
+        let mut ir = sample_ir();
+        ir.edges[0].arrow = ArrowType::DottedLine;
+        for raw in ["none", "NONE", "0", "0px, 0", "5 0"] {
+            ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(&format!(
+                "stroke-dasharray:{raw}"
+            ))));
+            assert_eq!(edge_stroke(&ir, &path), EdgeStroke::Solid, "{raw}");
+        }
+        ir.edges[0].arrow = ArrowType::Line;
+        for raw in ["5", "5px 3px", "5px,0,0", "0 5"] {
+            ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(&format!(
+                "stroke-dasharray:{raw}"
+            ))));
+            assert_eq!(edge_stroke(&ir, &path), EdgeStroke::Dotted, "{raw}");
+        }
+        for raw in [
+            "", "-1 5", "NaN", "inf", "5 nope", "5pxpx", "5%", ",4", "4,,4", "4,", "4, ,4",
+        ] {
+            for (arrow, expected) in [
+                (ArrowType::Line, EdgeStroke::Solid),
+                (ArrowType::DottedLine, EdgeStroke::Dotted),
+                (ArrowType::ThickLine, EdgeStroke::Thick),
+            ] {
+                ir.edges[0].arrow = arrow;
+                ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(&format!(
+                    "stroke-dasharray:{raw}"
+                ))));
+                assert_eq!(edge_stroke(&ir, &path), expected, "{raw}/{arrow:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn authored_dashes_preserve_thick_shafts_in_cell_and_subcell_output() {
+        let mut ir = sample_ir();
+        ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string("stroke-dasharray:5")));
+        let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0)]);
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig {
+                padding: 0,
+                ..TermRenderConfig::rich()
+            },
+            80,
+            24,
+        ));
+        ir.edges[0].arrow = ArrowType::ThickLine;
+        let mut cells = CellBuffer::new(60, 16);
+        renderer.render_edge_cell(&mut cells, &ir, &path, 1.0, 1.0);
+        assert_eq!(cells.cells[12 * 60 + 20], '┉');
+
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut counts = Vec::new();
+            for arrow in [ArrowType::Line, ArrowType::ThickLine] {
+                ir.edges[0].arrow = arrow;
+                let mut canvas = Canvas::new(60, 16, mode);
+                renderer.render_edge_canvas(&mut canvas, &ir, &path, 1.0, 1.0, 0, 0);
+                let (width, height) = canvas.pixel_dimensions();
+                counts.push(
+                    (0..height)
+                        .map(|y| (0..width).filter(|&x| canvas.get_pixel(x, y)).count())
+                        .sum::<usize>(),
+                );
+            }
+            assert!(counts[0] > 0);
+            assert_eq!(counts[1], 3 * counts[0], "{mode:?}: {counts:?}");
+        }
+    }
+
+    #[test]
     fn terminal_edge_strokes_and_hidden_edges_remain_distinct() {
         let mut ir = sample_ir();
         let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0)]);
@@ -9846,14 +10080,26 @@ mod tests {
                 padding: 2,
                 ..TermRenderConfig::rich()
             };
-            for arrow in [ArrowType::Line, ArrowType::DottedLine, ArrowType::ThickLine] {
+            for (arrow, dashed) in [
+                (ArrowType::Line, false),
+                (ArrowType::DottedLine, false),
+                (ArrowType::ThickLine, false),
+                (ArrowType::ThickLine, true),
+            ] {
                 ir.edges[0].arrow = arrow;
+                ir.edges[0].inline_style =
+                    dashed.then(|| Box::new(fm_core::parse_style_string("stroke-dasharray:5")));
                 let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
                 assert!(!result.output.is_empty(), "{mode:?}/{arrow:?}");
                 assert!(result.width <= 80 && result.height <= 24);
             }
         }
-        for stroke in [EdgeStroke::Solid, EdgeStroke::Dotted, EdgeStroke::Thick] {
+        for stroke in [
+            EdgeStroke::Solid,
+            EdgeStroke::Dotted,
+            EdgeStroke::Thick,
+            EdgeStroke::ThickDotted,
+        ] {
             let mut canvas = Canvas::new(8, 8, MermaidRenderMode::Braille);
             TermRenderer::draw_canvas_shaft(
                 &mut canvas,
