@@ -188,6 +188,172 @@ check("Space activates a navigation dot once", dispatch(dot, "keydown", " ").def
 dispatch(elements.get("deck-next"), "keydown", "ArrowRight");
 check("stage arrow shortcuts still work from focused controls", calls.next === 2);
 
+// Exercise the actual affine helpers with independent endpoint expectations. These checks
+// cover the deformation and DOM attribute contract; browser SVG measurement/rasterization
+// remains the job of deck_runtime_e2e.py. Paths are kept verbatim, so curves/arcs need no
+// second SVG parser or approximation in the runtime.
+const geometryHelpers = canonical.slice(canonical.indexOf("  function multiplyMatrix("),
+  canonical.indexOf("  function mount("));
+const motion = runInNewContext(geometryHelpers +
+  "\n({captureMotion, captureEdgeMotion, moveElement, moveEdge})");
+const identity = [1, 0, 0, 1, 0, 0];
+function matrixObject(values) {
+  return Object.fromEntries(["a", "b", "c", "d", "e", "f"].map((key, index) => [key, values[index]]));
+}
+function geometryElement(tag, parent, matrix = identity, attributes = {}) {
+  let reads = 0;
+  return {
+    tagName: tag, parentNode: parent, attributes: { ...attributes },
+    getCTM() { reads++; return matrixObject(matrix); },
+    getAttribute(name) { return this.attributes[name] ?? null; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    querySelector() { return this.path; },
+    geometryReads() { return reads; },
+  };
+}
+function transformAttribute(el, point) {
+  const text = el.getAttribute("transform");
+  const m = text.match(/^matrix\(([^)]+)\)$/);
+  if (!m) throw new Error("Expected a single affine path transform, got " + text);
+  const [a, b, c, d, e, f] = m[1].split(/[, ]+/).map(Number);
+  return { x: a * point.x + c * point.y + e, y: b * point.x + d * point.y + f };
+}
+function nearPoint(actual, expected) {
+  return Math.abs(actual.x - expected.x) < 1e-6 && Math.abs(actual.y - expected.y) < 1e-6;
+}
+const svgParent = geometryElement("svg", null);
+const sourceNode = { hx: 0, hy: 0, fx: 10, fy: 20 };
+const targetNode = { hx: 100, hy: 0, fx: 130, fy: -10 };
+let pathMeasurements = 0;
+function measuredPath(parent, path, start, end, matrix = identity, attributes = {}) {
+  const el = geometryElement("path", parent, matrix, { d: path, ...attributes });
+  el.getTotalLength = () => { pathMeasurements++; return 120; };
+  el.getPointAtLength = length => { pathMeasurements++; return length ? end : start; };
+  return el;
+}
+const curve = measuredPath(svgParent, "M0 0 C25 60 75 60 100 0", { x: 0, y: 0 }, { x: 100, y: 0 }, identity,
+  { style: "stroke:url(#author-paint);stroke-opacity:0.4;stroke-width:7", "marker-start": "url(#diamond)" });
+const arc = measuredPath(svgParent, "M0 0 A70 30 15 0 1 100 0", { x: 0, y: 0 }, { x: 100, y: 0 });
+const curvedMotion = motion.captureEdgeMotion(curve, sourceNode, targetNode, identity);
+const arcMotion = motion.captureEdgeMotion(arc, sourceNode, targetNode, identity);
+const readsBeforeFrames = pathMeasurements + curve.geometryReads() + arc.geometryReads() + svgParent.geometryReads();
+motion.moveEdge(curvedMotion);
+motion.moveEdge(arcMotion);
+check("curved edge anchors follow exact endpoint displacement",
+  nearPoint(transformAttribute(curve, { x: 0, y: 0 }), { x: 10, y: 20 }) &&
+  nearPoint(transformAttribute(curve, { x: 100, y: 0 }), { x: 130, y: -10 }));
+check("curves and parallel arcs retain their original commands and separation",
+  curve.getAttribute("d") === "M0 0 C25 60 75 60 100 0" &&
+  arc.getAttribute("d") === "M0 0 A70 30 15 0 1 100 0" &&
+  nearPoint(transformAttribute(curve, { x: 25, y: 60 }), { x: 40, y: 72.5 }));
+check("morphing retains authored paint, opacity, markers and DOM ancestry",
+  curve.getAttribute("style") === "stroke:url(#author-paint);stroke-opacity:0.4;stroke-width:7" &&
+  curve.getAttribute("marker-start") === "url(#diamond)" && curve.parentNode === svgParent);
+check("animation does not remeasure DOM geometry",
+  pathMeasurements + curve.geometryReads() + arc.geometryReads() + svgParent.geometryReads() === readsBeforeFrames);
+
+// A scaled/translated caption group and an independently translated path must each keep
+// their original coordinate space. The path's extra transform compensates caption motion.
+const captionGroup = geometryElement("g", svgParent, [2, 0, 0, 3, 40, 60],
+  { transform: "translate(40 60) scale(2 3)", opacity: "0.6" });
+const transformedPath = measuredPath(captionGroup, "M0 0 Q25 30 50 0",
+  { x: 0, y: 0 }, { x: 50, y: 0 }, [2, 0, 0, 3, 50, 81], { transform: "translate(5 7)" });
+captionGroup.path = transformedPath;
+const groupedMotion = motion.captureEdgeMotion(captionGroup, sourceNode, targetNode, identity);
+motion.moveEdge(groupedMotion);
+const localStart = transformAttribute(transformedPath, { x: 0, y: 0 });
+const localEnd = transformAttribute(transformedPath, { x: 50, y: 0 });
+// Parent scale/translation, then the known average caption shift (20,5).
+const rootPoint = point => ({ x: 2 * point.x + 60, y: 3 * point.y + 65 });
+check("caption and path transforms compose through transformed ancestors",
+  nearPoint(rootPoint(localStart), { x: 60, y: 101 }) &&
+  nearPoint(rootPoint(localEnd), { x: 180, y: 71 }) &&
+  captionGroup.getAttribute("transform") === "translate(20.000000 5.000000) translate(40 60) scale(2 3)" &&
+  captionGroup.getAttribute("opacity") === "0.6");
+const nodeWithTransform = geometryElement("g", captionGroup, [0, 3, -2, 0, 40, 60], { transform: "rotate(90)" });
+motion.moveElement(motion.captureMotion(nodeWithTransform, identity), 10, 12);
+check("node motion retains authored transforms in parent coordinates",
+  nodeWithTransform.getAttribute("transform") === "translate(5.000000 4.000000) rotate(90)");
+const loop = geometryElement("g", svgParent, identity, { transform: "translate(1 2)" });
+motion.moveEdge(motion.captureEdgeMotion(loop, sourceNode, sourceNode, identity));
+check("self-loop geometry and original transforms move together",
+  loop.getAttribute("transform") === "translate(10.000000 20.000000) translate(1 2)");
+const collapsed = measuredPath(svgParent, "M0 0 Z", { x: 0, y: 0 }, { x: 0, y: 0 });
+check("degenerate or unavailable path geometry requests static rendering",
+  motion.captureEdgeMotion(collapsed, sourceNode, targetNode, identity) === null &&
+  motion.captureEdgeMotion(geometryElement("path", svgParent), sourceNode, targetNode, identity) === null);
+
+// Mount the complete runtime against a small DOM/event fixture. Geometry is deliberately
+// fixed by the fixture; this verifies mode selection, animation, reveal and teardown without
+// claiming browser layout coverage.
+function runtimeDom(tag, id = "") {
+  const el = geometryElement(tag, null, identity, id ? { id } : {});
+  el.id = id; el.children = []; el.listeners = {}; el.clientWidth = 900; el.clientHeight = 500;
+  el.style = { setProperty(name, value) { this[name] = value; } };
+  const classes = new Set();
+  el.classList = { add: value => classes.add(value), remove: value => classes.delete(value), contains: value => classes.has(value) };
+  el.appendChild = child => { child.parentNode = el; el.children.push(child); return child; };
+  el.removeChild = child => { el.children.splice(el.children.indexOf(child), 1); child.parentNode = null; };
+  el.contains = child => child === el || el.children.some(item => item.contains(child));
+  el.addEventListener = (type, listener) => { (el.listeners[type] ??= []).push(listener); };
+  el.removeEventListener = (type, listener) => { el.listeners[type] = (el.listeners[type] || []).filter(item => item !== listener); };
+  el.querySelectorAll = selector => el.children.flatMap(child =>
+    [...(selector === "[id]" ? child.id ? [child] : [] : child.tagName === selector ? [child] : []), ...child.querySelectorAll(selector)]);
+  el.querySelector = selector => el.querySelectorAll(selector)[0] || null;
+  return el;
+}
+function mountedFixture(diagramType, measurable = true) {
+  const svg = runtimeDom("svg");
+  svg.viewBox = { baseVal: { width: 500, height: 300 } };
+  const a = svg.appendChild(runtimeDom("g", "fm-node-a-0"));
+  const b = svg.appendChild(runtimeDom("g", "fm-node-b-1"));
+  const edge = svg.appendChild(runtimeDom("g", "fm-edge-0"));
+  const path = edge.appendChild(runtimeDom("path"));
+  path.setAttribute("d", "M50 180 C100 220 250 220 300 180");
+  if (measurable) {
+    path.getTotalLength = () => 280;
+    path.getPointAtLength = length => ({ x: length ? 300 : 50, y: 180 });
+  }
+  const manifest = { diagramType, viewBox: { width: 500, height: 300 },
+    options: { fitMargin: 20, zoomMax: 2, dimOpacity: .1 }, overview: { enabled: false },
+    nodeGeometry: { [a.id]: { x: 0, y: 0, width: 100, height: 40 }, [b.id]: { x: 250, y: 0, width: 100, height: 40 } },
+    edgeEndpoints: { [edge.id]: { fromElementId: a.id, toElementId: b.id } },
+    slides: [{ id: "one", title: "One", bounds: { x: 0, y: 0, width: 350, height: 220 }, fitMargin: 20, zoomMax: 2,
+      nodes: [{ elementId: a.id, step: 0 }, { elementId: b.id, step: 1 }],
+      edges: [{ elementId: edge.id, step: 1 }], maxStep: 1, steps: [{ step: 1, elementIds: [b.id, edge.id] }] }] };
+  const host = runtimeDom("div"), frames = new Map(), timers = new Map();
+  let serial = 0;
+  const environment = { window: {}, document: { createElement: runtimeDom, createElementNS: (_ns, tag) => runtimeDom(tag) },
+    requestAnimationFrame: fn => { frames.set(++serial, fn); return serial; }, cancelAnimationFrame: id => frames.delete(id),
+    setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id),
+    matchMedia: () => ({ matches: false }) };
+  runInNewContext(canonical, environment);
+  const deck = environment.window.FmDeckRuntime.mount({ stage: host, svg, manifest });
+  const viewport = host.children[0];
+  for (const [id, fn] of [...frames]) { frames.delete(id); fn(1000); }
+  return { deck, host, viewport, a, b, edge, path, frames, timers };
+}
+const animated = mountedFixture("Flowchart");
+check("complete graph runtime animates the existing routed path",
+  animated.viewport.classList.contains("fm-deck-morphing") &&
+  animated.path.getAttribute("transform")?.startsWith("matrix(") &&
+  animated.path.getAttribute("d") === "M50 180 C100 220 250 220 300 180");
+animated.deck.destroy();
+check("morph teardown removes the frame loop and mount", animated.frames.size === 0 && animated.host.children.length === 0);
+for (const [family, measurable] of [["Sequence", true], ["sequence", true], ["Flowchart", false]]) {
+  const mounted = mountedFixture(family, measurable);
+  check(`${family}/${measurable}: camera mode keeps original message paths and headers`,
+    !mounted.viewport.classList.contains("fm-deck-morphing") &&
+    !mounted.path.getAttribute("transform") && !mounted.a.getAttribute("transform") &&
+    mounted.path.getAttribute("d") === "M50 180 C100 220 250 220 300 180" &&
+    mounted.viewport.style.transform.startsWith("translate3d(") && mounted.edge.classList.contains("fm-deck-hidden"));
+  mounted.deck.next();
+  for (const fn of mounted.timers.values()) fn();
+  check(`${family}/${measurable}: camera mode still reveals nodes and messages`,
+    !mounted.b.classList.contains("fm-deck-hidden") && !mounted.edge.classList.contains("fm-deck-hidden"));
+  mounted.deck.destroy();
+}
+
 // Render the demo deck through the SHIPPED WASM.
 const demoMatch = demoSources[0].match(/const DECK_DEMO_SOURCE = `([\s\S]*?)`;/);
 check("DECK_DEMO_SOURCE extractable", Boolean(demoMatch));

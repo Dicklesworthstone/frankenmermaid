@@ -6,7 +6,7 @@ asserts the full runtime contract: mount + SVG pinning, camera transform, dim/ha
 focus classes, staggered step reveals, slide navigation, overview tour rect (presence +
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
-layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
+routes, push-out exile of off-slide nodes, float-only members, original engine paths, and
 drag spring-back, self-loop edges gluing to their node, and variant followers. Also drives the
 standalone talk.html golden in fullscreen, through Chromium PDF printing, and on a phone layout.
 Exit 0 = all pass.
@@ -66,7 +66,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(900)  # let the 6%/frame push easing act
     check("morphing class armed", page.eval_on_selector(
         ".fm-deck-viewport", "el => el.classList.contains('fm-deck-morphing')"))
-    check("live edge layer with 4 paths", page.locator(".fm-deck-live path").count() == 4)
+    check("all 5 engine edge roots remain addressable", page.locator('[id^="fm-edge-"]').count() == 5)
 
     def push_mag(tf):
         try:
@@ -81,13 +81,12 @@ with sync_playwright() as p:
     check("outside-the-window d floats in place", 0 <= push_mag(d_tf) < 30, d_tf)
     a_tf = page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''")
     check("member a stays near home (float only)", 0 <= push_mag(a_tf) < 30, a_tf)
-    live_d = page.eval_on_selector(".fm-deck-live path", "el => el.getAttribute('d') || ''")
-    check("live edges carry path data", live_d.startswith("M "), live_d)
-    parked = page.eval_on_selector(
-        "#fm-edge-0",
-        "el => (el.tagName === 'path' ? el : el.querySelector('path'))"
-        ".classList.contains('fm-deck-parked')")
-    check("engine edge path parked", parked)
+    route = page.eval_on_selector("#fm-edge-3", "el => ({d:el.getAttribute('d'), transform:el.getAttribute('transform')})")
+    check("routed edge keeps every original bend while animating",
+          route["d"] == "M 740 300 L 740 380 L 180 380 L 160 140" and
+          route["transform"].startswith("matrix("), route)
+    check("engine paths stay visible without replacement duplicates",
+          page.locator(".fm-deck-parked, .fm-deck-live").count() == 0)
     # Self-loop (fm-edge-4 on node c): no degenerate live segment; the engine loop path
     # stays visible and the whole edge group rides the node's displacement instead.
     loop_parked = page.eval_on_selector(
@@ -109,6 +108,23 @@ with sync_playwright() as p:
     check("variant follower mirrors dim + exact transform of its base",
           companions["mirrorDim"] and companions["mirror"] == companions["c"],
           companions)
+    # Read endpoint geometry and participant movement in one frame. The old live-line
+    # approximation could pass presence tests while discarding every authored route.
+    anchors = page.evaluate("""() => {
+      const svg = document.querySelector('.fm-deck-viewport svg');
+      const root = svg.getCTM().inverse();
+      const world = el => root.multiply(el.getCTM());
+      const point = (el, p) => new DOMPoint(p[0], p[1]).matrixTransform(world(el));
+      const edge = document.querySelector('#fm-edge-3');
+      const a = point(document.querySelector('#fm-node-a-0'), [110,116]);
+      const d = point(document.querySelector('#fm-node-d-3'), [750,280]);
+      const start = point(edge,[740,300]), end = point(edge,[160,140]);
+      return {start:[start.x,start.y], end:[end.x,end.y],
+        expectedStart:[740+d.x-750,300+d.y-280], expectedEnd:[160+a.x-110,140+a.y-116]};
+    }""")
+    check("routed endpoints follow their own nodes exactly",
+          all(abs(actual - expected) < 0.001 for key in ("Start", "End")
+              for actual, expected in zip(anchors[key.lower()], anchors["expected" + key])), anchors)
     # Drag member a and release: it follows the pointer, then springs back home.
     box = page.eval_on_selector("#fm-node-a-0", "el => { const r = el.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }")
     page.mouse.move(box["x"], box["y"]); page.mouse.down()

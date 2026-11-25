@@ -9,11 +9,12 @@
  * MORPH MODE (manifest schema >= 1.1.0, `nodeGeometry` + `edgeEndpoints` present): the graph
  * itself rearranges, graphcon-deck's signature look. Every node floats on a gentle per-node
  * sine bob; on slide change, off-slide nodes GLIDE OUT past the fitted camera window edge
- * (ray-scaled push-out, eased per frame) while members glide home; edges are redrawn every
- * frame as straight paths between their endpoints' live border points (engine paths park
- * hidden; edge labels ride along on a group translate); member nodes are draggable with
- * spring-back. Falls back to the static choreography under prefers-reduced-motion or a
- * pre-1.1 manifest. The loop runs continuously ONLY while the stage is on screen
+ * (ray-scaled push-out, eased per frame) while members glide home; the original routed
+ * edges deform between their moving anchors without losing curves, parallel routes or
+ * authored paint. Member nodes are draggable with spring-back. Sequence diagrams keep
+ * their timed messages, lifelines and fragments together in camera/reveal mode, as do
+ * reduced-motion, pre-1.1 and unmeasurable SVG inputs. The loop runs continuously ONLY
+ * while the stage is on screen
  * (IntersectionObserver-gated) — a background section still burns zero frames.
  *
  * Canonical copy: crates/fm-cli/src/deck_runtime.js (embedded into the CLI's talk.html via
@@ -66,6 +67,113 @@
     }
   }
 
+  // Affine operations use SVG's [a,b,c,d,e,f] convention. All DOM geometry is read ONCE
+  // before animation: every frame operates on cached viewBox-space anchors and matrices.
+  function multiplyMatrix(left, right) {
+    return [
+      left[0] * right[0] + left[2] * right[1],
+      left[1] * right[0] + left[3] * right[1],
+      left[0] * right[2] + left[2] * right[3],
+      left[1] * right[2] + left[3] * right[3],
+      left[0] * right[4] + left[2] * right[5] + left[4],
+      left[1] * right[4] + left[3] * right[5] + left[5],
+    ];
+  }
+
+  function inverseMatrix(matrix) {
+    var determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+    if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) return null;
+    var inverse = [
+      matrix[3] / determinant, -matrix[1] / determinant,
+      -matrix[2] / determinant, matrix[0] / determinant,
+      (matrix[2] * matrix[5] - matrix[3] * matrix[4]) / determinant,
+      (matrix[1] * matrix[4] - matrix[0] * matrix[5]) / determinant,
+    ];
+    return inverse.every(Number.isFinite) ? inverse : null;
+  }
+
+  function svgMatrix(element) {
+    var matrix = element && typeof element.getCTM === "function" && element.getCTM();
+    if (!matrix) return null;
+    var values = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f];
+    return values.every(Number.isFinite) ? values : null;
+  }
+
+  function matrixPoint(matrix, point) {
+    return {
+      x: matrix[0] * point.x + matrix[2] * point.y + matrix[4],
+      y: matrix[1] * point.x + matrix[3] * point.y + matrix[5],
+    };
+  }
+
+  function captureMotion(element, rootInverse) {
+    var own = svgMatrix(element);
+    var parent = svgMatrix(element.parentNode);
+    if (!own || !parent) return null;
+    var world = multiplyMatrix(rootInverse, own);
+    var parentInverse = inverseMatrix(multiplyMatrix(rootInverse, parent));
+    if (!parentInverse || !world.every(Number.isFinite)) return null;
+    return { element: element, original: element.getAttribute("transform") || "",
+      world: world, parentInverse: parentInverse };
+  }
+
+  function moveElement(motion, dx, dy) {
+    var inverse = motion.parentInverse;
+    var x = inverse[0] * dx + inverse[2] * dy;
+    var y = inverse[1] * dx + inverse[3] * dy;
+    motion.element.setAttribute("transform",
+      "translate(" + x.toFixed(6) + " " + y.toFixed(6) + ") " + motion.original);
+  }
+
+  function captureEdgeMotion(group, from, to, rootInverse) {
+    var groupMotion = captureMotion(group, rootInverse);
+    if (!groupMotion) return null;
+    if (from === to) return { group: groupMotion, from: from, to: to, selfLoop: true };
+    var path = group.tagName.toLowerCase() === "path" ? group : group.querySelector("path");
+    var motion = path && captureMotion(path, rootInverse);
+    if (!motion || typeof path.getTotalLength !== "function" ||
+      typeof path.getPointAtLength !== "function") return null;
+    var start, end;
+    try {
+      var length = path.getTotalLength();
+      if (!Number.isFinite(length) || length <= 0) return null;
+      start = matrixPoint(motion.world, path.getPointAtLength(0));
+      end = matrixPoint(motion.world, path.getPointAtLength(length));
+    } catch (_error) { return null; }
+    var dx = end.x - start.x, dy = end.y - start.y;
+    var squared = dx * dx + dy * dy;
+    if (![start.x, start.y, end.x, end.y, squared].every(Number.isFinite) || squared < 1e-12) return null;
+    return { group: groupMotion, path: motion, from: from, to: to,
+      start: start, dx: dx / squared, dy: dy / squared,
+      separateGroup: path !== group };
+  }
+
+  function moveEdge(edge) {
+    var fromX = edge.from.fx - edge.from.hx, fromY = edge.from.fy - edge.from.hy;
+    if (edge.selfLoop) {
+      moveElement(edge.group, fromX, fromY);
+      return;
+    }
+    var toX = edge.to.fx - edge.to.hx, toY = edge.to.fy - edge.to.hy;
+    var changeX = toX - fromX, changeY = toY - fromY;
+    // p' = p + fromDisplacement + projection(p - start) * displacementDifference.
+    // This maps the two ORIGINAL path anchors exactly, preserving every SVG command,
+    // including arcs and curves. Distinct parallel routes stay distinct.
+    var a = 1 + changeX * edge.dx, b = changeY * edge.dx;
+    var c = changeX * edge.dy, d = 1 + changeY * edge.dy;
+    var e = fromX - (a - 1) * edge.start.x - c * edge.start.y;
+    var f = fromY - b * edge.start.x - (d - 1) * edge.start.y;
+    var labelX = edge.separateGroup ? (fromX + toX) / 2 : 0;
+    var labelY = edge.separateGroup ? (fromY + toY) / 2 : 0;
+    if (edge.separateGroup) moveElement(edge.group, labelX, labelY);
+    // The caption group has already moved. Compensate in the path's parent space and
+    // retain its original transform. Keeping the real path in its original DOM ancestry
+    // preserves inherited styles, group opacity, gradients, markers, IDs and hit targets.
+    var matrix = multiplyMatrix(edge.path.parentInverse,
+      multiplyMatrix([a, b, c, d, e - labelX, f - labelY], edge.path.world));
+    edge.path.element.setAttribute("transform", "matrix(" + matrix.join(" ") + ")");
+  }
+
   function mount(options) {
     var stage = options.stage;
     var manifest = options.manifest;
@@ -115,10 +223,7 @@
       ".fm-deck-viewport .fm-deck-half{opacity:.45;transition:opacity .5s ease;}" +
       ".fm-deck-viewport .fm-deck-hidden{opacity:0 !important;transition:opacity .5s ease;}" +
       ".fm-deck-viewport [id]{transition:opacity .5s ease;}" +
-      // Morph mode: engine edge paths park (live paths replace them); exiled nodes stay
-      // half-visible so their flight out of the window reads as motion, not a fade.
-      ".fm-deck-morphing .fm-deck-parked{visibility:hidden;}" +
-      ".fm-deck-viewport .fm-deck-live path{transition:opacity .5s ease;}" +
+      // Exiled nodes stay half-visible so flight reads as motion, not a fade.
       '.fm-deck-viewport.fm-deck-morphing g[id^="fm-node-"].fm-deck-dim{opacity:.55;}' +
       ".fm-deck-tip{position:absolute;z-index:30;max-width:270px;background:#1d1f23;color:#f3f1ea;" +
       "font-size:11.5px;line-height:1.5;padding:9px 12px;border-radius:9px;pointer-events:none;" +
@@ -205,34 +310,29 @@
 
     /* ── Morph model (graphcon parity, bd-tm1q7) ─────────────────── */
 
-    var morphEnabled =
-      !reducedMotion() && !!geometryOf && !!endpointsOf && Object.keys(geometryOf).length > 0;
+    var morphEnabled = !reducedMotion() && !!geometryOf && !!endpointsOf &&
+      Object.keys(geometryOf).length > 0 &&
+      String(manifest.diagramType || svgRoot.getAttribute("data-type") || "").toLowerCase() !== "sequence";
     var morphNodes = Object.create(null); // elementId -> node motion state
     var morphNodeIds = [];
     var liveEdges = [];
-    var liveOf = Object.create(null); // engine edge group id -> live path (class mirror)
     var pushCtx = null; // {cx, cy, rw, rh, margin} in viewBox space
     var pushMembers = Object.create(null); // elementId -> true (home team this scene)
     var stageOnScreen = true;
 
-    // Rect-clip border point: where the segment from n's center toward (tx, ty) exits n's
-    // box (+4 breathing room), so live edges land on node borders, not centers.
-    function borderPoint(node, towardX, towardY) {
-      var dx = towardX - node.fx;
-      var dy = towardY - node.fy;
-      if (!dx && !dy) return [node.fx, node.fy];
-      var hw = node.hw + 4;
-      var hh = node.hh + 4;
-      var scale = Math.min(dx ? hw / Math.abs(dx) : Infinity, dy ? hh / Math.abs(dy) : Infinity, 1);
-      return [node.fx + dx * scale, node.fy + dy * scale];
-    }
-
     if (morphEnabled) {
-      viewport.classList.add("fm-deck-morphing");
+      var rootMatrix = svgMatrix(svgRoot);
+      var rootInverse = rootMatrix && inverseMatrix(rootMatrix);
+      if (!rootInverse) morphEnabled = false;
       Object.keys(geometryOf).forEach((id, index) => {
+        if (!morphEnabled) return;
         var el = elements[id];
         var rect = geometryOf[id];
         if (!el || !rect) return;
+        var motion = captureMotion(el, rootInverse);
+        var followers = (followersOf[id] || []).filter(follower => !el.contains(follower))
+          .map(follower => captureMotion(follower, rootInverse));
+        if (!motion || followers.some(follower => !follower)) { morphEnabled = false; return; }
         morphNodes[id] = {
           id: id,
           el: el,
@@ -248,66 +348,25 @@
           fx: rect.x + rect.width / 2, // current rendered center, filled per frame
           fy: rect.y + rect.height / 2,
           dragging: false,
-          followers: followersOf[id] || null,
+          motion: motion,
+          followers: followers,
         };
         morphNodeIds.push(id);
       });
-      // Live edge layer sits under the node groups (over clusters), inheriting the camera.
-      var liveLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      liveLayer.setAttribute("class", "fm-deck-live");
-      var firstNodeGroup = svgRoot.querySelector('g[id^="fm-node-"]');
-      if (firstNodeGroup && firstNodeGroup.parentNode) {
-        firstNodeGroup.parentNode.insertBefore(liveLayer, firstNodeGroup);
-      } else {
-        svgRoot.appendChild(liveLayer);
-      }
       Object.keys(endpointsOf).forEach((id) => {
+        if (!morphEnabled) return;
         var group = elements[id];
         var ends = endpointsOf[id];
         var from = ends && morphNodes[ends.fromElementId];
         var to = ends && morphNodes[ends.toElementId];
         if (!group || !from || !to) return;
-        // A self-loop cannot be redrawn as a segment between two border points (they
-        // coincide); keep the engine's loop path visible and glue the whole edge group to
-        // its node's displacement instead.
-        if (from === to) {
-          liveEdges.push({ group: group, live: null, from: from, to: to, selfLoop: true });
-          return;
-        }
-        // Engine edges are groups wrapping a path; hand-authored fixtures may use bare paths.
-        var enginePath = group.tagName === "path" ? group : group.querySelector("path");
-        if (!enginePath) return;
-        var live = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        // Inherit the engine path's look (theme classes, width, dash, arrow markers).
-        var carry = [
-          "class",
-          "stroke",
-          "stroke-width",
-          "stroke-dasharray",
-          "marker-start",
-          "marker-end",
-        ];
-        for (var c = 0; c < carry.length; c += 1) {
-          var value = enginePath.getAttribute(carry[c]);
-          if (value !== null) live.setAttribute(carry[c], value);
-        }
-        live.setAttribute("fill", "none");
-        liveLayer.appendChild(live);
-        enginePath.classList.add("fm-deck-parked"); // engine path hides; label stays
-        var ax = borderPoint(from, to.fx, to.fy);
-        var bx = borderPoint(to, from.fx, from.fy);
-        liveEdges.push({
-          group: group,
-          live: live,
-          from: from,
-          to: to,
-          // Home midpoint: the label (still inside the engine group) rides a group
-          // translate of (current midpoint − this).
-          mx0: (ax[0] + bx[0]) / 2,
-          my0: (ax[1] + bx[1]) / 2,
-        });
-        liveOf[id] = live;
+        var edge = captureEdgeMotion(group, from, to, rootInverse);
+        if (!edge) { morphEnabled = false; return; }
+        liveEdges.push(edge);
       });
+      // No transforms were changed during capture: a missing/degenerate geometry API can
+      // safely keep the whole diagram in camera/reveal mode, with no partial animation.
+      if (morphEnabled) viewport.classList.add("fm-deck-morphing");
     }
 
     // Push-out target, graphcon's pushTarget: scale the home→center ray until the node
@@ -468,13 +527,8 @@
       if (!el) return;
       if (on) el.classList.add(className);
       else el.classList.remove(className);
-      // Live edge paths and variant followers mirror their base element's focus classes
+      // Variant followers mirror their base element's focus classes
       // (single choke point: every dim/half/hidden change anywhere flows through here).
-      var live = el.id && liveOf[el.id];
-      if (live) {
-        if (on) live.classList.add(className);
-        else live.classList.remove(className);
-      }
       var followers = el.id && followersOf[el.id];
       if (followers) {
         for (var f = 0; f < followers.length; f += 1) {
@@ -742,49 +796,15 @@
         var bobY = Math.cos(now * FLOAT_SPEED_Y + n.phase * 1.4) * FLOAT_AMP;
         n.fx = n.hx + bobX + n.px + n.tx;
         n.fy = n.hy + bobY + n.py + n.ty;
-        var nodeTransform =
-          "translate(" + (n.fx - n.hx).toFixed(2) + " " + (n.fy - n.hy).toFixed(2) + ")";
-        n.el.setAttribute("transform", nodeTransform);
+        moveElement(n.motion, n.fx - n.hx, n.fy - n.hy);
         if (n.followers) {
           for (var fi = 0; fi < n.followers.length; fi += 1) {
-            n.followers[fi].setAttribute("transform", nodeTransform);
+            moveElement(n.followers[fi], n.fx - n.hx, n.fy - n.hy);
           }
         }
       }
       for (i = 0; i < liveEdges.length; i += 1) {
-        var edge = liveEdges[i];
-        if (edge.selfLoop) {
-          var loop = edge.from;
-          edge.group.setAttribute(
-            "transform",
-            "translate(" +
-              (loop.fx - loop.hx).toFixed(2) +
-              " " +
-              (loop.fy - loop.hy).toFixed(2) +
-              ")",
-          );
-          continue;
-        }
-        var a = borderPoint(edge.from, edge.to.fx, edge.to.fy);
-        var b = borderPoint(edge.to, edge.from.fx, edge.from.fy);
-        edge.live.setAttribute(
-          "d",
-          "M " +
-            a[0].toFixed(2) +
-            " " +
-            a[1].toFixed(2) +
-            " L " +
-            b[0].toFixed(2) +
-            " " +
-            b[1].toFixed(2),
-        );
-        // The label (still inside the parked engine group) rides to the live midpoint.
-        var mx = (a[0] + b[0]) / 2;
-        var my = (a[1] + b[1]) / 2;
-        edge.group.setAttribute(
-          "transform",
-          "translate(" + (mx - edge.mx0).toFixed(2) + " " + (my - edge.my0).toFixed(2) + ")",
-        );
+        moveEdge(liveEdges[i]);
       }
     }
 
