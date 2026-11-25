@@ -10,7 +10,7 @@ use fm_layout::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, RasterLine};
 use crate::config::{ResolvedConfig, TermRenderConfig};
 use crate::glyphs::{BoxGlyphs, ClusterGlyphs, EdgeGlyphs};
 use crate::transform::TermTransform;
@@ -635,6 +635,16 @@ impl TermRenderer {
         if matches!(self.config.tier, MermaidTier::Compact)
             || matches!(self.config.render_mode, MermaidRenderMode::CellOnly)
         {
+            // Gantt lays out a text gutter and a proportional timeline in cell space. A
+            // generic node-box fit can discard usable columns before that gutter is measured
+            // (a 100-unit supplied layout shrinks to 17 cells even in a 60-column viewport).
+            // Let the timeline use the resolved width, including the caller's max-width cap.
+            let cell_width =
+                if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
+                    self.config.cols.max(1)
+                } else {
+                    cell_width
+                };
             return self.render_cell_mode(ir, layout, cell_width, cell_height, scale_x, scale_y);
         }
 
@@ -1117,7 +1127,10 @@ impl TermRenderer {
         if let Some(metrics) = &central_metrics {
             for edge in &layout.edges {
                 for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
-                    central_cells.insert(self.point_to_cells(&marker.center, scale_x, scale_y));
+                    if let Some(cell) = self.marker_point_to_cells(&marker.center, scale_x, scale_y)
+                    {
+                        central_cells.insert(cell);
+                    }
                 }
             }
         }
@@ -1598,11 +1611,34 @@ impl TermRenderer {
         if let Some(metrics) = &central_metrics {
             for edge in &layout.edges {
                 for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
-                    let x = (marker.center.x * pixel_scale_x) as isize + padding_x as isize;
-                    let y = (marker.center.y * pixel_scale_y) as isize + padding_y as isize;
-                    let radius = ((marker.radius * pixel_scale_x.min(pixel_scale_y)).round()
-                        as isize)
-                        .max(1);
+                    let Some((x, y)) = Self::padded_raster_point(
+                        (
+                            marker.center.x * pixel_scale_x,
+                            marker.center.y * pixel_scale_y,
+                        ),
+                        (padding_x, padding_y),
+                    ) else {
+                        continue;
+                    };
+                    let radius = marker.radius * pixel_scale_x.min(pixel_scale_y);
+                    if !radius.is_finite() {
+                        continue;
+                    }
+                    let radius = (radius.round() as isize).max(1);
+                    let (width, height) = canvas.pixel_dimensions();
+                    let (wide_x, wide_y, wide_radius) = (x as i128, y as i128, radius as i128);
+                    // Cull by the circle's extent, not just its center: a boundary dot may
+                    // still paint visible pixels. Widen before adding the radius so an extreme
+                    // supplied endpoint never reaches fill_circle's unchecked center offsets.
+                    if width == 0
+                        || height == 0
+                        || wide_x + wide_radius < 0
+                        || wide_y + wide_radius < 0
+                        || wide_x - wide_radius >= width as i128
+                        || wide_y - wide_radius >= height as i128
+                    {
+                        continue;
+                    }
                     canvas.fill_circle(x, y, radius);
                     central_mask
                         .get_or_insert_with(|| {
@@ -1845,9 +1881,13 @@ impl TermRenderer {
 
         // Draw line segments.
         for window in edge_path.points.windows(2) {
-            let (x0, y0) = self.point_to_cells(&window[0], scale_x, scale_y);
-            let (x1, y1) = self.point_to_cells(&window[1], scale_x, scale_y);
-            self.draw_line_cell(buffer, x0, y0, x1, y1, stroke);
+            let Some((x0, y0)) = self.line_point_to_cells(&window[0], scale_x, scale_y) else {
+                continue;
+            };
+            let Some((x1, y1)) = self.line_point_to_cells(&window[1], scale_x, scale_y) else {
+                continue;
+            };
+            self.draw_raster_line_cell(buffer, RasterLine::signed(x0, y0, x1, y1), stroke);
         }
 
         for (x, y, glyph) in self
@@ -1869,7 +1909,7 @@ impl TermRenderer {
     ) {
         let markers: std::collections::BTreeSet<_> =
             fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge_path, metrics)
-                .map(|marker| self.point_to_cells(&marker.center, scale_x, scale_y))
+                .filter_map(|marker| self.marker_point_to_cells(&marker.center, scale_x, scale_y))
                 .collect();
         if markers.is_empty() {
             return;
@@ -1918,27 +1958,32 @@ impl TermRenderer {
         y1: usize,
         stroke: EdgeStroke,
     ) {
+        self.draw_raster_line_cell(buffer, RasterLine::unsigned(x0, y0, x1, y1), stroke);
+    }
+
+    fn draw_raster_line_cell(&self, buffer: &mut CellBuffer, line: RasterLine, stroke: EdgeStroke) {
         let glyphs = &self.edge_glyphs;
+        let (dx, dy) = line.delta();
         let line_char = if stroke == EdgeStroke::Dotted {
-            if x0 == x1 {
+            if dx == 0 {
                 glyphs.dotted_v
             } else {
                 glyphs.dotted_h
             }
         } else if stroke == EdgeStroke::Thick {
-            match (self.config.glyph_mode, x0 == x1) {
+            match (self.config.glyph_mode, dx == 0) {
                 (fm_core::MermaidGlyphMode::Ascii, true) => '#',
                 (fm_core::MermaidGlyphMode::Ascii, false) => '=',
                 (_, true) => '┃',
                 (_, false) => '━',
             }
-        } else if x0 == x1 {
+        } else if dx == 0 {
             glyphs.line_v
-        } else if y0 == y1 {
+        } else if dy == 0 {
             glyphs.line_h
-        } else if (x1 as isize - x0 as isize).abs() == (y1 as isize - y0 as isize).abs() {
+        } else if dx.abs() == dy.abs() {
             // Check for perfect diagonal
-            if (x1 > x0) == (y1 > y0) {
+            if (dx > 0) == (dy > 0) {
                 glyphs.line_diag_nw
             } else {
                 glyphs.line_diag_ne
@@ -1948,40 +1993,9 @@ impl TermRenderer {
             glyphs.line_h
         };
 
-        // Bresenham line drawing.
-        let dx = (x1 as isize - x0 as isize).abs();
-        let dy = -(y1 as isize - y0 as isize).abs();
-        let sx = if x0 < x1 { 1_isize } else { -1 };
-        let sy = if y0 < y1 { 1_isize } else { -1 };
-        let mut err = dx + dy;
-        let mut x = x0 as isize;
-        let mut y = y0 as isize;
-
-        loop {
-            if x >= 0 && y >= 0 {
-                buffer.set(x as usize, y as usize, line_char);
-            }
-
-            if x == x1 as isize && y == y1 as isize {
-                break;
-            }
-
-            let e2 = 2 * err;
-            if e2 >= dy {
-                if x == x1 as isize {
-                    break;
-                }
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                if y == y1 as isize {
-                    break;
-                }
-                err += dx;
-                y += sy;
-            }
-        }
+        line.visit(buffer.width, buffer.height, |x, y| {
+            buffer.set(x, y, line_char)
+        });
     }
 
     /// Use the same f32 grid projection as shafts and central dots, with checked padding for
@@ -1992,21 +2006,8 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> Option<(usize, usize)> {
-        let (x, y) = TermTransform::new(scale_x, scale_y).map_or_else(
-            || (point.x * scale_x, point.y * scale_y),
-            |transform| transform.apply(point.x, point.y),
-        );
-        if !x.is_finite()
-            || !y.is_finite()
-            || f64::from(x) + (self.config.padding as f64) < 0.0
-            || f64::from(y) + (self.config.padding as f64) < 0.0
-        {
-            return None;
-        }
-        Some((
-            (x as usize).checked_add(self.config.padding)?,
-            (y as usize).checked_add(self.config.padding)?,
-        ))
+        let (x, y) = self.line_point_to_cells(point, scale_x, scale_y)?;
+        Some((usize::try_from(x).ok()?, usize::try_from(y).ok()?))
     }
 
     /// Share semantic endpoint resolution with the vector renderers, including a distinct
@@ -2669,18 +2670,21 @@ impl TermRenderer {
     /// Concurrent-state layouts emit horizontal or vertical dividers. The same interpolation
     /// handles diagonal supplied segments without forcing their geometry into one axis.
     ///
-    /// `draw_line` takes `isize` and clips internally, so off-canvas dashes are dropped rather than
-    /// wrapped.
+    /// Start at the original dash containing the first visible major-axis step. Clipping must not
+    /// restart the dash pattern, and offscreen distance must not determine the number of dashes.
     fn draw_dashed_segment(canvas: &mut Canvas, x0: isize, y0: isize, x1: isize, y1: isize) {
-        let dx = x1 - x0;
-        let dy = y1 - y0;
-        let steps = dx.abs().max(dy.abs());
+        let line = RasterLine::signed(x0, y0, x1, y1);
+        let (dx, dy) = line.delta();
+        let steps = line.steps();
         if steps == 0 {
             canvas.draw_line(x0, y0, x0, y0);
             return;
         }
 
         let (pixel_width, pixel_height) = canvas.pixel_dimensions();
+        let Some((first, last)) = line.clipped_steps(pixel_width, pixel_height) else {
+            return;
+        };
         let (cell_width, cell_height) = canvas.cell_dimensions();
         let pixels_per_cell = if dx.abs() >= dy.abs() {
             pixel_width / cell_width.max(1)
@@ -2689,19 +2693,18 @@ impl TermRenderer {
         };
         // An off run of 2*n-1 pixels contains a whole n-pixel cell at every phase.
         // Three off pixels work horizontally in Braille, but cannot empty a four-pixel row.
-        let dash = (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as isize;
-        let mut step = 0_isize;
-        while step <= steps {
+        let dash = (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as u128;
+        let period = dash * 2;
+        let mut step = first / period * period;
+        while step <= last {
             let end = (step + dash - 1).min(steps);
             // Endpoints of this dash, interpolated along the segment. Integer arithmetic keeps the
             // result deterministic across platforms, which the terminal output determinism test
             // depends on.
-            let ax = x0 + dx * step / steps;
-            let ay = y0 + dy * step / steps;
-            let bx = x0 + dx * end / steps;
-            let by = y0 + dy * end / steps;
-            canvas.draw_line(ax, ay, bx, by);
-            step += dash * 2;
+            let (ax, ay) = line.interpolate(step);
+            let (bx, by) = line.interpolate(end);
+            canvas.draw_line(ax as isize, ay as isize, bx as isize, by as isize);
+            step += period;
         }
     }
 
@@ -2779,25 +2782,31 @@ impl TermRenderer {
         (scale_x, scale_y): (f32, f32),
         (padding_x, padding_y): (usize, usize),
     ) {
-        let x0 = (from.x * scale_x) as isize + padding_x as isize;
-        let y0 = (from.y * scale_y) as isize + padding_y as isize;
-        let x1 = (to.x * scale_x) as isize + padding_x as isize;
-        let y1 = (to.y * scale_y) as isize + padding_y as isize;
+        let Some((x0, y0)) =
+            Self::padded_raster_point((from.x * scale_x, from.y * scale_y), (padding_x, padding_y))
+        else {
+            return;
+        };
+        let Some((x1, y1)) =
+            Self::padded_raster_point((to.x * scale_x, to.y * scale_y), (padding_x, padding_y))
+        else {
+            return;
+        };
         match stroke {
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
             EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
             EdgeStroke::Thick => {
-                let (ox, oy) = if (x1 - x0).abs() >= (y1 - y0).abs() {
+                let (ox, oy) = if x1.abs_diff(x0) >= y1.abs_diff(y0) {
                     (0, 1)
                 } else {
                     (1, 0)
                 };
                 for offset in -1..=1 {
                     canvas.draw_line(
-                        x0 + ox * offset,
-                        y0 + oy * offset,
-                        x1 + ox * offset,
-                        y1 + oy * offset,
+                        x0.saturating_add(ox * offset),
+                        y0.saturating_add(oy * offset),
+                        x1.saturating_add(ox * offset),
+                        y1.saturating_add(oy * offset),
                     );
                 }
             }
@@ -5113,9 +5122,17 @@ impl TermRenderer {
                     continue;
                 };
                 if cell_mode {
-                    let (x0, y0) = self.point_to_cells(&from, scale_x, scale_y);
-                    let (x1, y1) = self.point_to_cells(&to, scale_x, scale_y);
-                    self.draw_line_cell(&mut cells, x0, y0, x1, y1, stroke);
+                    let Some((x0, y0)) = self.line_point_to_cells(&from, scale_x, scale_y) else {
+                        continue;
+                    };
+                    let Some((x1, y1)) = self.line_point_to_cells(&to, scale_x, scale_y) else {
+                        continue;
+                    };
+                    self.draw_raster_line_cell(
+                        &mut cells,
+                        RasterLine::signed(x0, y0, x1, y1),
+                        stroke,
+                    );
                 } else {
                     // A clipped foreign segment may start in the middle of its dash cycle.
                     // Protect its corridor through the gaps as well. On our own route only
@@ -5177,7 +5194,39 @@ impl TermRenderer {
     ) -> (usize, usize) {
         let (x, y) = self.layout_point_to_cells(point.x, point.y, scale_x, scale_y);
 
-        (x + self.config.padding, y + self.config.padding)
+        (
+            x.saturating_add(self.config.padding),
+            y.saturating_add(self.config.padding),
+        )
+    }
+
+    /// Keep signed offscreen geometry until raster clipping; clamping a negative endpoint to
+    /// zero changes a diagonal's slope and can draw a visible edge that never crossed the grid.
+    fn line_point_to_cells(
+        &self,
+        point: &fm_layout::LayoutPoint,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Option<(isize, isize)> {
+        let scaled = TermTransform::new(scale_x, scale_y)
+            .map(|transform| transform.apply(point.x, point.y))
+            .unwrap_or((point.x * scale_x, point.y * scale_y));
+        Self::padded_raster_point(scaled, (self.config.padding, self.config.padding))
+    }
+
+    fn padded_raster_point(
+        (x, y): (f32, f32),
+        (padding_x, padding_y): (usize, usize),
+    ) -> Option<(isize, isize)> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let padding_x = padding_x.min(isize::MAX as usize) as isize;
+        let padding_y = padding_y.min(isize::MAX as usize) as isize;
+        Some((
+            (x as isize).saturating_add(padding_x),
+            (y as isize).saturating_add(padding_y),
+        ))
     }
 
     /// Convert one layout-space point into terminal cell space through the CGA-backed transform.
@@ -6242,7 +6291,11 @@ fn append_footnote_links(
     for node in &ir.nodes {
         if let Some(url) = TermRenderer::node_link_url(node) {
             let idx = entries.len() + 1;
-            entries.push(format!("[{idx}] {}: {url}", node.id));
+            entries.push(format!(
+                "[{idx}] {}: {}",
+                single_line_terminal_text(&node.id),
+                single_line_terminal_text(url),
+            ));
         }
     }
     if entries.is_empty() {
@@ -6289,12 +6342,10 @@ struct CellLabel {
     require_clear_cells: bool,
 }
 
-/// Fit a caption without splitting a grapheme (combining text, emoji or a ZWJ sequence).
-fn fit_cell_text(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let text = if text.chars().any(char::is_control) {
+/// Data printed on a terminal row must not contain terminal commands or row separators.
+/// URL scheme validation is a separate policy: even an allowed HTTPS URL can contain controls.
+fn single_line_terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(char::is_control) {
         std::borrow::Cow::Owned(
             text.chars()
                 .map(|ch| if ch.is_control() { ' ' } else { ch })
@@ -6302,7 +6353,15 @@ fn fit_cell_text(text: &str, width: usize) -> String {
         )
     } else {
         std::borrow::Cow::Borrowed(text)
-    };
+    }
+}
+
+/// Fit a caption without splitting a grapheme (combining text, emoji or a ZWJ sequence).
+fn fit_cell_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let text = single_line_terminal_text(text);
     if text.width() <= width {
         return text.into_owned();
     }
@@ -9640,6 +9699,183 @@ mod tests {
     }
 
     #[test]
+    fn clipped_dashes_keep_the_original_phase_and_diagonal_interpolation() {
+        fn reference(canvas: &mut Canvas, from: (isize, isize), to: (isize, isize)) {
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let steps = dx.abs().max(dy.abs());
+            let (pw, ph) = canvas.pixel_dimensions();
+            let (cw, ch) = canvas.cell_dimensions();
+            let pixels_per_cell = if dx.abs() >= dy.abs() {
+                pw / cw
+            } else {
+                ph / ch
+            };
+            let dash = (pixels_per_cell * 2 - 1).max(3) as isize;
+            if steps == 0 {
+                canvas.draw_line(from.0, from.1, to.0, to.1);
+                return;
+            }
+            let mut step = 0;
+            while step <= steps {
+                let end = (step + dash - 1).min(steps);
+                canvas.draw_line(
+                    from.0 + dx * step / steps,
+                    from.1 + dy * step / steps,
+                    from.0 + dx * end / steps,
+                    from.1 + dy * end / steps,
+                );
+                step += dash * 2;
+            }
+        }
+
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            for (from, to) in [
+                ((-51, 7), (82, 7)),
+                ((82, 7), (-51, 7)),
+                ((7, -51), (7, 82)),
+                ((7, 82), (7, -51)),
+                ((-43, -7), (75, 28)),
+                ((75, 28), (-43, -7)),
+                ((-7, -43), (28, 75)),
+                ((28, 75), (-7, -43)),
+                ((-43, 28), (75, -7)),
+                ((75, -7), (-43, 28)),
+                ((-20, -40), (-2, -3)),
+                ((3, 3), (3, 3)),
+            ] {
+                let mut actual = Canvas::new(24, 18, mode);
+                let mut expected = actual.clone();
+                TermRenderer::draw_dashed_segment(&mut actual, from.0, from.1, to.0, to.1);
+                reference(&mut expected, from, to);
+                assert_eq!(
+                    actual.render(),
+                    expected.render(),
+                    "{mode:?}: {from:?}->{to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_dashes_preserve_phase_without_walking_offscreen_distance() {
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            for reverse in [false, true] {
+                let mut canvas = Canvas::new(24, 18, mode);
+                let (width, height) = canvas.pixel_dimensions();
+                let dash = ((width / 24) * 2 - 1).max(3) as u128;
+                let (x0, x1) = if reverse {
+                    (isize::MAX, isize::MIN)
+                } else {
+                    (isize::MIN, isize::MAX)
+                };
+                TermRenderer::draw_dashed_segment(&mut canvas, x0, 2, x1, 2);
+                for y in 0..height {
+                    for x in 0..width {
+                        let step = (x as i128 - x0 as i128).unsigned_abs();
+                        assert_eq!(canvas.get_pixel(x, y), y == 2 && step % (dash * 2) < dash);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cell_connectors_keep_signed_geometry_and_route_masks_agree() {
+        let mut ir = sample_ir();
+        ir.edges[0].arrow = ArrowType::Line;
+        let mut layout = layout_diagram(&ir);
+        let config = TermRenderConfig {
+            padding: 0,
+            ..TermRenderConfig::compact()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 24, 18));
+        // Clamping each endpoint separately would fabricate a visible diagonal in the first
+        // quadrant, although every point on the original line has x + y = -10.
+        let outside = terminal_edge_test_path(&[(-20.0, 10.0), (10.0, -20.0)]);
+        let mut cells = CellBuffer::new(24, 18);
+        renderer.render_edge_cell(&mut cells, &ir, &outside, 1.0, 1.0);
+        assert!(cells.cells.iter().all(|&cell| cell == ' '));
+
+        let crossing = terminal_edge_test_path(&[(-20.0, 4.0), (40.0, 16.0)]);
+        renderer.render_edge_cell(&mut cells, &ir, &crossing, 1.0, 1.0);
+        let mut expected = Canvas::new(24, 18, MermaidRenderMode::CellOnly);
+        expected.draw_line(-20, 4, 40, 16);
+        for y in 0..18 {
+            for x in 0..24 {
+                assert_eq!(cells.cells[y * 24 + x] != ' ', expected.get_pixel(x, y));
+            }
+        }
+        layout.edges[0] = crossing;
+        let mask =
+            renderer.edge_label_route_grid(&ir, &layout, &layout.edges[0], false, 24, 18, 1.0, 1.0);
+        assert_eq!(mask.into_iter().flatten().collect::<Vec<_>>(), cells.cells);
+
+        cells.cells.fill(' ');
+        renderer.draw_line_cell(&mut cells, 0, 0, usize::MAX, usize::MAX, EdgeStroke::Thick);
+        for y in 0..18 {
+            for x in 0..24 {
+                assert_eq!(cells.cells[y * 24 + x] != ' ', x == y);
+            }
+        }
+    }
+
+    #[test]
+    fn public_terminal_renderer_accepts_extreme_supplied_connectors_in_every_mode() {
+        let mut ir = sample_ir();
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0] = terminal_edge_test_path(&[(-f32::MAX, -f32::MAX), (f32::MAX, f32::MAX)]);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                show_labels: false,
+                padding: 2,
+                ..TermRenderConfig::rich()
+            };
+            for arrow in [ArrowType::Line, ArrowType::DottedLine, ArrowType::ThickLine] {
+                ir.edges[0].arrow = arrow;
+                let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
+                assert!(!result.output.is_empty(), "{mode:?}/{arrow:?}");
+                assert!(result.width <= 80 && result.height <= 24);
+            }
+        }
+        for stroke in [EdgeStroke::Solid, EdgeStroke::Dotted, EdgeStroke::Thick] {
+            let mut canvas = Canvas::new(8, 8, MermaidRenderMode::Braille);
+            TermRenderer::draw_canvas_shaft(
+                &mut canvas,
+                stroke,
+                fm_layout::LayoutPoint {
+                    x: f32::NAN,
+                    y: 0.0,
+                },
+                fm_layout::LayoutPoint { x: 10.0, y: 10.0 },
+                (1.0, 1.0),
+                (2, 2),
+            );
+            assert!(
+                canvas
+                    .render()
+                    .chars()
+                    .all(|ch| ch == '\n' || blank_terminal_cell(ch))
+            );
+        }
+    }
+
+    #[test]
     fn caption_route_masks_match_painted_shafts_in_all_raster_modes() {
         let mut ir = sample_ir();
         let mut layout = layout_diagram(&ir);
@@ -11709,6 +11945,48 @@ mod tests {
     }
 
     #[test]
+    fn supplied_sequence_central_dots_share_signed_padding_with_arrows_and_shafts() {
+        for reverse in [false, true] {
+            let points = if reverse {
+                [(15.0, 5.0), (-1.0, 5.0)]
+            } else {
+                [(-1.0, 5.0), (15.0, 5.0)]
+            };
+            let (mut ir, mut layout) = sequence_central_marker_fixture(&points);
+            ir.direction = GraphDirection::LR;
+            ir.edges[0].arrow = ArrowType::DoubleArrow;
+            ir.edges[0].extras_mut().sequence_central_connection =
+                Some(fm_core::SequenceCentralConnection::Both);
+            // These are the fitter's minimum LR content dimensions, giving scale=1 in every
+            // tier. The negative endpoint is still visible inside the two-column padding.
+            layout.bounds.width = 20.0;
+            layout.bounds.height = 10.0;
+            for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+                let config = TermRenderConfig {
+                    tier,
+                    render_mode: MermaidRenderMode::CellOnly,
+                    show_labels: false,
+                    padding: 2,
+                    ..Default::default()
+                };
+                let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
+                let row: Vec<_> = result.output.lines().nth(7).unwrap().chars().collect();
+                assert_eq!((row[1], row[2]), ('●', '◀'), "{tier:?}: {}", result.output);
+                assert_eq!(
+                    (row[16], row[17]),
+                    ('▶', '●'),
+                    "{tier:?}: {}",
+                    result.output
+                );
+                assert!(row[3..16].iter().all(|&cell| cell == '─'));
+                assert_eq!(result.output.matches('●').count(), 2);
+                assert_eq!(result.output.matches('◀').count(), 1);
+                assert_eq!(result.output.matches('▶').count(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn sequence_central_connection_arrows_share_fractional_scale_rounding() {
         let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 8.0), (50.0, 8.0)]);
         ir.edges[0].arrow = ArrowType::DoubleArrow;
@@ -11731,6 +12009,76 @@ mod tests {
         let result = renderer.render_cell_mode(&ir, &layout, 80, 24, 0.7, 1.0);
         let row: Vec<_> = result.output.lines().nth(8).unwrap().chars().collect();
         assert_eq!((row[7], row[35]), ('◀', '▶'), "{}", result.output);
+    }
+
+    #[test]
+    fn supplied_sequence_central_dots_cull_extreme_endpoints_and_keep_boundary_pixels() {
+        for mode in [
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Braille,
+        ] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Rich,
+                render_mode: mode,
+                show_labels: false,
+                padding: 2,
+                ..Default::default()
+            };
+            for far in [f32::MAX / 16.0, f32::MAX, -f32::MAX / 16.0, -f32::MAX] {
+                for reverse in [false, true] {
+                    let points = if reverse {
+                        [(far, 5.0), (8.0, 5.0)]
+                    } else {
+                        [(8.0, 5.0), (far, 5.0)]
+                    };
+                    let (mut ir, mut layout) = sequence_central_marker_fixture(&points);
+                    ir.direction = GraphDirection::LR;
+                    ir.edges[0].arrow = ArrowType::DoubleArrow;
+                    ir.edges[0].extras_mut().sequence_central_connection =
+                        Some(fm_core::SequenceCentralConnection::Both);
+                    layout.bounds.width = 20.0;
+                    layout.bounds.height = 10.0;
+                    let result =
+                        render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
+                    let above: Vec<_> = result.output.lines().nth(6).unwrap().chars().collect();
+                    assert!(
+                        above
+                            .get(10)
+                            .is_some_and(|&cell| !blank_terminal_cell(cell)),
+                        "{mode:?}/reverse={reverse}: visible central dot was lost"
+                    );
+                }
+            }
+
+            let (mut ir, mut layout) = sequence_central_marker_fixture(&[(-3.0, 5.0), (12.0, 5.0)]);
+            ir.direction = GraphDirection::LR;
+            ir.edges[0].arrow = ArrowType::DoubleArrow;
+            ir.edges[0].extras_mut().sequence_central_connection =
+                Some(fm_core::SequenceCentralConnection::Both);
+            layout.bounds.width = 20.0;
+            layout.bounds.height = 10.0;
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
+            let above = result.output.lines().nth(6).unwrap();
+            assert!(
+                above
+                    .chars()
+                    .next()
+                    .is_some_and(|cell| !blank_terminal_cell(cell)),
+                "{mode:?}: a partially visible boundary dot was culled"
+            );
+            ir.edges[0].extras_mut().sequence_central_connection = None;
+            let ordinary = render_diagram_with_layout_and_config(&ir, &layout, &config, 80, 24);
+            assert!(
+                ordinary
+                    .output
+                    .lines()
+                    .nth(6)
+                    .unwrap()
+                    .chars()
+                    .all(blank_terminal_cell)
+            );
+        }
     }
 
     #[test]
@@ -13062,6 +13410,94 @@ mod tests {
     }
 
     #[test]
+    fn compact_gantt_uses_available_columns_without_distorting_supplied_schedule() {
+        let parsed = fm_parser::parse(
+            "gantt\n\
+             section Alpha\n\
+             Build UI :done, build, 2026-02-01, 2d\n\
+             Verify :verify, 2026-02-05, 4d\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = parsed.ir;
+        assert_eq!(ir.nodes.len(), 2);
+        let layout = DiagramLayout {
+            nodes: [(0.0, 20.0), (60.0, 40.0)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (x, width))| LayoutNodeBox {
+                    node_index: index,
+                    node_id: ir.nodes[index].id.clone(),
+                    rank: index,
+                    order: index,
+                    span: Default::default(),
+                    bounds: LayoutRect {
+                        x,
+                        y: index as f32 * 10.0,
+                        width,
+                        height: 6.0,
+                    },
+                })
+                .collect(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 24.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        };
+
+        for (cols, max_width) in [(18, 120), (60, 120), (60, 32)] {
+            let config = TermRenderConfig {
+                tier: MermaidTier::Compact,
+                render_mode: MermaidRenderMode::CellOnly,
+                max_width,
+                ..Default::default()
+            };
+            let result = render_diagram_with_layout_and_config(&ir, &layout, &config, cols, 12);
+            assert!(result.width <= cols.min(max_width) && result.height <= 12);
+            assert!(
+                result
+                    .output
+                    .lines()
+                    .all(|line| line.width() <= result.width)
+            );
+            let build = result
+                .output
+                .lines()
+                .find(|line| line.contains('░'))
+                .unwrap();
+            let verify = result
+                .output
+                .lines()
+                .find(|line| line.contains('█'))
+                .unwrap();
+            if cols.min(max_width) >= 24 {
+                assert!(build.starts_with("Build UI"), "{}", result.output);
+                assert!(verify.starts_with("Verify"), "{}", result.output);
+            } else {
+                assert!(build.contains('…'), "{}", result.output);
+            }
+            let build_cells = build.chars().filter(|&ch| ch == '░').count();
+            let verify_cells = verify.chars().filter(|&ch| ch == '█').count();
+            assert!(build_cells > 0 && verify_cells.abs_diff(build_cells * 2) <= 2);
+            let build_end = build
+                .chars()
+                .enumerate()
+                .filter_map(|(index, ch)| (ch == '░').then_some(index))
+                .last()
+                .unwrap();
+            let verify_start = verify.chars().position(|ch| ch == '█').unwrap();
+            assert!(verify_start > build_end);
+        }
+    }
+
+    #[test]
     fn renders_generic_diagram_title_in_compact_mode() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some("Shipping History".to_string());
@@ -13238,6 +13674,109 @@ mod tests {
             "Compact cell mode must render radar axis labels and legend: {}",
             radar_res.output
         );
+    }
+
+    #[test]
+    fn footnotes_sanitize_osc_from_strictly_parsed_click_links() {
+        let url = "https://example.com/\x1b]0;diagram-title\x07end";
+        let source = format!("flowchart LR\nA[Documentation] --> B\nclick A \"{url}\"\n");
+        let parsed = fm_parser::parse(&source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(
+            parsed.ir.meta.init.config.sanitize_mode,
+            fm_core::MermaidSanitizeMode::Strict
+        );
+        assert_eq!(parsed.ir.find_node("A").unwrap().href(), Some(url));
+
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                link_mode: fm_core::MermaidLinkMode::Footnote,
+                ..TermRenderConfig::rich()
+            };
+            let result = render_diagram_with_config(&parsed.ir, &config, 80, 24);
+            let footer = result.output.split_once("\nLinks:\n").unwrap().1;
+            assert_eq!(footer, "[1] A: https://example.com/ ]0;diagram-title end");
+            assert!(
+                result
+                    .output
+                    .chars()
+                    .all(|ch| !ch.is_control() || ch == '\n')
+            );
+        }
+        // Rendering must not rewrite link metadata consumed by other backends.
+        assert_eq!(parsed.ir.find_node("A").unwrap().href(), Some(url));
+    }
+
+    #[test]
+    fn footnotes_sanitize_controls_decoded_from_sequence_menu_json() {
+        // The source itself contains only printable ASCII and line separators. JSON escapes
+        // materialize the control characters after parsing, so input-byte filtering is insufficient.
+        let source = concat!(
+            "sequenceDiagram\nparticipant Alice\n",
+            "links Alice: {\"Docs\":\"https://example.com/one\\ntwo\\rthree\\tfour",
+            "\\u001b]0;changed\\u0007end\"}\n",
+        );
+        assert!(source.is_ascii());
+        let parsed = fm_parser::parse(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let url = "https://example.com/one\ntwo\rthree\tfour\x1b]0;changed\x07end";
+        assert_eq!(parsed.ir.find_node("Alice").unwrap().menu_links[0].url, url);
+        let config = TermRenderConfig {
+            link_mode: fm_core::MermaidLinkMode::Footnote,
+            ..TermRenderConfig::compact()
+        };
+        let result = render_diagram_with_config(&parsed.ir, &config, 80, 24);
+        let footer = result.output.split_once("\nLinks:\n").unwrap().1;
+        assert_eq!(
+            footer,
+            "[1] Alice: https://example.com/one two three four ]0;changed end"
+        );
+        assert_eq!(footer.lines().count(), 1);
+        assert!(
+            result
+                .output
+                .chars()
+                .all(|ch| !ch.is_control() || ch == '\n')
+        );
+        assert_eq!(parsed.ir.find_node("Alice").unwrap().menu_links[0].url, url);
+    }
+
+    #[test]
+    fn footnotes_sanitize_public_ir_ids_and_preserve_ordinary_urls() {
+        let url = "https://example.com/docs?q=two%20words&escaped=%1B#section";
+        let source = format!("flowchart LR\nA[Documentation] --> B\nclick A \"{url}\"\n");
+        let mut ir = fm_parser::parse(&source).ir;
+        let config = TermRenderConfig {
+            link_mode: fm_core::MermaidLinkMode::Footnote,
+            ..TermRenderConfig::compact()
+        };
+        let ordinary = render_diagram_with_config(&ir, &config, 80, 24);
+        assert_eq!(
+            ordinary.output.split_once("\nLinks:\n").unwrap().1,
+            format!("[1] A: {url}")
+        );
+
+        // Public IR consumers can supply identifiers that Mermaid's identifier normalizer would
+        // otherwise clean. Sanitize the footer boundary, including DEL and C1 controls, as well.
+        ir.nodes[0].id = "A\x1b[2J\rSpoof\t\x7f\u{9b}".to_string();
+        let supplied = render_diagram_with_config(&ir, &config, 80, 24);
+        assert_eq!(
+            supplied.output.split_once("\nLinks:\n").unwrap().1,
+            format!("[1] A [2J Spoof   : {url}")
+        );
+        assert!(
+            supplied
+                .output
+                .chars()
+                .all(|ch| !ch.is_control() || ch == '\n')
+        );
+        assert_eq!(ir.nodes[0].href(), Some(url));
     }
 
     #[test]

@@ -7,6 +7,98 @@
 
 use fm_core::MermaidRenderMode;
 
+/// Integer line geometry with random access to its original raster steps.
+///
+/// Clipping the geometric endpoints and restarting Bresenham changes its rounding phase. Instead,
+/// skip directly to the original steps whose major coordinate is in the viewport. Every visit then
+/// costs at most one viewport width or height, even when either endpoint is at an integer limit.
+#[derive(Clone, Copy)]
+pub(crate) struct RasterLine {
+    start: (i128, i128),
+    delta: (i128, i128),
+}
+
+impl RasterLine {
+    pub(crate) fn signed(x0: isize, y0: isize, x1: isize, y1: isize) -> Self {
+        Self {
+            start: (x0 as i128, y0 as i128),
+            delta: (x1 as i128 - x0 as i128, y1 as i128 - y0 as i128),
+        }
+    }
+
+    pub(crate) fn unsigned(x0: usize, y0: usize, x1: usize, y1: usize) -> Self {
+        Self {
+            start: (x0 as i128, y0 as i128),
+            delta: (x1 as i128 - x0 as i128, y1 as i128 - y0 as i128),
+        }
+    }
+
+    pub(crate) const fn delta(self) -> (i128, i128) {
+        self.delta
+    }
+
+    pub(crate) fn steps(self) -> u128 {
+        self.delta.0.unsigned_abs().max(self.delta.1.unsigned_abs())
+    }
+
+    /// Inclusive original-step range whose major coordinate can reach the viewport.
+    pub(crate) fn clipped_steps(self, width: usize, height: usize) -> Option<(u128, u128)> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (start, delta, extent) = if self.delta.0.abs() >= self.delta.1.abs() {
+            (self.start.0, self.delta.0, width)
+        } else {
+            (self.start.1, self.delta.1, height)
+        };
+        let last_cell = (extent - 1) as i128;
+        let (first, last) = if delta >= 0 {
+            (-start, last_cell - start)
+        } else {
+            (start - last_cell, start)
+        };
+        let first = first.max(0);
+        let last = last.min(self.steps() as i128);
+        (first <= last).then_some((first as u128, last as u128))
+    }
+
+    /// Truncating interpolation used for the original dash endpoints, before rasterization.
+    pub(crate) fn interpolate(self, step: u128) -> (i128, i128) {
+        let steps = self.steps();
+        if steps == 0 {
+            return self.start;
+        }
+        let offset = |delta: i128| (delta.unsigned_abs() * step / steps) as i128 * delta.signum();
+        (
+            self.start.0 + offset(self.delta.0),
+            self.start.1 + offset(self.delta.1),
+        )
+    }
+
+    pub(crate) fn visit(self, width: usize, height: usize, mut pixel: impl FnMut(usize, usize)) {
+        let Some((first, last)) = self.clipped_steps(width, height) else {
+            return;
+        };
+        let steps = self.steps();
+        for step in first..=last {
+            // The original Bresenham loop rounds a half-step toward the destination. Both
+            // factors are at most usize::MAX; widening before multiplication also covers a line
+            // spanning isize::MIN..=isize::MAX without overflowing the signed error accumulator.
+            let offset = |delta: i128| {
+                (delta.unsigned_abs() * step + steps / 2)
+                    .checked_div(steps)
+                    .unwrap_or(0) as i128
+                    * delta.signum()
+            };
+            let x = self.start.0 + offset(self.delta.0);
+            let y = self.start.1 + offset(self.delta.1);
+            if x >= 0 && y >= 0 && x < width as i128 && y < height as i128 {
+                pixel(x as usize, y as usize);
+            }
+        }
+    }
+}
+
 /// A pixel-level canvas that maps to terminal cells.
 #[derive(Debug, Clone)]
 pub struct Canvas {
@@ -147,39 +239,9 @@ impl Canvas {
             return;
         }
 
-        let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        let mut x = x0;
-        let mut y = y0;
-
-        loop {
-            if x >= 0 && y >= 0 {
-                self.set_pixel(x as usize, y as usize);
-            }
-
-            if x == x1 && y == y1 {
-                break;
-            }
-
-            let e2 = 2 * err;
-            if e2 >= dy {
-                if x == x1 {
-                    break;
-                }
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                if y == y1 {
-                    break;
-                }
-                err += dx;
-                y += sy;
-            }
-        }
+        RasterLine::signed(x0, y0, x1, y1).visit(self.pixel_width, self.pixel_height, |x, y| {
+            self.set_pixel(x, y)
+        });
     }
 
     /// Draw a rectangle outline.
@@ -602,6 +664,118 @@ mod tests {
         // Bresenham should hit all diagonal pixels
         for i in 0..=5 {
             assert!(canvas.get_pixel(i, i), "pixel ({i}, {i}) should be set");
+        }
+    }
+
+    /// Small-coordinate reference: rasterize the whole segment, then crop the resulting pixels.
+    /// This intentionally uses the step-by-step error accumulator rather than RasterLine's jumps.
+    fn reference_line(
+        (mut x, mut y): (isize, isize),
+        (x1, y1): (isize, isize),
+        width: usize,
+        height: usize,
+    ) -> Vec<bool> {
+        let mut pixels = vec![false; width * height];
+        let dx = (x1 - x).abs();
+        let dy = -(y1 - y).abs();
+        let sx = if x < x1 { 1 } else { -1 };
+        let sy = if y < y1 { 1 } else { -1 };
+        let mut error = dx + dy;
+        loop {
+            if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
+                pixels[y as usize * width + x as usize] = true;
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let twice = 2 * error;
+            if twice >= dy {
+                error += dy;
+                x += sx;
+            }
+            if twice <= dx {
+                error += dx;
+                y += sy;
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn clipped_lines_preserve_bresenham_pixels_in_every_octant_and_mode() {
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut canvas = Canvas::new(7, 5, mode);
+            let (width, height) = canvas.pixel_dimensions();
+            let coordinates = [-9, -1, 0, 1, 5, 11, 19];
+            for x0 in coordinates {
+                for y0 in coordinates {
+                    for x1 in coordinates {
+                        for y1 in coordinates {
+                            canvas.clear();
+                            canvas.draw_line(x0, y0, x1, y1);
+                            let expected = reference_line((x0, y0), (x1, y1), width, height);
+                            for y in 0..height {
+                                for x in 0..width {
+                                    assert_eq!(
+                                        canvas.get_pixel(x, y),
+                                        expected[y * width + x],
+                                        "{mode:?}: ({x0},{y0})->({x1},{y1}) at ({x},{y})"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lines_at_integer_limits_are_bounded_and_do_not_overflow() {
+        for reverse in [false, true] {
+            let (lo, hi) = if reverse {
+                (isize::MAX, isize::MIN)
+            } else {
+                (isize::MIN, isize::MAX)
+            };
+            let mut canvas = Canvas::new(9, 7, MermaidRenderMode::CellOnly);
+            canvas.draw_line(lo, lo, hi, hi);
+            for y in 0..7 {
+                for x in 0..9 {
+                    assert_eq!(canvas.get_pixel(x, y), x == y);
+                }
+            }
+            canvas.clear();
+            // x + y = -1 never enters the nonnegative viewport.
+            canvas.draw_line(lo, hi, hi, lo);
+            assert!((0..7).all(|y| (0..9).all(|x| !canvas.get_pixel(x, y))));
+
+            canvas.clear();
+            let (y0, y1) = if reverse { (2, 1) } else { (1, 2) };
+            canvas.draw_line(lo, y0, hi, y1);
+            for y in 0..7 {
+                for x in 0..9 {
+                    assert_eq!(canvas.get_pixel(x, y), y == 2);
+                }
+            }
+        }
+
+        let mut visits = 0;
+        RasterLine::unsigned(0, 0, usize::MAX, usize::MAX).visit(9, 7, |x, y| {
+            assert_eq!(x, y);
+            visits += 1;
+        });
+        assert_eq!(visits, 7);
+        for (width, height) in [(0, 0), (0, 7), (9, 0)] {
+            let mut canvas = Canvas::new(width, height, MermaidRenderMode::Braille);
+            canvas.draw_line(isize::MIN, isize::MIN, isize::MAX, isize::MAX);
+            canvas.draw_line(isize::MIN, 0, isize::MAX, 0);
+            canvas.draw_line(0, isize::MIN, 0, isize::MAX);
         }
     }
 
