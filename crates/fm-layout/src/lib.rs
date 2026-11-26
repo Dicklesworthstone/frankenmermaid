@@ -6271,9 +6271,10 @@ fn apply_scene_path_style(path: &mut RenderPath, style: &BTreeMap<String, String
         path.fill = None;
     }
     let width = style.get("stroke-width").and_then(|value| {
+        let value = value.trim();
         value
-            .trim()
-            .trim_end_matches("px")
+            .strip_suffix("px")
+            .unwrap_or(value)
             .trim()
             .parse::<f32>()
             .ok()

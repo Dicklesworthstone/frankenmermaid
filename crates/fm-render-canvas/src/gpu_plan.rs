@@ -3184,7 +3184,9 @@ impl GpuRenderPlan {
                 .edges
                 .get(edge.edge_index)
                 .map_or(fm_core::ArrowType::Arrow, |ir_edge| ir_edge.arrow);
-            if arrow == fm_core::ArrowType::Invisible {
+            if arrow == fm_core::ArrowType::Invisible
+                || !crate::renderer::edge_stroke_visible(ir, edge.edge_index, config)
+            {
                 continue;
             }
             // ONE source of truth with the raster pass: `legacy_edge_stroke` is the same function
@@ -5140,6 +5142,14 @@ impl GpuRenderPlan {
             // theme variables, configured alpha, or a circle terminator's separate fill.
             let mut effective_config = config.clone();
             effective_config.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
+            plan.arrowheads.retain(|marker| {
+                ir.edges.get(marker.edge_index as usize).is_none()
+                    || crate::renderer::edge_stroke_visible(
+                        ir,
+                        marker.edge_index as usize,
+                        &effective_config,
+                    )
+            });
             for marker in &mut plan.arrowheads {
                 if ir.edges.get(marker.edge_index as usize).is_some() {
                     apply_edge_marker_paint(marker, ir, &effective_config);
@@ -5172,7 +5182,7 @@ fn append_sequence_central_markers(
     }
     let start = arrowheads.len();
     for edge in &layout.edges {
-        if !crate::renderer::sequence_central_stroke_visible(ir, edge.edge_index, config) {
+        if !crate::renderer::edge_stroke_visible(ir, edge.edge_index, config) {
             continue;
         }
         let color = resolved_edge_color(ir, edge.edge_index, config);

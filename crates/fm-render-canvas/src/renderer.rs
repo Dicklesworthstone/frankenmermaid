@@ -2814,7 +2814,7 @@ impl Canvas2dRenderer {
         let metrics = self.config.font_metrics();
         ctx.save();
         for edge in &layout.edges {
-            if !sequence_central_stroke_visible(ir, edge.edge_index, &self.config) {
+            if !edge_stroke_visible(ir, edge.edge_index, &self.config) {
                 continue;
             }
             let (stroke, _) = resolve_edge_style_with_defaults(ir, edge.edge_index, &self.config);
@@ -3269,7 +3269,7 @@ impl Canvas2dRenderer {
             let stroke_opacity =
                 resolve_edge_stroke_opacity(ir, edge_path.edge_index).unwrap_or(1.0);
 
-            if !labels_only {
+            if !labels_only && edge_stroke_visible(ir, edge_path.edge_index, &self.config) {
                 if stroke_opacity != 1.0 {
                     ctx.set_global_alpha(edge_opacity.unwrap_or(1.0) * stroke_opacity);
                 }
@@ -5094,9 +5094,11 @@ pub(crate) fn resolve_edge_style_with_defaults(
     (stroke, width)
 }
 
-/// A central connection inherits the connector's stroke channel, including its absence.
-/// The legacy width resolver keeps a fallback for zero, so inspect the authored value here.
-pub(crate) fn sequence_central_stroke_visible(
+/// The shaft and every endpoint glyph share the connector's stroke visibility. Canvas ignores
+/// a zero line width and the paint `none`, so suppress their drawing calls explicitly while
+/// leaving the independent caption channel intact. The width resolver retains its positive
+/// fallback for callers that actually draw a stroke.
+pub(crate) fn edge_stroke_visible(
     ir: &MermaidDiagramIr,
     edge_index: usize,
     config: &CanvasRenderConfig,
@@ -5114,9 +5116,10 @@ pub(crate) fn sequence_central_stroke_visible(
     !style
         .get("stroke-width")
         .and_then(|width| {
+            let width = width.trim();
             width
-                .trim()
-                .trim_end_matches("px")
+                .strip_suffix("px")
+                .unwrap_or(width)
                 .trim()
                 .parse::<f64>()
                 .ok()
@@ -5139,8 +5142,9 @@ pub(crate) fn sequence_central_stroke_visible(
 /// see it until an edge and a node disagreed about the same declaration.
 fn parse_stroke_width(raw: Option<&str>) -> Option<f64> {
     raw.and_then(|raw| {
-        raw.trim()
-            .trim_end_matches("px")
+        let raw = raw.trim();
+        raw.strip_suffix("px")
+            .unwrap_or(raw)
             .trim()
             .parse::<f64>()
             .ok()
@@ -6034,6 +6038,282 @@ mod tests {
             );
             let (_, texts) = record_gantt_canvas_paint(ctx.operations());
             assert!(texts.iter().any(|text| text.text == "still labelled"));
+        }
+    }
+
+    #[test]
+    fn canvas_and_gpu_hidden_edge_strokes_preserve_captions_without_connectors() {
+        for source in [
+            "flowchart LR\nAlpha o--o|transfer| Bravo",
+            "classDiagram\nAlpha \"one\" o--* \"many\" Bravo : transfer",
+            "erDiagram\nAlpha ||--o{ Bravo : transfer",
+            "sequenceDiagram\nAlpha()->>()Bravo: transfer",
+        ] {
+            let original = fm_parser::parse(source).ir;
+            assert_eq!(original.edges.len(), 1, "{source}");
+            let layout = layout_diagram(&original);
+            let config = CanvasRenderConfig::default();
+            let mut control = MockCanvas2dContext::new(800.0, 600.0);
+            Canvas2dRenderer::new(config.clone()).draw_edges(
+                &layout,
+                &original,
+                &mut control,
+                0.0,
+                0.0,
+                &mut 0,
+            );
+            assert!(
+                control
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op, DrawOperation::Stroke))
+            );
+            let plan = crate::gpu_plan::GpuRenderPlan::from_layout_with_config(
+                &original, &layout, &config,
+            );
+            assert!(!plan.edge_segments.is_empty());
+            assert!(!plan.arrowheads.is_empty() || !plan.er_marker_segments.is_empty());
+
+            for style in [
+                "stroke:none",
+                "stroke: NONE ",
+                "stroke-width:0",
+                "stroke-width:0px",
+                "stroke-width:-0.0",
+            ] {
+                let mut ir = original.clone();
+                ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+                let mut context = MockCanvas2dContext::new(800.0, 600.0);
+                Canvas2dRenderer::new(config.clone()).draw_edges(
+                    &layout,
+                    &ir,
+                    &mut context,
+                    0.0,
+                    0.0,
+                    &mut 0,
+                );
+                assert!(
+                    !context.operations().iter().any(|op| matches!(
+                        op,
+                        DrawOperation::Stroke | DrawOperation::Rotate(_) | DrawOperation::Arc(..)
+                    )),
+                    "{source}/{style}: a hidden stroke left a shaft or endpoint glyph"
+                );
+                assert!(
+                    context.operations().iter().any(
+                        |op| matches!(op, DrawOperation::FillText(text, _, _) if text == "transfer")
+                    ),
+                    "{source}/{style}: hiding the stroke must preserve its caption"
+                );
+                if ir.diagram_type == DiagramType::Class {
+                    for cardinality in ["one", "many"] {
+                        assert!(context.operations().iter().any(
+                            |op| matches!(op, DrawOperation::FillText(text, _, _) if text == cardinality)
+                        ));
+                    }
+                }
+
+                // The public renderer uses a second caption pass for graph diagrams. Verify
+                // that this path and the independent scene renderer keep the caption too.
+                let scene = build_render_scene(&ir, &layout);
+                for direct in [true, false] {
+                    let mut context = MockCanvas2dContext::new(800.0, 600.0);
+                    if direct {
+                        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut context);
+                    } else {
+                        crate::render_scene_to_canvas(&scene, &mut context, &config);
+                    }
+                    assert!(
+                        !context
+                            .operations()
+                            .iter()
+                            .any(|op| matches!(op, DrawOperation::Rotate(_)))
+                    );
+                    assert!(context.operations().iter().any(
+                        |op| matches!(op, DrawOperation::FillText(text, _, _) if text == "transfer")
+                    ));
+                }
+                for plan in [
+                    crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                    crate::gpu_plan::GpuRenderPlan::from_layout_and_scene_with_config(
+                        &ir, &layout, &scene, &config,
+                    ),
+                ] {
+                    assert!(
+                        plan.edge_segments.is_empty(),
+                        "{source}/{style}: GPU shaft survived"
+                    );
+                    assert!(
+                        plan.arrowheads.is_empty(),
+                        "{source}/{style}: GPU endpoint survived"
+                    );
+                    assert!(
+                        plan.er_marker_segments.is_empty(),
+                        "{source}/{style}: ER cardinality glyph survived"
+                    );
+                    let run = plan
+                        .text_runs
+                        .iter()
+                        .find(|run| {
+                            run.source == crate::gpu_plan::GpuTextSource::Edge
+                                && run.node_index == 0
+                        })
+                        .expect("the hidden connector retains its own caption run");
+                    let caption: String = plan.text_quads[run.first_quad as usize..]
+                        [..run.quad_count as usize]
+                        .iter()
+                        .map(|quad| {
+                            plan.glyph_atlas
+                                .cells
+                                .iter()
+                                .find(|cell| {
+                                    cell.face_index == run.face_index
+                                        && cell.uv_min == quad.uv_min
+                                        && cell.uv_max == quad.uv_max
+                                })
+                                .expect("caption quad resolves to an atlas glyph")
+                                .glyph
+                        })
+                        .collect();
+                    assert_eq!(caption, "transfer", "{source}/{style}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_and_gpu_edge_stroke_visibility_follows_cascade_and_width_fallbacks() {
+        let config = CanvasRenderConfig::default();
+        let original = fm_parser::parse("flowchart LR\nAlpha ==>|transfer| Bravo").ir;
+        let layout = layout_diagram(&original);
+        for (style, visible) in [
+            ("stroke-width:0", false),
+            ("stroke-width:0px", false),
+            ("stroke-width:-1", true),
+            ("stroke-width:NaN", true),
+            ("stroke-width:inf", true),
+            ("stroke-width:wide", true),
+            ("stroke-width:0pxpx", true),
+            ("stroke-width:0%", true),
+            ("stroke-width:3pxpx", true),
+            ("stroke-width:0.5px", true),
+        ] {
+            let mut ir = original.clone();
+            ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+            let mut context = MockCanvas2dContext::new(800.0, 600.0);
+            Canvas2dRenderer::new(config.clone()).draw_edges(
+                &layout,
+                &ir,
+                &mut context,
+                0.0,
+                0.0,
+                &mut 0,
+            );
+            assert_eq!(
+                context
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op, DrawOperation::Stroke)),
+                visible,
+                "{style}"
+            );
+            let scene = build_render_scene(&ir, &layout);
+            let mut scene_context = MockCanvas2dContext::new(800.0, 600.0);
+            crate::render_scene_to_canvas(&scene, &mut scene_context, &config);
+            assert_eq!(
+                scene_context
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op, DrawOperation::Rotate(_))),
+                visible,
+                "{style}: scene endpoint visibility"
+            );
+            for plan in [
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                crate::gpu_plan::GpuRenderPlan::from_layout_and_scene_with_config(
+                    &ir, &layout, &scene, &config,
+                ),
+            ] {
+                assert_eq!(!plan.edge_segments.is_empty(), visible, "{style}");
+                assert_eq!(!plan.arrowheads.is_empty(), visible, "{style}");
+                if style.ends_with("pxpx") {
+                    assert!(
+                        plan.edge_segments
+                            .iter()
+                            .all(|segment| segment.width == 2.5)
+                    );
+                }
+            }
+        }
+        for (source, visible) in [
+            ("flowchart LR\nA-->B\nlinkStyle default stroke:none", false),
+            (
+                "flowchart LR\nA-->B\nlinkStyle default stroke:none\nlinkStyle 0 stroke:navy",
+                true,
+            ),
+            (
+                "flowchart LR\nA-->B\nlinkStyle default stroke-width:0\nlinkStyle 0 stroke-width:3",
+                true,
+            ),
+            (
+                "flowchart LR\nA e@-->B\nclassDef hidden stroke-width:0\nclass e hidden",
+                false,
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = layout_diagram(&ir);
+            assert_eq!(ir.edges.len(), 1);
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(!plan.edge_segments.is_empty(), visible, "{source}");
+            assert_eq!(!plan.arrowheads.is_empty(), visible, "{source}");
+        }
+
+        // Runtime and source themes must not be undone by replacing a plan's markers from
+        // a scene built before the runtime paint was applied. Explicit edge paint still wins.
+        for themed in [false, true] {
+            let mut ir = original.clone();
+            let mut config = config.clone();
+            if themed {
+                ir.meta
+                    .theme_overrides
+                    .theme_variables
+                    .insert("lineColor".into(), "none".into());
+            } else {
+                config.edge_stroke = "none".into();
+            }
+            for authored_override in [false, true] {
+                if authored_override {
+                    ir.edges[0].inline_style =
+                        Some(Box::new(fm_core::parse_style_string("stroke:navy")));
+                }
+                let scene = build_render_scene(&ir, &layout);
+                let mut context = MockCanvas2dContext::new(800.0, 600.0);
+                Canvas2dRenderer::new(config.clone()).draw_edges(
+                    &layout,
+                    &ir,
+                    &mut context,
+                    0.0,
+                    0.0,
+                    &mut 0,
+                );
+                assert_eq!(
+                    context
+                        .operations()
+                        .iter()
+                        .any(|op| matches!(op, DrawOperation::Stroke)),
+                    authored_override
+                );
+                for plan in [
+                    crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config),
+                    crate::gpu_plan::GpuRenderPlan::from_layout_and_scene_with_config(
+                        &ir, &layout, &scene, &config,
+                    ),
+                ] {
+                    assert_eq!(!plan.edge_segments.is_empty(), authored_override);
+                    assert_eq!(!plan.arrowheads.is_empty(), authored_override);
+                }
+            }
         }
     }
 
