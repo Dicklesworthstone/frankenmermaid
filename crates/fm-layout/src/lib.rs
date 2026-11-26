@@ -24303,6 +24303,30 @@ fn separate_disjoint_subgraphs(
     }
 }
 
+/// Why a constraint solve wrote no coordinates.
+///
+/// Only [`ConstraintSolveError::Infeasible`] says anything about the constraints. Every other way
+/// a solve can end without a proven optimum belongs in [`ConstraintSolveError::Undecided`]: a spent
+/// time budget, HiGHS stopping at its MIP gap tolerance (`SolutionStatus::GapLimit`), microlp
+/// running out of time before it finds a feasible point, or any other solver error. Treating
+/// those as infeasible lets the conflict diagnosis report constraints that can all hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstraintSolveError {
+    /// The solver proved that no placement satisfies every constraint.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Infeasible(String),
+    /// The solve ended without a verdict. The constraints may well be satisfiable.
+    Undecided(String),
+}
+
+impl std::fmt::Display for ConstraintSolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Infeasible(message) | Self::Undecided(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Maximum constraint count for automatic Minimal Irreducible Infeasible Subset (IIS) diagnosis.
 ///
 /// The deletion filter in [`crate::infeasible::diagnose`] makes `n + 1` oracle calls for `n`
@@ -24324,31 +24348,64 @@ pub fn diagnose_constraint_infeasibility(
 ) -> Option<(crate::infeasible::InfeasibilityReport, String)> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if ir.constraints.is_empty()
-            || ir.constraints.len() > MAX_CONSTRAINT_DIAGNOSIS_COUNT
-            || nodes.is_empty()
-            || wall_clock_valve_ms == 0
-        {
-            return None;
-        }
-        let report = crate::infeasible::diagnose(ir.constraints.len(), |active_indices| {
-            let mut subset_ir = ir.clone();
-            subset_ir.constraints = active_indices
-                .iter()
-                .filter_map(|&idx| ir.constraints.get(idx).cloned())
-                .collect();
-            let mut trial_nodes = nodes.to_vec();
-            solve_constraint_coordinates(&subset_ir, &mut trial_nodes, spacing, wall_clock_valve_ms)
-                .is_err()
-        })?;
-        let description = crate::infeasible::describe(&report, &ir.constraints);
-        Some((report, description))
+        diagnose_constraint_infeasibility_with(
+            ir,
+            nodes,
+            spacing,
+            wall_clock_valve_ms,
+            solve_constraint_coordinates,
+        )
     }
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (ir, nodes, spacing, wall_clock_valve_ms);
         None
     }
+}
+
+/// [`diagnose_constraint_infeasibility`] with the solver passed in, so tests can supply outcomes
+/// that a real solver produces only under particular load or solver versions.
+///
+/// The deletion filter's oracle asks "is this subset infeasible?". Only a solve that PROVES
+/// infeasibility answers yes. A budget or gap stop answers "unknown", and calling that
+/// "infeasible" makes the filter drop constraints it should keep and blame constraints that hold.
+#[cfg(not(target_arch = "wasm32"))]
+fn diagnose_constraint_infeasibility_with<S>(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    spacing: LayoutSpacing,
+    wall_clock_valve_ms: u64,
+    mut solve: S,
+) -> Option<(crate::infeasible::InfeasibilityReport, String)>
+where
+    S: FnMut(
+        &MermaidDiagramIr,
+        &mut [LayoutNodeBox],
+        LayoutSpacing,
+        u64,
+    ) -> Result<usize, ConstraintSolveError>,
+{
+    if ir.constraints.is_empty()
+        || ir.constraints.len() > MAX_CONSTRAINT_DIAGNOSIS_COUNT
+        || nodes.is_empty()
+        || wall_clock_valve_ms == 0
+    {
+        return None;
+    }
+    let report = crate::infeasible::diagnose(ir.constraints.len(), |active_indices| {
+        let mut subset_ir = ir.clone();
+        subset_ir.constraints = active_indices
+            .iter()
+            .filter_map(|&idx| ir.constraints.get(idx).cloned())
+            .collect();
+        let mut trial_nodes = nodes.to_vec();
+        matches!(
+            solve(&subset_ir, &mut trial_nodes, spacing, wall_clock_valve_ms),
+            Err(ConstraintSolveError::Infeasible(_))
+        )
+    })?;
+    let description = crate::infeasible::describe(&report, &ir.constraints);
+    Some((report, description))
 }
 
 fn apply_constraint_solver(
@@ -24379,13 +24436,17 @@ fn apply_constraint_solver(
         }
         Ok(_) => {}
         Err(error) => {
+            // Diagnosis re-solves the model at least once more, and only a proven-infeasible
+            // solve can lead to a conflict report. An undecided stop goes straight to fallback.
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some((report, diagnosis)) = diagnose_constraint_infeasibility(
-                ir,
-                nodes,
-                spacing,
-                config.constraint_solver_wall_clock_valve_ms,
-            ) {
+            if matches!(error, ConstraintSolveError::Infeasible(_))
+                && let Some((report, diagnosis)) = diagnose_constraint_infeasibility(
+                    ir,
+                    nodes,
+                    spacing,
+                    config.constraint_solver_wall_clock_valve_ms,
+                )
+            {
                 warn!(
                     %error,
                     conflicting_indices = ?report.conflicting,
@@ -24454,11 +24515,11 @@ fn solve_constraint_coordinates(
     nodes: &mut [LayoutNodeBox],
     spacing: LayoutSpacing,
     wall_clock_valve_ms: u64,
-) -> Result<usize, String> {
+) -> Result<usize, ConstraintSolveError> {
     if wall_clock_valve_ms == 0 {
-        return Err(String::from(
+        return Err(ConstraintSolveError::Undecided(String::from(
             "constraint solver has no time budget; keeping heuristic coordinates",
-        ));
+        )));
     }
 
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
@@ -24671,7 +24732,13 @@ fn solve_constraint_coordinates(
         return Ok(0);
     }
 
-    let solution = model.solve().map_err(|error| error.to_string())?;
+    // Only `ResolutionError::Infeasible` is a proof about the constraints. HiGHS reports
+    // `UnboundedOrInfeasible` through it as well. microlp reports "time limit reached before
+    // finding a feasible solution" as `Other`, which says nothing about feasibility.
+    let solution = model.solve().map_err(|error| match error {
+        good_lp::ResolutionError::Infeasible => ConstraintSolveError::Infeasible(error.to_string()),
+        other => ConstraintSolveError::Undecided(other.to_string()),
+    })?;
     // bd-9xwk. `Ok` is NOT "solved". HiGHS answers a budget stop with `ReachedTimeLimit` (or
     // `ReachedIterationLimit`/`ReachedMemoryLimit`) and, whenever a feasible primal point exists,
     // good_lp returns it as `Ok` carrying `SolutionStatus::TimeLimit`. Writing that point out puts
@@ -24683,11 +24750,12 @@ fn solve_constraint_coordinates(
     // caller takes its `layout.constraint_solver.fallback` branch, and the deterministic heuristic
     // coordinates stay. A fired valve costs the optimization; it never changes it.
     if !constraint_solution_is_usable(solution.status()) {
-        return Err(format!(
+        // A feasible point exists here, so this is never evidence of infeasibility.
+        return Err(ConstraintSolveError::Undecided(format!(
             "constraint LP stopped at {:?} rather than a proven optimum; keeping heuristic \
              coordinates so geometry does not depend on host load",
             solution.status()
-        ));
+        )));
     }
     for (index, node) in nodes.iter_mut().enumerate() {
         node.bounds.x = solution.value(x_vars[index]) as f32;
@@ -24704,10 +24772,10 @@ fn solve_constraint_coordinates(
     _nodes: &mut [LayoutNodeBox],
     _spacing: LayoutSpacing,
     _wall_clock_valve_ms: u64,
-) -> Result<usize, String> {
-    Err(String::from(
+) -> Result<usize, ConstraintSolveError> {
+    Err(ConstraintSolveError::Undecided(String::from(
         "constraint solver is unavailable on wasm32 builds and falls back to heuristic layout",
-    ))
+    )))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -53174,6 +53242,140 @@ mod tests {
         assert!(description.contains("N1 pinned to (10, 40)"));
         assert!(description.contains("N1 pinned to (900, 700)"));
         assert!(!description.contains("N0"));
+    }
+
+    /// A solve that stops without a verdict is not evidence that the constraints conflict.
+    ///
+    /// Observed with the `highs` feature: `nonOverlap` across all 32 nodes of a chain. microlp
+    /// proves an optimum, but HiGHS stops at its MIP gap tolerance (`GapLimit`). The diagnosis then
+    /// reported "these constraints cannot all hold at once: non-overlap for all nodes", and the
+    /// CLI told the author to relax a constraint that holds. A microlp solve that outlasts the
+    /// wall-clock valve ends the same way. Both depend on the solver build or on time, so the
+    /// oracle is driven here with scripted solver outcomes.
+    #[test]
+    fn diagnosis_does_not_blame_constraints_for_an_undecided_solve() {
+        let mut ir = labeled_graph_ir(3, &[(0, 1), (1, 2)]);
+        ir.constraints.push(IrConstraint::NonOverlap {
+            node_ids: Vec::new(),
+            gap: 0.0,
+            span: Span::at_line(1, 1),
+        });
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N0".to_string(),
+            x: 0.0,
+            y: 0.0,
+            span: Span::at_line(2, 1),
+        });
+        let nodes = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                constraint_solver: ConstraintSolverMode::Disabled,
+                ..LayoutConfig::default()
+            },
+        )
+        .nodes;
+        let holds_non_overlap = |subset: &MermaidDiagramIr| {
+            subset
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, IrConstraint::NonOverlap { .. }))
+        };
+
+        // Every set that still holds the non-overlap row stops at the gap limit; the rest solve.
+        let mut oracle_calls = 0_usize;
+        let undecided = super::diagnose_constraint_infeasibility_with(
+            &ir,
+            &nodes,
+            LayoutSpacing::default(),
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            |subset, _, _, _| {
+                oracle_calls += 1;
+                if holds_non_overlap(subset) {
+                    Err(super::ConstraintSolveError::Undecided(
+                        "constraint LP stopped at GapLimit rather than a proven optimum"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(subset.constraints.len())
+                }
+            },
+        );
+        assert!(
+            undecided.is_none(),
+            "an undecided solve was reported as conflicting constraints: {undecided:?}"
+        );
+        assert_eq!(
+            oracle_calls, 1,
+            "the full set was not proven infeasible, so the filter must stop after one solve"
+        );
+
+        // CONTROL. The same constraints with a PROVEN infeasible outcome are diagnosed, so the
+        // `None` above is about the verdict and not about this fixture.
+        let (report, description) = super::diagnose_constraint_infeasibility_with(
+            &ir,
+            &nodes,
+            LayoutSpacing::default(),
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            |subset, _, _, _| {
+                if holds_non_overlap(subset) {
+                    Err(super::ConstraintSolveError::Infeasible(
+                        "Infeasible".to_string(),
+                    ))
+                } else {
+                    Ok(subset.constraints.len())
+                }
+            },
+        )
+        .expect("control failed: a proven-infeasible solve must be diagnosed");
+        assert_eq!(report.conflicting, vec![0]);
+        assert!(description.contains("non-overlap"), "{description}");
+    }
+
+    /// The real solver keeps the two verdicts apart: contradictory pins are PROVEN infeasible,
+    /// while a solve with no time budget is only undecided.
+    #[test]
+    fn constraint_solve_separates_proven_infeasibility_from_an_early_stop() {
+        let mut ir = labeled_graph_ir(3, &[(0, 1), (1, 2)]);
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 10.0,
+            y: 40.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 900.0,
+            y: 700.0,
+            span: Span::default(),
+        });
+        let nodes = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                constraint_solver: ConstraintSolverMode::Disabled,
+                ..LayoutConfig::default()
+            },
+        )
+        .nodes;
+
+        let mut trial = nodes.clone();
+        let proven = solve_constraint_coordinates(
+            &ir,
+            &mut trial,
+            LayoutSpacing::default(),
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+        );
+        assert!(
+            matches!(proven, Err(super::ConstraintSolveError::Infeasible(_))),
+            "two pins on one node must be proven infeasible, got {proven:?}"
+        );
+
+        let mut trial = nodes.clone();
+        let stopped = solve_constraint_coordinates(&ir, &mut trial, LayoutSpacing::default(), 0);
+        assert!(
+            matches!(stopped, Err(super::ConstraintSolveError::Undecided(_))),
+            "a solve with no time budget proves nothing about the constraints, got {stopped:?}"
+        );
+        assert_eq!(trial, nodes, "an undecided solve must not move any node");
     }
 
     #[test]
