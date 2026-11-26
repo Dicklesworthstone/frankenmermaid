@@ -1718,6 +1718,59 @@ mod xychart {
     }
 
     #[test]
+    fn large_multiline_xy_captions_retain_their_rows_faces_and_positions() {
+        for orientation in ["", " horizontal"] {
+            let mut ir = fm_parser::parse(&three_series_source(orientation)).ir;
+            ir.meta.title = Some("Worldwide results\nRevenue and costs".into());
+            let meta = ir.xy_chart_meta.as_mut().unwrap();
+            meta.x_axis.categories[0] = "January\nReporting window".into();
+            meta.y_axis.label = Some("Net movement\nMillions of dollars".into());
+            let config = CanvasRenderConfig {
+                font_size: 36.0,
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            let mut canvas = MockCanvas2dContext::new(1600.0, 1000.0);
+            let raster = fm_render_canvas::render_to_canvas_with_layout(
+                &ir, &layout, &mut canvas, &config,
+            );
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            for (first, second, role) in [
+                ("Worldwide results", "Revenue and costs", GpuTextSource::DiagramTitle),
+                ("January", "Reporting window", GpuTextSource::XyCategory),
+                ("Net movement", "Millions of dollars", GpuTextSource::XyAxisTitle),
+            ] {
+                let mut previous: Option<(f64, f32)> = None;
+                for text in [first, second] {
+                    let run = plan.text_runs.iter()
+                        .find(|run| run.source == role && run_text(&plan, run) == text)
+                        .expect("one GPU run per authored row");
+                    let face = &plan.glyph_atlas.faces[run.face_index as usize];
+                    assert_eq!(
+                        face.weight,
+                        if role == GpuTextSource::DiagramTitle { "600" } else { "normal" },
+                    );
+                    let quad = &plan.text_quads[run.first_quad as usize];
+                    let y = canvas.operations().iter().find_map(|op| match op {
+                        DrawOperation::FillText(row, _, y) if row == text => {
+                            Some(raster.viewport.canvas_to_diagram(0.0, *y).1)
+                        }
+                        _ => None,
+                    }).expect("one Canvas draw per authored row");
+                    if let Some((last_canvas, last_gpu)) = previous {
+                        let advance = y - last_canvas;
+                        assert!(advance > 20.0, "large-font rows occupy separate lines");
+                        assert!((advance - f64::from(quad.center[1] - last_gpu)).abs() < 0.001);
+                    }
+                    previous = Some((y, quad.center[1]));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn long_categories_and_titles_extend_gpu_camera_bounds() {
         // Horizontal layout already reserves a measured category-label margin.
         // An overflowing title exercises the GPU's additional camera expansion.

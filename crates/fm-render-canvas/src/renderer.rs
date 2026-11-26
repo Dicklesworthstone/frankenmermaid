@@ -619,6 +619,17 @@ impl Canvas2dRenderer {
                 )
             });
 
+        let xy_chart = ir.xy_chart_meta.as_ref()
+            .filter(|_| ir.diagram_type == DiagramType::XyChart)
+            .map(|meta| {
+                let metrics = self.config.font_metrics();
+                let rows = fm_layout::xychart_text_rows(ir, meta, layout, &metrics);
+                for row in &rows {
+                    row.include_in_bounds(&mut render_bounds, &metrics);
+                }
+                (meta, rows)
+            });
+
         let packet_bits = fm_layout::packet_bit_labels(ir, layout, &self.config.font_metrics());
         for label in &packet_bits {
             let right =
@@ -749,12 +760,34 @@ impl Canvas2dRenderer {
 
         // XY marks are data, not labelled graph nodes. The generic path loses the numeric
         // scale and axis titles, paints every series alike, and never fills area series.
-        if let Some(meta) = ir.xy_chart_meta.as_ref()
-            && ir.diagram_type == DiagramType::XyChart
-        {
-            let labels_drawn = self.draw_xychart_axes(ir, meta, layout, ctx, offset_x, offset_y);
+        if let Some((meta, rows)) = xy_chart {
+            self.draw_xychart_axes(meta, layout, ctx, offset_x, offset_y);
             let (nodes_drawn, edges_drawn) =
                 self.draw_xychart_series(meta, layout, ctx, offset_x, offset_y);
+            let mut labels_drawn = 0;
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_text_baseline(TextBaseline::Alphabetic);
+            let mut previous_font = None;
+            for row in rows.iter().filter(|row| !row.text.is_empty()) {
+                let title = row.role == fm_layout::XyChartTextRole::DiagramTitle;
+                if previous_font != Some((row.font_size, title)) {
+                    let weight = if title { "600 " } else { "" };
+                    ctx.set_font(&format!("{weight}{}px {}", row.font_size, self.config.font_family));
+                    previous_font = Some((row.font_size, title));
+                }
+                ctx.set_text_align(match row.align {
+                    IrTextAlign::Start => TextAlign::Left,
+                    IrTextAlign::Middle => TextAlign::Center,
+                    IrTextAlign::End => TextAlign::Right,
+                });
+                ctx.fill_text(
+                    &row.text,
+                    f64::from(row.anchor.0) + offset_x,
+                    f64::from(row.anchor.1) + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
             ctx.restore();
             return CanvasRenderResult {
                 draw_calls: self.draw_calls,
@@ -1902,20 +1935,18 @@ impl Canvas2dRenderer {
     #[allow(clippy::too_many_arguments)]
     fn draw_xychart_axes<C: Canvas2dContext>(
         &mut self,
-        ir: &MermaidDiagramIr,
         meta: &IrXyChartMeta,
         layout: &DiagramLayout,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
-    ) -> usize {
+    ) {
         let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
         let (left, top) = (f64::from(plot.x) + offset_x, f64::from(plot.y) + offset_y);
         let (width, height) = (f64::from(plot.width), f64::from(plot.height));
         let (right, bottom) = (left + width, top + height);
         let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
         let categories = fm_layout::xychart_categories(meta);
-        let mut labels = 0;
 
         ctx.set_fill_style("rgba(148,163,184,0.06)");
         ctx.fill_rect(left, top, width, height);
@@ -1925,13 +1956,6 @@ impl Canvas2dRenderer {
         ctx.stroke_rect(left, top, width, height);
         self.draw_calls += 2;
 
-        ctx.set_font(&format!(
-            "{}px {}",
-            (self.config.font_size * 0.72).max(8.0),
-            self.config.font_family
-        ));
-        ctx.set_fill_style(&self.config.label_color);
-        ctx.set_text_baseline(TextBaseline::Alphabetic);
         for value in fm_layout::xychart_y_ticks(min, max) {
             let (x, y) = if meta.horizontal {
                 (
@@ -1961,20 +1985,11 @@ impl Canvas2dRenderer {
             ctx.move_to(x, y);
             if meta.horizontal {
                 ctx.line_to(x, top - 5.0);
-                ctx.set_text_align(TextAlign::Center);
-                ctx.fill_text(&fm_layout::format_xychart_tick_value(value), x, top - 11.0);
             } else {
                 ctx.line_to(left - 5.0, y);
-                ctx.set_text_align(TextAlign::Right);
-                ctx.fill_text(
-                    &fm_layout::format_xychart_tick_value(value),
-                    left - 10.0,
-                    y + 4.0,
-                );
             }
             ctx.stroke();
-            self.draw_calls += 3;
-            labels += 1;
+            self.draw_calls += 2;
         }
 
         ctx.set_stroke_style(&self.config.edge_stroke);
@@ -1992,75 +2007,24 @@ impl Canvas2dRenderer {
         ctx.stroke();
         self.draw_calls += 1;
 
-        let category_font = (self.config.font_size * 0.74).max(8.0);
-        ctx.set_font(&format!("{category_font}px {}", self.config.font_family));
         ctx.set_stroke_style(&self.config.label_color);
         ctx.set_line_width(1.0);
         let band = if meta.horizontal { height } else { width } / categories.len().max(1) as f64;
-        for (index, category) in categories.iter().enumerate() {
+        for index in 0..categories.len() {
             let position = band * (index as f64 + 0.5);
             ctx.begin_path();
             if meta.horizontal {
                 let y = top + position;
                 ctx.move_to(left - 5.0, y);
                 ctx.line_to(left, y);
-                ctx.set_text_align(TextAlign::Right);
-                ctx.fill_text(category, left - 11.0, y + category_font * 0.35);
             } else {
                 let x = left + position;
                 ctx.move_to(x, bottom);
                 ctx.line_to(x, bottom + 5.0);
-                ctx.set_text_align(TextAlign::Center);
-                ctx.fill_text(category, x, bottom + 24.0);
             }
             ctx.stroke();
-            self.draw_calls += 2;
-            labels += 1;
-        }
-
-        ctx.set_font(&format!(
-            "{}px {}",
-            (self.config.font_size * 0.76).max(8.0),
-            self.config.font_family
-        ));
-        if let Some(label) = meta.y_axis.label.as_deref() {
-            if meta.horizontal {
-                ctx.set_text_align(TextAlign::Center);
-                ctx.fill_text(label, left + width / 2.0, top - 34.0);
-            } else {
-                ctx.set_text_align(TextAlign::Left);
-                ctx.fill_text(label, left - 52.0, top - 12.0);
-            }
             self.draw_calls += 1;
-            labels += 1;
         }
-        if let Some(label) = meta.x_axis.label.as_deref() {
-            if meta.horizontal {
-                ctx.set_text_align(TextAlign::Right);
-                ctx.fill_text(label, left - 11.0, top - 34.0);
-            } else {
-                ctx.set_text_align(TextAlign::Center);
-                ctx.fill_text(label, left + width / 2.0, bottom + 48.0);
-            }
-            self.draw_calls += 1;
-            labels += 1;
-        }
-        if let Some(title) = ir.declared_title_if_drawn() {
-            ctx.set_font(&format!(
-                "600 {}px {}",
-                (self.config.font_size * 1.18).max(8.0),
-                self.config.font_family
-            ));
-            ctx.set_text_align(TextAlign::Center);
-            ctx.fill_text(
-                title,
-                f64::from(layout.bounds.x + layout.bounds.width / 2.0) + offset_x,
-                top - if meta.horizontal { 70.0 } else { 34.0 },
-            );
-            self.draw_calls += 1;
-            labels += 1;
-        }
-        labels
     }
 
     /// Paint data from the layout's exact mark boxes; never reconstruct their values or ordering.
@@ -10070,14 +10034,18 @@ mod tests {
                  bar [-10, 0, 20]\n line [0, 10, -10]\n area [-5, 15, -5]\n",
                 if horizontal { " horizontal" } else { "" },
             );
-            let ir = fm_parser::parse(&source).ir;
+            let mut ir = fm_parser::parse(&source).ir;
+            ir.meta.title = Some("Quarterly movement across international markets\nQuarterly results".into());
+            ir.xy_chart_meta.as_mut().unwrap().x_axis.categories[0] = "First quarter\nReporting window".into();
             let layout = layout_diagram(&ir);
-            let scene = build_render_scene(&ir, &layout);
             let config = CanvasRenderConfig {
                 auto_fit: false,
                 padding: 0.0,
+                font_size: 36.0,
                 ..Default::default()
             };
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+            assert!(scene.bounds.x < layout.bounds.x || scene.bounds.y < layout.bounds.y);
             let mut direct_ctx = MockCanvas2dContext::new(1000.0, 800.0);
             let direct =
                 crate::render_to_canvas_with_layout(&ir, &layout, &mut direct_ctx, &config);
@@ -10090,22 +10058,16 @@ mod tests {
             let direct_labels = text_operations(&direct_ctx);
             let scene_labels = text_operations(&scene_ctx);
             assert_eq!(scene_labels.len(), direct_labels.len());
+            assert_eq!(direct.viewport, result.viewport);
+            for row in ["Quarterly results", "Reporting window"] {
+                assert!(direct_labels.iter().any(|(text, _, _, _)| text == row));
+            }
             for ((direct_text, dx, dy, direct_baseline), (scene_text, sx, sy, scene_baseline)) in
                 direct_labels.iter().zip(&scene_labels)
             {
                 assert_eq!(scene_text, direct_text);
-                // The scene can expand its clip for long labels. Compare in original layout
-                // coordinates so this test also catches a second origin translation.
-                assert!(
-                    (sx + f64::from(scene.bounds.x) - dx - f64::from(layout.bounds.x)).abs()
-                        < 0.002,
-                    "x for {scene_text}"
-                );
-                assert!(
-                    (sy + f64::from(scene.bounds.y) - dy - f64::from(layout.bounds.y)).abs()
-                        < 0.002,
-                    "y for {scene_text}"
-                );
+                assert!((sx - dx).abs() < 0.002, "x for {scene_text}");
+                assert!((sy - dy).abs() < 0.002, "y for {scene_text}");
                 assert_eq!(scene_baseline, direct_baseline);
             }
             let mut alpha = 1.0_f64;

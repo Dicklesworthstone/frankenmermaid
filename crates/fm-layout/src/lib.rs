@@ -5076,6 +5076,31 @@ pub struct XyChartText {
     pub index: usize,
 }
 
+impl XyChartText {
+    /// Expand a chart frame to include this measured row and its two-unit text margin.
+    /// The frame is independent of the plot used to project the data marks.
+    pub fn include_in_bounds(&self, bounds: &mut LayoutRect, base_metrics: &fm_core::FontMetrics) {
+        if self.text.is_empty() {
+            return;
+        }
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: self.font_size,
+            ..base_metrics.config().clone()
+        });
+        let width = metrics.estimate_width(&self.text);
+        let left = self.anchor.0 - width * match self.align {
+            TextAlign::Start => 0.0,
+            TextAlign::Middle => 0.5,
+            TextAlign::End => 1.0,
+        };
+        let x = bounds.x.min(left - 2.0);
+        let y = bounds.y.min(self.anchor.1 - self.font_size - 2.0);
+        let right = (bounds.x + bounds.width).max(left + width + 2.0);
+        let bottom = (bounds.y + bounds.height).max(self.anchor.1 + self.font_size * 0.3 + 2.0);
+        *bounds = LayoutRect { x, y, width: right - x, height: bottom - y };
+    }
+}
+
 /// Compose chart text once for shared scenes, SVG, Canvas and GPU rendering. Caption bands grow
 /// away from the plot for large fonts or multiline text; the data projection never changes.
 #[must_use]
@@ -5465,54 +5490,28 @@ fn append_xychart_scene_label(
     row: &XyChartText,
     base_metrics: &fm_core::FontMetrics,
 ) {
-    let font_size = row.font_size;
-    let align = row.align;
-    let anchor = LayoutPoint {
+    if row.text.is_empty() {
+        return;
+    }
+    row.include_in_bounds(bounds, base_metrics);
+    layer.children.push(RenderItem::Text(RenderText {
+        source: RenderSource::Diagram,
+        text: row.text.clone(),
         x: row.anchor.0,
         y: row.anchor.1,
-    };
-    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
-        font_size,
-        line_height: 1.2,
-        ..base_metrics.config().clone()
-    });
-    for (index, line) in row.text.lines().enumerate() {
-        let width = metrics.estimate_width(line);
-        let x = match align {
-            TextAlign::Start => anchor.x,
-            TextAlign::Middle => anchor.x - width / 2.0,
-            TextAlign::End => anchor.x - width,
-        };
-        let y = anchor.y + index as f32 * metrics.line_height_px();
-        let left = bounds.x.min(x - 2.0);
-        let top = bounds.y.min(y - font_size - 2.0);
-        let right = (bounds.x + bounds.width).max(x + width + 2.0);
-        let bottom = (bounds.y + bounds.height).max(y + font_size * 0.3 + 2.0);
-        *bounds = LayoutRect {
-            x: left,
-            y: top,
-            width: right - left,
-            height: bottom - top,
-        };
-        layer.children.push(RenderItem::Text(RenderText {
-            source: RenderSource::Diagram,
-            text: line.to_owned(),
-            x: anchor.x,
-            y,
-            font_size,
-            font: RenderFont::new(
-                None,
-                (row.role == XyChartTextRole::DiagramTitle).then_some("600"),
-                None,
-            ),
-            align,
-            baseline: TextBaseline::Alphabetic,
-            fill: FillStyle::Solid {
-                color: String::from("#1e293b"),
-                opacity: 1.0,
-            },
-        }));
-    }
+        font_size: row.font_size,
+        font: RenderFont::new(
+            None,
+            (row.role == XyChartTextRole::DiagramTitle).then_some("600"),
+            None,
+        ),
+        align: row.align,
+        baseline: TextBaseline::Alphabetic,
+        fill: FillStyle::Solid {
+            color: String::from("#1e293b"),
+            opacity: 1.0,
+        },
+    }));
 }
 
 fn build_xychart_scene_data(

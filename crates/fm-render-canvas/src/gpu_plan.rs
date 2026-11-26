@@ -5202,15 +5202,6 @@ fn append_sequence_central_markers(
     (arrowheads.len() > start).then_some(start)
 }
 
-struct XyChartLabel {
-    text: String,
-    anchor: (f32, f32),
-    font_size: f32,
-    align: crate::TextAlign,
-    source: GpuTextSource,
-    index: usize,
-}
-
 impl GpuRenderPlan {
     /// Quadrant coordinates describe data points, not label-sized graph nodes. Reuse the
     /// measured chart composition for the GPU's backgrounds, marker sizes, and text anchors.
@@ -5486,7 +5477,7 @@ impl GpuRenderPlan {
         config: &crate::CanvasRenderConfig,
         metrics: &fm_core::FontMetrics,
     ) -> Self {
-        use crate::TextAlign;
+        use fm_layout::{TextAlign, XyChartTextRole};
         use fm_core::IrXySeriesKind;
 
         let font_px = metrics.font_size();
@@ -5502,37 +5493,14 @@ impl GpuRenderPlan {
         let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
         let categories = fm_layout::xychart_categories(meta);
         let mut axes = Vec::new();
-        let mut labels = Vec::new();
-        let mut label = |text: String, anchor, font_size, align, source, index| {
-            labels.push(XyChartLabel {
-                text,
-                anchor,
-                font_size,
-                align,
-                source,
-                index,
-            });
-        };
-        let value_font = (font_px * 0.72).max(8.0);
-        for (index, value) in fm_layout::xychart_y_ticks(min, max).into_iter().enumerate() {
-            let (from, to, tick_end, text_anchor, align) = if meta.horizontal {
+        let labels = fm_layout::xychart_text_rows(ir, meta, layout, metrics);
+        for value in fm_layout::xychart_y_ticks(min, max) {
+            let (from, to, tick_end) = if meta.horizontal {
                 let x = fm_layout::xychart_value_to_x(value, min, max, plot);
-                (
-                    [x, top],
-                    [x, bottom],
-                    [x, top - 5.0],
-                    (x, top - 11.0),
-                    TextAlign::Center,
-                )
+                ([x, top], [x, bottom], [x, top - 5.0])
             } else {
                 let y = fm_layout::xychart_value_to_y(value, min, max, plot);
-                (
-                    [left, y],
-                    [right, y],
-                    [left - 5.0, y],
-                    (left - 10.0, y + 4.0),
-                    TextAlign::Right,
-                )
+                ([left, y], [right, y], [left - 5.0, y])
             };
             axes.push(xy_segment(
                 from,
@@ -5542,14 +5510,6 @@ impl GpuRenderPlan {
                 [4.0, 4.0],
             ));
             axes.push(xy_segment(from, tick_end, label_color, 1.0, [0.0, 0.0]));
-            label(
-                fm_layout::format_xychart_tick_value(value),
-                text_anchor,
-                value_font,
-                align,
-                GpuTextSource::XyValueTick,
-                index,
-            );
         }
         axes.push(xy_segment(
             [left, top],
@@ -5567,85 +5527,21 @@ impl GpuRenderPlan {
             [0.0, 0.0],
         ));
 
-        let category_font = (font_px * 0.74).max(8.0);
         let band = if meta.horizontal {
             plot.height
         } else {
             plot.width
         } / categories.len().max(1) as f32;
-        for (index, category) in categories.into_iter().enumerate() {
+        for index in 0..categories.len() {
             let position = band * (index as f32 + 0.5);
-            let (from, to, anchor, align) = if meta.horizontal {
+            let (from, to) = if meta.horizontal {
                 let y = top + position;
-                (
-                    [left - 5.0, y],
-                    [left, y],
-                    (left - 11.0, y + category_font * 0.35),
-                    TextAlign::Right,
-                )
+                ([left - 5.0, y], [left, y])
             } else {
                 let x = left + position;
-                (
-                    [x, bottom],
-                    [x, bottom + 5.0],
-                    (x, bottom + 24.0),
-                    TextAlign::Center,
-                )
+                ([x, bottom], [x, bottom + 5.0])
             };
             axes.push(xy_segment(from, to, label_color, 1.0, [0.0, 0.0]));
-            label(
-                category,
-                anchor,
-                category_font,
-                align,
-                GpuTextSource::XyCategory,
-                index,
-            );
-        }
-
-        let axis_font = (font_px * 0.76).max(8.0);
-        if let Some(text) = meta.y_axis.label.as_ref() {
-            let (anchor, align) = if meta.horizontal {
-                ((left + plot.width / 2.0, top - 34.0), TextAlign::Center)
-            } else {
-                ((left - 52.0, top - 12.0), TextAlign::Left)
-            };
-            label(
-                text.clone(),
-                anchor,
-                axis_font,
-                align,
-                GpuTextSource::XyAxisTitle,
-                1,
-            );
-        }
-        if let Some(text) = meta.x_axis.label.as_ref() {
-            let (anchor, align) = if meta.horizontal {
-                ((left - 11.0, top - 34.0), TextAlign::Right)
-            } else {
-                ((left + plot.width / 2.0, bottom + 48.0), TextAlign::Center)
-            };
-            label(
-                text.clone(),
-                anchor,
-                axis_font,
-                align,
-                GpuTextSource::XyAxisTitle,
-                0,
-            );
-        }
-        if let Some(title) = ir.declared_title_if_drawn() {
-            label(
-                title.to_owned(),
-                (
-                    layout.bounds.x + layout.bounds.width / 2.0,
-                    top - if meta.horizontal { 70.0 } else { 34.0 },
-                ),
-                (font_px * 1.18).max(8.0),
-                TextAlign::Center,
-                GpuTextSource::DiagramTitle,
-                0,
-            );
         }
 
         let max_font_px = labels
@@ -5656,10 +5552,21 @@ impl GpuRenderPlan {
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
         let default_face = GlyphFace::new(&config.font_family);
+        let title_face = GlyphFace {
+            weight: "600".into(),
+            ..default_face.clone()
+        };
+        let label_face = |role| {
+            if role == XyChartTextRole::DiagramTitle {
+                &title_face
+            } else {
+                &default_face
+            }
+        };
         let glyph_atlas = GlyphAtlasPlan::for_styled_texts(
             labels
                 .iter()
-                .map(|label| (default_face.clone(), label.text.as_str())),
+                .map(|label| (label_face(label.role).clone(), label.text.as_str())),
             cell_px,
         );
         let mut text_quads = Vec::new();
@@ -5671,7 +5578,14 @@ impl GpuRenderPlan {
             runs: &mut text_runs,
             metrics,
         };
-        for label in labels {
+        for label in labels.into_iter().filter(|label| !label.text.is_empty()) {
+            sink.face_index = glyph_atlas.face_index(label_face(label.role)).unwrap_or(0);
+            let source = match label.role {
+                XyChartTextRole::Category => GpuTextSource::XyCategory,
+                XyChartTextRole::ValueTick => GpuTextSource::XyValueTick,
+                XyChartTextRole::AxisTitle => GpuTextSource::XyAxisTitle,
+                XyChartTextRole::DiagramTitle => GpuTextSource::DiagramTitle,
+            };
             // Canvas uses an alphabetic baseline. Glyph cells share the explicit atlas
             // baseline, so convert it to the cell-centre anchor used by TextSink.
             let anchor = (
@@ -5679,28 +5593,28 @@ impl GpuRenderPlan {
                 label.anchor.1 - (GLYPH_BASELINE_RATIO - 0.5) * label.font_size,
             );
             match label.align {
-                TextAlign::Left => sink.push_left(
+                TextAlign::Start => sink.push_left(
                     &label.text,
                     anchor,
                     label.font_size,
                     label_color,
-                    label.source,
+                    source,
                     label.index,
                 ),
-                TextAlign::Right => sink.push_right(
+                TextAlign::End => sink.push_right(
                     &label.text,
                     anchor,
                     label.font_size,
                     label_color,
-                    label.source,
+                    source,
                     label.index,
                 ),
-                TextAlign::Center => sink.push_centred_with_font(
+                TextAlign::Middle => sink.push_centred_with_font(
                     &label.text,
                     anchor,
                     label.font_size,
                     label_color,
-                    label.source,
+                    source,
                     label.index,
                 ),
             }
