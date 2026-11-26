@@ -8126,16 +8126,8 @@ fn refine_graph_label_spacing(
         bounds.0 = bounds.0.min(start);
         bounds.1 = bounds.1.max(start + size);
     }
-    let physical_ranks: Vec<_> = {
-        let mut ranks: Vec<_> = rank_bounds.values().copied().collect();
-        ranks.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        ranks
-    };
     // Long horizontal labels may already force a larger rank gap than the configured minimum.
-    let rank_base = physical_ranks
-        .windows(2)
-        .map(|pair| pair[1].0 - pair[0].1)
-        .fold(config.spacing.rank_spacing, f32::max);
+    let rank_base = widest_physical_rank_gap(&rank_bounds, config.spacing.rank_spacing);
     let mut best_quality = initial;
     let mut best = None;
     for cross_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0] {
@@ -8210,6 +8202,25 @@ fn refine_graph_label_spacing(
         );
         *traced = candidate;
     }
+}
+
+/// The widest gap between consecutive ranks in physical order, or `minimum` if that is wider.
+/// `rank_bounds` maps each rank to its `(start, end)` extent on the rank axis.
+///
+/// Ranks that start at the same coordinate stay in rank order. Sorting by start alone left
+/// that order to the sort algorithm, and the gap after a tie depends on it: insertion sort
+/// (what native builds run for up to 20 ranks) keeps rank order, while ipnsort's quicksort
+/// and the heapsort that `optimize_for_size` std builds use do not.
+fn widest_physical_rank_gap(rank_bounds: &BTreeMap<usize, (f32, f32)>, minimum: f32) -> f32 {
+    let mut ranks: Vec<_> = rank_bounds
+        .iter()
+        .map(|(&rank, &(start, end))| (start, end, rank))
+        .collect();
+    ranks.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+    ranks
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].1)
+        .fold(minimum, f32::max)
 }
 
 /// Connectivity for packing includes authored containers: unrelated nodes inside one subgraph
@@ -42915,6 +42926,50 @@ mod tests {
                     assert_eq!(layout.edges.len(), ir.edges.len());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn label_refine_rank_gap_resolves_equal_starts_by_rank() {
+        // Two ranks starting together: the gap to the next rank is measured from whichever
+        // comes second, so the tie order decides it (30 in rank order, 20 the other way).
+        let tied = std::collections::BTreeMap::from([
+            (0, (10.0_f32, 30.0_f32)),
+            (1, (10.0, 20.0)),
+            (2, (50.0, 60.0)),
+        ]);
+        assert_eq!(super::widest_physical_rank_gap(&tied, 0.0), 30.0);
+        assert_eq!(super::widest_physical_rank_gap(&tied, 40.0), 40.0);
+        // Bottom-to-top layouts list ranks in descending start order, and past 20 elements the
+        // native unstable sort is a quicksort that need not keep tied ranks in rank order. Every
+        // ordering must match a stable sort of the BTreeMap's rank order.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for case in 0..400 {
+            let count = 2 + next(63) as usize;
+            let rank_bounds: std::collections::BTreeMap<usize, (f32, f32)> = (0..count)
+                .map(|rank| {
+                    let start = 1000.0 - 40.0 * next(8) as f32;
+                    (rank, (start, start + 4.0 + next(30) as f32))
+                })
+                .collect();
+            let mut stable: Vec<_> = rank_bounds.values().copied().collect();
+            stable.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // No minimum: the widest gap then always follows some tie group's last member.
+            let expected = stable
+                .windows(2)
+                .map(|pair| pair[1].0 - pair[0].1)
+                .fold(0.0, f32::max);
+            assert_eq!(
+                super::widest_physical_rank_gap(&rank_bounds, 0.0).to_bits(),
+                expected.to_bits(),
+                "case {case}: {rank_bounds:?}"
+            );
         }
     }
 
