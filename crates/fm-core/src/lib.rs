@@ -3940,7 +3940,8 @@ pub struct IrEdge {
     /// `er_notation()` / `guard()` / … accessors (read) and `extras_mut()` (write).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<Box<IrEdgeExtras>>,
-    /// Parsed inline style from `linkStyle N ...` directives.
+    /// Source inline style and resolved `linkStyle` declarations. Source properties, including
+    /// semantic class-relation dashes, take precedence over default and indexed declarations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_style: Option<Box<IrInlineStyle>>,
 }
@@ -3975,6 +3976,10 @@ impl GraphEdgeCaption<'_> {
 /// common flowchart/sequence edge pays only a null pointer for all of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrEdgeExtras {
+    /// Origins of properties inherited during style population. Retained across serialization
+    /// so editing style references and populating again cannot promote old results to source CSS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_provenance: Option<Box<IrEdgeStyleProvenance>>,
     /// Minimum rank distance requested by a flowchart link's authored length.
     ///
     /// Ordinary links span one rank. Extra dashes, equals signs, or dots request more ranks
@@ -4064,6 +4069,16 @@ pub struct IrEdgeExtras {
     /// The subgraph the target end named. See [`Self::from_subgraph`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_subgraph: Option<IrSubgraphId>,
+}
+
+/// Separate source inline properties from the last inherited values of a populated edge.
+/// The maps are disjoint; together they describe its previous resolved inline style.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrEdgeStyleProvenance {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_inline: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    inherited: BTreeMap<String, String>,
 }
 
 /// A sequence message's explicitly marked central lifeline connections.
@@ -10524,7 +10539,9 @@ impl MermaidDiagramIr {
             }
         }
 
-        // 3. Apply per-edge styles (cascade: linkStyle default → linkStyle N).
+        // 3. Apply per-edge styles (default → indexed → source inline), matching the renderers.
+        // The parser also stores semantic paint here: replacing it makes a UML realization lose
+        // its dashed line merely because the document supplies a default edge color.
         let mut default_link_style = BTreeMap::new();
         for sr in &self.style_refs {
             if sr.target == IrStyleTarget::LinkDefault {
@@ -10545,9 +10562,67 @@ impl MermaidDiagramIr {
                 }
             }
 
-            if !merged.is_empty() {
-                edge.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
+            let has_provenance = edge
+                .extras
+                .as_deref()
+                .is_some_and(|extras| extras.style_provenance.is_some());
+            if merged.is_empty() && !has_provenance {
+                continue;
             }
+
+            let current = edge
+                .inline_style
+                .take()
+                .map_or_else(BTreeMap::new, |style| style.properties);
+            let previous = edge
+                .extras
+                .as_deref_mut()
+                .and_then(|extras| extras.style_provenance.take());
+            let source_inline = if let Some(mut previous) = previous {
+                // Callers can edit the public inline map between populations. Keep changed/new
+                // values as source overrides, but do not freeze unchanged inherited values.
+                previous
+                    .source_inline
+                    .retain(|key, _| current.contains_key(key));
+                for (key, value) in current {
+                    let prior = previous
+                        .source_inline
+                        .get(&key)
+                        .or_else(|| previous.inherited.get(&key));
+                    if prior != Some(&value) {
+                        previous.source_inline.insert(key, value);
+                    }
+                }
+                previous.source_inline
+            } else {
+                current
+            };
+
+            merged.retain(|key, _| !source_inline.contains_key(key));
+            if merged.is_empty() {
+                // Nothing is inherited now, so the inline map alone records all its sources.
+                edge.inline_style = (!source_inline.is_empty()).then(|| {
+                    Box::new(IrInlineStyle {
+                        properties: source_inline,
+                    })
+                });
+                if edge
+                    .extras
+                    .as_deref()
+                    .is_some_and(|extras| *extras == IrEdgeExtras::default())
+                {
+                    edge.extras = None;
+                }
+                continue;
+            }
+
+            let inherited = merged.clone();
+            merged.extend(source_inline.clone());
+            edge.extras_mut().style_provenance = Some(Box::new(IrEdgeStyleProvenance {
+                source_inline,
+                inherited,
+            }));
+            edge.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
         }
     }
 
@@ -19972,6 +20047,206 @@ mod tests {
         let edge_style = ir.edges[0].inline_style.as_ref().unwrap();
         // Specific linkStyle overrides default.
         assert_eq!(edge_style.properties.get("stroke").unwrap(), "#f00");
+    }
+
+    #[test]
+    fn populate_structured_styles_keeps_semantic_edge_dashes() {
+        for (default, stroke) in [
+            ("stroke:#f00", Some("#f00")),
+            ("stroke-dasharray:none", None),
+            ("stroke:#f00,stroke-dasharray:none", Some("#f00")),
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Class);
+            // This is how the class parser represents a realization: the enum carries its
+            // hollow triangle, while the inline declaration carries the semantic dashed line.
+            ir.edges.push(IrEdge {
+                arrow: ArrowType::InheritanceReverse,
+                inline_style: Some(Box::new(parse_style_string("stroke-dasharray:5"))),
+                ..Default::default()
+            });
+            ir.style_refs.push(IrStyleRef {
+                target: IrStyleTarget::LinkDefault,
+                style: default.to_string(),
+                span: Span::default(),
+            });
+
+            ir.populate_structured_styles();
+
+            let properties = &ir.edges[0].inline_style.as_ref().unwrap().properties;
+            assert_eq!(
+                properties.get("stroke-dasharray").unwrap(),
+                "5",
+                "{default}"
+            );
+            assert_eq!(
+                properties.get("stroke").map(String::as_str),
+                stroke,
+                "{default}"
+            );
+        }
+    }
+
+    #[test]
+    fn populate_structured_styles_source_edge_inline_overrides_indexed_and_default() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.edges.push(IrEdge {
+            inline_style: Some(Box::new(parse_style_string("stroke:#0f0,stroke-width:4"))),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge::default());
+        for (target, style) in [
+            (
+                IrStyleTarget::LinkDefault,
+                "stroke:#aaa,stroke-width:1,color:#123",
+            ),
+            (
+                IrStyleTarget::Link(0),
+                "stroke:#00f,stroke-width:2,opacity:0.5",
+            ),
+            (IrStyleTarget::Link(1), "stroke:#f00"),
+        ] {
+            ir.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+
+        ir.populate_structured_styles();
+
+        assert_eq!(
+            ir.edges[0].inline_style.as_ref().unwrap().properties,
+            BTreeMap::from([
+                ("stroke".into(), "#0f0".into()),
+                ("stroke-width".into(), "4".into()),
+                ("color".into(), "#123".into()),
+                ("opacity".into(), "0.5".into()),
+            ])
+        );
+        assert_eq!(
+            ir.edges[1].inline_style.as_ref().unwrap().properties,
+            BTreeMap::from([
+                ("stroke".into(), "#f00".into()),
+                ("stroke-width".into(), "1".into()),
+                ("color".into(), "#123".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn populate_structured_styles_edges_repopulate_after_ref_edits_and_roundtrip() {
+        let mut original = MermaidDiagramIr::empty(DiagramType::Class);
+        original.edges.push(IrEdge {
+            arrow: ArrowType::InheritanceReverse,
+            inline_style: Some(Box::new(parse_style_string("stroke-dasharray:5"))),
+            extras: Some(Box::new(super::IrEdgeExtras {
+                co_arrow: Some(ArrowType::CompositionReverse),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        original.edges.push(IrEdge::default());
+        for (target, style) in [
+            (
+                IrStyleTarget::LinkDefault,
+                "stroke:#f00,stroke-width:2,color:#123",
+            ),
+            (IrStyleTarget::Link(0), "stroke-width:3"),
+        ] {
+            original.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+        original.populate_structured_styles();
+        let restored: MermaidDiagramIr =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert_eq!(restored, original);
+
+        for mut ir in [original, restored] {
+            ir.style_refs[0].style = "stroke:#00f,opacity:0.5".into();
+            ir.style_refs[1].style = "stroke-width:4".into();
+            ir.populate_structured_styles();
+            assert_eq!(
+                ir.edges[0].inline_style.as_ref().unwrap().properties,
+                BTreeMap::from([
+                    ("stroke".into(), "#00f".into()),
+                    ("stroke-dasharray".into(), "5".into()),
+                    ("stroke-width".into(), "4".into()),
+                    ("opacity".into(), "0.5".into()),
+                ])
+            );
+            assert_eq!(
+                ir.edges[1].inline_style.as_ref().unwrap().properties,
+                BTreeMap::from([
+                    ("stroke".into(), "#00f".into()),
+                    ("opacity".into(), "0.5".into()),
+                ])
+            );
+            let once = ir.clone();
+            ir.populate_structured_styles();
+            assert_eq!(ir, once);
+
+            ir.style_refs.clear();
+            ir.populate_structured_styles();
+            assert_eq!(
+                ir.edges[0].inline_style.as_ref().unwrap().properties,
+                BTreeMap::from([("stroke-dasharray".into(), "5".into())])
+            );
+            assert_eq!(ir.edges[0].co_arrow(), Some(ArrowType::CompositionReverse));
+            assert!(
+                ir.edges[0]
+                    .extras
+                    .as_ref()
+                    .unwrap()
+                    .style_provenance
+                    .is_none()
+            );
+            assert!(ir.edges[1].inline_style.is_none());
+            assert!(ir.edges[1].extras.is_none());
+        }
+    }
+
+    #[test]
+    fn populate_structured_styles_recognizes_inline_edge_edits() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Class);
+        ir.edges.push(IrEdge {
+            inline_style: Some(Box::new(parse_style_string("stroke-dasharray:5"))),
+            ..Default::default()
+        });
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::LinkDefault,
+            style: "stroke:#f00,stroke-width:2".into(),
+            span: Span::default(),
+        });
+        ir.populate_structured_styles();
+        let current = &mut ir.edges[0].inline_style.as_mut().unwrap().properties;
+        current.insert("stroke".into(), "#a0a".into());
+        current.insert("opacity".into(), "0.7".into());
+        current.remove("stroke-dasharray");
+        ir.style_refs[0].style = "stroke:#00f,stroke-width:4,stroke-dasharray:none".into();
+
+        ir.populate_structured_styles();
+
+        assert_eq!(
+            ir.edges[0].inline_style.as_ref().unwrap().properties,
+            BTreeMap::from([
+                ("stroke".into(), "#a0a".into()),
+                ("stroke-width".into(), "4".into()),
+                ("stroke-dasharray".into(), "none".into()),
+                ("opacity".into(), "0.7".into()),
+            ])
+        );
+        ir.style_refs.clear();
+        ir.populate_structured_styles();
+        assert_eq!(
+            ir.edges[0].inline_style.as_ref().unwrap().properties,
+            BTreeMap::from([
+                ("stroke".into(), "#a0a".into()),
+                ("opacity".into(), "0.7".into()),
+            ])
+        );
     }
 
     #[test]
