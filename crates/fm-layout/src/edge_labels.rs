@@ -288,19 +288,21 @@ impl<'a> EdgeLabelPlacer<'a> {
                     &obstacles,
                     self.layout.bounds,
                 )
-            })
-            .unwrap_or_else(|| {
-                closest_clear_route_neighborhood(
-                    path,
-                    width,
-                    height,
-                    self.layout,
-                    self.padding,
-                    &self.plates,
-                    foreign_routes,
-                    ignored_nodes,
-                )
             });
+        let center = match center {
+            Some(center) => center,
+            None => closest_clear_route_neighborhood(
+                path,
+                width,
+                height,
+                self.layout,
+                self.padding,
+                &self.plates,
+                foreign_routes,
+                ignored_nodes,
+                obstacles,
+            ),
+        };
         self.plates.push(LayoutRect {
             x: center.x - width / 2.0,
             y: center.y - height / 2.0,
@@ -397,17 +399,16 @@ fn append_foreign_route_obstacles_with_tolerance(
     tolerance: f32,
     obstacles: &mut Vec<EdgeLabelObstacle>,
 ) -> bool {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let length_squared = dx * dx + dy * dy;
+    let corridor = RouteCorridor::new(from, to, tolerance);
+    let (dx, dy, length_squared) = (corridor.dx, corridor.dy, corridor.length_squared);
     if length_squared <= f32::EPSILON {
         return false;
     }
     let mut shared = Vec::new();
     for pair in path.points.windows(2) {
-        if edge_label_routes_share_corridor(from, to, pair[0], pair[1], tolerance) {
-            let a = ((pair[0].x - from.x) * dx + (pair[0].y - from.y) * dy) / length_squared;
-            let b = ((pair[1].x - from.x) * dx + (pair[1].y - from.y) * dy) / length_squared;
+        if corridor.shares(pair[0], pair[1]) {
+            let a = corridor.along(pair[0]) / length_squared;
+            let b = corridor.along(pair[1]) / length_squared;
             shared.push((a.min(b).max(0.0), a.max(b).min(1.0)));
         }
     }
@@ -755,6 +756,8 @@ fn closest_clear_route_position_with_offset(
     best
 }
 
+/// `obstacles` is what `clear_edge_label_position_ignoring_nodes` scans for these arguments:
+/// the nodes other than `ignored_nodes`, the state notes, `plates`, then `routes`.
 #[allow(clippy::too_many_arguments)]
 fn closest_clear_route_neighborhood(
     path: &LayoutEdgePath,
@@ -765,6 +768,7 @@ fn closest_clear_route_neighborhood(
     plates: &[LayoutRect],
     routes: &[EdgeLabelObstacle],
     ignored_nodes: &[usize],
+    obstacles: Vec<EdgeLabelObstacle>,
 ) -> LayoutPoint {
     let anchor = edge_label_position(path);
     let mut best = anchor;
@@ -794,21 +798,6 @@ fn closest_clear_route_neighborhood(
         .then(|| {
             let frame = ClearPlateFrame::new(layout.bounds, padding, width, height);
             let projected: Vec<_> = queries.iter().map(|&query| frame.project(query)).collect();
-            let obstacles = layout
-                .nodes
-                .iter()
-                .filter(|node| !ignored_nodes.contains(&node.node_index))
-                .map(|node| EdgeLabelObstacle::Bounds(node.bounds))
-                .chain(
-                    layout
-                        .extensions
-                        .state_notes
-                        .iter()
-                        .map(|note| EdgeLabelObstacle::Bounds(note.bounds)),
-                )
-                .chain(plates.iter().copied().map(EdgeLabelObstacle::Bounds))
-                .chain(routes.iter().copied())
-                .collect();
             ClearPositionIndex::new(frame, obstacles, &projected)
         })
         .flatten();
@@ -923,22 +912,59 @@ fn edge_label_routes_share_corridor(
     to: LayoutPoint,
     tolerance: f32,
 ) -> bool {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let length_squared = dx * dx + dy * dy;
-    let cross_from = (from.x - a.x) * dy - (from.y - a.y) * dx;
-    let cross_to = (to.x - a.x) * dy - (to.y - a.y) * dx;
-    let along_from = (from.x - a.x) * dx + (from.y - a.y) * dy;
-    let along_to = (to.x - a.x) * dx + (to.y - a.y) * dy;
-    // Unequal node widths can put opposing parallel trunks less than a stroke apart.
-    // Their painted ink already shares a corridor: treating one as a foreign crossing
-    // ejects every label from the other. Exempt only the longitudinal overlap, and only
-    // when BOTH ends remain inside the two strokes' combined half-widths.
-    let cross_tolerance = tolerance * length_squared.sqrt();
-    length_squared > f32::EPSILON
-        && cross_from.abs() <= cross_tolerance
-        && cross_to.abs() <= cross_tolerance
-        && along_from.min(along_to) < length_squared
-        && along_from.max(along_to) > 0.0
+    RouteCorridor::new(a, b, tolerance).shares(from, to)
+}
+
+/// The segment `a`-`b` with the stroke tolerance of `edge_label_routes_share_corridor`.
+/// Label placement tests each foreign route segment against every segment of the labelled
+/// path, thousands of times per label, so the values that depend on `a`-`b` alone are
+/// computed once per segment. The methods are inlined at build time: a browser engine
+/// inlines a wasm call only while the caller has inlining budget left, and
+/// `EdgeLabelPlacer::prepare`, which runs this loop, has too little for it.
+#[derive(Clone, Copy)]
+struct RouteCorridor {
+    a: LayoutPoint,
+    dx: f32,
+    dy: f32,
+    length_squared: f32,
+    cross_tolerance: f32,
+}
+
+impl RouteCorridor {
+    #[inline(always)]
+    fn new(a: LayoutPoint, b: LayoutPoint, tolerance: f32) -> Self {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let length_squared = dx * dx + dy * dy;
+        Self {
+            a,
+            dx,
+            dy,
+            length_squared,
+            cross_tolerance: tolerance * length_squared.sqrt(),
+        }
+    }
+
+    /// The projection of `point` onto the segment, scaled by its squared length.
+    #[inline(always)]
+    fn along(self, point: LayoutPoint) -> f32 {
+        (point.x - self.a.x) * self.dx + (point.y - self.a.y) * self.dy
+    }
+
+    #[inline(always)]
+    fn shares(self, from: LayoutPoint, to: LayoutPoint) -> bool {
+        let cross =
+            |point: LayoutPoint| (point.x - self.a.x) * self.dy - (point.y - self.a.y) * self.dx;
+        let (along_from, along_to) = (self.along(from), self.along(to));
+        // Unequal node widths can put opposing parallel trunks less than a stroke apart.
+        // Their painted ink already shares a corridor: treating one as a foreign crossing
+        // ejects every label from the other. Exempt only the longitudinal overlap, and only
+        // when BOTH ends remain inside the two strokes' combined half-widths.
+        self.length_squared > f32::EPSILON
+            && cross(from).abs() <= self.cross_tolerance
+            && cross(to).abs() <= self.cross_tolerance
+            && along_from.min(along_to) < self.length_squared
+            && along_from.max(along_to) > 0.0
+    }
 }
 
 /// Clip to the cross-axis slab before projecting the forbidden interval. A diagonal route's
@@ -1529,36 +1555,29 @@ impl ClearPositionIndex {
         obstacles: Vec<EdgeLabelObstacle>,
         queries: &[LayoutPoint],
     ) -> Option<Self> {
+        // `max` skips NaN, so check every input explicitly rather than only the maximum.
+        let mut finite = [frame.min_x, frame.max_x, frame.min_y, frame.max_y]
+            .into_iter()
+            .all(f32::is_finite);
         let mut magnitude = frame.clearance_x.abs().max(frame.clearance_y.abs()) + 3.0;
+        let mut include = |value: f32| {
+            magnitude = magnitude.max(value.abs());
+            finite &= value.is_finite();
+        };
+        include(frame.clearance_x);
+        include(frame.clearance_y);
         for query in queries {
-            magnitude = magnitude.max(query.x.abs()).max(query.y.abs());
+            include(query.x);
+            include(query.y);
         }
         for obstacle in &obstacles {
             let corners = match *obstacle {
                 EdgeLabelObstacle::Bounds(rect) => [rect.x, rect.y, rect.width, rect.height],
                 EdgeLabelObstacle::Segment(a, b) => [a.x, a.y, b.x, b.y],
             };
-            for value in corners {
-                magnitude = magnitude.max(value.abs());
-            }
+            corners.into_iter().for_each(&mut include);
         }
-        // `max` skips NaN, so check every input explicitly rather than only the maximum.
-        let finite = magnitude < 1.0e30
-            && [
-                frame.min_x,
-                frame.max_x,
-                frame.min_y,
-                frame.max_y,
-                frame.clearance_x,
-                frame.clearance_y,
-            ]
-            .into_iter()
-            .chain(queries.iter().flat_map(|query| [query.x, query.y]))
-            .chain(obstacles.iter().flat_map(|obstacle| match *obstacle {
-                EdgeLabelObstacle::Bounds(rect) => [rect.x, rect.y, rect.width, rect.height],
-                EdgeLabelObstacle::Segment(a, b) => [a.x, a.y, b.x, b.y],
-            }))
-            .all(f32::is_finite);
+        let finite = finite && magnitude < 1.0e30;
         if !finite || frame.clearance_x < 0.0 || frame.clearance_y < 0.0 || queries.is_empty() {
             return None;
         }
@@ -1571,16 +1590,8 @@ impl ClearPositionIndex {
         let buckets = (queries.len() / Self::QUERIES_PER_BUCKET).clamp(1, Self::MAX_BUCKETS);
         Some(Self {
             frame,
-            rows: StabBuckets::new(
-                queries.iter().map(|query| query.y),
-                ranges.iter().map(|range| range.0),
-                buckets,
-            ),
-            columns: StabBuckets::new(
-                queries.iter().map(|query| query.x),
-                ranges.iter().map(|range| range.1),
-                buckets,
-            ),
+            rows: StabBuckets::new(queries, &ranges, false, buckets),
+            columns: StabBuckets::new(queries, &ranges, true, buckets),
             obstacles,
             row_cache: BTreeMap::new(),
             column_cache: BTreeMap::new(),
@@ -1669,6 +1680,9 @@ fn component_containing(components: &[(f32, f32)], position: f32) -> (f32, f32) 
         .unwrap_or((position, position))
 }
 
+/// One obstacle's row range and column range, as [`stab_ranges`] returns them.
+type StabRanges = ((f32, f32), (f32, f32));
+
 /// Closed ranges of query `y` (row) and query `x` (column) outside which
 /// `exclusion_intervals` returns `None` for the x and y interval respectively.
 ///
@@ -1681,11 +1695,7 @@ fn component_containing(components: &[(f32, f32)], position: f32) -> (f32, f32) 
 /// slab parameters land clearly on the same side outside `[0, 1]` (by a relative 5e-4, far
 /// above one ulp of 1.0) and the interval is `None`. Coordinates stay below 1e30, so nothing
 /// overflows.
-fn stab_ranges(
-    obstacle: EdgeLabelObstacle,
-    frame: ClearPlateFrame,
-    margin: f32,
-) -> ((f32, f32), (f32, f32)) {
+fn stab_ranges(obstacle: EdgeLabelObstacle, frame: ClearPlateFrame, margin: f32) -> StabRanges {
     let (clearance_x, clearance_y) = (frame.clearance_x, frame.clearance_y);
     match obstacle {
         EdgeLabelObstacle::Bounds(bounds) => (
@@ -1723,13 +1733,16 @@ struct StabBuckets {
 }
 
 impl StabBuckets {
-    fn new(
-        queries: impl Iterator<Item = f32> + Clone,
-        ranges: impl Iterator<Item = (f32, f32)>,
-        count: usize,
-    ) -> Self {
-        let low = queries.clone().fold(f32::INFINITY, f32::min);
-        let high = queries.fold(f32::NEG_INFINITY, f32::max);
+    /// Buckets over the queries' `y` and the row ranges from [`stab_ranges`], or over their `x`
+    /// and the column ranges when `columns` is set. One function serves both axes, so the
+    /// wasm build carries one copy.
+    fn new(queries: &[LayoutPoint], ranges: &[StabRanges], columns: bool, count: usize) -> Self {
+        let coordinate = |query: &LayoutPoint| if columns { query.x } else { query.y };
+        let low = queries.iter().map(coordinate).fold(f32::INFINITY, f32::min);
+        let high = queries
+            .iter()
+            .map(coordinate)
+            .fold(f32::NEG_INFINITY, f32::max);
         let step = (high - low) / count as f32;
         let count = if step.is_normal() { count } else { 1 };
         let mut index = Self {
@@ -1737,7 +1750,8 @@ impl StabBuckets {
             step,
             buckets: vec![Vec::new(); count],
         };
-        for (obstacle, (start, end)) in ranges.enumerate() {
+        for (obstacle, &(row, column)) in ranges.iter().enumerate() {
+            let (start, end) = if columns { column } else { row };
             // No query can stab a range that misses the queries' whole span. An inverted range
             // comes from a rectangle with a negative extent, whose clearance band is empty.
             if start > high || end < low || start > end {
