@@ -210,7 +210,12 @@ where
     F: FnMut(usize) -> (f32, f32),
     E: FnMut(PathCmd),
 {
-    if count == 0 {
+    if count == 0
+        || (0..count).any(|index| {
+            let point = point_at(index);
+            !point.0.is_finite() || !point.1.is_finite()
+        })
+    {
         return;
     }
     let first = point_at(0);
@@ -231,18 +236,31 @@ where
     }
 
     // Collapse tiny lateral jogs, but never shortcut a route that backtracks past its endpoints.
-    const STRAIGHT_EPS: f32 = 2.0;
+    const STRAIGHT_EPS: f64 = 2.0;
     let last = point_at(count - 1);
-    let chord = (last.0 - first.0, last.1 - first.1);
-    let chord_len = (chord.0 * chord.0 + chord.1 * chord.1).sqrt();
-    if chord_len > f32::EPSILON {
+    // Finite f32 routes can overflow their squared length or cross product in f32. NaN
+    // comparisons would then classify a real bend as straight and cut through its corridor.
+    // Widen before subtraction and multiplication; the entire finite f32 domain fits in f64.
+    let chord = (
+        f64::from(last.0) - f64::from(first.0),
+        f64::from(last.1) - f64::from(first.1),
+    );
+    let chord_len = chord.0.hypot(chord.1);
+    if chord_len.is_finite() && chord_len > f64::from(f32::EPSILON) {
         let mut straight = true;
         for index in 1..(count - 1) {
             let point = point_at(index);
-            let deviation =
-                ((point.0 - first.0) * chord.1 - (point.1 - first.1) * chord.0).abs() / chord_len;
-            let along = ((point.0 - first.0) * chord.0 + (point.1 - first.1) * chord.1) / chord_len;
-            if deviation > STRAIGHT_EPS || along < -STRAIGHT_EPS || along > chord_len + STRAIGHT_EPS
+            let offset = (
+                f64::from(point.0) - f64::from(first.0),
+                f64::from(point.1) - f64::from(first.1),
+            );
+            let deviation = (offset.0 * chord.1 - offset.1 * chord.0).abs() / chord_len;
+            let along = (offset.0 * chord.0 + offset.1 * chord.1) / chord_len;
+            if !deviation.is_finite()
+                || !along.is_finite()
+                || deviation > STRAIGHT_EPS
+                || along < -STRAIGHT_EPS
+                || along > chord_len + STRAIGHT_EPS
             {
                 straight = false;
                 break;
@@ -312,21 +330,31 @@ where
         return;
     };
     while let Some(next) = next_orthogonal_corner(corner, count, &mut index, point_at) {
-        let incoming = (corner.0 - previous.0, corner.1 - previous.1);
-        let outgoing = (next.0 - corner.0, next.1 - corner.1);
+        // Widen before subtraction: a finite leg can span more than f32::MAX, and
+        // normalizing an infinite delta would turn a valid corner into NaN.
+        let incoming = (
+            f64::from(corner.0) - f64::from(previous.0),
+            f64::from(corner.1) - f64::from(previous.1),
+        );
+        let outgoing = (
+            f64::from(next.0) - f64::from(corner.0),
+            f64::from(next.1) - f64::from(corner.1),
+        );
         if (incoming.0 == 0.0) != (outgoing.0 == 0.0) {
             let incoming_length = incoming.0.abs() + incoming.1.abs();
             let outgoing_length = outgoing.0.abs() + outgoing.1.abs();
-            let trim = CORNER_TRIM
+            let trim = f64::from(CORNER_TRIM)
                 .min(incoming_length * 0.5)
                 .min(outgoing_length * 0.5);
+            // Cast the small trim before the existing f32 corner arithmetic so ordinary
+            // routed coordinates keep their established rounding.
             let entry = (
-                corner.0 - incoming.0 / incoming_length * trim,
-                corner.1 - incoming.1 / incoming_length * trim,
+                corner.0 - (incoming.0 / incoming_length * trim) as f32,
+                corner.1 - (incoming.1 / incoming_length * trim) as f32,
             );
             let exit = (
-                corner.0 + outgoing.0 / outgoing_length * trim,
-                corner.1 + outgoing.1 / outgoing_length * trim,
+                corner.0 + (outgoing.0 / outgoing_length * trim) as f32,
+                corner.1 + (outgoing.1 / outgoing_length * trim) as f32,
             );
             if entry != cursor {
                 emit(PathCmd::LineTo {
@@ -468,8 +496,22 @@ fn direction(from: LayoutPoint, to: LayoutPoint) -> Option<LayoutPoint> {
         x: to.x - from.x,
         y: to.y - from.y,
     };
-    (tangent.x.is_finite() && tangent.y.is_finite() && (tangent.x != 0.0 || tangent.y != 0.0))
-        .then_some(tangent)
+    if tangent.x.is_finite() && tangent.y.is_finite() {
+        return (tangent.x != 0.0 || tangent.y != 0.0).then_some(tangent);
+    }
+
+    // Keep every representable tangent unchanged. For full-span finite segments, a
+    // proportional bounded direction preserves both the slope and the actual endpoint.
+    let dx = f64::from(to.x) - f64::from(from.x);
+    let dy = f64::from(to.y) - f64::from(from.y);
+    let scale = dx.abs().max(dy.abs());
+    if !dx.is_finite() || !dy.is_finite() || scale == 0.0 {
+        return None;
+    }
+    Some(LayoutPoint {
+        x: (dx / scale) as f32,
+        y: (dy / scale) as f32,
+    })
 }
 
 /// Flatten open connector curves with a 0.05 layout-unit flatness bound. The GPU and label
@@ -698,6 +740,174 @@ mod tests {
         assert_eq!(endpoints.end.point, LayoutPoint { x: 8.0, y: 12.0 });
         assert_eq!(endpoints.start.tangent, LayoutPoint { x: 2.0, y: 0.0 });
         assert_eq!(endpoints.end.tangent, LayoutPoint { x: 2.0, y: 0.0 });
+    }
+
+    #[test]
+    fn finite_extreme_elbows_do_not_overflow_into_straight_shortcuts() {
+        let (commands, endpoints) = route(
+            &[(-f32::MAX, 8.0), (16.0, 8.0), (16.0, f32::MAX)],
+            DiagramType::Flowchart,
+        );
+        assert_eq!(
+            commands,
+            vec![
+                PathCmd::MoveTo {
+                    x: -f32::MAX,
+                    y: 8.0
+                },
+                PathCmd::LineTo { x: 10.0, y: 8.0 },
+                PathCmd::QuadTo {
+                    cx: 16.0,
+                    cy: 8.0,
+                    x: 16.0,
+                    y: 14.0
+                },
+                PathCmd::LineTo {
+                    x: 16.0,
+                    y: f32::MAX
+                },
+            ]
+        );
+        let endpoints = endpoints.expect("finite elbow endpoints");
+        assert_eq!(endpoints.start.tangent.y, 0.0);
+        assert_eq!(endpoints.end.tangent.x, 0.0);
+        assert!(endpoints.start.tangent.x.is_finite());
+        assert!(endpoints.end.tangent.y.is_finite());
+
+        // A large collinear route still collapses, while a zero-length route has no direction.
+        let (straight, _) = route(
+            &[(-f32::MAX, 8.0), (16.0, 8.0), (f32::MAX, 8.0)],
+            DiagramType::Flowchart,
+        );
+        assert_eq!(straight.len(), 2);
+        assert_eq!(
+            straight[1],
+            PathCmd::LineTo {
+                x: f32::MAX,
+                y: 8.0
+            }
+        );
+        assert!(
+            route(&[(f32::MAX, f32::MAX); 3], DiagramType::Flowchart)
+                .1
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rounded_full_span_elbows_keep_finite_corner_commands_and_endpoints() {
+        for (points, entry, exit) in [
+            (
+                [(-f32::MAX, 8.0), (f32::MAX, 8.0), (f32::MAX, 40.0)],
+                (f32::MAX, 8.0),
+                (f32::MAX, 14.0),
+            ),
+            (
+                [(f32::MAX, 40.0), (f32::MAX, 8.0), (-f32::MAX, 8.0)],
+                (f32::MAX, 14.0),
+                (f32::MAX, 8.0),
+            ),
+            (
+                [
+                    (-f32::MAX, -f32::MAX),
+                    (f32::MAX, -f32::MAX),
+                    (f32::MAX, f32::MAX),
+                ],
+                (f32::MAX, -f32::MAX),
+                (f32::MAX, -f32::MAX),
+            ),
+        ] {
+            for transpose in [false, true] {
+                for sign in [-1.0, 1.0] {
+                    let project = |(x, y): (f32, f32)| {
+                        let x = x * sign;
+                        if transpose { (y, x) } else { (x, y) }
+                    };
+                    let points = points.map(project);
+                    let entry = project(entry);
+                    let exit = project(exit);
+                    let (commands, endpoints) = route(&points, DiagramType::Flowchart);
+                    assert_eq!(
+                        commands,
+                        vec![
+                            PathCmd::MoveTo {
+                                x: points[0].0,
+                                y: points[0].1,
+                            },
+                            PathCmd::LineTo {
+                                x: entry.0,
+                                y: entry.1,
+                            },
+                            PathCmd::QuadTo {
+                                cx: points[1].0,
+                                cy: points[1].1,
+                                x: exit.0,
+                                y: exit.1,
+                            },
+                            PathCmd::LineTo {
+                                x: points[2].0,
+                                y: points[2].1,
+                            },
+                        ],
+                        "{points:?}"
+                    );
+                    let endpoints = endpoints.expect("full-span finite elbow endpoints");
+                    assert_eq!(
+                        endpoints.start.point,
+                        LayoutPoint {
+                            x: points[0].0,
+                            y: points[0].1,
+                        }
+                    );
+                    assert_eq!(
+                        endpoints.end.point,
+                        LayoutPoint {
+                            x: points[2].0,
+                            y: points[2].1,
+                        }
+                    );
+                    assert!(finite_point(&endpoints.start.tangent));
+                    assert!(finite_point(&endpoints.end.tangent));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_span_tangents_preserve_proportions_without_moving_endpoints() {
+        for kind in [DiagramType::Flowchart, DiagramType::Sequence] {
+            let (_, endpoints) = route(&[(-f32::MAX, 0.0), (f32::MAX, f32::MAX)], kind);
+            let endpoints = endpoints.expect("finite diagonal endpoints");
+            assert_eq!(
+                endpoints.start.point,
+                LayoutPoint {
+                    x: -f32::MAX,
+                    y: 0.0,
+                }
+            );
+            assert_eq!(
+                endpoints.end.point,
+                LayoutPoint {
+                    x: f32::MAX,
+                    y: f32::MAX,
+                }
+            );
+            assert_eq!(endpoints.start.tangent, LayoutPoint { x: 1.0, y: 0.5 });
+            assert_eq!(endpoints.end.tangent, endpoints.start.tangent);
+        }
+    }
+
+    #[test]
+    fn smoothed_paths_reject_nonfinite_routes_without_inventing_a_shortcut() {
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for index in 0..3 {
+                let mut points = [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0)];
+                points[index].0 = invalid;
+                let (commands, endpoints) = route(&points, DiagramType::Flowchart);
+                assert!(commands.is_empty(), "{invalid}/{index}: {commands:?}");
+                assert!(endpoints.is_none());
+            }
+        }
     }
 
     #[test]

@@ -245,6 +245,15 @@ fn painted_route<'a>(
     ir: &MermaidDiagramIr,
     path: &'a LayoutEdgePath,
 ) -> std::borrow::Cow<'a, LayoutEdgePath> {
+    if path
+        .points
+        .iter()
+        .any(|point| !point.x.is_finite() || !point.y.is_finite())
+    {
+        let mut rendered = path.clone();
+        rendered.points.clear();
+        return std::borrow::Cow::Owned(rendered);
+    }
     if path.points.len() > 2 && fm_layout::edge_paths::edge_uses_smoothed_path(ir, path.edge_index)
     {
         std::borrow::Cow::Owned(fm_layout::edge_labels::rendered_edge_route(ir, path))
@@ -2099,7 +2108,13 @@ impl TermRenderer {
         let Some(edge) = ir.edges.get(path.edge_index) else {
             return [None; 2];
         };
-        if path.bundled || edge.arrow == ArrowType::Invisible {
+        if path.bundled
+            || edge.arrow == ArrowType::Invisible
+            || path
+                .points
+                .iter()
+                .any(|point| !point.x.is_finite() || !point.y.is_finite())
+        {
             return [None; 2];
         }
         let Some(endpoints) = fm_layout::edge_paths::emit_diagram_edge_path(
@@ -2837,9 +2852,13 @@ impl TermRenderer {
         if edge_path.bundled || is_invisible_edge(ir, edge_path) {
             return;
         }
+        let rendered = painted_route(ir, edge_path);
+        if rendered.points.is_empty() {
+            return;
+        }
         let stroke = edge_stroke(ir, edge_path);
         let mut phase = 0;
-        for pair in painted_route(ir, edge_path).points.windows(2) {
+        for pair in rendered.points.windows(2) {
             Self::draw_canvas_shaft(
                 canvas,
                 stroke,
@@ -2886,6 +2905,12 @@ impl TermRenderer {
         else {
             return;
         };
+        let line = RasterLine::signed(x0, y0, x1, y1);
+        if line.steps() == 0 && *phase > 0 {
+            // Flattening can place several samples in one pixel. Its preceding nonempty leg
+            // already painted that endpoint with the correct direction and dash cadence.
+            return;
+        }
         match stroke {
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
             EdgeStroke::Dotted => Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, *phase),
@@ -2912,7 +2937,7 @@ impl TermRenderer {
                 }
             }
         }
-        *phase += RasterLine::signed(x0, y0, x1, y1).steps();
+        *phase = phase.saturating_add(line.steps());
     }
 
     /// Consume shared ER geometry in forward tangent space: source and target variants have
@@ -9808,6 +9833,192 @@ mod tests {
             parallel_offset: 0.0,
             bundle_count: 1,
             bundled: false,
+        }
+    }
+
+    #[test]
+    fn terminal_connectors_follow_rounded_geometry_and_authored_curve_overrides() {
+        let mut ir = fm_parser::parse("flowchart LR\nA e@--- B\ne@{ curve: basis }").ir;
+        assert_eq!(ir.edges.len(), 1);
+        assert_eq!(
+            ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
+        );
+        // An edge-local curve must take precedence over the diagram's sharp-corner default.
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0), (40.0, 52.0)]);
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig {
+                padding: 0,
+                ..TermRenderConfig::rich()
+            },
+            60,
+            60,
+        ));
+        let mut rounded_cells = CellBuffer::new(60, 60);
+        renderer.render_edge_cell(&mut rounded_cells, &ir, &path, 1.0, 1.0);
+        // The shared elbow trims six units: independently evaluating its quadratic at t=1/2
+        // gives (38.5, 13.5), whereas the routing polygon passes through (40, 12).
+        assert_ne!(rounded_cells.cells[13 * 60 + 38], ' ');
+        assert_eq!(rounded_cells.cells[12 * 60 + 40], ' ');
+        assert_ne!(rounded_cells.cells[12 * 60 + 20], ' ');
+        assert_ne!(rounded_cells.cells[30 * 60 + 40], ' ');
+
+        let linear = fm_parser::parse("flowchart LR\nA e@--- B\ne@{ curve: step }").ir;
+        let mut sharp_cells = CellBuffer::new(60, 60);
+        renderer.render_edge_cell(&mut sharp_cells, &linear, &path, 1.0, 1.0);
+        assert_ne!(sharp_cells.cells[12 * 60 + 40], ' ');
+        assert_eq!(sharp_cells.cells[13 * 60 + 38], ' ');
+
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut rounded = Canvas::new(60, 60, mode);
+            renderer.render_edge_canvas(&mut rounded, &ir, &path, 1.0, 1.0, 0, 0);
+            assert!(rounded.get_pixel(38, 13), "{mode:?}");
+            assert!(!rounded.get_pixel(40, 12), "{mode:?}");
+            let mut sharp = Canvas::new(60, 60, mode);
+            renderer.render_edge_canvas(&mut sharp, &linear, &path, 1.0, 1.0, 0, 0);
+            assert!(sharp.get_pixel(40, 12), "{mode:?}");
+            assert!(!sharp.get_pixel(38, 13), "{mode:?}");
+        }
+
+        // Specialized sequence messages keep their rectangular self-message route.
+        ir.diagram_type = DiagramType::Sequence;
+        let mut sequence = CellBuffer::new(60, 60);
+        renderer.render_edge_cell(&mut sequence, &ir, &path, 1.0, 1.0);
+        assert_eq!(sequence.cells, sharp_cells.cells);
+    }
+
+    #[test]
+    fn terminal_dashes_survive_finely_segmented_routes_and_clipping() {
+        let mut ir = sample_ir();
+        // Orthogonal/linear overrides retain supplied waypoints, including many one-pixel legs.
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig {
+                padding: 0,
+                ..TermRenderConfig::rich()
+            },
+            48,
+            48,
+        ));
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            for direction in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)] {
+                let points: Vec<_> = (-32..=112)
+                    .map(|step| {
+                        (
+                            (12 + step * direction.0) as f32,
+                            (12 + step * direction.1) as f32,
+                        )
+                    })
+                    .collect();
+                let split = terminal_edge_test_path(&points);
+                let whole = terminal_edge_test_path(&[points[0], *points.last().unwrap()]);
+                for arrow in [ArrowType::DottedLine, ArrowType::ThickLine] {
+                    ir.edges[0].arrow = arrow;
+                    ir.edges[0].inline_style =
+                        Some(Box::new(fm_core::parse_style_string("stroke-dasharray:5")));
+                    for scale in [1.0, 0.5] {
+                        // Compression creates repeated projected pixels; they must not
+                        // restart a vertical dash with the horizontal pixel cadence.
+                        let mut segmented = Canvas::new(48, 48, mode);
+                        renderer.render_edge_canvas(
+                            &mut segmented,
+                            &ir,
+                            &split,
+                            scale,
+                            scale,
+                            0,
+                            0,
+                        );
+                        let mut uninterrupted = Canvas::new(48, 48, mode);
+                        renderer.render_edge_canvas(
+                            &mut uninterrupted,
+                            &ir,
+                            &whole,
+                            scale,
+                            scale,
+                            0,
+                            0,
+                        );
+                        assert_eq!(
+                            segmented.render(),
+                            uninterrupted.render(),
+                            "{mode:?}/{direction:?}/{arrow:?}/{scale}: subdivision changed dashes"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_curved_routes_reject_nonfinite_points_and_clip_extreme_coordinates() {
+        let mut ir = sample_ir();
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig {
+                padding: 0,
+                ..TermRenderConfig::rich()
+            },
+            24,
+            24,
+        ));
+        for routing in [None, Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)] {
+            ir.meta.edge_routing = routing;
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let path = terminal_edge_test_path(&[
+                    (2.0, 4.0),
+                    (8.0, 4.0),
+                    (invalid, 4.0),
+                    (8.0, 12.0),
+                ]);
+                let mut cells = CellBuffer::new(24, 24);
+                renderer.render_edge_cell(&mut cells, &ir, &path, 1.0, 1.0);
+                assert!(cells.cells.iter().all(|&cell| cell == ' '));
+                assert_eq!(
+                    renderer.edge_marker_cells(&ir, &path, 1.0, 1.0),
+                    [None; 2]
+                );
+                for mode in [
+                    MermaidRenderMode::Braille,
+                    MermaidRenderMode::Block,
+                    MermaidRenderMode::HalfBlock,
+                ] {
+                    let mut canvas = Canvas::new(24, 24, mode);
+                    renderer.render_edge_canvas(&mut canvas, &ir, &path, 1.0, 1.0, 0, 0);
+                    assert!(
+                        canvas
+                            .render()
+                            .chars()
+                            .all(|ch| ch == '\n' || blank_terminal_cell(ch))
+                    );
+                }
+            }
+        }
+
+        ir.meta.edge_routing = None;
+        ir.edges[0].arrow = ArrowType::Line;
+        let extreme = terminal_edge_test_path(&[(-f32::MAX, 8.0), (16.0, 8.0), (16.0, f32::MAX)]);
+        let mut cells = CellBuffer::new(24, 24);
+        renderer.render_edge_cell(&mut cells, &ir, &extreme, 1.0, 1.0);
+        assert_ne!(cells.cells[8 * 24 + 4], ' ');
+        assert_ne!(cells.cells[20 * 24 + 16], ' ');
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let mut canvas = Canvas::new(24, 24, mode);
+            renderer.render_edge_canvas(&mut canvas, &ir, &extreme, 1.0, 1.0, 0, 0);
+            assert!(canvas.get_pixel(4, 8), "{mode:?}");
+            assert!(canvas.get_pixel(16, 20), "{mode:?}");
         }
     }
 
