@@ -23531,9 +23531,7 @@ mod tests {
         assert_eq!(tasks.matches("<path").count(), 4);
         assert_eq!(progress.matches("<path").count(), 2);
         assert_eq!(
-            dependencies
-                .matches("marker-end=\"url(#fm-scene-")
-                .count(),
+            dependencies.matches("marker-end=\"url(#fm-scene-").count(),
             3
         );
         assert!(
@@ -23669,7 +23667,11 @@ mod tests {
                     ("stroke-dasharray", "7,3"),
                 ] {
                     assert_eq!(scene_attribute(task, property), Some(expected), "{task}");
-                    assert_eq!(scene_style_property(task, property), Some(expected), "{task}");
+                    assert_eq!(
+                        scene_style_property(task, property),
+                        Some(expected),
+                        "{task}"
+                    );
                 }
                 assert_eq!(scene_attribute(task, "opacity"), None);
                 assert_eq!(scene_style_property(task, "opacity"), None);

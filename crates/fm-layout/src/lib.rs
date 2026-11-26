@@ -4733,8 +4733,7 @@ fn build_gantt_render_scene(
     let font_size = metrics.font_size();
     let mut sections = RenderGroup::new(Some(String::from("gantt-sections")));
     let mut axes = RenderGroup::new(Some(String::from("gantt-axes")));
-    let mut labels =
-        RenderGroup::new(Some(String::from("gantt-labels"))).with_resolved_paints();
+    let mut labels = RenderGroup::new(Some(String::from("gantt-labels"))).with_resolved_paints();
     let task_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
         font_size: font_size * 0.8,
         ..metrics.config().clone()
@@ -4888,8 +4887,7 @@ fn build_gantt_render_scene(
             .get("color")
             .and_then(|value| scene_paint(value))
             .unwrap_or_else(|| {
-                if placement.is_some_and(|entry| entry.placement != GanttLabelPlacement::Inside)
-                {
+                if placement.is_some_and(|entry| entry.placement != GanttLabelPlacement::Inside) {
                     return String::from("#1e293b");
                 }
                 let fill = match &bar.fill {
@@ -4991,10 +4989,12 @@ fn build_gantt_render_scene(
                 },
             );
         }
-        let (marker_start, marker_end) = ir.edges.get(edge.edge_index).map_or(
-            (MarkerKind::None, MarkerKind::Arrow),
-            |edge_ir| edge_marker_kinds(edge_ir, edge.reversed),
-        );
+        let (marker_start, marker_end) = ir
+            .edges
+            .get(edge.edge_index)
+            .map_or((MarkerKind::None, MarkerKind::Arrow), |edge_ir| {
+                edge_marker_kinds(edge_ir, edge.reversed)
+            });
         let mut path = RenderPath {
             source: RenderSource::Edge(edge.edge_index),
             commands,
@@ -22447,7 +22447,7 @@ fn block_beta_group_identity_path(ir: &MermaidDiagramIr, node_index: usize) -> V
     let mut path = Vec::new();
     let mut visited = BTreeSet::new();
     while let Some(subgraph) = ir.graph.subgraphs.get(current_subgraph.0) {
-        if !visited.insert(current_subgraph) {
+        if !visited.insert(current_subgraph.0) {
             break;
         }
         path.push(subgraph.id.0);
@@ -24245,7 +24245,7 @@ fn subgraph_depth(ir: &MermaidDiagramIr, subgraph_id: fm_core::IrSubgraphId) -> 
         let Some(parent) = ir.graph.subgraph(parent_id) else {
             break;
         };
-        if parent_id == subgraph_id || !visited.insert(parent_id) {
+        if parent_id == subgraph_id || !visited.insert(parent_id.0) {
             break;
         }
         depth += 1;
@@ -39398,21 +39398,27 @@ mod tests {
         let bars = gantt_scene_paths(gantt_scene_group(&scene, "gantt-tasks"));
         assert_eq!(bars.len(), 3);
         assert_eq!(gantt_scene_path_extents(bars[0]), layout.nodes[0].bounds);
-        assert!(matches!(bars[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
-            if color == "#123456" && (*opacity - 0.24).abs() < 0.0001));
+        assert!(
+            matches!(bars[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#123456" && (*opacity - 0.24).abs() < 0.0001)
+        );
         let stroke = bars[0].stroke.as_ref().unwrap();
         assert_eq!(stroke.color, "#abcdef");
         assert_eq!(stroke.width, 4.0);
         assert_eq!(stroke.dash_array, [7.0, 3.0]);
         assert!((stroke.opacity - 0.32).abs() < 0.0001);
         assert!(bars[1].fill.is_none() && bars[1].stroke.is_none());
-        assert!(matches!(bars[2].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
-            if color == "#c4b5fd" && *opacity == 1.0));
+        assert!(
+            matches!(bars[2].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#c4b5fd" && *opacity == 1.0)
+        );
 
         let overlays = gantt_scene_paths(gantt_scene_group(&scene, "gantt-progress"));
         assert_eq!(overlays.len(), 1);
-        assert!(matches!(overlays[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
-            if color == "#0f172a" && (*opacity - 0.088).abs() < 0.0001));
+        assert!(
+            matches!(overlays[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#0f172a" && (*opacity - 0.088).abs() < 0.0001)
+        );
         assert!(overlays[0].stroke.is_none());
         assert!(
             (gantt_scene_path_extents(overlays[0]).width - layout.nodes[0].bounds.width * 0.5)
@@ -39429,8 +39435,10 @@ mod tests {
         assert_eq!(label.font.family(), Some("monospace"));
         assert_eq!(label.font.weight(), Some("bold"));
         assert_eq!(label.font.style(), Some("italic"));
-        assert!(matches!(&label.fill, super::FillStyle::Solid { color, opacity }
-            if color == "#ff00ff" && (*opacity - 0.4).abs() < 0.0001));
+        assert!(
+            matches!(&label.fill, super::FillStyle::Solid { color, opacity }
+            if color == "#ff00ff" && (*opacity - 0.4).abs() < 0.0001)
+        );
 
         let dependencies = gantt_scene_paths(gantt_scene_group(&scene, "gantt-dependencies"));
         assert_eq!(dependencies.len(), 2);
