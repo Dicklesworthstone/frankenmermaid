@@ -415,6 +415,26 @@ enum EdgeStroke {
     ThickDotted,
 }
 
+/// Relative position within the dash cycle, retained when a bend changes raster cadence.
+#[derive(Default)]
+struct EdgeDashPhase {
+    offset: u128,
+    period: u128,
+}
+
+impl EdgeDashPhase {
+    fn advance(&mut self, steps: u128, period: u128) -> u128 {
+        let offset = if self.period == 0 {
+            0
+        } else {
+            self.offset * period / self.period
+        };
+        self.offset = (offset + steps % period) % period;
+        self.period = period;
+        offset
+    }
+}
+
 impl EdgeStroke {
     const fn with_dashes(self, dashed: bool) -> Self {
         match (matches!(self, Self::Thick | Self::ThickDotted), dashed) {
@@ -2768,6 +2788,20 @@ impl TermRenderer {
         Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, 0);
     }
 
+    fn canvas_dash_length(canvas: &Canvas, line: RasterLine) -> u128 {
+        let (dx, dy) = line.delta();
+        let (pixel_width, pixel_height) = canvas.pixel_dimensions();
+        let (cell_width, cell_height) = canvas.cell_dimensions();
+        let pixels_per_cell = if dx.abs() >= dy.abs() {
+            pixel_width / cell_width.max(1)
+        } else {
+            pixel_height / cell_height.max(1)
+        };
+        // An off run of 2*n-1 pixels contains a whole n-pixel cell at every phase.
+        // Three off pixels work horizontally in Braille, but cannot empty a four-pixel row.
+        (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as u128
+    }
+
     fn draw_dashed_segment_at(
         canvas: &mut Canvas,
         x0: isize,
@@ -2777,22 +2811,13 @@ impl TermRenderer {
         phase: u128,
     ) {
         let line = RasterLine::signed(x0, y0, x1, y1);
-        let (dx, dy) = line.delta();
         let steps = line.steps();
 
         let (pixel_width, pixel_height) = canvas.pixel_dimensions();
         let Some((first, last)) = line.clipped_steps(pixel_width, pixel_height) else {
             return;
         };
-        let (cell_width, cell_height) = canvas.cell_dimensions();
-        let pixels_per_cell = if dx.abs() >= dy.abs() {
-            pixel_width / cell_width.max(1)
-        } else {
-            pixel_height / cell_height.max(1)
-        };
-        // An off run of 2*n-1 pixels contains a whole n-pixel cell at every phase.
-        // Three off pixels work horizontally in Braille, but cannot empty a four-pixel row.
-        let dash = (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as u128;
+        let dash = Self::canvas_dash_length(canvas, line);
         let period = dash * 2;
         let phase = phase % period;
         let mut run = (first + phase) / period * period;
@@ -2857,7 +2882,7 @@ impl TermRenderer {
             return;
         }
         let stroke = edge_stroke(ir, edge_path);
-        let mut phase = 0;
+        let mut phase = EdgeDashPhase::default();
         for pair in rendered.points.windows(2) {
             Self::draw_canvas_shaft(
                 canvas,
@@ -2893,7 +2918,7 @@ impl TermRenderer {
         to: fm_layout::LayoutPoint,
         (scale_x, scale_y): (f32, f32),
         (padding_x, padding_y): (usize, usize),
-        phase: &mut u128,
+        phase: &mut EdgeDashPhase,
     ) {
         let Some((x0, y0)) =
             Self::padded_raster_point((from.x * scale_x, from.y * scale_y), (padding_x, padding_y))
@@ -2906,14 +2931,23 @@ impl TermRenderer {
             return;
         };
         let line = RasterLine::signed(x0, y0, x1, y1);
-        if line.steps() == 0 && *phase > 0 {
+        if line.steps() == 0 && phase.period > 0 {
             // Flattening can place several samples in one pixel. Its preceding nonempty leg
             // already painted that endpoint with the correct direction and dash cadence.
             return;
         }
+        let phase_offset = if line.steps() == 0 {
+            0
+        } else {
+            // Preserve on/off position when a turn changes Braille's horizontal/vertical
+            // periods. A raw step count can turn an off-run into an on-run at the bend.
+            phase.advance(line.steps(), Self::canvas_dash_length(canvas, line) * 2)
+        };
         match stroke {
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
-            EdgeStroke::Dotted => Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, *phase),
+            EdgeStroke::Dotted => {
+                Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, phase_offset)
+            }
             EdgeStroke::Thick | EdgeStroke::ThickDotted => {
                 let (ox, oy) = if x1.abs_diff(x0) >= y1.abs_diff(y0) {
                     (0, 1)
@@ -2930,14 +2964,20 @@ impl TermRenderer {
                         y1.saturating_add(oy * offset),
                     );
                     if stroke == EdgeStroke::ThickDotted {
-                        Self::draw_dashed_segment_at(canvas, from.0, from.1, to.0, to.1, *phase);
+                        Self::draw_dashed_segment_at(
+                            canvas,
+                            from.0,
+                            from.1,
+                            to.0,
+                            to.1,
+                            phase_offset,
+                        );
                     } else {
                         canvas.draw_line(from.0, from.1, to.0, to.1);
                     }
                 }
             }
         }
-        *phase = phase.saturating_add(line.steps());
     }
 
     /// Consume shared ER geometry in forward tangent space: source and target variants have
@@ -5311,7 +5351,7 @@ impl TermRenderer {
                     ));
                 }
             }
-            let mut phase = 0;
+            let mut phase = EdgeDashPhase::default();
             for obstacle in segments {
                 let fm_layout::edge_labels::EdgeLabelObstacle::Segment(from, to) = obstacle else {
                     continue;
@@ -10429,7 +10469,7 @@ mod tests {
                 fm_layout::LayoutPoint { x: 10.0, y: 10.0 },
                 (1.0, 1.0),
                 (2, 2),
-                &mut 0,
+                &mut EdgeDashPhase::default(),
             );
             assert!(
                 canvas
@@ -10590,6 +10630,63 @@ mod tests {
                 assert!((0..24).any(|x| actual.get_pixel(x, 3)));
                 assert!((0..24).any(|x| !actual.get_pixel(x, 3)));
             }
+        }
+    }
+
+    #[test]
+    fn terminal_dashes_keep_their_cycle_through_bends_and_route_masks() {
+        let mut ir = sample_ir();
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        ir.edges[0].arrow = ArrowType::DottedLine;
+        let mut layout = layout_diagram(&ir);
+        // Four horizontal pixels end in an off-run. The vertical leg has a different
+        // cadence in Braille, but the shared bend must remain in that same off-run.
+        layout.edges[0] = terminal_edge_test_path(&[(4.0, 8.0), (8.0, 8.0), (8.0, 30.0)]);
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                padding: 0,
+                ..TermRenderConfig::rich()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 40));
+            let mut canvas = Canvas::new(60, 40, mode);
+            renderer.render_edge_canvas(&mut canvas, &ir, &layout.edges[0], 1.0, 1.0, 0, 0);
+            assert!(
+                !canvas.get_pixel(8, 8),
+                "the bend is inside a dash gap: {mode:?}"
+            );
+            assert!(canvas.get_pixel(4, 8));
+            assert!((9..=30).any(|y| canvas.get_pixel(8, y)));
+
+            let (mx, my) = renderer.config.subcell_multiplier();
+            let mut projected = Canvas::new(60, 40, mode);
+            renderer.render_edge_canvas(
+                &mut projected,
+                &ir,
+                &layout.edges[0],
+                mx as f32,
+                my as f32,
+                0,
+                0,
+            );
+            assert_eq!(
+                renderer.edge_label_route_grid(
+                    &ir,
+                    &layout,
+                    &layout.edges[0],
+                    false,
+                    60,
+                    40,
+                    1.0,
+                    1.0,
+                ),
+                projected.render_char_grid(),
+                "captions must see the same dash cycle: {mode:?}"
+            );
         }
     }
 
