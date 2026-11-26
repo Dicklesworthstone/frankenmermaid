@@ -3388,11 +3388,10 @@ fn render_scene_path(
     if let Some(ir) = ir
         && let RenderSource::Node(index) = path.source
     {
-        if ir.diagram_type == DiagramType::Gantt && path.stroke.is_none() {
-            // Gantt task outlines always carry a stroke; their unstroked Node paths are progress
-            // decorations. Keep those decorations' semantic paint: inheriting the task fill would
-            // make progress invisible, and its outline/dash would invent a second task boundary.
-            // Overall author opacity still applies independently of the overlay's fill-opacity.
+        if !paints_resolved && ir.diagram_type == DiagramType::Gantt && path.stroke.is_none() {
+            // Unresolved Gantt scenes use unstroked Node paths for progress decorations. Keep
+            // their semantic paint and apply overall opacity once. Resolved scenes already carry
+            // that opacity and may also have task bodies with an explicitly disabled outline.
             if let Some(opacity) = ir
                 .resolved_node_style(index)
                 .get("opacity")
@@ -23533,12 +23532,12 @@ mod tests {
         assert_eq!(progress.matches("<path").count(), 2);
         assert_eq!(
             dependencies
-                .matches("marker-end=\"url(#arrow-end)\"")
+                .matches("marker-end=\"url(#fm-scene-")
                 .count(),
             3
         );
         assert!(
-            svg.contains("id=\"arrow-end\""),
+            svg.contains("id=\"fm-scene-0-arrow-end\""),
             "dependency markers require live definitions"
         );
         assert!(!tasks.contains(" marker-end="));
@@ -23563,11 +23562,12 @@ mod tests {
     #[test]
     fn scene_backend_styled_gantt_progress_retains_semantic_paint_and_node_opacity() {
         for (opacity, expected) in [
-            ("0.4", Some("0.40")),
-            ("2", Some("1")),
-            ("-1", Some("0")),
-            ("NaN", None),
-            ("inf", None),
+            ("0.4", "0.09"),
+            ("40%", "0.09"),
+            ("2", "0.22"),
+            ("-1", "0"),
+            ("NaN", "0.22"),
+            ("inf", "0.22"),
         ] {
             let source = format!(
                 "gantt\nTask :done,a,2026-01-01,4d,50%\n\
@@ -23607,36 +23607,117 @@ mod tests {
                 "author task stroke was lost: {tasks}"
             );
             assert!(
-                tasks.contains("stroke-dasharray:5 2"),
+                tasks.contains("stroke-dasharray:5,2"),
                 "author task dash was lost: {tasks}"
             );
             assert!(progress.contains("fill=\"#0f172a\""));
-            assert!(progress.contains("fill-opacity=\"0.22\""));
+            assert!(progress.contains(&format!("fill-opacity=\"{expected}\"")));
             assert!(progress.contains("stroke=\"none\""));
             let progress_tag = scene_tag_for_source(progress, "path", "node", 0);
             assert_eq!(scene_style_property(progress_tag, "fill"), Some("#0f172a"));
             assert_eq!(
                 scene_style_property(progress_tag, "fill-opacity"),
-                Some("0.22")
+                Some(expected)
             );
             assert_eq!(scene_style_property(progress_tag, "stroke"), Some("none"));
             assert_eq!(scene_style_property(progress_tag, "opacity"), None);
             assert!(!progress.contains("#ff0000") && !progress.contains("#00ff00"));
             assert!(!progress.contains("stroke-dasharray"));
-            match expected {
-                Some(expected) => assert!(
-                    progress.contains(&format!(" opacity=\"{expected}\"")),
-                    "{progress}"
-                ),
-                None => assert!(
-                    !progress.contains(" opacity="),
-                    "non-finite author opacity leaked: {progress}"
-                ),
-            }
+            assert!(
+                !progress.contains(" opacity="),
+                "resolved opacity was applied twice: {progress}"
+            );
             assert!(progress.contains("data-fm-source-kind=\"node\""));
             assert!(progress.contains("data-fm-source-index=\"0\""));
             assert!(progress.contains("data-fm-source-span="));
             assert!(progress.contains("50% complete"));
+        }
+    }
+
+    #[test]
+    fn standalone_gantt_scene_preserves_task_and_dependency_author_styles() {
+        let ir = fm_parser::parse(
+            "gantt\n dateFormat YYYY-MM-DD\n\
+             Styled :crit, done, a, 2026-01-01, 4d, 50%\n\
+             Hidden :b, after a, 2d\n Marker :milestone, c, after b, 0d\n\
+             style a fill:#123456,fill-opacity:0.6,stroke:#abcdef,stroke-opacity:0.8,stroke-width:4px,stroke-dasharray:7 3,opacity:40%,color:#ff00ff,font-size:19px,font-family:monospace,font-weight:bold,font-style:italic\n\
+             style b fill:none,stroke:none,color:#345678,opacity:0.5\n\
+             linkStyle default stroke:#aabbcc,stroke-width:3px,stroke-dasharray:5 2,opacity:0.5,stroke-opacity:0.6\n\
+             linkStyle 1 stroke:none\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        for embed_theme_css in [true, false] {
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                embed_theme_css,
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            };
+            let scene = build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+            for svg in [
+                render_scene_to_svg(&scene, &config),
+                render_svg_with_layout(&ir, &layout, &config),
+            ] {
+                let task = scene_tag_for_source(&svg, "path", "node", 0);
+                for (property, expected) in [
+                    ("fill", "#123456"),
+                    ("fill-opacity", "0.24"),
+                    ("stroke", "#abcdef"),
+                    ("stroke-opacity", "0.32"),
+                    ("stroke-width", "4"),
+                    ("stroke-dasharray", "7,3"),
+                ] {
+                    assert_eq!(scene_attribute(task, property), Some(expected), "{task}");
+                    assert_eq!(scene_style_property(task, property), Some(expected), "{task}");
+                }
+                assert_eq!(scene_attribute(task, "opacity"), None);
+                assert_eq!(scene_style_property(task, "opacity"), None);
+                let hidden = scene_tag_for_source(&svg, "path", "node", 1);
+                assert_eq!(scene_attribute(hidden, "fill"), Some("none"));
+                assert_eq!(scene_attribute(hidden, "stroke"), Some("none"));
+                assert_eq!(scene_attribute(hidden, "opacity"), None);
+
+                let label = scene_tag_for_source(&svg, "text", "node", 0);
+                assert_eq!(scene_attribute(label, "fill"), Some("#ff00ff"));
+                assert_eq!(scene_attribute(label, "fill-opacity"), Some("0.40"));
+                assert_eq!(scene_attribute(label, "font-size"), Some("19"));
+                assert_eq!(scene_attribute(label, "font-family"), Some("monospace"));
+                assert_eq!(scene_attribute(label, "font-weight"), Some("bold"));
+                assert_eq!(scene_attribute(label, "font-style"), Some("italic"));
+                assert_eq!(scene_style_property(label, "opacity"), None);
+                let progress = svg.split_once("id=\"gantt-progress\"").unwrap().1;
+                let overlay = scene_tag_for_source(progress, "path", "node", 0);
+                assert_eq!(scene_attribute(overlay, "fill"), Some("#0f172a"));
+                assert_eq!(scene_attribute(overlay, "fill-opacity"), Some("0.09"));
+                assert_eq!(scene_attribute(overlay, "stroke"), Some("none"));
+                assert_eq!(scene_attribute(overlay, "opacity"), None);
+
+                let dependency = scene_tag_for_source(&svg, "path", "edge", 0);
+                assert_eq!(scene_attribute(dependency, "stroke"), Some("#aabbcc"));
+                assert_eq!(scene_attribute(dependency, "stroke-width"), Some("3"));
+                assert_eq!(scene_attribute(dependency, "stroke-opacity"), Some("0.30"));
+                assert_eq!(scene_attribute(dependency, "stroke-dasharray"), Some("5,2"));
+                let reference = scene_attribute(dependency, "marker-end").unwrap();
+                let marker_id = reference
+                    .strip_prefix("url(#")
+                    .unwrap()
+                    .strip_suffix(')')
+                    .unwrap();
+                let marker = svg
+                    .split("<marker ")
+                    .find(|part| part.starts_with(&format!("id=\"{marker_id}\"")))
+                    .unwrap()
+                    .split_once("</marker>")
+                    .unwrap()
+                    .0;
+                assert!(marker.contains("#aabbcc"), "{marker}");
+                assert!(marker.contains("opacity=\"0.30\""), "{marker}");
+                let hidden_dependency = scene_tag_for_source(&svg, "path", "edge", 1);
+                assert_eq!(scene_attribute(hidden_dependency, "stroke"), Some("none"));
+                assert_eq!(scene_attribute(hidden_dependency, "marker-start"), None);
+                assert_eq!(scene_attribute(hidden_dependency, "marker-end"), None);
+            }
         }
     }
 

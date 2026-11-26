@@ -4733,7 +4733,12 @@ fn build_gantt_render_scene(
     let font_size = metrics.font_size();
     let mut sections = RenderGroup::new(Some(String::from("gantt-sections")));
     let mut axes = RenderGroup::new(Some(String::from("gantt-axes")));
-    let mut labels = RenderGroup::new(Some(String::from("gantt-labels")));
+    let mut labels =
+        RenderGroup::new(Some(String::from("gantt-labels"))).with_resolved_paints();
+    let task_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: font_size * 0.8,
+        ..metrics.config().clone()
+    });
     let section_fills = ["#f0f4ff", "#fff8f0", "#f0fff4", "#fff0f8"];
     for (index, band) in layout.extensions.bands.iter().enumerate() {
         if band.kind != LayoutBandKind::Section {
@@ -4825,12 +4830,16 @@ fn build_gantt_render_scene(
         .iter()
         .map(|entry| (entry.node_index, entry))
         .collect();
-    let mut bars = RenderGroup::new(Some(String::from("gantt-tasks")));
-    let mut progress = RenderGroup::new(Some(String::from("gantt-progress")));
+    let mut bars = RenderGroup::new(Some(String::from("gantt-tasks"))).with_resolved_paints();
+    let mut progress =
+        RenderGroup::new(Some(String::from("gantt-progress"))).with_resolved_paints();
     for node in &layout.nodes {
         let task = tasks.get(&node.node_index).copied();
         let flags = task.map(|task| task.flags).unwrap_or_default();
         let color = gantt_task_fill(flags);
+        let declared = ir.resolved_node_style(node.node_index);
+        let opacity = scene_style_opacity(&declared, "opacity");
+        let placement = placements.get(&node.node_index);
         let center = node.bounds.center();
         let commands = if flags.milestone {
             let radius = node.bounds.width.min(node.bounds.height) * 0.4;
@@ -4858,26 +4867,45 @@ fn build_gantt_render_scene(
         };
         // Critical is independent of done/active/milestone. Its border must survive the fill's
         // primary-type precedence, or a completed critical task loses its critical-path meaning.
-        bars.children.push(scene_path(
-            RenderSource::Node(node.node_index),
+        let mut bar = RenderPath {
+            source: RenderSource::Node(node.node_index),
             commands,
-            Some(FillStyle::Solid {
+            fill: Some(FillStyle::Solid {
                 color: color.to_owned(),
                 opacity: 1.0,
             }),
-            Some(if flags.crit {
+            stroke: Some(if flags.crit {
                 StrokeStyle::solid("#dc2626", 2.0)
             } else {
                 StrokeStyle::solid("#7c8da5", if flags.milestone { 1.5 } else { 1.0 })
             }),
-        ));
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
+        };
+        apply_scene_path_style(&mut bar, &declared);
+        let stroke_pad = bar.stroke.as_ref().map_or(0.0, |stroke| stroke.width / 2.0);
+        let label_color = declared
+            .get("color")
+            .and_then(|value| scene_paint(value))
+            .unwrap_or_else(|| {
+                if placement.is_some_and(|entry| entry.placement != GanttLabelPlacement::Inside)
+                {
+                    return String::from("#1e293b");
+                }
+                let fill = match &bar.fill {
+                    Some(FillStyle::Solid { color, .. }) => color.as_str(),
+                    None => "#ffffff",
+                };
+                fm_core::readable_label_color(fill, "#1e293b", "#ffffff").to_owned()
+            });
+        bars.children.push(RenderItem::Path(bar));
         include_packing_bounds(
             &mut bounds,
             LayoutRect {
-                x: node.bounds.x - 1.0,
-                y: node.bounds.y - 1.0,
-                width: node.bounds.width + 2.0,
-                height: node.bounds.height + 2.0,
+                x: node.bounds.x - stroke_pad.max(1.0),
+                y: node.bounds.y - stroke_pad.max(1.0),
+                width: node.bounds.width + stroke_pad.max(1.0) * 2.0,
+                height: node.bounds.height + stroke_pad.max(1.0) * 2.0,
             },
         );
         if !flags.milestone
@@ -4898,12 +4926,14 @@ fn build_gantt_render_scene(
                 // makes the completed fraction visible while retaining the task's status color.
                 Some(FillStyle::Solid {
                     color: "#0f172a".into(),
-                    opacity: 0.22,
+                    // Progress is a separate semantic overlay. Task fill/stroke declarations
+                    // must not repaint it, but overall task opacity still applies once.
+                    opacity: 0.22 * opacity,
                 }),
                 None,
             ));
         }
-        let placement = placements.get(&node.node_index);
+        let label_metrics = ir.effective_node_font_metrics(node.node_index, &task_metrics);
         append_measured_scene_text(
             &mut labels,
             &mut bounds,
@@ -4912,8 +4942,8 @@ fn build_gantt_render_scene(
                 text: layout_label_text(ir, node.node_index).to_owned(),
                 x: placement.map_or(center.x, |entry| entry.x),
                 y: center.y + font_size * 0.3,
-                font_size: font_size * 0.8,
-                font: RenderFont::from_style(&ir.resolved_node_style(node.node_index)),
+                font_size: label_metrics.font_size(),
+                font: RenderFont::from_style(&declared),
                 align: match placement.map(|entry| entry.placement) {
                     Some(GanttLabelPlacement::OutsideRight) => TextAlign::Start,
                     Some(GanttLabelPlacement::OutsideLeft) => TextAlign::End,
@@ -4921,15 +4951,16 @@ fn build_gantt_render_scene(
                 },
                 baseline: TextBaseline::Middle,
                 fill: FillStyle::Solid {
-                    color: "#1e293b".into(),
-                    opacity: 1.0,
+                    color: label_color,
+                    opacity,
                 },
             },
-            metrics,
+            &label_metrics,
         );
     }
 
-    let mut dependencies = RenderGroup::new(Some(String::from("gantt-dependencies")));
+    let mut dependencies =
+        RenderGroup::new(Some(String::from("gantt-dependencies"))).with_resolved_paints();
     for edge in &layout.edges {
         if edge.bundled
             || ir
@@ -4960,14 +4991,23 @@ fn build_gantt_render_scene(
                 },
             );
         }
-        dependencies.children.push(RenderItem::Path(RenderPath {
+        let (marker_start, marker_end) = ir.edges.get(edge.edge_index).map_or(
+            (MarkerKind::None, MarkerKind::Arrow),
+            |edge_ir| edge_marker_kinds(edge_ir, edge.reversed),
+        );
+        let mut path = RenderPath {
             source: RenderSource::Edge(edge.edge_index),
             commands,
             fill: None,
             stroke: Some(StrokeStyle::solid("#64748b", 1.2)),
-            marker_start: MarkerKind::None,
-            marker_end: MarkerKind::Arrow,
-        }));
+            marker_start,
+            marker_end,
+        };
+        apply_scene_path_style(
+            &mut path,
+            &edge_labels::edge_label_style(ir, edge.edge_index),
+        );
+        dependencies.children.push(RenderItem::Path(path));
     }
     let mut title = RenderGroup::new(Some(String::from("gantt-title")));
     if let Some(text) = ir.declared_title_if_drawn() {
@@ -39330,6 +39370,107 @@ mod tests {
                     && text.x == placement.x && text.align == expected_align))
             );
         }
+    }
+
+    #[test]
+    fn render_scene_gantt_resolves_author_styles_before_discarding_the_ir() {
+        let ir = parse(
+            "gantt\n dateFormat YYYY-MM-DD\n\
+             Styled :crit, done, a, 2026-01-01, 4d, 50%\n\
+             Hidden :b, after a, 2d\n Marker :milestone, c, after b, 0d\n\
+             style a fill:#123456,fill-opacity:0.6,stroke:#abcdef,stroke-opacity:0.8,stroke-width:4px,stroke-dasharray:7 3,opacity:40%,color:#ff00ff,font-size:19px,font-family:monospace,font-weight:bold,font-style:italic\n\
+             style b fill:none,stroke:none,color:#345678,opacity:0.5\n\
+             linkStyle default stroke:#aabbcc,stroke-width:3px,stroke-dasharray:5 2,opacity:0.5,stroke-opacity:0.6\n\
+             linkStyle 1 stroke:none\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        for id in [
+            "gantt-tasks",
+            "gantt-progress",
+            "gantt-labels",
+            "gantt-dependencies",
+        ] {
+            assert!(gantt_scene_group(&scene, id).paints_resolved, "{id}");
+        }
+        let bars = gantt_scene_paths(gantt_scene_group(&scene, "gantt-tasks"));
+        assert_eq!(bars.len(), 3);
+        assert_eq!(gantt_scene_path_extents(bars[0]), layout.nodes[0].bounds);
+        assert!(matches!(bars[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#123456" && (*opacity - 0.24).abs() < 0.0001));
+        let stroke = bars[0].stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#abcdef");
+        assert_eq!(stroke.width, 4.0);
+        assert_eq!(stroke.dash_array, [7.0, 3.0]);
+        assert!((stroke.opacity - 0.32).abs() < 0.0001);
+        assert!(bars[1].fill.is_none() && bars[1].stroke.is_none());
+        assert!(matches!(bars[2].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#c4b5fd" && *opacity == 1.0));
+
+        let overlays = gantt_scene_paths(gantt_scene_group(&scene, "gantt-progress"));
+        assert_eq!(overlays.len(), 1);
+        assert!(matches!(overlays[0].fill.as_ref(), Some(super::FillStyle::Solid { color, opacity })
+            if color == "#0f172a" && (*opacity - 0.088).abs() < 0.0001));
+        assert!(overlays[0].stroke.is_none());
+        assert!(
+            (gantt_scene_path_extents(overlays[0]).width - layout.nodes[0].bounds.width * 0.5)
+                .abs()
+                < 0.001
+        );
+
+        let texts = scene_texts(gantt_scene_group(&scene, "gantt-labels"));
+        let label = texts
+            .iter()
+            .find(|text| text.source == RenderSource::Node(0))
+            .unwrap();
+        assert_eq!(label.font_size, 19.0);
+        assert_eq!(label.font.family(), Some("monospace"));
+        assert_eq!(label.font.weight(), Some("bold"));
+        assert_eq!(label.font.style(), Some("italic"));
+        assert!(matches!(&label.fill, super::FillStyle::Solid { color, opacity }
+            if color == "#ff00ff" && (*opacity - 0.4).abs() < 0.0001));
+
+        let dependencies = gantt_scene_paths(gantt_scene_group(&scene, "gantt-dependencies"));
+        assert_eq!(dependencies.len(), 2);
+        let stroke = dependencies[0].stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#aabbcc");
+        assert_eq!(stroke.width, 3.0);
+        assert_eq!(stroke.dash_array, [5.0, 2.0]);
+        assert!((stroke.opacity - 0.3).abs() < 0.0001);
+        assert_eq!(dependencies[0].marker_end, super::MarkerKind::Arrow);
+        assert!(dependencies[1].stroke.is_none());
+        assert_eq!(dependencies[1].marker_start, super::MarkerKind::None);
+        assert_eq!(dependencies[1].marker_end, super::MarkerKind::None);
+    }
+
+    #[test]
+    fn render_scene_gantt_dependency_styles_reject_unsafe_paints_and_keep_endpoints() {
+        let mut ir = parse("gantt\n A :a, 2026-01-01, 2d\n B :b, after a, 1d\n").ir;
+        ir.edges[0].arrow = fm_core::ArrowType::DoubleArrow;
+        ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle {
+            properties: BTreeMap::from([
+                ("stroke".into(), "url(https://example.invalid/paint)".into()),
+                ("stroke-width".into(), "NaN".into()),
+                ("opacity".into(), "inf".into()),
+                ("stroke-dasharray".into(), "3 -1".into()),
+            ]),
+        }));
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let paths = gantt_scene_paths(gantt_scene_group(&scene, "gantt-dependencies"));
+        assert_eq!(paths.len(), 1);
+        let stroke = paths[0].stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#64748b");
+        assert_eq!(stroke.width, 1.2);
+        assert_eq!(stroke.opacity, 1.0);
+        assert!(stroke.dash_array.is_empty());
+        assert_eq!(paths[0].marker_start, super::MarkerKind::Arrow);
+        assert_eq!(paths[0].marker_end, super::MarkerKind::Arrow);
+        let endpoints = super::edge_paths::path_endpoints(&paths[0].commands).unwrap();
+        assert_eq!(endpoints.start.point, layout.edges[0].points[0]);
+        assert_eq!(endpoints.end.point, *layout.edges[0].points.last().unwrap());
     }
 
     #[test]
