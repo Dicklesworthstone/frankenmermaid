@@ -1247,10 +1247,18 @@ mod annotations {
                 .iter()
                 .position(|batch| batch.family == PrimitiveFamily::AxisTick)
                 .unwrap();
+            // Task bars are path-filled (rounded bars, milestones, progress overlays), so they
+            // draw in the NodeFill pass rather than as SDF node boxes.
             let task_pass = batches
                 .iter()
-                .position(|batch| batch.family == PrimitiveFamily::Node)
-                .unwrap();
+                .position(|batch| batch.family == PrimitiveFamily::NodeFill)
+                .expect("Gantt task bars must reach the GPU plan as filled paths");
+            assert!(
+                !batches
+                    .iter()
+                    .any(|batch| batch.family == PrimitiveFamily::Node),
+                "Gantt task bars must not fall back to SDF node boxes"
+            );
             assert!(axis_pass < task_pass);
             assert_eq!(
                 batches[axis_pass].instance_count as usize,
