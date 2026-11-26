@@ -24336,9 +24336,10 @@ const MAX_CONSTRAINT_DIAGNOSIS_COUNT: usize = 32;
 
 /// Diagnose mutually conflicting layout constraints using [`crate::infeasible::diagnose`] (`bd-p5qgx`).
 ///
-/// Returns `Some((report, description))` when `ir.constraints` is infeasible under the LP solver,
-/// or `None` when the constraint set is empty, feasible, exceeds the diagnosis size cap, or runs
-/// on `wasm32`.
+/// Returns `Some((report, description))` when the LP solver proves `ir.constraints` infeasible.
+/// Returns `None` when the constraint set is empty, is feasible, exceeds the diagnosis size cap, or
+/// cannot be decided because the solver stopped on its time budget or gap tolerance, and always on
+/// `wasm32`.
 #[must_use]
 pub fn diagnose_constraint_infeasibility(
     ir: &MermaidDiagramIr,
@@ -24507,6 +24508,39 @@ const fn constraint_lp_iteration_limit(node_count: usize, constraint_count: usiz
 #[cfg(not(target_arch = "wasm32"))]
 const fn constraint_solution_is_usable(status: SolutionStatus) -> bool {
     matches!(status, SolutionStatus::Optimal)
+}
+
+/// Classify a `model.solve()` that returned `Err`.
+///
+/// Only `ResolutionError::Infeasible` is a proof about the constraints. good_lp's HiGHS backend
+/// reports `UnboundedOrInfeasible` through it as well, which here means infeasible because the
+/// objective (total displacement) is bounded below. microlp reports "Time limit reached before
+/// finding a feasible solution" as `Other`, and HiGHS reports a stop without a feasible point as
+/// `Other("NoSolutionFound")`. Neither says anything about whether the constraints can hold.
+///
+/// A free function, like [`constraint_solution_is_usable`], so the mapping is testable without
+/// racing a real solver against its time limit.
+#[cfg(not(target_arch = "wasm32"))]
+fn constraint_resolution_error(error: &good_lp::ResolutionError) -> ConstraintSolveError {
+    match error {
+        good_lp::ResolutionError::Infeasible => ConstraintSolveError::Infeasible(error.to_string()),
+        other => ConstraintSolveError::Undecided(other.to_string()),
+    }
+}
+
+/// The error for a solve that returned `Ok` with `status`, or `None` when its point may be used.
+///
+/// A solve that stopped early but still returned a point found a feasible placement, so its stop
+/// is never evidence of infeasibility.
+#[cfg(not(target_arch = "wasm32"))]
+fn constraint_status_error(status: SolutionStatus) -> Option<ConstraintSolveError> {
+    if constraint_solution_is_usable(status) {
+        return None;
+    }
+    Some(ConstraintSolveError::Undecided(format!(
+        "constraint LP stopped at {status:?} rather than a proven optimum; keeping heuristic \
+         coordinates so geometry does not depend on host load"
+    )))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -24732,13 +24766,10 @@ fn solve_constraint_coordinates(
         return Ok(0);
     }
 
-    // Only `ResolutionError::Infeasible` is a proof about the constraints. HiGHS reports
-    // `UnboundedOrInfeasible` through it as well. microlp reports "time limit reached before
-    // finding a feasible solution" as `Other`, which says nothing about feasibility.
-    let solution = model.solve().map_err(|error| match error {
-        good_lp::ResolutionError::Infeasible => ConstraintSolveError::Infeasible(error.to_string()),
-        other => ConstraintSolveError::Undecided(other.to_string()),
-    })?;
+    // Only a proof of infeasibility blames the constraints; see `constraint_resolution_error`.
+    let solution = model
+        .solve()
+        .map_err(|error| constraint_resolution_error(&error))?;
     // bd-9xwk. `Ok` is NOT "solved". HiGHS answers a budget stop with `ReachedTimeLimit` (or
     // `ReachedIterationLimit`/`ReachedMemoryLimit`) and, whenever a feasible primal point exists,
     // good_lp returns it as `Ok` carrying `SolutionStatus::TimeLimit`. Writing that point out puts
@@ -24749,13 +24780,8 @@ fn solve_constraint_coordinates(
     // So the result is failed CLOSED: anything other than a proven optimum is refused here, the
     // caller takes its `layout.constraint_solver.fallback` branch, and the deterministic heuristic
     // coordinates stay. A fired valve costs the optimization; it never changes it.
-    if !constraint_solution_is_usable(solution.status()) {
-        // A feasible point exists here, so this is never evidence of infeasibility.
-        return Err(ConstraintSolveError::Undecided(format!(
-            "constraint LP stopped at {:?} rather than a proven optimum; keeping heuristic \
-             coordinates so geometry does not depend on host load",
-            solution.status()
-        )));
+    if let Some(error) = constraint_status_error(solution.status()) {
+        return Err(error);
     }
     for (index, node) in nodes.iter_mut().enumerate() {
         node.bounds.x = solution.value(x_vars[index]) as f32;
@@ -52965,6 +52991,52 @@ mod tests {
         assert!(
             !constraint_solution_is_usable(SolutionStatus::GapLimit),
             "a gap-limited solve is not a proven optimum either"
+        );
+    }
+
+    /// Only a solver's proof of infeasibility may reach the conflict diagnosis.
+    ///
+    /// The other outcomes come from real solvers only under load or near their tolerances, so no
+    /// end-to-end fixture reaches them reliably: microlp's time limit before a feasible point,
+    /// HiGHS stopping without one, and HiGHS returning a time- or gap-limited point. Calling any
+    /// of them infeasible makes `validate` tell the user to relax constraints that can all hold.
+    #[test]
+    fn only_a_proof_of_infeasibility_blames_the_constraints() {
+        use good_lp::ResolutionError;
+
+        assert!(
+            matches!(
+                super::constraint_resolution_error(&ResolutionError::Infeasible),
+                super::ConstraintSolveError::Infeasible(_)
+            ),
+            "a proof of infeasibility is the one solver error that blames the constraints"
+        );
+        for error in [
+            ResolutionError::Other("Time limit reached before finding a feasible solution"),
+            ResolutionError::Other("NoSolutionFound"),
+            ResolutionError::Unbounded,
+            ResolutionError::Str(String::from("HiGHS error while solving model")),
+        ] {
+            assert!(
+                matches!(
+                    super::constraint_resolution_error(&error),
+                    super::ConstraintSolveError::Undecided(_)
+                ),
+                "{error:?} says nothing about whether the constraints can hold"
+            );
+        }
+        for status in [SolutionStatus::TimeLimit, SolutionStatus::GapLimit] {
+            assert!(
+                matches!(
+                    super::constraint_status_error(status),
+                    Some(super::ConstraintSolveError::Undecided(_))
+                ),
+                "a {status:?} stop returned a feasible point, so it is no evidence of infeasibility"
+            );
+        }
+        assert_eq!(
+            super::constraint_status_error(SolutionStatus::Optimal),
+            None
         );
     }
 
