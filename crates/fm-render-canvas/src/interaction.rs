@@ -16,7 +16,7 @@
 //! Baking a transform in here would silently assume a viewport this module cannot see, and the
 //! regions would drift from the picture the moment the user panned or zoomed.
 
-use fm_core::MermaidDiagramIr;
+use fm_core::{IrMenuLink, MermaidDiagramIr, is_safe_link_target};
 use fm_layout::{DiagramLayout, LayoutRect};
 use std::sync::Arc;
 
@@ -54,6 +54,9 @@ pub struct HitRegion {
     pub callback: Option<String>,
     /// `click <id> "url" "tooltip"` — what a browser shows on hover.
     pub tooltip: Option<String>,
+    /// Sequence actor `link` / `links` entries, in IR order. The host presents the menu;
+    /// querying a region never follows a URL or chooses an entry on the author's behalf.
+    pub menu_links: Vec<IrMenuLink>,
 }
 
 impl HitRegion {
@@ -87,12 +90,23 @@ pub fn hit_regions(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<HitRegi
         .iter()
         .filter_map(|placed| {
             let node = ir.nodes.get(placed.node_index)?;
-            let interaction = node.interaction.as_ref()?;
+            let sanitize_mode = ir.meta.init.config.sanitize_mode;
+            let href = node
+                .href()
+                .filter(|href| is_safe_link_target(href, sanitize_mode));
+            let menu_links: Vec<_> = node
+                .menu_links
+                .iter()
+                .filter(|link| is_safe_link_target(&link.url, sanitize_mode))
+                .cloned()
+                .collect();
             // An `icon` is decoration, not an interaction: a node carrying only an icon is not
             // clickable, and reporting it would make every icon-bearing diagram look interactive.
-            if interaction.href.is_none()
-                && interaction.callback.is_none()
-                && interaction.tooltip.is_none()
+            // Menu-only actors have no interaction allocation, but still need a pointer region.
+            if href.is_none()
+                && node.callback().is_none()
+                && node.tooltip().is_none()
+                && menu_links.is_empty()
             {
                 return None;
             }
@@ -100,10 +114,11 @@ pub fn hit_regions(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<HitRegi
                 node_index: placed.node_index,
                 node_id: node.id.to_string(),
                 bounds: placed.bounds,
-                href: interaction.href.clone(),
-                link_target: interaction.link_target.clone(),
-                callback: interaction.callback.clone(),
-                tooltip: interaction.tooltip.clone(),
+                href: href.map(str::to_owned),
+                link_target: node.link_target().map(str::to_owned),
+                callback: node.callback().map(str::to_owned),
+                tooltip: node.tooltip().map(str::to_owned),
+                menu_links,
             })
         })
         .collect()
@@ -1164,6 +1179,38 @@ mod session_tests {
             assert!(session.select_at(x, y, [200.0, 120.0]));
             assert_eq!(session.selected_node_id(), Some("A"));
         }
+    }
+
+    #[test]
+    fn session_picks_sequence_actor_menus_from_the_completed_draw() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\nparticipant A as Alpha\nparticipant B as Beta\n\
+             A->>B: request\nlink A: Docs @ https://example.com/docs\n",
+        )
+        .ir;
+        let layout = Arc::new(fm_layout::layout_diagram(&ir));
+        let mut session = CanvasSession::default();
+        session.set_diagram(ir, layout, CanvasRenderConfig::default());
+        let mut context = MockCanvas2dContext::new(800.0, 400.0);
+        session.redraw(&mut context).expect("draw sequence");
+        let (x, y) = drawn_label(&context, "Alpha");
+        let hit = session
+            .hit_test_interaction(x, y, [800.0, 400.0])
+            .expect("menu-only actor is interactive");
+        assert_eq!(hit.node_id, "A");
+        assert_eq!(hit.menu_links.len(), 1);
+        assert_eq!(hit.menu_links[0].label, "Docs");
+        assert_eq!(hit.menu_links[0].url, "https://example.com/docs");
+        assert!(hit.href.is_none() && hit.callback.is_none());
+        let (bx, by) = drawn_label(&context, "Beta");
+        assert!(
+            session
+                .hit_test_interaction(bx, by, [800.0, 400.0])
+                .is_none()
+        );
+        assert!(session.hit_test_interaction(x, y, [400.0, 200.0]).is_none());
+        session.clear();
+        assert!(session.hit_test_interaction(x, y, [800.0, 400.0]).is_none());
     }
 
     #[test]

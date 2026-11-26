@@ -303,16 +303,17 @@ impl Diagram {
         Ok(self.session.cancel_selection_gesture(token))
     }
 
-    /// Inspect the topmost node's interaction metadata without following a URL or calling JS.
+    /// Return the topmost node's link, callback, tooltip and actor-menu metadata, or null.
+    /// Coordinates are backing-store pixels in the last completed draw's viewport. A resize
+    /// invalidates the result until redraw. This only queries metadata; the host owns activation.
     #[wasm_bindgen(js_name = hitTestInteraction)]
     pub fn hit_test_interaction(&mut self, x: f64, y: f64) -> Result<JsValue, JsValue> {
         self.ensure_alive()?;
         let size = self.sync_canvas_size();
-        let region = self
-            .session
-            .hit_test_interaction(x, y, size)
-            .map(WasmHitRegion::from);
-        to_js_value(&region)
+        self.session.hit_test_interaction(x, y, size).map_or_else(
+            || Ok(JsValue::NULL),
+            |hit| to_js_value(&WasmHitRegion::from(hit)),
+        )
     }
 }
 

@@ -2103,6 +2103,8 @@ pub struct WasmHitRegion {
     callback: Option<String>,
     /// The hover text.
     tooltip: Option<String>,
+    /// Ordered actor-menu entries from sequence `link` / `links` directives.
+    menu_links: Vec<fm_core::IrMenuLink>,
 }
 
 impl From<&fm_render_canvas::HitRegion> for WasmHitRegion {
@@ -2119,6 +2121,7 @@ impl From<&fm_render_canvas::HitRegion> for WasmHitRegion {
             link_target: region.link_target.clone(),
             callback: region.callback.clone(),
             tooltip: region.tooltip.clone(),
+            menu_links: region.menu_links.clone(),
         }
     }
 }
@@ -3024,6 +3027,10 @@ impl Diagram {
     }
 
     pub fn hit_test_node(&self, _x: f64, _y: f64) -> Result<Option<String>, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn hit_test_interaction(&self, _x: f64, _y: f64) -> Result<JsValue, JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 
@@ -5535,6 +5542,34 @@ mod tests {
             placed.bounds.width > 0.0 && placed.bounds.height > 0.0,
             "CONTROL FAILED: A has a degenerate box, so matching it proves nothing"
         );
+    }
+
+    #[test]
+    fn wasm_hit_regions_serialize_sequence_actor_menus() {
+        let _serial = config_guard();
+        let geometry = build_diagram_geometry(
+            "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: request\n\
+             link A: Documentation @ https://example.com/docs\n\
+             links A: {\"Status\": \"https://example.com/status\"}\n",
+            None,
+        )
+        .expect("sequence geometry");
+        let regions = fm_render_canvas::hit_regions(&geometry.ir, &geometry.layout);
+        assert_eq!(regions.len(), 1);
+        let hit = WasmHitRegion::from(&regions[0]);
+        let json = serde_json::to_value(&hit).expect("browser metadata serializes");
+        assert_eq!(json["nodeId"], "A");
+        assert_eq!(
+            json["menuLinks"],
+            serde_json::json!([
+                {"label": "Documentation", "url": "https://example.com/docs"},
+                {"label": "Status", "url": "https://example.com/status"}
+            ])
+        );
+        assert!(json.get("menu_links").is_none());
+        assert!(json["href"].is_null() && json["callback"].is_null());
+        // The public metadata is sufficient to choose a menu entry without reparsing source.
+        assert!(fm_render_svg::render_svg(&geometry.ir).contains("data-menu-links="));
     }
 
     /// The WASM WebGPU entrypoint must prepare primitives from the same corpus source that SVG

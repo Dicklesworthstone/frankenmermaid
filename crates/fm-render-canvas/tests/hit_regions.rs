@@ -206,6 +206,75 @@ fn a_diagram_without_click_exports_no_regions() {
     );
 }
 
+#[test]
+fn sequence_actor_menus_reach_raster_regions_without_a_click_directive() {
+    let (ir, layout) = plan(
+        "sequenceDiagram\nparticipant A as Alpha\nparticipant B as Beta\n\
+         A->>B: request\nlink A: Docs @ https://example.com/docs\n\
+         links A: {\"Status\": \"https://example.com/status\"}\n",
+    );
+    assert!(ir.nodes[0].interaction.is_none());
+    assert_eq!(ir.nodes[0].menu_links.len(), 2);
+    let svg = fm_render_svg::render_svg(&ir);
+    assert!(svg.contains("data-menu-links="));
+    let regions = hit_regions(&ir, &layout);
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].node_id, "A");
+    assert_eq!(regions[0].menu_links, ir.nodes[0].menu_links);
+    assert!(regions[0].href.is_none());
+    assert!(regions[0].callback.is_none());
+    assert!(regions[0].tooltip.is_none());
+
+    let mut context = fm_render_canvas::MockCanvas2dContext::new(800.0, 400.0);
+    let result = fm_render_canvas::render_to_canvas_with_layout(
+        &ir,
+        &layout,
+        &mut context,
+        &fm_render_canvas::CanvasRenderConfig::default(),
+    );
+    assert_eq!(result.nodes_drawn, 2);
+    assert_eq!(result.hit_regions, regions);
+}
+
+#[test]
+fn raster_links_apply_the_same_sanitization_to_programmatic_ir_as_svg() {
+    use fm_core::{IrMenuLink, MermaidSanitizeMode};
+    let (mut ir, layout) = plan("flowchart LR\nA-->B\nB-->C");
+    ir.nodes[0].menu_links = vec![
+        IrMenuLink {
+            label: "Docs".into(),
+            url: "https://example.com/docs".into(),
+        },
+        IrMenuLink {
+            label: "Unsafe".into(),
+            url: "javascript:alert(1)".into(),
+        },
+    ];
+    ir.nodes[0].interaction_mut().href = Some("javascript:alert(2)".into());
+    ir.nodes[0].interaction_mut().tooltip = Some("Keep this tooltip".into());
+    ir.nodes[1].menu_links = vec![IrMenuLink {
+        label: "Unsafe only".into(),
+        url: "%6aavascript:alert(3)".into(),
+    }];
+    ir.nodes[2].interaction_mut().href = Some("javascript:alert(4)".into());
+
+    ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Strict;
+    let regions = hit_regions(&ir, &layout);
+    assert_eq!(regions.len(), 1, "unsafe-only nodes are not actionable");
+    assert!(regions[0].href.is_none());
+    assert_eq!(regions[0].menu_links, ir.nodes[0].menu_links[..1]);
+    assert_eq!(regions[0].tooltip.as_deref(), Some("Keep this tooltip"));
+    let svg = fm_render_svg::render_svg(&ir);
+    assert!(svg.contains("https://example.com/docs"));
+    assert!(!svg.contains("javascript:") && !svg.contains("Unsafe"));
+
+    ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Lenient;
+    let regions = hit_regions(&ir, &layout);
+    assert_eq!(regions.len(), 3);
+    assert_eq!(regions[0].menu_links, ir.nodes[0].menu_links);
+    assert_eq!(regions[0].href.as_deref(), Some("javascript:alert(2)"));
+}
+
 /// The region must land where the renderer draws the node, or the host's pointer maths is right and
 /// the answer is still wrong.
 #[test]

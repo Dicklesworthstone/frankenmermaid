@@ -603,6 +603,20 @@ diagram.on('rendered', () => console.log('done'));
 diagram.destroy();
 ```
 
+### Canvas and WebGPU interactions
+
+`hitRegions(source, config)` returns each interactive node's layout bounds, `href`, `linkTarget`,
+`callback`, `tooltip`, and `menuLinks` (an array of `{ label, url }` entries). Sequence actor
+`link` and `links` directives work without a separate `click` declaration. URLs use the same
+sanitization policy as SVG, including when a Rust caller constructs the IR directly.
+
+For an existing Canvas2D `Diagram`, call `diagram.hitTestInteraction(x, y)` with backing-store
+pixel coordinates. It returns the topmost node's metadata or `null`, using the viewport of the
+last completed draw without parsing or laying out the source again. Resizing invalidates the
+query until redraw, and an ordinary node covering a link blocks clicks through it. The host
+displays menus and tooltips and handles activation; querying metadata never follows a link or
+invokes a callback.
+
 ### SVG labels and detail levels
 
 Browser SVG rendering preserves complete node labels, edge labels, and subgraph titles by
