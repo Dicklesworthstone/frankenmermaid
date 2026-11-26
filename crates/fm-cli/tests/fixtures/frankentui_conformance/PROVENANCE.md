@@ -14,8 +14,8 @@ Fixtures in this directory are **hand-crafted** Mermaid diagram files that repre
    - Syntax follows official Mermaid documentation
 
 2. **Expected Value Extraction:**
-   - Run `cargo run -p fm-cli -- parse <fixture.mmd>` to get IR statistics
-   - Run `cargo run -p fm-cli -- render <fixture.mmd>` to get SVG output
+   - Run `cargo run -p frankenmermaid-cli -- parse <fixture.mmd>` to get IR statistics
+   - Run `cargo run -p frankenmermaid-cli -- render <fixture.mmd>` to get SVG output
    - Extract node/edge/cluster counts from parse output
    - Identify key strings that should appear in rendered SVG
 
@@ -60,7 +60,7 @@ For fixtures that need validation against mermaid-js:
 
 ```bash
 # 1. Render with frankenmermaid
-cargo run -p fm-cli -- render fixture.mmd > fm_output.svg
+cargo run -p frankenmermaid-cli -- render fixture.mmd > fm_output.svg
 
 # 2. Render with mermaid-js (requires Node.js + @mermaid-js/mermaid-cli)
 npx mmdc -i fixture.mmd -o mermaid_output.svg
@@ -73,27 +73,27 @@ diff -u fm_output.svg mermaid_output.svg
 
 ```bash
 # Run all conformance tests
-cargo test -p fm-cli --test frankentui_conformance_test
+cargo test -p frankenmermaid-cli --test frankentui_conformance_test
 
 # Run with verbose output
-cargo test -p fm-cli --test frankentui_conformance_test -- --nocapture
+cargo test -p frankenmermaid-cli --test frankentui_conformance_test -- --nocapture
 ```
 
 ## Updating Expected Values
 
 When parser/render behavior changes intentionally:
 
-1. Run `cargo run -p fm-cli -- parse <fixture.mmd>` for new counts
-2. Run `cargo run -p fm-cli -- render <fixture.mmd>` and check SVG
+1. Run `cargo run -p frankenmermaid-cli -- parse <fixture.mmd>` for new counts
+2. Run `cargo run -p frankenmermaid-cli -- render <fixture.mmd>` and check SVG
 3. Update `frankentui_conformance_cases.json` with new expectations
-4. Verify tests pass: `cargo test -p fm-cli --test frankentui_conformance_test`
+4. Verify tests pass: `cargo test -p frankenmermaid-cli --test frankentui_conformance_test`
 5. Document changes in git commit message
 
 ## Environment
 
 - **Rust version:** nightly (see `rust-toolchain.toml`)
 - **frankenmermaid version:** workspace version from `Cargo.toml`
-- **Generator command:** `cargo run -p fm-cli -- parse/render`
+- **Generator command:** `cargo run -p frankenmermaid-cli -- parse/render`
 
 ## Last Updated
 

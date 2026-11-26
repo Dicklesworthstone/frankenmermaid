@@ -201,7 +201,7 @@ sed -i 's/--fnx-mode enabled/--fnx-mode disabled/g' scripts/*.sh
 
 ```bash
 # Rebuild without FNX feature
-cargo build --release -p fm-cli
+cargo build --release -p frankenmermaid-cli
 # (no --features fnx-integration)
 ```
 

@@ -1,6 +1,6 @@
 //! Performance benchmarks for the `FrankenMermaid` pipeline (bd-2xl.4).
 //!
-//! Run with: `cargo bench -p fm-cli`
+//! Run with: `cargo bench -p frankenmermaid-cli`
 //!
 //! Budget targets:
 //! - Parse: <1ms small, <10ms medium, <100ms large

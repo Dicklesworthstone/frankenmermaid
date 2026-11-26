@@ -1300,8 +1300,8 @@ Radial   → Tree → Sugiyama
 The integration is gated by two feature flags:
 
 ```bash
-cargo build -p fm-cli --features fnx-integration              # Phase 1 (undirected)
-cargo build -p fm-cli --features fnx-experimental-directed    # Phase 1 + Phase 2 (directed)
+cargo build -p frankenmermaid-cli --features fnx-integration              # Phase 1 (undirected)
+cargo build -p frankenmermaid-cli --features fnx-experimental-directed    # Phase 1 + Phase 2 (directed)
 ```
 
 Default builds remain FNX-free.

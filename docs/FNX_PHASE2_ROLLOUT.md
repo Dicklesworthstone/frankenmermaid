@@ -159,7 +159,7 @@ The rollout gate test suite runs on every PR:
 ```yaml
 - name: FNX Phase-2 Rollout Gate
   run: |
-    cargo test -p fm-cli --test fnx_directed_rollout_gate -- --nocapture
+    cargo test -p frankenmermaid-cli --test fnx_directed_rollout_gate -- --nocapture
 ```
 
 All gate tests must pass before merging any layout-related changes.

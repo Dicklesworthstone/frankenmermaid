@@ -123,8 +123,8 @@ This document tracks FrankenTUI/mermaid-js conformance test coverage for the fra
 ## How to Add Tests
 
 1. Create a `.mmd` fixture in `fixtures/frankentui_conformance/`
-2. Run `cargo run -p fm-cli -- parse <fixture>` to get expected counts
-3. Run `cargo run -p fm-cli -- render <fixture>` to verify SVG contains expected text
+2. Run `cargo run -p frankenmermaid-cli -- parse <fixture>` to get expected counts
+3. Run `cargo run -p frankenmermaid-cli -- render <fixture>` to verify SVG contains expected text
 4. Add entry to `frankentui_conformance_cases.json` with:
    - `id`: unique test identifier
    - `description`: what feature is being tested

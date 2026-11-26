@@ -23,7 +23,7 @@ if [[ -n "${FM_CLI:-}" ]]; then
 elif command -v fm-cli &> /dev/null; then
     CLI_CMD="fm-cli"
 else
-    CLI_CMD="cargo run --features fnx-integration -p fm-cli --"
+    CLI_CMD="cargo run --features fnx-integration -p frankenmermaid-cli --"
 fi
 
 PASSED=0
