@@ -18,7 +18,7 @@
 
 use fm_core::{IrMenuLink, MermaidDiagramIr, is_safe_link_target};
 use fm_layout::{DiagramLayout, LayoutRect};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::selection::{
     NodeSelectionSet, SelectionContainment, SelectionGesture, SelectionMode, SelectionRegion,
@@ -432,6 +432,52 @@ struct CanvasFrame {
     ir: MermaidDiagramIr,
     layout: Arc<DiagramLayout>,
     config: crate::CanvasRenderConfig,
+    /// Cached in layout coordinates so resizing the canvas only changes the pointer transform.
+    /// Sessions that only pick nodes never build this map.
+    edge_segments: OnceLock<Vec<(usize, fm_core::cga::CgaLineSegment)>>,
+}
+
+impl CanvasFrame {
+    fn edge_segments(&self) -> &[(usize, fm_core::cga::CgaLineSegment)] {
+        use fm_core::cga::{CgaLineSegment, CgaPoint};
+        use fm_layout::edge_paths::{emit_diagram_edge_path, flatten_connector_command};
+
+        self.edge_segments.get_or_init(|| {
+            let ir = &self.ir;
+            let mut config = self.config.clone();
+            config.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
+            let mut segments = Vec::new();
+            // XY series have a dedicated paint pass. Their line/area connections come directly
+            // from layout, independently of graph linkStyle and directed arrow conventions.
+            let xy = ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some();
+            for edge in self.layout.edges.iter().filter(|edge| !edge.bundled) {
+                let index = edge.edge_index;
+                if !xy
+                    && (ir.edges.get(index).is_some_and(|edge| edge.arrow == fm_core::ArrowType::Invisible)
+                        || !crate::renderer::edge_stroke_visible(ir, index, &config)
+                        || crate::renderer::resolve_edge_opacity(ir, index) == Some(0.0)
+                        || crate::renderer::resolve_edge_stroke_opacity(ir, index) == Some(0.0))
+                {
+                    continue;
+                }
+                let mut current = None;
+                emit_diagram_edge_path(ir, index, &edge.points, |cmd| {
+                    flatten_connector_command(cmd, &mut current, &mut |a, b| {
+                        if [a.x, a.y, b.x, b.y].into_iter().all(f32::is_finite) && a != b {
+                            segments.push((
+                                index,
+                                CgaLineSegment::new(
+                                    CgaPoint::new(f64::from(a.x), f64::from(a.y)),
+                                    CgaPoint::new(f64::from(b.x), f64::from(b.y)),
+                                ),
+                            ));
+                        }
+                    });
+                });
+            }
+            segments
+        })
+    }
 }
 
 impl CanvasSession {
@@ -456,7 +502,12 @@ impl CanvasSession {
         self.selection_set.reconcile(&ir, &layout);
         self.selection.reconcile(&ir, &layout);
         self.reconcile_primary(None);
-        self.frame = Some(CanvasFrame { ir, layout, config });
+        self.frame = Some(CanvasFrame {
+            ir,
+            layout,
+            config,
+            edge_segments: OnceLock::new(),
+        });
     }
 
     /// Change raster styling or fit/padding without copying or recomputing the retained geometry.
@@ -469,6 +520,7 @@ impl CanvasSession {
         self.invalidate();
         if let Some(frame) = &mut self.frame {
             frame.config = config;
+            frame.edge_segments = OnceLock::new();
         }
     }
 
@@ -551,8 +603,8 @@ impl CanvasSession {
             .find(|region| region.node_index == node.node_index && region.bounds == node.bounds)
     }
 
-    /// Nearest rendered edge polyline within a tolerance measured in CANVAS pixels.
-    /// Bundled-away paths and non-finite segments are excluded. Equal-distance ties use edge ID.
+    /// Nearest connector centerline within a tolerance measured in canvas pixels. Curves
+    /// use the same flattened path as GPU rendering. Equal-distance ties use the edge index.
     #[must_use]
     pub fn hit_test_edge(
         &self,
@@ -561,7 +613,7 @@ impl CanvasSession {
         max_distance: f64,
         canvas_size: [f64; 2],
     ) -> Option<usize> {
-        use fm_core::cga::{CgaLineSegment, CgaPoint};
+        use fm_core::cga::CgaPoint;
 
         if !max_distance.is_finite() || max_distance < 0.0 {
             return None;
@@ -574,32 +626,15 @@ impl CanvasSession {
         let point = CgaPoint::new(x, y);
         let frame = self.frame.as_ref()?;
         let mut closest: Option<(usize, f64)> = None;
-        for edge in &frame.layout.edges {
-            if edge.bundled {
-                continue;
-            }
-            for points in edge.points.windows(2) {
-                let start = points[0];
-                let end = points[1];
-                if ![start.x, start.y, end.x, end.y]
-                    .iter()
-                    .all(|value| value.is_finite())
-                {
-                    continue;
-                }
-                let distance = CgaLineSegment::new(
-                    CgaPoint::new(f64::from(start.x), f64::from(start.y)),
-                    CgaPoint::new(f64::from(end.x), f64::from(end.y)),
-                )
-                .distance_to_point(&point);
-                if distance.is_finite()
-                    && distance <= tolerance
-                    && closest.is_none_or(|(index, best)| {
-                        distance < best || (distance == best && edge.edge_index < index)
-                    })
-                {
-                    closest = Some((edge.edge_index, distance));
-                }
+        for &(index, segment) in frame.edge_segments() {
+            let distance = segment.distance_to_point(&point);
+            if distance.is_finite()
+                && distance <= tolerance
+                && closest.is_none_or(|(other, best)| {
+                    distance < best || (distance == best && index < other)
+                })
+            {
+                closest = Some((index, distance));
             }
         }
         closest.map(|(index, _)| index)
@@ -1260,6 +1295,51 @@ mod session_tests {
                 session.hit_test_edge(90.0, 32.5, tolerance, [200.0, 120.0]),
                 None
             );
+        }
+    }
+
+    #[test]
+    fn session_picks_the_cubic_sankey_ribbon_instead_of_its_control_polygon() {
+        let ir = fm_parser::parse("sankey-beta\nSource,Target,5\n").ir;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        layout.edges[0].points = [
+            LayoutPoint { x: 20.0, y: 20.0 },
+            LayoutPoint { x: 65.0, y: 20.0 },
+            LayoutPoint { x: 75.0, y: 120.0 },
+            LayoutPoint { x: 120.0, y: 120.0 },
+        ].into_iter().collect();
+        layout.bounds = LayoutRect {
+            x: 0.0, y: 0.0, width: 160.0, height: 160.0,
+        };
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut session = CanvasSession::default();
+        session.set_diagram(ir, Arc::new(layout), config);
+        session.redraw(&mut MockCanvas2dContext::new(160.0, 160.0)).unwrap();
+        // Bézier evaluation at t = 1/4, and an interior control point that is never painted.
+        assert_eq!(session.hit_test_edge(48.28125, 35.625, 0.1, [160.0, 160.0]), Some(0));
+        assert_eq!(session.hit_test_edge(65.0, 20.0, 0.1, [160.0, 160.0]), None);
+    }
+
+    #[test]
+    fn invisible_connectors_and_suppressed_strokes_have_no_pickable_centerline() {
+        for source in [
+            "flowchart LR\nA ~~~ B",
+            "flowchart LR\nA --> B\nlinkStyle 0 stroke:none",
+            "flowchart LR\nA --> B\nlinkStyle 0 stroke-width:0px",
+            "flowchart LR\nA --> B\nlinkStyle 0 stroke-opacity:0",
+            "flowchart LR\nA --> B\nlinkStyle 0 opacity:0",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            assert_eq!(layout.edges.len(), 1);
+            let mut session = CanvasSession::default();
+            session.set_diagram(ir, Arc::new(layout), CanvasRenderConfig::default());
+            session.redraw(&mut MockCanvas2dContext::new(400.0, 200.0)).unwrap();
+            assert_eq!(session.hit_test_edge(200.0, 100.0, 1000.0, [400.0, 200.0]), None, "{source}");
         }
     }
 
