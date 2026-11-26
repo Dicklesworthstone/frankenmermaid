@@ -159,6 +159,14 @@ impl<'a> EdgeLabelPlacer<'a> {
     /// Find a clear center for a measured backing plate and reserve it for subsequent labels.
     /// The returned plate can extend outside the original layout; include it in render bounds.
     pub fn place(&mut self, path: &LayoutEdgePath, width: f32, height: f32) -> LayoutPoint {
+        let route = self.prepare(path);
+        self.place_prepared(&route, width, height)
+    }
+
+    /// Everything about placing a label on `path` that depends on neither the plate size nor
+    /// the plates already placed: the painted route and the obstacles other connectors form
+    /// around it. A caller placing several plate sizes on one layout can prepare it once.
+    fn prepare(&self, path: &LayoutEdgePath) -> PreparedRoute {
         let rendered = rendered_edge_route(self.ir, path);
         let path = &rendered;
         let mut foreign_routes = Vec::new();
@@ -204,6 +212,22 @@ impl<'a> EdgeLabelPlacer<'a> {
             ignored_nodes.sort_unstable();
             ignored_nodes.dedup();
         }
+        PreparedRoute {
+            rendered,
+            foreign_routes,
+            shared_corridors,
+            ignored_nodes,
+        }
+    }
+
+    /// [`Self::place`] for a route from [`Self::prepare`] on this placer's layout.
+    fn place_prepared(&mut self, route: &PreparedRoute, width: f32, height: f32) -> LayoutPoint {
+        let PreparedRoute {
+            rendered: path,
+            foreign_routes,
+            shared_corridors,
+            ignored_nodes,
+        } = route;
         let mut obstacles: Vec<_> = self
             .layout
             .nodes
@@ -225,9 +249,9 @@ impl<'a> EdgeLabelPlacer<'a> {
         // clear part belonging only to this connector, including a plate touching its side.
         // Fully coincident routes have no such slot; skip the additional interval searches.
         let distinct_center = if !shared_corridors.is_empty()
-            && route_may_have_distinct_span(path, &shared_corridors)
+            && route_may_have_distinct_span(path, shared_corridors)
         {
-            let distinct_anchor = distinct_branch_anchor(path, anchor, &shared_corridors);
+            let distinct_anchor = distinct_branch_anchor(path, anchor, shared_corridors);
             let ordinary_obstacles = obstacles.len();
             obstacles.extend(
                 shared_corridors
@@ -273,8 +297,8 @@ impl<'a> EdgeLabelPlacer<'a> {
                     self.layout,
                     self.padding,
                     &self.plates,
-                    &foreign_routes,
-                    &ignored_nodes,
+                    foreign_routes,
+                    ignored_nodes,
                 )
             });
         self.plates.push(LayoutRect {
@@ -284,6 +308,11 @@ impl<'a> EdgeLabelPlacer<'a> {
             height,
         });
         center
+    }
+
+    /// Forget every reserved plate, as if this placer had just been built for its layout.
+    fn clear_plates(&mut self) {
+        self.plates.clear();
     }
 
     /// Replace the latest reservation after a raster surface snaps it to its actual cells.
@@ -314,6 +343,18 @@ impl<'a> EdgeLabelPlacer<'a> {
                 }
             })
     }
+}
+
+/// The plate-independent part of one label placement; see [`EdgeLabelPlacer::prepare`].
+struct PreparedRoute {
+    /// The painted connector the plate attaches to.
+    rendered: LayoutEdgePath,
+    /// Other connectors' visible spans, marker envelopes and cluster captions.
+    foreign_routes: Vec<EdgeLabelObstacle>,
+    /// Other connectors sharing part of this one's corridor, with their stroke tolerance.
+    shared_corridors: Vec<(LayoutPoint, LayoutPoint, f32)>,
+    /// Containers of the endpoints, whose interiors this label may use.
+    ignored_nodes: Vec<usize>,
 }
 
 /// Routing waypoints are not the painted connector: a smoothed bend can depart from its
@@ -728,52 +769,83 @@ fn closest_clear_route_neighborhood(
     let anchor = edge_label_position(path);
     let mut best = anchor;
     let mut best_score = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
-    for origin in std::iter::once(anchor)
+    let queries: Vec<LayoutPoint> = std::iter::once(anchor)
         .chain(path.points.iter().copied())
         .chain(path.points.windows(2).map(|p| LayoutPoint {
             x: f32::midpoint(p[0].x, p[1].x),
             y: f32::midpoint(p[0].y, p[1].y),
         }))
-    {
-        for (dx, dy) in [
-            (0.0, 0.0),
-            (width / 2.0, 0.0),
-            (-width / 2.0, 0.0),
-            (0.0, height / 2.0),
-            (0.0, -height / 2.0),
-        ] {
-            let center = clear_edge_label_position_ignoring_nodes(
-                LayoutPoint {
-                    x: origin.x + dx,
-                    y: origin.y + dy,
-                },
-                width,
-                height,
-                layout,
-                padding,
-                plates,
-                routes,
-                ignored_nodes,
-            );
-            let plate = LayoutRect {
-                x: center.x - width / 2.0,
-                y: center.y - height / 2.0,
-                width,
-                height,
-            };
-            let area = ((layout.bounds.x + layout.bounds.width).max(plate.x + width)
-                - layout.bounds.x.min(plate.x))
-                * ((layout.bounds.y + layout.bounds.height).max(plate.y + height)
-                    - layout.bounds.y.min(plate.y));
-            let score = (
-                edge_label_route_distance_squared(path, plate),
-                area,
-                (center.x - anchor.x).powi(2) + (center.y - anchor.y).powi(2),
-            );
-            if score < best_score {
-                best = center;
-                best_score = score;
-            }
+        .flat_map(|origin| {
+            [
+                (0.0, 0.0),
+                (width / 2.0, 0.0),
+                (-width / 2.0, 0.0),
+                (0.0, height / 2.0),
+                (0.0, -height / 2.0),
+            ]
+            .map(|(dx, dy)| LayoutPoint {
+                x: origin.x + dx,
+                y: origin.y + dy,
+            })
+        })
+        .collect();
+    // Every query shares one plate and one obstacle set: index the obstacles once.
+    let mut index = (!clear_position_index_disabled())
+        .then(|| {
+            let frame = ClearPlateFrame::new(layout.bounds, padding, width, height);
+            let projected: Vec<_> = queries.iter().map(|&query| frame.project(query)).collect();
+            let obstacles = layout
+                .nodes
+                .iter()
+                .filter(|node| !ignored_nodes.contains(&node.node_index))
+                .map(|node| EdgeLabelObstacle::Bounds(node.bounds))
+                .chain(
+                    layout
+                        .extensions
+                        .state_notes
+                        .iter()
+                        .map(|note| EdgeLabelObstacle::Bounds(note.bounds)),
+                )
+                .chain(plates.iter().copied().map(EdgeLabelObstacle::Bounds))
+                .chain(routes.iter().copied())
+                .collect();
+            ClearPositionIndex::new(frame, obstacles, &projected)
+        })
+        .flatten();
+    for query in queries {
+        let center = index.as_mut().map_or_else(
+            || {
+                clear_edge_label_position_ignoring_nodes(
+                    query,
+                    width,
+                    height,
+                    layout,
+                    padding,
+                    plates,
+                    routes,
+                    ignored_nodes,
+                )
+            },
+            |index| index.clear_position(query),
+        );
+        let plate = LayoutRect {
+            x: center.x - width / 2.0,
+            y: center.y - height / 2.0,
+            width,
+            height,
+        };
+        let area = ((layout.bounds.x + layout.bounds.width).max(plate.x + width)
+            - layout.bounds.x.min(plate.x))
+            * ((layout.bounds.y + layout.bounds.height).max(plate.y + height)
+                - layout.bounds.y.min(plate.y));
+        let score = (
+            edge_label_route_distance_squared(path, plate),
+            area,
+            (center.x - anchor.x).powi(2) + (center.y - anchor.y).powi(2),
+        );
+        if score < best_score {
+            best = center;
+            best_score = score;
         }
     }
     best
@@ -906,30 +978,58 @@ impl EdgeLabelObstacle {
         clearance_x: f32,
         clearance_y: f32,
     ) -> (EdgeLabelInterval, EdgeLabelInterval) {
+        (
+            self.x_exclusion(anchor.y, clearance_x, clearance_y),
+            self.y_exclusion(anchor.x, clearance_x, clearance_y),
+        )
+    }
+
+    /// The x interval a plate centred at height `y` must avoid. It depends on `y` alone.
+    fn x_exclusion(self, y: f32, clearance_x: f32, clearance_y: f32) -> EdgeLabelInterval {
+        count_obstacle_evaluation();
         match self {
             Self::Bounds(bounds) => {
-                let x = (
-                    bounds.x - clearance_x,
-                    bounds.x + bounds.width + clearance_x,
-                );
-                let y = (
+                let band = (
                     bounds.y - clearance_y,
                     bounds.y + bounds.height + clearance_y,
                 );
-                (
-                    (y.0 < anchor.y && anchor.y < y.1).then_some(x),
-                    (x.0 < anchor.x && anchor.x < x.1).then_some(y),
-                )
+                (band.0 < y && y < band.1).then_some((
+                    bounds.x - clearance_x,
+                    bounds.x + bounds.width + clearance_x,
+                ))
             }
-            Self::Segment(from, to) => {
-                // Includes the stroke and the rounded elbow's <=1.5px route departure.
-                let x = clearance_x + 3.0;
-                let y = clearance_y + 3.0;
-                (
-                    edge_label_segment_interval((from.x, from.y), (to.x, to.y), anchor.y, y, x),
-                    edge_label_segment_interval((from.y, from.x), (to.y, to.x), anchor.x, x, y),
-                )
+            // Includes the stroke and the rounded elbow's <=1.5px route departure.
+            Self::Segment(from, to) => edge_label_segment_interval(
+                (from.x, from.y),
+                (to.x, to.y),
+                y,
+                clearance_y + 3.0,
+                clearance_x + 3.0,
+            ),
+        }
+    }
+
+    /// The y interval a plate centred at `x` must avoid. It depends on `x` alone.
+    fn y_exclusion(self, x: f32, clearance_x: f32, clearance_y: f32) -> EdgeLabelInterval {
+        count_obstacle_evaluation();
+        match self {
+            Self::Bounds(bounds) => {
+                let band = (
+                    bounds.x - clearance_x,
+                    bounds.x + bounds.width + clearance_x,
+                );
+                (band.0 < x && x < band.1).then_some((
+                    bounds.y - clearance_y,
+                    bounds.y + bounds.height + clearance_y,
+                ))
             }
+            Self::Segment(from, to) => edge_label_segment_interval(
+                (from.y, from.x),
+                (to.y, to.x),
+                x,
+                clearance_x + 3.0,
+                clearance_y + 3.0,
+            ),
         }
     }
 }
@@ -1224,26 +1324,8 @@ fn clear_edge_label_position_ignoring_nodes(
     foreign_routes: &[EdgeLabelObstacle],
     ignored_nodes: &[usize],
 ) -> LayoutPoint {
-    let half_width = width / 2.0;
-    let half_height = height / 2.0;
-    let min_x = layout.bounds.x - padding + half_width + 2.0;
-    let max_x = layout.bounds.x + layout.bounds.width + padding - half_width - 2.0;
-    let min_y = layout.bounds.y - padding + half_height + 2.0;
-    let max_y = layout.bounds.y + layout.bounds.height + padding - half_height - 2.0;
-    let routed_anchor = anchor;
-    let project = |value: f32, low: f32, high: f32| {
-        if low <= high {
-            value.clamp(low, high)
-        } else {
-            (low + high) / 2.0
-        }
-    };
-    let anchor = LayoutPoint {
-        x: project(anchor.x, min_x, max_x),
-        y: project(anchor.y, min_y, max_y),
-    };
-    let clearance_x = half_width + 2.0;
-    let clearance_y = half_height + 2.0;
+    let frame = ClearPlateFrame::new(layout.bounds, padding, width, height);
+    let projected = frame.project(anchor);
     let obstacles = || {
         layout
             .nodes
@@ -1260,48 +1342,429 @@ fn clear_edge_label_position_ignoring_nodes(
             .chain(placed_labels.iter().copied().map(EdgeLabelObstacle::Bounds))
             .chain(foreign_routes.iter().copied())
     };
-    if !obstacles().any(|obstacle| {
-        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
-        x.is_some_and(|(lo, hi)| lo < anchor.x && anchor.x < hi)
-            && y.is_some_and(|(lo, hi)| lo < anchor.y && anchor.y < hi)
-    }) {
-        return anchor;
+    if !obstacles().any(|obstacle| frame.blocks(obstacle, projected)) {
+        return projected;
     }
     let mut x_intervals = Vec::new();
     let mut y_intervals = Vec::new();
     for obstacle in obstacles() {
-        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
+        let (x, y) = obstacle.exclusion_intervals(projected, frame.clearance_x, frame.clearance_y);
         x_intervals.extend(x);
         y_intervals.extend(y);
     }
-    let (left, right) = edge_label_exclusion_interval(x_intervals, anchor.x);
-    let (top, bottom) = edge_label_exclusion_interval(y_intervals, anchor.y);
-    let mut closest_inside = None;
-    let mut inside_distance = f32::INFINITY;
-    let mut closest = anchor;
-    let mut distance = f32::INFINITY;
-    for (x, y) in [
-        (anchor.x, bottom),
-        (anchor.x, top),
-        (right, anchor.y),
-        (left, anchor.y),
-    ] {
-        let candidate_distance = (x - routed_anchor.x).abs() + (y - routed_anchor.y).abs();
-        if candidate_distance < distance {
-            closest = LayoutPoint { x, y };
-            distance = candidate_distance;
-        }
-        if x >= min_x
-            && x <= max_x
-            && y >= min_y
-            && y <= max_y
-            && candidate_distance < inside_distance
-        {
-            closest_inside = Some(LayoutPoint { x, y });
-            inside_distance = candidate_distance;
+    frame.nearest_clear_candidate(
+        anchor,
+        projected,
+        edge_label_exclusion_interval(x_intervals, projected.x),
+        edge_label_exclusion_interval(y_intervals, projected.y),
+    )
+}
+
+/// The plate-size constants of one clear-position query: the frame a plate centre may occupy
+/// and the clearance every obstacle projects around it. A neighborhood search asks many
+/// queries for one plate, so they are computed once.
+#[derive(Clone, Copy)]
+struct ClearPlateFrame {
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    clearance_x: f32,
+    clearance_y: f32,
+}
+
+impl ClearPlateFrame {
+    fn new(bounds: LayoutRect, padding: f32, width: f32, height: f32) -> Self {
+        let half_width = width / 2.0;
+        let half_height = height / 2.0;
+        Self {
+            min_x: bounds.x - padding + half_width + 2.0,
+            max_x: bounds.x + bounds.width + padding - half_width - 2.0,
+            min_y: bounds.y - padding + half_height + 2.0,
+            max_y: bounds.y + bounds.height + padding - half_height - 2.0,
+            clearance_x: half_width + 2.0,
+            clearance_y: half_height + 2.0,
         }
     }
-    closest_inside.unwrap_or(closest)
+
+    /// The query anchor moved inside the frame, or to its middle when the plate is wider.
+    fn project(self, anchor: LayoutPoint) -> LayoutPoint {
+        let project = |value: f32, low: f32, high: f32| {
+            if low <= high {
+                value.clamp(low, high)
+            } else {
+                (low + high) / 2.0
+            }
+        };
+        LayoutPoint {
+            x: project(anchor.x, self.min_x, self.max_x),
+            y: project(anchor.y, self.min_y, self.max_y),
+        }
+    }
+
+    /// Whether `obstacle` covers a plate centred on the projected anchor.
+    fn blocks(self, obstacle: EdgeLabelObstacle, projected: LayoutPoint) -> bool {
+        let (x, y) = obstacle.exclusion_intervals(projected, self.clearance_x, self.clearance_y);
+        x.is_some_and(|(lo, hi)| lo < projected.x && projected.x < hi)
+            && y.is_some_and(|(lo, hi)| lo < projected.y && projected.y < hi)
+    }
+
+    /// Prefer the nearest clear axis-aligned candidate within the frame, or the nearest one
+    /// outside it when none fits: the ends of the merged exclusions around the projected anchor
+    /// along x (`left`, `right`) and along y (`top`, `bottom`). Distances are measured from the
+    /// unprojected `anchor`.
+    fn nearest_clear_candidate(
+        self,
+        anchor: LayoutPoint,
+        projected: LayoutPoint,
+        (left, right): (f32, f32),
+        (top, bottom): (f32, f32),
+    ) -> LayoutPoint {
+        let mut closest_inside = None;
+        let mut inside_distance = f32::INFINITY;
+        let mut closest = projected;
+        let mut distance = f32::INFINITY;
+        for (x, y) in [
+            (projected.x, bottom),
+            (projected.x, top),
+            (right, projected.y),
+            (left, projected.y),
+        ] {
+            let candidate_distance = (x - anchor.x).abs() + (y - anchor.y).abs();
+            if candidate_distance < distance {
+                closest = LayoutPoint { x, y };
+                distance = candidate_distance;
+            }
+            if x >= self.min_x
+                && x <= self.max_x
+                && y >= self.min_y
+                && y <= self.max_y
+                && candidate_distance < inside_distance
+            {
+                closest_inside = Some(LayoutPoint { x, y });
+                inside_distance = candidate_distance;
+            }
+        }
+        closest_inside.unwrap_or(closest)
+    }
+}
+
+// Test-only hooks: force the linear clear-position scan, so a test can prove the index changes
+// no answer, and count obstacle evaluations, so a test can bound the work. Outside tests they
+// compile to a constant `false` and an empty call.
+#[cfg(test)]
+thread_local! {
+    static LINEAR_CLEAR_POSITION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OBSTACLE_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn clear_position_index_disabled() -> bool {
+    LINEAR_CLEAR_POSITION.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn clear_position_index_disabled() -> bool {
+    false
+}
+
+#[cfg(test)]
+fn count_obstacle_evaluation() {
+    OBSTACLE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+const fn count_obstacle_evaluation() {}
+
+/// Obstacle candidates for the clear-position queries of one neighborhood search.
+///
+/// `clear_edge_label_position_ignoring_nodes` evaluates every obstacle for every query. The
+/// fallback search asks it about ten times per route point for one plate against one fixed
+/// obstacle set, so a congested diagram did O(queries x obstacles) interval work per label:
+/// 967 million interval evaluations, about 87% of a 7.4 s native render, for one 36-node
+/// flowchart.
+///
+/// An obstacle's x interval depends only on the query's `y`, and its y interval only on the
+/// query's `x`. So a query needs the obstacles whose x interval exists at its `y` (its row)
+/// and, when it is blocked, those whose y interval exists at its `x` (its column). Each
+/// obstacle is filed under the query buckets its stab range overlaps, a query evaluates only
+/// its own buckets, and a row or column is merged once per distinct coordinate, since the
+/// five plate offsets around each route point share coordinates. The answer is unchanged:
+/// - every obstacle with a `Some` interval is in the bucket (`stab_ranges` is a superset and
+///   bucketing is monotone), and is evaluated exactly once there;
+/// - a bucket's other obstacles yield `None`, which the linear scan drops as well;
+/// - a blocking obstacle has an x interval containing the query's `x`, so it is in the row,
+///   and its y interval is evaluated exactly as the linear scan does;
+/// - the intervals are sorted before they are merged, and two intervals that compare equal
+///   under `total_cmp` are bitwise identical, so evaluation order cannot change the merge;
+/// - a cached row or column is keyed by the coordinate's bits, so it is the same value.
+struct ClearPositionIndex {
+    frame: ClearPlateFrame,
+    obstacles: Vec<EdgeLabelObstacle>,
+    rows: StabBuckets,
+    columns: StabBuckets,
+    /// By the bits of a query `y`.
+    row_cache: BTreeMap<u32, ClearRow>,
+    /// By the bits of a query `x`: the merged components of the y intervals there.
+    column_cache: BTreeMap<u32, Vec<(f32, f32)>>,
+}
+
+/// The obstacles whose x interval exists at one query `y`, with that interval, and the
+/// merged components of those intervals.
+struct ClearRow {
+    intervals: Vec<(usize, (f32, f32))>,
+    components: Vec<(f32, f32)>,
+}
+
+impl ClearPositionIndex {
+    /// Queries per bucket that keep the build cheaper than the scans it replaces.
+    const QUERIES_PER_BUCKET: usize = 4;
+    const MAX_BUCKETS: usize = 64;
+
+    /// `None` when any coordinate is not finite or not below 1e30, or a negative plate size
+    /// makes a clearance negative: the stab ranges need arithmetic that cannot overflow and
+    /// segment reaches that are not inverted, so those searches keep the linear scan.
+    fn new(
+        frame: ClearPlateFrame,
+        obstacles: Vec<EdgeLabelObstacle>,
+        queries: &[LayoutPoint],
+    ) -> Option<Self> {
+        let mut magnitude = frame.clearance_x.abs().max(frame.clearance_y.abs()) + 3.0;
+        for query in queries {
+            magnitude = magnitude.max(query.x.abs()).max(query.y.abs());
+        }
+        for obstacle in &obstacles {
+            let corners = match *obstacle {
+                EdgeLabelObstacle::Bounds(rect) => [rect.x, rect.y, rect.width, rect.height],
+                EdgeLabelObstacle::Segment(a, b) => [a.x, a.y, b.x, b.y],
+            };
+            for value in corners {
+                magnitude = magnitude.max(value.abs());
+            }
+        }
+        // `max` skips NaN, so check every input explicitly rather than only the maximum.
+        let finite = magnitude < 1.0e30
+            && [
+                frame.min_x,
+                frame.max_x,
+                frame.min_y,
+                frame.max_y,
+                frame.clearance_x,
+                frame.clearance_y,
+            ]
+            .into_iter()
+            .chain(queries.iter().flat_map(|query| [query.x, query.y]))
+            .chain(obstacles.iter().flat_map(|obstacle| match *obstacle {
+                EdgeLabelObstacle::Bounds(rect) => [rect.x, rect.y, rect.width, rect.height],
+                EdgeLabelObstacle::Segment(a, b) => [a.x, a.y, b.x, b.y],
+            }))
+            .all(f32::is_finite);
+        if !finite || frame.clearance_x < 0.0 || frame.clearance_y < 0.0 || queries.is_empty() {
+            return None;
+        }
+        // Hundreds of times the rounding error of the interval arithmetic; see `stab_ranges`.
+        let margin = 1.0e-3 * (1.0 + magnitude);
+        let ranges: Vec<_> = obstacles
+            .iter()
+            .map(|&obstacle| stab_ranges(obstacle, frame, margin))
+            .collect();
+        let buckets = (queries.len() / Self::QUERIES_PER_BUCKET).clamp(1, Self::MAX_BUCKETS);
+        Some(Self {
+            frame,
+            rows: StabBuckets::new(
+                queries.iter().map(|query| query.y),
+                ranges.iter().map(|range| range.0),
+                buckets,
+            ),
+            columns: StabBuckets::new(
+                queries.iter().map(|query| query.x),
+                ranges.iter().map(|range| range.1),
+                buckets,
+            ),
+            obstacles,
+            row_cache: BTreeMap::new(),
+            column_cache: BTreeMap::new(),
+        })
+    }
+
+    /// `clear_edge_label_position_ignoring_nodes` for a query whose projection was indexed.
+    fn clear_position(&mut self, anchor: LayoutPoint) -> LayoutPoint {
+        let Self {
+            frame,
+            obstacles,
+            rows,
+            columns,
+            row_cache,
+            column_cache,
+        } = self;
+        let (clearance_x, clearance_y) = (frame.clearance_x, frame.clearance_y);
+        let projected = frame.project(anchor);
+        let row = row_cache.entry(projected.y.to_bits()).or_insert_with(|| {
+            let intervals: Vec<_> = rows
+                .candidates(projected.y)
+                .iter()
+                .filter_map(|&index| {
+                    obstacles[index]
+                        .x_exclusion(projected.y, clearance_x, clearance_y)
+                        .map(|interval| (index, interval))
+                })
+                .collect();
+            let components =
+                merged_components(intervals.iter().map(|&(_, interval)| interval).collect());
+            ClearRow {
+                intervals,
+                components,
+            }
+        });
+        let blocked = row.intervals.iter().any(|&(index, (left, right))| {
+            left < projected.x
+                && projected.x < right
+                && obstacles[index]
+                    .y_exclusion(projected.x, clearance_x, clearance_y)
+                    .is_some_and(|(top, bottom)| top < projected.y && projected.y < bottom)
+        });
+        if !blocked {
+            return projected;
+        }
+        let horizontal = component_containing(&row.components, projected.x);
+        let vertical = column_cache
+            .entry(projected.x.to_bits())
+            .or_insert_with(|| {
+                merged_components(
+                    columns
+                        .candidates(projected.x)
+                        .iter()
+                        .filter_map(|&index| {
+                            obstacles[index].y_exclusion(projected.x, clearance_x, clearance_y)
+                        })
+                        .collect(),
+                )
+            });
+        let vertical = component_containing(vertical, projected.y);
+        frame.nearest_clear_candidate(anchor, projected, horizontal, vertical)
+    }
+}
+
+/// The connected unions `edge_label_exclusion_interval` forms from `intervals`, in its order.
+fn merged_components(mut intervals: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut components: Vec<(f32, f32)> = Vec::new();
+    for (start, end) in intervals {
+        match components.last_mut() {
+            Some((_, right)) if start < *right => *right = right.max(end),
+            _ => components.push((start, end)),
+        }
+    }
+    components
+}
+
+/// `edge_label_exclusion_interval` over precomputed components. That function closes the
+/// components in order and returns the first one strictly containing `position`, or the
+/// empty interval at `position` when none does.
+fn component_containing(components: &[(f32, f32)], position: f32) -> (f32, f32) {
+    components
+        .iter()
+        .copied()
+        .find(|&(left, right)| left < position && position < right)
+        .unwrap_or((position, position))
+}
+
+/// Closed ranges of query `y` (row) and query `x` (column) outside which
+/// `exclusion_intervals` returns `None` for the x and y interval respectively.
+///
+/// A rectangle's interval exists only strictly inside its clearance band, and the band ends
+/// below are computed exactly as `exclusion_intervals` computes them, so `margin` only widens
+/// them. A segment's interval exists only where the query's clearance slab meets the
+/// segment's extent on that axis. `edge_label_segment_interval` decides that with a handful
+/// of roundings, together under 20 ulps of the largest magnitude `m` involved (about
+/// `1.2e-6 * m`). `margin` is `1e-3 * (1 + m)`, so for a query beyond the widened range both
+/// slab parameters land clearly on the same side outside `[0, 1]` (by a relative 5e-4, far
+/// above one ulp of 1.0) and the interval is `None`. Coordinates stay below 1e30, so nothing
+/// overflows.
+fn stab_ranges(
+    obstacle: EdgeLabelObstacle,
+    frame: ClearPlateFrame,
+    margin: f32,
+) -> ((f32, f32), (f32, f32)) {
+    let (clearance_x, clearance_y) = (frame.clearance_x, frame.clearance_y);
+    match obstacle {
+        EdgeLabelObstacle::Bounds(bounds) => (
+            (
+                bounds.y - clearance_y - margin,
+                bounds.y + bounds.height + clearance_y + margin,
+            ),
+            (
+                bounds.x - clearance_x - margin,
+                bounds.x + bounds.width + clearance_x + margin,
+            ),
+        ),
+        EdgeLabelObstacle::Segment(from, to) => {
+            let (reach_x, reach_y) = (clearance_x + 3.0, clearance_y + 3.0);
+            (
+                (
+                    from.y.min(to.y) - reach_y - margin,
+                    from.y.max(to.y) + reach_y + margin,
+                ),
+                (
+                    from.x.min(to.x) - reach_x - margin,
+                    from.x.max(to.x) + reach_x + margin,
+                ),
+            )
+        }
+    }
+}
+
+/// Uniform buckets over the span of the query coordinates; each lists the obstacles whose
+/// stab range overlaps it.
+struct StabBuckets {
+    origin: f32,
+    step: f32,
+    buckets: Vec<Vec<usize>>,
+}
+
+impl StabBuckets {
+    fn new(
+        queries: impl Iterator<Item = f32> + Clone,
+        ranges: impl Iterator<Item = (f32, f32)>,
+        count: usize,
+    ) -> Self {
+        let low = queries.clone().fold(f32::INFINITY, f32::min);
+        let high = queries.fold(f32::NEG_INFINITY, f32::max);
+        let step = (high - low) / count as f32;
+        let count = if step.is_normal() { count } else { 1 };
+        let mut index = Self {
+            origin: low,
+            step,
+            buckets: vec![Vec::new(); count],
+        };
+        for (obstacle, (start, end)) in ranges.enumerate() {
+            // No query can stab a range that misses the queries' whole span. An inverted range
+            // comes from a rectangle with a negative extent, whose clearance band is empty.
+            if start > high || end < low || start > end {
+                continue;
+            }
+            let first = index.bucket(start.max(low));
+            let last = index.bucket(end.min(high));
+            for bucket in &mut index.buckets[first..=last] {
+                bucket.push(obstacle);
+            }
+        }
+        index
+    }
+
+    /// Monotone in `value`: rounded subtraction, division by a positive step, the saturating
+    /// float-to-int cast and the final `min` all preserve order. A range `start <= q <= end`
+    /// therefore always files its obstacle under the bucket of every query `q` it contains.
+    fn bucket(&self, value: f32) -> usize {
+        if self.buckets.len() == 1 {
+            return 0;
+        }
+        (((value - self.origin) / self.step) as usize).min(self.buckets.len() - 1)
+    }
+
+    fn candidates(&self, value: f32) -> &[usize] {
+        &self.buckets[self.bucket(value)]
+    }
 }
 
 pub(crate) fn can_refine_graph_label_spacing(ir: &MermaidDiagramIr) -> bool {
@@ -1375,6 +1838,11 @@ fn graph_label_attachment_quality_impl(
     let mut detached = 0;
     let mut worst_gap = 0.0_f32;
     let mut area = layout.bounds.width * layout.bounds.height;
+    // Every face scores the same layout, so the placer's obstacles and each connector's
+    // prepared route are built once and shared; each face starts from no reserved plates.
+    let mut placer = EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, base_metrics);
+    let mut routes: Vec<Option<PreparedRoute>> = Vec::new();
+    routes.resize_with(layout.edges.len(), || None);
     // Canvas measures its installed face, which can have wider narrow letters than the
     // proportional estimate. Score fixed-advance faces as well: a smaller plate does not
     // necessarily reuse the same free interval after earlier labels have been placed.
@@ -1407,8 +1875,8 @@ fn graph_label_attachment_quality_impl(
             1.0,
         ),
     ] {
-        let mut placer = EdgeLabelPlacer::with_font_metrics(ir, layout, 20.0, base_metrics);
-        for path in &layout.edges {
+        placer.clear_plates();
+        for (path, route) in layout.edges.iter().zip(&mut routes) {
             let Some(edge) = ir.edges.get(path.edge_index) else {
                 continue;
             };
@@ -1461,9 +1929,10 @@ fn graph_label_attachment_quality_impl(
             let width = advance * allowance + font_size * overhang_em + 8.0;
             let height =
                 caption.line_count() as f32 * (font_size * 1.2).max(minimum_line_height) + 4.0;
-            let center = placer.place(path, width, height);
+            let route = route.get_or_insert_with(|| placer.prepare(path));
+            let center = placer.place_prepared(route, width, height);
             let gap = edge_label_route_distance_squared(
-                &rendered_edge_route(ir, path),
+                &route.rendered,
                 LayoutRect {
                     x: center.x - width / 2.0,
                     y: center.y - height / 2.0,
@@ -2836,5 +3305,295 @@ mod tests {
             LayoutPoint { x: 100.0, y: 50.0 },
             LayoutPoint { x: 150.0, y: 50.0 }
         ));
+    }
+
+    /// A generated 36-node flowchart with 23 captions and no node spacing. Most captions find
+    /// no clear slot on their own connector, so placement falls back to the neighborhood
+    /// search, and the spacing refine repeats every placement for 55 candidate layouts. Its
+    /// native render took about 7.4 s, most of it in that search's obstacle scans.
+    const CONGESTED_CAPTIONS: &str = r#"%%{init: {"flowchart":{"nodeSpacing":0,"rankSpacing":50}}}%%
+flowchart BT
+  n0{fail very long edge caption here}
+  n1[x retry async queue queue very long edge caption here ok]
+  n2([sync queue])
+  n3([gamma 日本 user fail cache])
+  n4([delta])
+  n5(delta load)
+  n6([very long edge caption here])
+  n7([alpha x])
+  n8[[load]]
+  n9[/ok/]
+  n10[very long edge caption here db load a b]
+  n11{日本 load}
+  n12[/日本 delta/]
+  n13[/db async/]
+  n14[retry 日本]
+  n15[delta Ünïcode load gamma]
+  n16[[load cache user very long edge caption here ok]]
+  n17([x])
+  n18{{queue queue load delta delta}}
+  n19([very long edge caption here load])
+  n20([retry])
+  n21{beta queue}
+  n22[/delta sync/]
+  n23[very long edge caption here]
+  n24{queue x cache x alpha sync}
+  n25[[alpha]]
+  n26{{Ünïcode}}
+  n27(queue)
+  n28[cache]
+  n29[/Ünïcode retry/]
+  n30{{beta}}
+  n31([queue])
+  n32[[alpha Ünïcode gamma fail]]
+  n33[/user x/]
+  n34([load])
+  n35((very long edge caption here retry queue ok delta gamma))
+  n0 -.-> n3
+  n1 ==>|load Ünïcode| n4
+  n0 -.->|load| n6
+  n4 -.-> n7
+  n2 --o n8
+  n1 --x n10
+  n5 -->|x| n11
+  n0 --x n12
+  n8 <-->|delta x| n14
+  n0 --x|load delta| n15
+  n1 --> n16
+  n2 --- n17
+  n6 ---|日本 x| n18
+  n7 -.-> n19
+  n14 -.-> n20
+  n6 <--> n21
+  n10 ==>|Ünïcode Ünïcode retry| n22
+  n20 -->|Ünïcode cache| n23
+  n1 <--> n25
+  n23 <-->|sync user 日本 user| n26
+  n3 -.-> n27
+  n13 <--> n28
+  n17 <-->|load 日本 async fail alpha queue| n29
+  n24 ---|save| n30
+  n28 ==> n31
+  n8 --o n32
+  n22 -.->|user queue fail| n34
+  n14 -.->|Ünïcode| n35
+  n30 -->|db beta alpha| n17
+  n5 ---|very long edge caption here| n8
+  n14 --o|user x| n6
+  n22 ---|retry Ünïcode Ünïcode x| n26
+  n0 <-->|fail sync| n4
+  n35 <--> n8
+  n31 <--> n21
+  n1 --x|async alpha gamma a b| n12
+  n25 --o|x x| n16
+  n10 --- n26
+"#;
+
+    fn obstacle_evaluations() -> u64 {
+        OBSTACLE_EVALUATIONS.with(std::cell::Cell::get)
+    }
+
+    fn with_linear_clear_position<T>(run: impl FnOnce() -> T) -> T {
+        LINEAR_CLEAR_POSITION.with(|linear| linear.set(true));
+        let result = run();
+        LINEAR_CLEAR_POSITION.with(|linear| linear.set(false));
+        result
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn clear_position_index_matches_the_linear_scan() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        // Half-pixel coordinates land queries exactly on clearance-band edges, segment ends and
+        // bucket boundaries far more often than continuous values would.
+        let mut coordinate = |span: u64| (xorshift(&mut state) % (span * 2)) as f32 / 2.0;
+        let (mut linear_work, mut indexed_work) = (0, 0);
+        for case in 0..300 {
+            let mut layout = frame();
+            layout.bounds = LayoutRect {
+                x: coordinate(40) - 20.0,
+                y: coordinate(40) - 20.0,
+                width: 20.0 + coordinate(300),
+                height: 20.0 + coordinate(300),
+            };
+            let (width, height) = (4.0 + coordinate(80), 4.0 + coordinate(40));
+            let padding = if coordinate(2) < 1.0 { 0.0 } else { 20.0 };
+            let obstacle_count = coordinate(40) as usize;
+            let mut obstacles = Vec::new();
+            for kind in 0..obstacle_count {
+                let (x, y) = (coordinate(180) - 40.0, coordinate(180) - 40.0);
+                let length = coordinate(60);
+                obstacles.push(match kind % 5 {
+                    0 => EdgeLabelObstacle::Bounds(LayoutRect {
+                        x,
+                        y,
+                        width: length,
+                        height: coordinate(30),
+                    }),
+                    // A negative extent leaves an empty clearance band on that axis.
+                    4 => EdgeLabelObstacle::Bounds(LayoutRect {
+                        x,
+                        y,
+                        width: length - 30.0,
+                        height: coordinate(30) - 25.0,
+                    }),
+                    1 => EdgeLabelObstacle::Segment(
+                        LayoutPoint { x, y },
+                        LayoutPoint { x: x + length, y },
+                    ),
+                    2 => EdgeLabelObstacle::Segment(
+                        LayoutPoint { x, y },
+                        LayoutPoint { x, y: y - length },
+                    ),
+                    _ => EdgeLabelObstacle::Segment(
+                        LayoutPoint { x, y },
+                        LayoutPoint {
+                            x: x + length,
+                            y: y + coordinate(60) - 30.0,
+                        },
+                    ),
+                });
+            }
+            // Like the neighborhood search, ask about each origin and four plate offsets, which
+            // share rows and columns; the index reuses those across queries.
+            let queries: Vec<_> = (0..1 + coordinate(12) as usize)
+                .flat_map(|_| {
+                    let (x, y) = (coordinate(220) - 60.0, coordinate(220) - 60.0);
+                    [
+                        (0.0, 0.0),
+                        (width / 2.0, 0.0),
+                        (-width / 2.0, 0.0),
+                        (0.0, height / 2.0),
+                        (0.0, -height / 2.0),
+                    ]
+                    .map(|(dx, dy)| LayoutPoint {
+                        x: x + dx,
+                        y: y + dy,
+                    })
+                })
+                .collect();
+            let plate = ClearPlateFrame::new(layout.bounds, padding, width, height);
+            let projected: Vec<_> = queries.iter().map(|&query| plate.project(query)).collect();
+            let mut index = ClearPositionIndex::new(plate, obstacles.clone(), &projected)
+                .expect("finite coordinates are indexed");
+            for &query in &queries {
+                let before = obstacle_evaluations();
+                let linear = clear_edge_label_position_ignoring_nodes(
+                    query,
+                    width,
+                    height,
+                    &layout,
+                    padding,
+                    &[],
+                    &obstacles,
+                    &[],
+                );
+                let between = obstacle_evaluations();
+                let indexed = index.clear_position(query);
+                linear_work += between - before;
+                indexed_work += obstacle_evaluations() - between;
+                assert_eq!(
+                    (linear.x.to_bits(), linear.y.to_bits()),
+                    (indexed.x.to_bits(), indexed.y.to_bits()),
+                    "case {case}: query {query:?}, plate {width}x{height}, padding {padding}"
+                );
+            }
+        }
+        assert!(
+            indexed_work * 2 < linear_work,
+            "the index must skip obstacles: {indexed_work} indexed vs {linear_work} linear evaluations"
+        );
+    }
+
+    #[test]
+    fn unindexable_searches_keep_the_linear_scan() {
+        let plate = ClearPlateFrame::new(frame().bounds, 0.0, 20.0, 10.0);
+        let queries = [LayoutPoint { x: 50.0, y: 50.0 }];
+        let segment = |y: f32| {
+            EdgeLabelObstacle::Segment(LayoutPoint { x: 0.0, y }, LayoutPoint { x: 100.0, y })
+        };
+        assert!(ClearPositionIndex::new(plate, vec![segment(50.0)], &queries).is_some());
+        for y in [f32::NAN, f32::INFINITY, 2.0e30] {
+            assert!(ClearPositionIndex::new(plate, vec![segment(y)], &queries).is_none());
+        }
+        let inverted = ClearPlateFrame::new(frame().bounds, 0.0, -20.0, 10.0);
+        assert!(ClearPositionIndex::new(inverted, vec![segment(50.0)], &queries).is_none());
+        assert!(ClearPositionIndex::new(plate, vec![segment(50.0)], &[]).is_none());
+    }
+
+    #[test]
+    fn congested_caption_placement_is_unchanged_by_the_index() {
+        let ir = fm_parser::parse(CONGESTED_CAPTIONS).ir;
+        let layout = crate::layout_diagram_traced(&ir).layout;
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let place_all = || {
+            let mut placer = EdgeLabelPlacer::with_font_metrics(&ir, &layout, 20.0, &metrics);
+            layout
+                .edges
+                .iter()
+                .filter(|path| ir.graph_edge_caption(path.edge_index).is_some())
+                .map(|path| {
+                    let center = placer.place(path, 160.0, 22.0);
+                    (center.x.to_bits(), center.y.to_bits())
+                })
+                .collect::<Vec<_>>()
+        };
+        let start = obstacle_evaluations();
+        let linear = with_linear_clear_position(place_all);
+        let linear_quality =
+            with_linear_clear_position(|| graph_label_attachment_quality(&ir, &layout, &metrics));
+        let middle = obstacle_evaluations();
+        let indexed = place_all();
+        let indexed_quality = graph_label_attachment_quality(&ir, &layout, &metrics);
+        let end = obstacle_evaluations();
+        assert!(
+            middle - start > 0,
+            "wide plates must reach the neighborhood search"
+        );
+        assert_eq!(linear, indexed);
+        assert_eq!(
+            (
+                linear_quality.0,
+                linear_quality.1.to_bits(),
+                linear_quality.2.to_bits()
+            ),
+            (
+                indexed_quality.0,
+                indexed_quality.1.to_bits(),
+                indexed_quality.2.to_bits()
+            )
+        );
+        assert!(
+            (end - middle) * 4 < middle - start,
+            "the index must skip most obstacles: {} indexed vs {} linear evaluations",
+            end - middle,
+            middle - start
+        );
+    }
+
+    #[test]
+    fn congested_caption_refine_does_bounded_obstacle_work() {
+        let ir = fm_parser::parse(CONGESTED_CAPTIONS).ir;
+        assert!(can_refine_graph_label_spacing(&ir));
+        let start = obstacle_evaluations();
+        let traced = crate::layout_diagram_traced(&ir);
+        let evaluations = obstacle_evaluations() - start;
+        assert!(
+            evaluations > 0,
+            "the refine must reach the neighborhood search on this diagram"
+        );
+        // Every interval the neighborhood searches evaluate is counted. The linear scan made
+        // 967 million evaluations here and the index about 57 million.
+        assert!(
+            evaluations < 100_000_000,
+            "label refine did {evaluations} obstacle evaluations"
+        );
+        assert!(!traced.layout.edges.is_empty());
     }
 }
