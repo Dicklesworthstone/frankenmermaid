@@ -159,7 +159,7 @@ impl<'a> EdgeLabelPlacer<'a> {
     /// Find a clear center for a measured backing plate and reserve it for subsequent labels.
     /// The returned plate can extend outside the original layout; include it in render bounds.
     pub fn place(&mut self, path: &LayoutEdgePath, width: f32, height: f32) -> LayoutPoint {
-        let rendered = rendered_label_route(self.ir, path);
+        let rendered = rendered_edge_route(self.ir, path);
         let path = &rendered;
         let mut foreign_routes = Vec::new();
         let mut shared_corridors = Vec::new();
@@ -319,7 +319,8 @@ impl<'a> EdgeLabelPlacer<'a> {
 /// Routing waypoints are not the painted connector: a smoothed bend can depart from its
 /// diagonal chord by several pixels. Attachment, collision avoidance, and spacing refinement
 /// must all consume the same bounded curve geometry used by the graphical renderers.
-fn rendered_label_route(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> LayoutEdgePath {
+#[must_use]
+pub fn rendered_edge_route(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> LayoutEdgePath {
     let mut rendered = path.clone();
     rendered.points.clear();
     let mut current = None;
@@ -960,7 +961,7 @@ fn graph_edge_label_route_obstacles(
         if path.bundled || edge.arrow == ArrowType::Invisible || path.points.len() < 2 {
             continue;
         }
-        let rendered = rendered_label_route(ir, path);
+        let rendered = rendered_edge_route(ir, path);
         for pair in rendered.points.windows(2) {
             if pair[0] != pair[1] {
                 obstacles.push((
@@ -1462,7 +1463,7 @@ fn graph_label_attachment_quality_impl(
                 caption.line_count() as f32 * (font_size * 1.2).max(minimum_line_height) + 4.0;
             let center = placer.place(path, width, height);
             let gap = edge_label_route_distance_squared(
-                &rendered_label_route(ir, path),
+                &rendered_edge_route(ir, path),
                 LayoutRect {
                     x: center.x - width / 2.0,
                     y: center.y - height / 2.0,
@@ -1687,13 +1688,12 @@ mod tests {
         };
         assert!(edge_label_route_distance_squared(&path, plate) < 0.0001);
         assert!(
-            edge_label_route_distance_squared(&rendered_label_route(&ir, &path), plate).sqrt()
-                > 4.0
+            edge_label_route_distance_squared(&rendered_edge_route(&ir, &path), plate).sqrt() > 4.0
         );
 
         ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
         assert!(
-            edge_label_route_distance_squared(&rendered_label_route(&ir, &path), plate) < 0.0001
+            edge_label_route_distance_squared(&rendered_edge_route(&ir, &path), plate) < 0.0001
         );
     }
 
@@ -2710,7 +2710,7 @@ mod tests {
                             .find(|path| path.edge_index == *index)
                             .unwrap();
                         let gap = edge_label_route_distance_squared(
-                            &rendered_label_route(&ir, path),
+                            &rendered_edge_route(&ir, path),
                             *plate,
                         )
                         .sqrt();

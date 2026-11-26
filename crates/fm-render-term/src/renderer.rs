@@ -240,6 +240,19 @@ fn compact_label_width(line: &str) -> usize {
     line.width()
 }
 
+/// Most connectors are already polylines. Allocate samples only for a routed graph bend.
+fn painted_route<'a>(
+    ir: &MermaidDiagramIr,
+    path: &'a LayoutEdgePath,
+) -> std::borrow::Cow<'a, LayoutEdgePath> {
+    if path.points.len() > 2 && fm_layout::edge_paths::edge_uses_smoothed_path(ir, path.edge_index)
+    {
+        std::borrow::Cow::Owned(fm_layout::edge_labels::rendered_edge_route(ir, path))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
 /// A `~~~` link shapes the layout and is never drawn, nor is its label.
 fn is_invisible_edge(ir: &MermaidDiagramIr, edge_path: &fm_layout::LayoutEdgePath) -> bool {
     ir.edges
@@ -1940,7 +1953,7 @@ impl TermRenderer {
         let stroke = edge_stroke(ir, edge_path);
 
         // Draw line segments.
-        for window in edge_path.points.windows(2) {
+        for window in painted_route(ir, edge_path).points.windows(2) {
             let Some((x0, y0)) = self.line_point_to_cells(&window[0], scale_x, scale_y) else {
                 continue;
             };
@@ -2737,13 +2750,20 @@ impl TermRenderer {
     /// Start at the original dash containing the first visible major-axis step. Clipping must not
     /// restart the dash pattern, and offscreen distance must not determine the number of dashes.
     fn draw_dashed_segment(canvas: &mut Canvas, x0: isize, y0: isize, x1: isize, y1: isize) {
+        Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, 0);
+    }
+
+    fn draw_dashed_segment_at(
+        canvas: &mut Canvas,
+        x0: isize,
+        y0: isize,
+        x1: isize,
+        y1: isize,
+        phase: u128,
+    ) {
         let line = RasterLine::signed(x0, y0, x1, y1);
         let (dx, dy) = line.delta();
         let steps = line.steps();
-        if steps == 0 {
-            canvas.draw_line(x0, y0, x0, y0);
-            return;
-        }
 
         let (pixel_width, pixel_height) = canvas.pixel_dimensions();
         let Some((first, last)) = line.clipped_steps(pixel_width, pixel_height) else {
@@ -2759,16 +2779,23 @@ impl TermRenderer {
         // Three off pixels work horizontally in Braille, but cannot empty a four-pixel row.
         let dash = (pixels_per_cell.saturating_mul(2).saturating_sub(1)).max(3) as u128;
         let period = dash * 2;
-        let mut step = first / period * period;
-        while step <= last {
-            let end = (step + dash - 1).min(steps);
+        let phase = phase % period;
+        let mut run = (first + phase) / period * period;
+        while run <= last + phase {
+            let run_end = run + dash - 1;
+            if run_end < phase {
+                run += period;
+                continue;
+            }
+            let step = run.saturating_sub(phase);
+            let end = (run_end - phase).min(steps);
             // Endpoints of this dash, interpolated along the segment. Integer arithmetic keeps the
             // result deterministic across platforms, which the terminal output determinism test
             // depends on.
             let (ax, ay) = line.interpolate(step);
             let (bx, by) = line.interpolate(end);
             canvas.draw_line(ax as isize, ay as isize, bx as isize, by as isize);
-            step += period;
+            run += period;
         }
     }
 
@@ -2811,7 +2838,8 @@ impl TermRenderer {
             return;
         }
         let stroke = edge_stroke(ir, edge_path);
-        for pair in edge_path.points.windows(2) {
+        let mut phase = 0;
+        for pair in painted_route(ir, edge_path).points.windows(2) {
             Self::draw_canvas_shaft(
                 canvas,
                 stroke,
@@ -2819,6 +2847,7 @@ impl TermRenderer {
                 pair[1],
                 (scale_x, scale_y),
                 (padding_x, padding_y),
+                &mut phase,
             );
         }
         if let Some(edge) = ir.edges.get(edge_path.edge_index)
@@ -2845,6 +2874,7 @@ impl TermRenderer {
         to: fm_layout::LayoutPoint,
         (scale_x, scale_y): (f32, f32),
         (padding_x, padding_y): (usize, usize),
+        phase: &mut u128,
     ) {
         let Some((x0, y0)) =
             Self::padded_raster_point((from.x * scale_x, from.y * scale_y), (padding_x, padding_y))
@@ -2858,7 +2888,7 @@ impl TermRenderer {
         };
         match stroke {
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
-            EdgeStroke::Dotted => Self::draw_dashed_segment(canvas, x0, y0, x1, y1),
+            EdgeStroke::Dotted => Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, *phase),
             EdgeStroke::Thick | EdgeStroke::ThickDotted => {
                 let (ox, oy) = if x1.abs_diff(x0) >= y1.abs_diff(y0) {
                     (0, 1)
@@ -2875,13 +2905,14 @@ impl TermRenderer {
                         y1.saturating_add(oy * offset),
                     );
                     if stroke == EdgeStroke::ThickDotted {
-                        Self::draw_dashed_segment(canvas, from.0, from.1, to.0, to.1);
+                        Self::draw_dashed_segment_at(canvas, from.0, from.1, to.0, to.1, *phase);
                     } else {
                         canvas.draw_line(from.0, from.1, to.0, to.1);
                     }
                 }
             }
         }
+        *phase += RasterLine::signed(x0, y0, x1, y1).steps();
     }
 
     /// Consume shared ER geometry in forward tangent space: source and target variants have
@@ -4582,10 +4613,26 @@ impl TermRenderer {
                         )
                     },
                 );
-            let own_route = self
-                .edge_label_route_grid(ir, layout, path, false, width, height, scale_x, scale_y);
-            let foreign_routes =
-                self.edge_label_route_grid(ir, layout, path, true, width, height, scale_x, scale_y);
+            let own_route = self.painted_route_grid(
+                ir,
+                layout.edges.iter(),
+                path,
+                false,
+                width,
+                height,
+                scale_x,
+                scale_y,
+            );
+            let foreign_routes = self.painted_route_grid(
+                ir,
+                layout.edges.iter(),
+                path,
+                true,
+                width,
+                height,
+                scale_x,
+                scale_y,
+            );
             let occupied: Vec<bool> = grid
                 .iter()
                 .enumerate()
@@ -4944,7 +4991,12 @@ impl TermRenderer {
             protect(left, top, right, bottom);
         }
 
-        for path in &layout.edges {
+        let routes: Vec<_> = layout
+            .edges
+            .iter()
+            .map(|path| painted_route(ir, path))
+            .collect();
+        for (path, painted) in layout.edges.iter().zip(&routes) {
             if path.bundled || path.points.len() < 2 || is_invisible_edge(ir, path) {
                 continue;
             }
@@ -4969,7 +5021,7 @@ impl TermRenderer {
             if text.trim().is_empty() {
                 continue;
             }
-            let route: Vec<_> = path
+            let route: Vec<_> = painted
                 .points
                 .iter()
                 .map(|point| {
@@ -4979,10 +5031,26 @@ impl TermRenderer {
                     )
                 })
                 .collect();
-            let own_route = self
-                .edge_label_route_grid(ir, layout, path, false, width, height, scale_x, scale_y);
-            let foreign_routes =
-                self.edge_label_route_grid(ir, layout, path, true, width, height, scale_x, scale_y);
+            let own_route = self.painted_route_grid(
+                ir,
+                routes.iter().map(AsRef::as_ref),
+                painted,
+                false,
+                width,
+                height,
+                scale_x,
+                scale_y,
+            );
+            let foreign_routes = self.painted_route_grid(
+                ir,
+                routes.iter().map(AsRef::as_ref),
+                painted,
+                true,
+                width,
+                height,
+                scale_x,
+                scale_y,
+            );
             let mut blocked_nodes = node_cells.clone();
             for node in layout
                 .nodes
@@ -5101,7 +5169,7 @@ impl TermRenderer {
             caption.y = y;
             labels.push(caption);
             let mut badge = CellLabel::new(path.edge_index, true, vec![badge_text]);
-            let anchor = fm_layout::edge_label_position(path);
+            let anchor = fm_layout::edge_label_position(painted);
             let anchor = (
                 anchor.x * scale_x + self.config.padding as f32,
                 anchor.y * scale_y + self.config.padding as f32,
@@ -5146,13 +5214,43 @@ impl TermRenderer {
         (labels, occluded)
     }
 
-    /// Rasterize the connectors using the same cell/subcell geometry as the drawing pass.
-    /// Collinear shared portions are usable by either edge; distinct crossings stay protected.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn edge_label_route_grid(
         &self,
         ir: &MermaidDiagramIr,
         layout: &DiagramLayout,
+        own: &LayoutEdgePath,
+        foreign: bool,
+        width: usize,
+        height: usize,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Vec<Vec<char>> {
+        let routes: Vec<_> = layout
+            .edges
+            .iter()
+            .map(|path| painted_route(ir, path))
+            .collect();
+        self.painted_route_grid(
+            ir,
+            routes.iter().map(AsRef::as_ref),
+            &painted_route(ir, own),
+            foreign,
+            width,
+            height,
+            scale_x,
+            scale_y,
+        )
+    }
+
+    /// Rasterize the connectors using the same cell/subcell geometry as the drawing pass.
+    /// Collinear shared portions are usable by either edge; distinct crossings stay protected.
+    #[allow(clippy::too_many_arguments)]
+    fn painted_route_grid<'a>(
+        &self,
+        ir: &MermaidDiagramIr,
+        routes: impl Iterator<Item = &'a LayoutEdgePath>,
         own: &LayoutEdgePath,
         foreign: bool,
         width: usize,
@@ -5165,7 +5263,7 @@ impl TermRenderer {
         let (mult_x, mult_y) = self.config.subcell_multiplier();
         let mut canvas = Canvas::new(width, height, self.config.render_mode);
         let mut cells = CellBuffer::new(width, height);
-        for path in &layout.edges {
+        for path in routes {
             if path.bundled
                 || is_invisible_edge(ir, path)
                 || (path.edge_index == own.edge_index) == foreign
@@ -5188,6 +5286,7 @@ impl TermRenderer {
                     ));
                 }
             }
+            let mut phase = 0;
             for obstacle in segments {
                 let fm_layout::edge_labels::EdgeLabelObstacle::Segment(from, to) = obstacle else {
                     continue;
@@ -5220,6 +5319,7 @@ impl TermRenderer {
                         to,
                         (scale_x * mult_x as f32, scale_y * mult_y as f32),
                         (self.config.padding * mult_x, self.config.padding * mult_y),
+                        &mut phase,
                     );
                 }
             }
@@ -10118,6 +10218,7 @@ mod tests {
                 fm_layout::LayoutPoint { x: 10.0, y: 10.0 },
                 (1.0, 1.0),
                 (2, 2),
+                &mut 0,
             );
             assert!(
                 canvas
@@ -10180,6 +10281,104 @@ mod tests {
             let mask = renderer.edge_label_route_grid(&ir, &layout, &other, true, 60, 20, 1.0, 1.0);
             assert!(mask.into_iter().flatten().all(blank_terminal_cell));
             layout.edges[0].bundled = false;
+        }
+    }
+
+    #[test]
+    fn terminal_shafts_and_caption_masks_follow_the_selected_curve() {
+        let mut ir = sample_ir();
+        ir.edges[0].arrow = ArrowType::Line;
+        let mut layout = layout_diagram(&ir);
+        let straight = terminal_edge_test_path(&[(2.0, 10.0), (38.0, 10.0)]);
+        // The shared curve emitter straightens this shallow jog. An explicit
+        // orthogonal override must preserve it, even with the very same layout.
+        layout.edges[0] = terminal_edge_test_path(&[(2.0, 10.0), (18.0, 11.5), (38.0, 10.0)]);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                padding: 0,
+                ..TermRenderConfig::rich()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 20));
+            let (mx, my) = renderer.config.subcell_multiplier();
+            let draw = |ir: &MermaidDiagramIr, path: &LayoutEdgePath| -> Vec<Vec<char>> {
+                if mode == MermaidRenderMode::CellOnly {
+                    let mut cells = CellBuffer::new(60, 20);
+                    renderer.render_edge_cell(&mut cells, ir, path, 1.0, 1.0);
+                    cells.cells.chunks(60).map(<[char]>::to_vec).collect()
+                } else {
+                    let mut canvas = Canvas::new(60, 20, mode);
+                    renderer.render_edge_canvas(&mut canvas, ir, path, mx as f32, my as f32, 0, 0);
+                    canvas.render_char_grid()
+                }
+            };
+            ir.meta.edge_routing = None;
+            let baseline = draw(&ir, &straight);
+            assert!(
+                baseline
+                    .iter()
+                    .flatten()
+                    .any(|&ch| !blank_terminal_cell(ch))
+            );
+            for orthogonal in [false, true] {
+                ir.meta.edge_routing =
+                    orthogonal.then_some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+                let path = &layout.edges[0];
+                let painted = draw(&ir, path);
+                assert_eq!(painted == baseline, !orthogonal, "{mode:?}");
+                assert_eq!(
+                    renderer.edge_label_route_grid(&ir, &layout, path, false, 60, 20, 1.0, 1.0),
+                    painted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subdividing_a_dashed_shaft_preserves_its_visible_gaps() {
+        let mut ir = sample_ir();
+        ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Orthogonal);
+        let coords: Vec<_> = (-5..40).map(|x| (x as f32, 3.0)).collect();
+        let split = terminal_edge_test_path(&coords);
+        let straight = terminal_edge_test_path(&[(-5.0, 3.0), (39.0, 3.0)]);
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(
+                &TermRenderConfig {
+                    render_mode: mode,
+                    padding: 0,
+                    ..TermRenderConfig::rich()
+                },
+                32,
+                8,
+            ));
+            for dashed_thick in [false, true] {
+                ir.edges[0].arrow = if dashed_thick {
+                    ArrowType::ThickLine
+                } else {
+                    ArrowType::DottedLine
+                };
+                ir.edges[0].inline_style = dashed_thick
+                    .then(|| Box::new(fm_core::parse_style_string("stroke-dasharray:3")));
+                let draw = |path| {
+                    let mut canvas = Canvas::new(32, 8, mode);
+                    renderer.render_edge_canvas(&mut canvas, &ir, path, 1.0, 1.0, 0, 0);
+                    canvas
+                };
+                let actual = draw(&split);
+                let expected = draw(&straight);
+                assert_eq!(actual.render(), expected.render(), "{mode:?}");
+                assert!((0..24).any(|x| actual.get_pixel(x, 3)));
+                assert!((0..24).any(|x| !actual.get_pixel(x, 3)));
+            }
         }
     }
 
