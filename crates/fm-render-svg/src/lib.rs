@@ -2446,27 +2446,143 @@ impl SceneMarkerRegistry {
             return Some(format!("url(#{id})"));
         }
         let id = format!("fm-scene-{}-{base}", self.ids.len());
-        let marker =
-            crate::defs::scene_arrowhead(kind, &id, &stroke.color, opacity, at_start, sankey)
-                .or_else(|| {
-                    // Reuse the exact reference-backed ER geometry instead of maintaining another
-                    // copy. Both the id and opacity are generated here; accept only color paints before
-                    // inserting a value into this internally serialized fragment.
-                    let color = fm_layout::scene_paint(&stroke.color)?;
-                    let definition = er_marker_def(kind, &color)?;
-                    let (opening, body) = definition.split_once('>')?;
-                    let body = body.strip_suffix("</marker>")?;
-                    let opening =
-                        opening.replacen(&format!("id=\"{base}\""), &format!("id=\"{id}\""), 1);
-                    Some(Element::raw_svg(format!(
-                        "{opening}><g opacity=\"{}\">{body}</g></marker>",
-                        fmt_svg_number(opacity),
-                    )))
-                })?;
+        let marker = painted_marker_definition(kind, &id, &stroke.color, opacity, at_start, sankey)?;
         self.definitions.push(marker);
         self.ids.insert(key, id.clone());
         Some(format!("url(#{id})"))
     }
+}
+
+/// Both SVG backends use the same endpoint geometry and explicit connector paint. Marker
+/// contents do not inherit the referencing path's stroke or stroke-opacity.
+fn painted_marker_definition(
+    kind: MarkerKind,
+    id: &str,
+    color: &str,
+    opacity: f32,
+    at_start: bool,
+    sankey: bool,
+) -> Option<Element> {
+    crate::defs::scene_arrowhead(kind, id, color, opacity, at_start, sankey).or_else(|| {
+        // ER glyphs retain their reference-backed geometry, including opaque zero bubbles.
+        // Only validated colors enter this internally serialized fragment.
+        let color = fm_layout::scene_paint(color)?;
+        let definition = er_marker_def(kind, &color)?;
+        let base = map_marker_kind(kind)
+            .strip_prefix("url(#")?
+            .strip_suffix(')')?;
+        let (opening, body) = definition.split_once('>')?;
+        let body = body.strip_suffix("</marker>")?;
+        let opening = opening.replacen(&format!("id=\"{base}\""), &format!("id=\"{id}\""), 1);
+        Some(Element::raw_svg(format!(
+            "{opening}><g opacity=\"{}\">{body}</g></marker>",
+            fmt_svg_number(clamp_unit_interval(opacity)),
+        )))
+    })
+}
+
+/// An absent color disables the connector, including any endpoint glyphs. Overall edge
+/// opacity stays on the referencing path; only stroke-opacity belongs inside a marker.
+struct AuthoredEdgeMarkerPaint {
+    color: Option<String>,
+    opacity: f32,
+}
+
+fn authored_edge_marker_paint(
+    style: &BTreeMap<String, String>,
+    base_color: &str,
+) -> Option<AuthoredEdgeMarkerPaint> {
+    if style.get("stroke-width").is_some_and(|value| {
+        let value = value.trim();
+        value
+            .strip_suffix("px")
+            .unwrap_or(value)
+            .trim()
+            .parse::<f32>()
+            .is_ok_and(|width| width == 0.0)
+    }) {
+        // ER and Sankey endpoints have fixed user-space geometry, so shrinking the shaft to
+        // zero would otherwise leave their glyphs visible after ordinary markers disappear.
+        return Some(AuthoredEdgeMarkerPaint {
+            color: None,
+            opacity: 1.0,
+        });
+    }
+    let color = style.get("stroke").and_then(|value| {
+        if value.trim().eq_ignore_ascii_case("none") {
+            Some(None)
+        } else {
+            fm_layout::scene_paint(value).map(Some)
+        }
+    });
+    let opacity = fm_layout::scene_style_opacity(style, "stroke-opacity");
+    if color.is_none() && opacity == 1.0 {
+        return None;
+    }
+    Some(AuthoredEdgeMarkerPaint {
+        color: color.unwrap_or_else(|| Some(base_color.to_owned())),
+        opacity,
+    })
+}
+
+fn authored_edge_marker_id(edge_index: usize, kind: MarkerKind, at_start: bool) -> Option<String> {
+    let base = map_marker_kind(kind)
+        .strip_prefix("url(#")?
+        .strip_suffix(')')?;
+    // Stable edge identities keep cached SVG fragments valid when other edges change paint.
+    let slot = if at_start { "start" } else { "end" };
+    Some(format!("fm-edge-paint-{edge_index}-{slot}-{base}"))
+}
+
+fn authored_edge_marker_defs(
+    layout: &DiagramLayout,
+    ir: &MermaidDiagramIr,
+    colors: &ThemeColors,
+) -> String {
+    let mut definitions = String::new();
+    let mut emitted = std::collections::BTreeSet::new();
+    for path in &layout.edges {
+        if path.bundled {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        let (start, end) = fm_layout::edge_marker_kinds(edge, path.reversed);
+        if start == MarkerKind::None && end == MarkerKind::None {
+            continue;
+        }
+        let style = fm_layout::edge_labels::edge_label_style(ir, path.edge_index);
+        let base_color = sankey_edge_color(ir, path.edge_index, colors).unwrap_or_else(|| {
+            if fm_layout::edge_uses_feedback_marker(edge, path.reversed) {
+                &colors.cluster_stroke
+            } else {
+                &colors.edge
+            }
+        });
+        let Some(paint) = authored_edge_marker_paint(&style, base_color) else {
+            continue;
+        };
+        let Some(color) = paint.color else {
+            continue;
+        };
+        for (kind, at_start) in [(start, true), (end, false)] {
+            if let Some(id) = authored_edge_marker_id(path.edge_index, kind, at_start)
+                && emitted.insert(id.clone())
+                && let Some(marker) = painted_marker_definition(
+                    kind,
+                    &id,
+                    &color,
+                    paint.opacity,
+                    at_start,
+                    ir.diagram_type == DiagramType::Sankey,
+                )
+            {
+                marker.write_to_string(&mut definitions);
+            }
+        }
+    }
+    definitions
 }
 
 fn scene_node_has_interaction(
@@ -5121,6 +5237,16 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
 fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u32> {
     (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
         layout.edges.iter().fold(0, |mask, edge_path| {
+            // Styled endpoints use their own definitions, and disabled strokes use none.
+            // This mask describes only the shared theme markers emitted for the other edges.
+            if authored_edge_marker_paint(
+                &fm_layout::edge_labels::edge_label_style(ir, edge_path.edge_index),
+                DEFAULT_EDGE_COLOR,
+            )
+            .is_some()
+            {
+                return mask;
+            }
             let edge_mask = ir.edges.get(edge_path.edge_index).map_or(
                 if edge_path.reversed {
                     MARKER_OPEN
@@ -5847,6 +5973,7 @@ fn render_layout_to_svg(
     // pass to prune. Folding them in would buy no stripping and cost four more bits.
     let mut supplemental_markers = er_marker_defs_body(ir, edge_color);
     supplemental_markers.push_str(&sankey_marker_defs(ir, &theme.colors));
+    supplemental_markers.push_str(&authored_edge_marker_defs(layout, ir, &theme.colors));
     defs = defs.raw_markers(if supplemental_markers.is_empty() {
         arrow_markers
     } else {
@@ -17200,7 +17327,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         }
 
         // Source color is a semantic default; an authored link style remains the final layer.
-        let inline_style = match (sankey_color, resolve_edge_inline_style(ir, edge_index)) {
+        let authored_style = fm_layout::edge_labels::edge_label_style(ir, edge_index);
+        let marker_paint = authored_edge_marker_paint(&authored_style, base_color);
+        let inline_style = match (sankey_color, style_map_to_css(&authored_style)) {
             (Some(color), Some(author)) => Some(format!("stroke:{color};{author}")),
             (Some(color), None) => Some(format!("stroke:{color}")),
             (None, author) => author,
@@ -17215,11 +17344,28 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             elem = elem.attr("style", extra);
         }
 
-        if let Some(marker) = marker_start {
-            elem = elem.marker_start(marker);
-        }
-        if let Some(marker) = marker_end {
-            elem = elem.marker_end(marker);
+        if let Some(paint) = marker_paint {
+            // Markers are independent SVG definitions: a linkStyle declaration on the shaft
+            // cannot recolor or fade their children. Reference the matching painted glyphs, or
+            // omit both ends when the author disabled the shaft with stroke:none.
+            if paint.color.is_some()
+                && let Some(edge) = ir_edge
+            {
+                let (start, end) = fm_layout::edge_marker_kinds(edge, edge_path.reversed);
+                if let Some(id) = authored_edge_marker_id(edge_index, start, true) {
+                    elem = elem.marker_start(&format!("url(#{id})"));
+                }
+                if let Some(id) = authored_edge_marker_id(edge_index, end, false) {
+                    elem = elem.marker_end(&format!("url(#{id})"));
+                }
+            }
+        } else {
+            if let Some(marker) = marker_start {
+                elem = elem.marker_start(marker);
+            }
+            if let Some(marker) = marker_end {
+                elem = elem.marker_end(marker);
+            }
         }
 
         if config.include_source_spans {
