@@ -1060,7 +1060,7 @@ fn bundle_command(root: &Path, args: BundleArgs) -> Result<()> {
         bundle_version,
         release_ref,
         retention_days,
-        generated_by: "cargo run -p fm-cli --bin evidence -- bundle".to_string(),
+        generated_by: "cargo run -p frankenmermaid-cli --bin evidence -- bundle".to_string(),
         generated_from_root: ".".to_string(),
         summary,
         files,

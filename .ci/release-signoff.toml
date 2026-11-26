@@ -14,7 +14,7 @@ title = "Override ledger remains explicit and valid"
 owner = "release-manager"
 source = "override_summary"
 criterion = "The override summary parses cleanly and all active overrides remain authorized, time-boxed, and scoped."
-playbook = "Run `cargo run -p fm-cli --bin evidence -- --root . verify-overrides`, then expire or repair any bad override entries before release."
+playbook = "Run `cargo run -p frankenmermaid-cli --bin evidence -- --root . verify-overrides`, then expire or repair any bad override entries before release."
 
 [[checklist]]
 id = "demo-evidence"
