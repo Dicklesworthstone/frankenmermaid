@@ -2886,18 +2886,20 @@ fn parse_flowchart_statement_asts(
     // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
     // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
     // so plain flowcharts (no `:::`) do not pay an extra scan.
-    let class_suffix_op = find_outside_flow_strings(statement, ":::").is_some().then(|| {
-        // Every flow operator starts with one of `- < = .` (the first bytes of `FLOW_OPERATORS` /
-        // `FLOW_OP_GATE`). A `:::` node declaration (`A[Label]:::class…`) contains none of them, so this
-        // auto-vectorizing byte-set scan skips the depth-tracking `find_operator` SCALAR scan of the
-        // (often long) node line. Byte-identical: no such byte ⇒ no operator ⇒ `find_operator` is `None`.
-        statement
-            .as_bytes()
-            .iter()
-            .any(|&b| matches!(b, b'-' | b'<' | b'=' | b'.'))
-            .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE))
-            .flatten()
-    });
+    let class_suffix_op = find_outside_flow_strings(statement, ":::")
+        .is_some()
+        .then(|| {
+            // Every flow operator starts with one of `- < = .` (the first bytes of `FLOW_OPERATORS` /
+            // `FLOW_OP_GATE`). A `:::` node declaration (`A[Label]:::class…`) contains none of them, so this
+            // auto-vectorizing byte-set scan skips the depth-tracking `find_operator` SCALAR scan of the
+            // (often long) node line. Byte-identical: no such byte ⇒ no operator ⇒ `find_operator` is `None`.
+            statement
+                .as_bytes()
+                .iter()
+                .any(|&b| matches!(b, b'-' | b'<' | b'=' | b'.'))
+                .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE))
+                .flatten()
+        });
     let chumsky_would_fail = matches!(
         &class_suffix_op,
         Some(op)
@@ -5094,112 +5096,124 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = trim_fast(line);
-        if trimmed.is_empty() || is_comment(trimmed) {
+        if is_comment(trim_fast(line)) {
             continue;
         }
-
-        if trimmed.starts_with("classDiagram") {
-            continue;
-        }
-
-        // ⚠️ HONOURED, NOT MERELY SKIPPED (bd-92kw1). `direction` is documented mermaid syntax in
-        // this family, and the reference parses it and draws NOTHING — measured in Chromium 151
-        // against the pinned 11.15.0 bundle. We were drawing a box captioned `direction TB`. Setting
-        // the direction is what the line MEANS, so consuming it silently would fix the phantom and
-        // still ignore the author; `state` has done it this way since bd-ij0f.
-        if trimmed.starts_with("direction ")
-            && let Some(direction) = parse_graph_direction(trimmed)
-        {
-            builder.set_direction(direction);
-            continue;
-        }
-
-        if in_block.is_none()
-            && let Some(body) = trimmed.strip_prefix("namespace")
-            && body.starts_with(char::is_whitespace)
-            && let Some(header) = body.strip_suffix('{')
-        {
-            namespace_blocks.push((namespace_path.len(), Vec::new()));
-            open_class_namespace(
-                header,
-                span_for(line_number, line),
-                &mut namespace_path,
-                builder,
-            );
-            continue;
-        }
-
-        if trimmed == "}" {
-            if in_block.is_some() {
-                in_block = None;
-            } else if let Some(block) = namespace_blocks.pop() {
-                close_class_namespace(block, &mut namespace_path, &mut class_owners);
+        for fragment in split_class_line(line, in_block.is_some()) {
+            let trimmed = trim_fast(fragment);
+            if trimmed.is_empty() || is_comment(trimmed) {
+                continue;
             }
-            continue;
-        }
 
-        // Inside a class block: parse member declarations. The open class name lives in the builder's
-        // `current_class` context (set on `BlockStart`, read by `add_class_member`), so this branch
-        // only needs to know a block is open — the previous per-member `class_name.clone()` was written
-        // into `cn` and immediately dropped unused, one wasted heap alloc+copy+free per member line.
-        if in_block.is_some() {
-            // A bare `<<interface>>` on its own line inside the braces is mermaid's OWN documented
-            // form, and it is the one that was falling through: the statement-level branch below
-            // only fires for `<<interface>> ClassName`, which needs a name AFTER the closing
-            // angles. With nothing after it the annotation reached `parse_class_member` and
-            // interned as an attribute literally named `<<interface>>`, drawn as a member row
-            // where mermaid draws the stereotype under the class name.
-            if let Some(stereotype) = parse_bare_class_stereotype(trimmed) {
-                lower_class_statement(
-                    ClassStatement::Stereotype(String::new(), stereotype),
-                    line_number,
-                    line,
+            if trimmed.starts_with("classDiagram") {
+                continue;
+            }
+
+            // ⚠️ HONOURED, NOT MERELY SKIPPED (bd-92kw1). `direction` is documented mermaid syntax in
+            // this family, and the reference parses it and draws NOTHING — measured in Chromium 151
+            // against the pinned 11.15.0 bundle. We were drawing a box captioned `direction TB`. Setting
+            // the direction is what the line MEANS, so consuming it silently would fix the phantom and
+            // still ignore the author; `state` has done it this way since bd-ij0f.
+            if trimmed.starts_with("direction ")
+                && let Some(direction) = parse_graph_direction(trimmed)
+            {
+                builder.set_direction(direction);
+                continue;
+            }
+
+            if in_block.is_none()
+                && let Some(body) = trimmed.strip_prefix("namespace")
+                && body.starts_with(char::is_whitespace)
+                && let Some(header) = body.strip_suffix('{')
+            {
+                namespace_blocks.push((namespace_path.len(), Vec::new()));
+                open_class_namespace(
+                    header,
+                    span_for(line_number, line),
+                    &mut namespace_path,
                     builder,
                 );
                 continue;
             }
-            if let Some(member) = parse_class_member(trimmed) {
-                lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
-            }
-            continue;
-        }
 
-        let Some(statements) = parse_class_statements(trimmed, builder.parser_config()) else {
-            builder.add_warning(format!(
-                "Line {line_number}: unsupported class syntax: {trimmed}"
-            ));
-            continue;
-        };
-
-        for statement in statements {
-            match statement {
-                // A `{`-less producer (the `class List~T~` generics form, the `Animal : +name`
-                // shorthand) emits BlockStart..End within one line. Without clearing here, that
-                // trailing End left `in_block` set and every following line — edges included —
-                // was swallowed as a member of it.
-                ClassStatement::BlockStart(ref name, _) => in_block = Some(name.clone()),
-                ClassStatement::End => in_block = None,
-                _ => {}
-            }
-
-            // If inside a namespace, track node key to add to subgraph after lowering.
-            let ns_node_key = match (&statement, namespace_path.last()) {
-                (
-                    ClassStatement::Node(node) | ClassStatement::NodeWithGenerics(node, _),
-                    Some(_),
-                ) => Some(node.id.clone()),
-                (ClassStatement::BlockStart(name, _), Some(_)) => {
-                    parse_node_token_with_config(name, builder.parser_config()).map(|node| node.id)
+            if trimmed == "}" {
+                if in_block.is_some() {
+                    in_block = None;
+                    lower_class_statement(ClassStatement::End, line_number, line, builder);
+                } else if let Some(block) = namespace_blocks.pop() {
+                    close_class_namespace(block, &mut namespace_path, &mut class_owners);
                 }
-                _ => None,
-            };
-            lower_class_statement(statement, line_number, line, builder);
+                continue;
+            }
 
-            if let Some(node_id) = ns_node_key.and_then(|key| builder.node_id_by_key(&key))
-                && let Some((_, declarations)) = namespace_blocks.last_mut()
-            {
-                declarations.push(node_id);
+            // Inside a class block: parse member declarations. The open class name lives in the builder's
+            // `current_class` context (set on `BlockStart`, read by `add_class_member`), so this branch
+            // only needs to know a block is open — the previous per-member `class_name.clone()` was written
+            // into `cn` and immediately dropped unused, one wasted heap alloc+copy+free per member line.
+            if in_block.is_some() {
+                // A bare `<<interface>>` on its own line inside the braces is mermaid's OWN documented
+                // form, and it is the one that was falling through: the statement-level branch below
+                // only fires for `<<interface>> ClassName`, which needs a name AFTER the closing
+                // angles. With nothing after it the annotation reached `parse_class_member` and
+                // interned as an attribute literally named `<<interface>>`, drawn as a member row
+                // where mermaid draws the stereotype under the class name.
+                if let Some(stereotype) = parse_bare_class_stereotype(trimmed) {
+                    lower_class_statement(
+                        ClassStatement::Stereotype(String::new(), stereotype),
+                        line_number,
+                        line,
+                        builder,
+                    );
+                    continue;
+                }
+                if let Some(member) = parse_class_member(trimmed) {
+                    lower_class_statement(
+                        ClassStatement::Member(member),
+                        line_number,
+                        line,
+                        builder,
+                    );
+                }
+                continue;
+            }
+
+            let Some(statements) = parse_class_statements(trimmed, builder.parser_config()) else {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported class syntax: {trimmed}"
+                ));
+                continue;
+            };
+
+            for statement in statements {
+                match statement {
+                    // A `{`-less producer (the `class List~T~` generics form, the `Animal : +name`
+                    // shorthand) emits BlockStart..End within one line. Without clearing here, that
+                    // trailing End left `in_block` set and every following line — edges included —
+                    // was swallowed as a member of it.
+                    ClassStatement::BlockStart(ref name, _) => in_block = Some(name.clone()),
+                    ClassStatement::End => in_block = None,
+                    _ => {}
+                }
+
+                // If inside a namespace, track node key to add to subgraph after lowering.
+                let ns_node_key = match (&statement, namespace_path.last()) {
+                    (
+                        ClassStatement::Node(node) | ClassStatement::NodeWithGenerics(node, _),
+                        Some(_),
+                    ) => Some(node.id.clone()),
+                    (ClassStatement::BlockStart(name, _), Some(_)) => {
+                        parse_node_token_with_config(name, builder.parser_config())
+                            .map(|node| node.id)
+                    }
+                    _ => None,
+                };
+                lower_class_statement(statement, line_number, line, builder);
+
+                if let Some(node_id) = ns_node_key.and_then(|key| builder.node_id_by_key(&key))
+                    && let Some((_, declarations)) = namespace_blocks.last_mut()
+                {
+                    declarations.push(node_id);
+                }
             }
         }
     }
@@ -5226,6 +5240,88 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             }
         }
     }
+}
+
+/// Split structural braces without changing physical source lines. Mermaid's class-body lexer
+/// accepts `class A { +name }` and a member on either brace's line. It separates members with
+/// newlines, so a semicolon inside a body remains part of that member's text.
+fn split_class_line(line: &str, mut in_class: bool) -> SplitStatements<'_> {
+    if !line.bytes().any(|byte| matches!(byte, b'{' | b'}' | b';')) {
+        return SplitStatements::Single(std::iter::once(line));
+    }
+
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut quote_end = None;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+    for (index, ch) in line.char_indices() {
+        if let Some(end) = quote_end {
+            if index == end {
+                quote_end = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            // Unpaired apostrophes (for example Rust lifetimes) are member text.
+            quote_end = sequence_closing_quote(line, index, ch);
+            continue;
+        }
+        if ch == '%' && line[index..].starts_with("%%") && line[start..index].trim().is_empty() {
+            return SplitStatements::Multiple(statements.into_iter());
+        }
+        match ch {
+            '~' if !in_class && trim_fast(&line[start..index]).starts_with("class ") => {
+                quote_end = line[index + 1..].find('~').map(|end| index + 1 + end);
+            }
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                let header = trim_fast(&line[start..index]);
+                let is_class = header
+                    .strip_prefix("class")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+                let is_namespace = header
+                    .strip_prefix("namespace")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+                if !in_class && (is_class || is_namespace) {
+                    statements.push(&line[start..=index]);
+                    start = index + 1;
+                    in_class = is_class;
+                } else {
+                    brace_depth += 1;
+                }
+            }
+            '{' => brace_depth += 1,
+            '}' if brace_depth > 0 => brace_depth -= 1,
+            '}' if square_depth == 0
+                && paren_depth == 0
+                && (in_class
+                    || trim_fast(&line[start..index]).is_empty()
+                    || trim_fast(&line[start..index]).starts_with("class ")) =>
+            {
+                statements.push(&line[start..index]);
+                statements.push(&line[index..=index]);
+                start = index + 1;
+                in_class = false;
+            }
+            ';' if !in_class
+                && square_depth == 0
+                && paren_depth == 0
+                && brace_depth == 0
+                && !closes_entity_token(line, index) =>
+            {
+                statements.push(&line[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    statements.push(&line[start..]);
+    SplitStatements::Multiple(statements.into_iter())
 }
 
 /// The upstream class DB assigns ownership at block close. Delay attaching membership
@@ -5480,6 +5576,21 @@ fn parse_bare_class_stereotype(line: &str) -> Option<fm_core::ClassStereotype> {
     Some(class_stereotype_from_annotation(body))
 }
 
+/// An annotation at the end of a declaration precedes its optional opening brace.
+/// A quoted class name or display label ends in its own delimiter, so annotation-looking text
+/// within either cannot be mistaken for this suffix.
+fn split_class_declaration_stereotype(raw: &str) -> (&str, Option<fm_core::ClassStereotype>) {
+    if let Some(start) = raw.rfind("<<")
+        && let Some(stereotype) = parse_bare_class_stereotype(&raw[start..])
+    {
+        let declaration = trim_fast(&raw[..start]);
+        if !declaration.is_empty() {
+            return (declaration, Some(stereotype));
+        }
+    }
+    (raw, None)
+}
+
 fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
     // The sole caller (the `parse_class_statements` line loop) already `trim_fast`s the line and
     // `continue`s on an empty/comment line, so `trimmed` is a non-empty, whitespace-trimmed slice.
@@ -5541,31 +5652,34 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
         rest
     };
 
-    // Parse type annotation. `rsplit_once(':')` / `rfind(')')` on a single ASCII char go through
-    // the scalar `CharSearcher` reverse searcher (a profiled self-symbol on class parse); the SIMD
-    // `memchr::memrchr` finds the same last-byte index (`:` / `)` are ASCII ⇒ char boundaries).
-    let (name_part, return_type) = if let Some(colon) = memchr::memrchr(b':', rest.as_bytes()) {
-        // Colon-separated: `name : Type` or `method() : ReturnType`
-        (
-            trim_fast(&rest[..colon]),
-            Some(trim_fast(&rest[colon + 1..]).to_string()),
-        )
-    } else if is_method {
-        // For methods without colon, check for return type after closing paren
-        // e.g., `eat() void` → name="eat()", return_type=Some("void")
+    // A method's parameter list owns its colons. Splitting on the last colon in the whole member
+    // truncated typed parameters and C++ namespaces in return types: `get(x: T) std::string`
+    // became the name `get(x: T) std:` and the return type `string`.
+    let (name_part, return_type) = if is_method {
         if let Some(paren_end) = memchr::memrchr(b')', rest.as_bytes()) {
             let after_paren = trim_fast(&rest[paren_end + 1..]);
             if after_paren.is_empty() {
                 (rest, None)
             } else {
+                // Keep the established single-colon spelling without eating the leading `::`
+                // in an absolute namespace-qualified return type.
+                let return_type = after_paren
+                    .strip_prefix(':')
+                    .filter(|tail| !tail.starts_with(':'))
+                    .map_or(after_paren, trim_fast);
                 (
                     &rest[..=paren_end],
-                    Some(decode_mermaid_entities(after_paren)),
+                    Some(decode_mermaid_entities(return_type)),
                 )
             }
         } else {
             (rest, None)
         }
+    } else if let Some(colon) = class_attribute_type_separator(rest) {
+        (
+            trim_fast(&rest[..colon]),
+            Some(decode_mermaid_entities(trim_fast(&rest[colon + 1..]))),
+        )
     } else {
         (rest, None)
     };
@@ -5592,6 +5706,44 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
         is_static,
         is_abstract,
     })
+}
+
+/// Locate an attribute's optional `name: Type` separator. Namespace separators and colons in
+/// quoted text, array bounds, or generic arguments belong to the attribute itself.
+fn class_attribute_type_separator(member: &str) -> Option<usize> {
+    if !member.contains(':') {
+        return None;
+    }
+    let bytes = member.as_bytes();
+    let mut skip_until = None;
+    let mut depth = 0_usize;
+    for (index, ch) in member.char_indices() {
+        if let Some(end) = skip_until {
+            if index == end {
+                skip_until = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' | '`' => {
+                skip_until = sequence_closing_quote(member, index, ch);
+            }
+            '~' => {
+                skip_until = member[index + 1..].find('~').map(|end| index + 1 + end);
+            }
+            '[' | '(' | '{' | '<' => depth += 1,
+            ']' | ')' | '}' | '>' => depth = depth.saturating_sub(1),
+            ':' if depth == 0
+                && index > 0
+                && bytes[index - 1] != b':'
+                && bytes.get(index + 1) != Some(&b':') =>
+            {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Strip quoted cardinality labels from a class-diagram relationship line.
@@ -5836,8 +5988,13 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
         let raw_name = trim_fast(trim_fast(line.trim_start_matches("class")).trim_end_matches('{'));
+        let (raw_name, stereotype) = split_class_declaration_stereotype(raw_name);
         let (class_name, generics) = strip_class_declaration_generics(raw_name);
-        return Some(vec![ClassStatement::BlockStart(class_name, generics)]);
+        let mut statements = vec![ClassStatement::BlockStart(class_name, generics)];
+        if let Some(stereotype) = stereotype {
+            statements.push(ClassStatement::Stereotype(String::new(), stereotype));
+        }
+        return Some(statements);
     }
 
     if line.starts_with('}') {
@@ -5881,7 +6038,14 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             continue;
         }
 
-        if let Some(ast) = parse_class_assignment_ast(statement) {
+        // An inline stereotype declares a class. The flowchart-style assignment parser would
+        // otherwise consume `class A <<interface>>` as a CSS class list without creating A.
+        let inline_stereotype = statement.strip_prefix("class ").is_some_and(|declaration| {
+            split_class_declaration_stereotype(trim_fast(declaration))
+                .1
+                .is_some()
+        });
+        if !inline_stereotype && let Some(ast) = parse_class_assignment_ast(statement) {
             statements.push(ClassStatement::Ast(ast));
             continue;
         }
@@ -5890,12 +6054,17 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         if statement.starts_with("class ") {
             let rest = statement.strip_prefix("class ").unwrap_or("").trim();
             if !rest.is_empty() && !rest.contains("--") && !rest.contains("..") {
+                let (rest, stereotype) = split_class_declaration_stereotype(rest);
                 let (clean_name, generics) = strip_class_declaration_generics(rest);
                 if let Some(node) = parse_node_token_with_config(&clean_name, config) {
+                    let stereotype_target = stereotype.as_ref().map(|_| node.id.clone());
                     if generics.is_empty() {
                         statements.push(ClassStatement::Node(node));
                     } else {
                         statements.push(ClassStatement::NodeWithGenerics(node, generics));
+                    }
+                    if let Some((target, stereotype)) = stereotype_target.zip(stereotype) {
+                        statements.push(ClassStatement::Stereotype(target, stereotype));
                     }
                     continue;
                 }
@@ -17374,10 +17543,14 @@ fn unmatched_source_bracket(raw: &str) -> bool {
     let raw = trim_fast(raw);
     // Markdown strings can contain ordinary double quotes in their bodies.
     if let Some(body) = raw.strip_prefix("\"`") {
-        return !body.split_once("`\"").is_some_and(|(_, tail)| tail.is_empty());
+        return !body
+            .split_once("`\"")
+            .is_some_and(|(_, tail)| tail.is_empty());
     }
     if let Some(body) = raw.strip_prefix('`') {
-        return !body.split_once('`').is_some_and(|(_, tail)| tail.is_empty());
+        return !body
+            .split_once('`')
+            .is_some_and(|(_, tail)| tail.is_empty());
     }
     !extract_quoted_value(raw).is_some_and(|(_, tail)| tail.is_empty())
 }
@@ -20995,6 +21168,16 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             // A block declaration always ends at the opening brace, and the CSS directive never
             // does, so that is the discriminator. Trailing whitespace is already gone via `trim`.
             let rest = rest.trim();
+            // Compact bodies end at `}`, and an inline annotation has no brace at all. Both
+            // still declare classes; neither may attach `{}` or `<<interface>>` as a CSS class.
+            if builder.ir().diagram_type == DiagramType::Class
+                && (split_class_declaration_stereotype(rest).1.is_some()
+                    || split_class_line(line, false)
+                        .next()
+                        .is_some_and(|header| trim_fast(header).ends_with('{')))
+            {
+                continue;
+            }
             if let Some((nodes_raw, class_name)) = rest.rsplit_once(' ')
                 && !rest.ends_with('{')
                 && !(is_gantt && rest.contains(':'))
@@ -28196,6 +28379,288 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn class_member_types_preserve_namespaces_and_parameter_colons() {
+        for (source, name, return_type, is_static, is_abstract) in [
+            (
+                "+fetch(id: model::Id, tags: string[]) model::Result[]",
+                "fetch(id: model::Id, tags: string[])",
+                Some("model::Result[]"),
+                false,
+                false,
+            ),
+            (
+                "+consume(id: model::Id)",
+                "consume(id: model::Id)",
+                None,
+                false,
+                false,
+            ),
+            (
+                "+qualified() ::std::string",
+                "qualified()",
+                Some("::std::string"),
+                false,
+                false,
+            ),
+            (
+                "+explicit(id: string): model::Result[]",
+                "explicit(id: string)",
+                Some("model::Result[]"),
+                false,
+                false,
+            ),
+            (
+                "+create(id: model::Id)$ model::Result",
+                "create(id: model::Id)",
+                Some("model::Result"),
+                true,
+                false,
+            ),
+            (
+                "+render(items: List~model::Item~)* Result~model::Item~",
+                "render(items: List~model::Item~)",
+                Some("Result~model::Item~"),
+                false,
+                true,
+            ),
+            (
+                "+read(key: string) : model::A&amp;B$",
+                "read(key: string)",
+                Some("model::A&B"),
+                true,
+                false,
+            ),
+        ] {
+            for input in [
+                format!("classDiagram\nclass Api {{\n{source}\n}}"),
+                format!("classDiagram\nApi : {source}"),
+            ] {
+                let parsed = parse_mermaid(&input);
+                assert_eq!(parsed.ir.nodes.len(), 1, "{input}");
+                let meta = parsed.ir.nodes[0]
+                    .class_meta
+                    .as_ref()
+                    .expect("class metadata");
+                assert!(meta.attributes.is_empty(), "{input}");
+                assert_eq!(meta.methods.len(), 1, "{input}");
+                let member = &meta.methods[0];
+                assert_eq!(member.name, name, "{input}");
+                assert_eq!(member.return_type.as_deref(), return_type, "{input}");
+                assert_eq!(
+                    member.visibility,
+                    fm_core::ClassVisibility::Public,
+                    "{input}"
+                );
+                assert_eq!(member.is_static, is_static, "{input}");
+                assert_eq!(member.is_abstract, is_abstract, "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn class_attribute_types_ignore_nested_and_quoted_colons() {
+        for (source, name, return_type) in [
+            ("+std::string name", "std::string name", None),
+            ("+name: std::string", "name", Some("std::string")),
+            (
+                "+Map~std::string, model::Item~ values",
+                "Map~std::string, model::Item~ values",
+                None,
+            ),
+            (
+                "+slots[1:4] : Vec~model::Item~",
+                "slots[1:4]",
+                Some("Vec~model::Item~"),
+            ),
+            ("+Tuple~T: Key~ values", "Tuple~T: Key~ values", None),
+            ("+Tuple<T: Key> values", "Tuple<T: Key> values", None),
+            (
+                "+\"http://example.test\" url",
+                "\"http://example.test\" url",
+                None,
+            ),
+            ("+имя: модуль::A&amp;B", "имя", Some("модуль::A&B")),
+        ] {
+            let input = format!("classDiagram\nclass Api {{\n{source}\n}}");
+            let parsed = parse_mermaid(&input);
+            let meta = parsed.ir.nodes[0]
+                .class_meta
+                .as_ref()
+                .expect("class metadata");
+            assert!(meta.methods.is_empty(), "{source}");
+            assert_eq!(meta.attributes.len(), 1, "{source}");
+            let member = &meta.attributes[0];
+            assert_eq!(member.name, name, "{source}");
+            assert_eq!(member.return_type.as_deref(), return_type, "{source}");
+        }
+    }
+
+    #[test]
+    fn compact_class_bodies_keep_members_and_following_relations() {
+        let parsed = parse_mermaid(
+            "classDiagram\nclass Empty {}\nclass A { +name }\nclass B { +read(id: std::string) std::string }\nA --> B\nB --> Empty",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        let a = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+        let b = parsed.ir.nodes.iter().find(|node| node.id == "B").unwrap();
+        let a_meta = a.class_meta.as_ref().expect("A members");
+        let b_meta = b.class_meta.as_ref().expect("B members");
+        assert_eq!(a_meta.attributes.len(), 1);
+        assert_eq!(a_meta.attributes[0].name, "name");
+        assert_eq!(b_meta.methods.len(), 1);
+        assert_eq!(b_meta.methods[0].name, "read(id: std::string)");
+        assert_eq!(
+            b_meta.methods[0].return_type.as_deref(),
+            Some("std::string")
+        );
+        assert_eq!(a.span_primary.start.line, 3);
+        assert_eq!(b.span_primary.start.line, 4);
+        assert_eq!(parsed.ir.edges[0].span.start.line, 5);
+        assert_eq!(parsed.ir.edges[1].span.start.line, 6);
+    }
+
+    #[test]
+    fn class_members_on_brace_lines_and_comments_keep_scope() {
+        let parsed = parse_mermaid(
+            "classDiagram\nclass First { +first\n%% } class Spurious {\n+last() std::string } %% ignored { }\nclass Second { -value\n}\nFirst --> Second",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let first = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "First")
+            .unwrap();
+        let second = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Second")
+            .unwrap();
+        let first_meta = first.class_meta.as_ref().expect("First members");
+        assert_eq!(first_meta.attributes.len(), 1);
+        assert_eq!(first_meta.attributes[0].name, "first");
+        assert_eq!(first_meta.methods.len(), 1);
+        assert_eq!(first_meta.methods[0].name, "last()");
+        assert_eq!(
+            first_meta.methods[0].return_type.as_deref(),
+            Some("std::string")
+        );
+        let second_meta = second.class_meta.as_ref().expect("Second members");
+        assert_eq!(second_meta.attributes.len(), 1);
+        assert_eq!(second_meta.attributes[0].name, "value");
+        assert_eq!(
+            second_meta.attributes[0].visibility,
+            fm_core::ClassVisibility::Private
+        );
+        assert_eq!(second.span_primary.start.line, 5);
+        assert_eq!(parsed.ir.edges[0].span.start.line, 7);
+    }
+
+    #[test]
+    fn compact_class_bodies_keep_namespace_membership() {
+        let parsed = parse_mermaid(
+            "classDiagram\nnamespace Outer { namespace Inner { class A { +name } } class B { +count } }\nA --> B",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
+        let outer = &parsed.ir.graph.subgraphs[0];
+        let inner = &parsed.ir.graph.subgraphs[1];
+        assert_eq!(outer.key, "Outer");
+        assert_eq!(inner.key, "Outer.Inner");
+        assert_eq!(inner.parent, Some(outer.id));
+        let member_names = |members: &[fm_core::IrNodeId]| {
+            members
+                .iter()
+                .map(|id| parsed.ir.nodes[id.0].id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(member_names(&outer.members), ["A", "B"]);
+        assert_eq!(member_names(&inner.members), ["A"]);
+        for node in &parsed.ir.nodes {
+            assert_eq!(node.class_meta.as_ref().unwrap().attributes.len(), 1);
+            assert_eq!(node.span_primary.start.line, 2);
+        }
+        assert_eq!(parsed.ir.edges[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn compact_class_blocks_preserve_quoted_braces_and_member_semicolons() {
+        let parsed = parse_mermaid(
+            "classDiagram\nclass A[\"A {label}; text\"] { +string name; String suffix }\nclass B { +accept(value: string = \"}\"): Result }\nA --> B",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let a = &parsed.ir.nodes[0];
+        assert_eq!(parsed.ir.labels[a.label.unwrap().0].text, "A {label}; text");
+        let a_meta = a.class_meta.as_ref().expect("A members");
+        assert_eq!(a_meta.attributes.len(), 1);
+        assert_eq!(a_meta.attributes[0].name, "string name; String suffix");
+        let b_meta = parsed.ir.nodes[1].class_meta.as_ref().expect("B members");
+        assert_eq!(b_meta.methods.len(), 1);
+        assert_eq!(b_meta.methods[0].name, "accept(value: string = \"}\")");
+        assert_eq!(b_meta.methods[0].return_type.as_deref(), Some("Result"));
+    }
+
+    #[test]
+    fn class_structural_braces_do_not_truncate_relation_labels_or_generic_types() {
+        let parsed = parse_mermaid(
+            "classDiagram\nclass A~{key: Value}~ { +value }\nA --> B : closed } and { open\nnote for A \"body { text }; quoted\"",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let meta = parsed.ir.nodes[0].class_meta.as_ref().expect("A metadata");
+        assert_eq!(meta.generics, ["{key: Value}"]);
+        assert_eq!(meta.attributes.len(), 1);
+        assert_eq!(meta.attributes[0].name, "value");
+        let label = parsed.ir.edges[0].label.expect("relationship label");
+        assert_eq!(parsed.ir.labels[label.0].text, "closed } and { open");
+        assert_eq!(parsed.ir.state_notes.len(), 1);
+        assert_eq!(parsed.ir.state_notes[0].text, "body { text }; quoted");
+    }
+
+    #[test]
+    fn class_inline_annotations_apply_with_and_without_bodies() {
+        let parsed = parse_mermaid(
+            "classDiagram\nclass Store~T~[\"Store {label}\"] <<interface>> { +get(id: ID) T }\nclass Plain <<abstract>>\nclass Empty <<service>> {}\nclass Literal[\"text <<interface>>\"]\nclass Body { <<interface>> }",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 5);
+        assert!(parsed.ir.nodes.iter().all(|node| node.classes.is_empty()));
+        let store = &parsed.ir.nodes[0];
+        let meta = store.class_meta.as_ref().expect("Store metadata");
+        assert_eq!(meta.generics, ["T"]);
+        assert_eq!(meta.stereotype, Some(fm_core::ClassStereotype::Interface));
+        assert_eq!(meta.methods[0].name, "get(id: ID)");
+        assert_eq!(
+            parsed.ir.labels[store.label.unwrap().0].text,
+            "Store {label}"
+        );
+        assert_eq!(
+            parsed.ir.nodes[1].class_meta.as_ref().unwrap().stereotype,
+            Some(fm_core::ClassStereotype::Abstract)
+        );
+        assert_eq!(
+            parsed.ir.nodes[2].class_meta.as_ref().unwrap().stereotype,
+            Some(fm_core::ClassStereotype::Service)
+        );
+        assert!(
+            parsed.ir.nodes[3]
+                .class_meta
+                .as_ref()
+                .is_none_or(|meta| meta.stereotype.is_none())
+        );
+        let body = parsed.ir.nodes[4]
+            .class_meta
+            .as_ref()
+            .expect("Body metadata");
+        assert_eq!(body.stereotype, Some(fm_core::ClassStereotype::Interface));
+        assert!(body.attributes.is_empty());
+    }
+
+    #[test]
     fn class_colon_shorthand_populates_members_not_a_literal_label() {
         // The exact shape of crates/fm-cli/tests/golden/class_basic.mmd.
         let parsed =
@@ -32452,7 +32917,9 @@ Rel_Back(db, app, "Responds")"#,
                 assert_eq!(node.classes.as_slice(), classes, "{id}");
             }
             let endpoint_name = |endpoint| {
-                let id = ir.resolve_endpoint_node(endpoint).expect("resolved endpoint");
+                let id = ir
+                    .resolve_endpoint_node(endpoint)
+                    .expect("resolved endpoint");
                 ir.nodes[id.0].id.as_str()
             };
             let edges: Vec<_> = ir
@@ -36190,14 +36657,39 @@ Gateway --> Login"#,
         assert_eq!(ir.graph.subgraphs.len(), 6);
         assert_eq!(ir.clusters.len(), 6);
         for (key, parent, title, members) in [
-            ("Platform", None, "Platform", &["Login", "Router", "Gateway"][..]),
-            ("Platform.Services", Some("Platform"), "Application services", &["Login", "Router"][..]),
-            ("Platform.Services.Auth", Some("Platform.Services"), "Identity", &["Login"][..]),
+            (
+                "Platform",
+                None,
+                "Platform",
+                &["Login", "Router", "Gateway"][..],
+            ),
+            (
+                "Platform.Services",
+                Some("Platform"),
+                "Application services",
+                &["Login", "Router"][..],
+            ),
+            (
+                "Platform.Services.Auth",
+                Some("Platform.Services"),
+                "Identity",
+                &["Login"][..],
+            ),
             ("Other", None, "Other", &["Token"][..]),
             ("Other.Services", Some("Other"), "Services", &["Token"][..]),
-            ("Other.Services.Auth", Some("Other.Services"), "Auth", &["Token"][..]),
+            (
+                "Other.Services.Auth",
+                Some("Other.Services"),
+                "Auth",
+                &["Token"][..],
+            ),
         ] {
-            let ns = ir.graph.subgraphs.iter().find(|ns| ns.key == key).expect(key);
+            let ns = ir
+                .graph
+                .subgraphs
+                .iter()
+                .find(|ns| ns.key == key)
+                .expect(key);
             let parent_key = ns.parent.map(|id| ir.graph.subgraphs[id.0].key.as_str());
             assert_eq!(parent_key, parent, "{key}");
             if let Some(id) = ns.parent {
@@ -36207,15 +36699,29 @@ Gateway --> Login"#,
             assert_eq!(ir.labels[cluster.title.expect(key).0].text, title);
             assert_eq!(cluster.title, ns.title);
             assert_eq!(cluster.members, ns.members);
-            let names: Vec<_> = ns.members.iter().map(|id| ir.nodes[id.0].id.as_str()).collect();
+            let names: Vec<_> = ns
+                .members
+                .iter()
+                .map(|id| ir.nodes[id.0].id.as_str())
+                .collect();
             assert_eq!(names.as_slice(), members, "{key}");
         }
-        let outside = ir.nodes.iter().position(|node| node.id == "Outside").unwrap();
+        let outside = ir
+            .nodes
+            .iter()
+            .position(|node| node.id == "Outside")
+            .unwrap();
         assert!(ir.graph.nodes[outside].clusters.is_empty());
         assert_eq!(ir.edges.len(), 1);
         let edge = &ir.edges[0];
-        assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.from).unwrap().0].id, "Gateway");
-        assert_eq!(ir.nodes[ir.resolve_endpoint_node(edge.to).unwrap().0].id, "Login");
+        assert_eq!(
+            ir.nodes[ir.resolve_endpoint_node(edge.from).unwrap().0].id,
+            "Gateway"
+        );
+        assert_eq!(
+            ir.nodes[ir.resolve_endpoint_node(edge.to).unwrap().0].id,
+            "Login"
+        );
     }
 
     #[test]
@@ -36419,11 +36925,20 @@ namespace A {
 }"#,
         );
         let ir = &parsed.ir;
-        let names: Vec<_> = ir.graph.subgraphs.iter().map(|ns| ns.key.as_str()).collect();
+        let names: Vec<_> = ir
+            .graph
+            .subgraphs
+            .iter()
+            .map(|ns| ns.key.as_str())
+            .collect();
         assert_eq!(names, ["A", "A.Inner", "B"]);
         let a = &ir.graph.subgraphs[0];
         assert_eq!(ir.labels[a.title.unwrap().0].text, "Renamed");
-        let owned: Vec<_> = a.members.iter().map(|id| ir.nodes[id.0].id.as_str()).collect();
+        let owned: Vec<_> = a
+            .members
+            .iter()
+            .map(|id| ir.nodes[id.0].id.as_str())
+            .collect();
         assert_eq!(owned, ["First", "Third", "Fourth"]);
         assert!(ir.graph.subgraphs[1].members.is_empty());
         let b = &ir.graph.subgraphs[2];
@@ -36444,7 +36959,13 @@ namespace A {
             },
         );
         assert!(parsed.warnings.iter().any(|w| w.contains("nesting limit")));
-        let keys: Vec<_> = parsed.ir.graph.subgraphs.iter().map(|ns| ns.key.as_str()).collect();
+        let keys: Vec<_> = parsed
+            .ir
+            .graph
+            .subgraphs
+            .iter()
+            .map(|ns| ns.key.as_str())
+            .collect();
         assert_eq!(keys, ["A", "A.B", "Z"]);
         let deep = &parsed.ir.graph.subgraphs[1];
         let peer = &parsed.ir.graph.subgraphs[2];

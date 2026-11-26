@@ -134,6 +134,51 @@ fn drawn_row(member: &str) -> Vec<String> {
         .collect()
 }
 
+/// Mermaid 11.15.0's ClassMember parser separates a method at its closing parenthesis, not at
+/// parameter/type colons. The parser must preserve those fields before any renderer sees them.
+#[test]
+fn typed_parameters_and_namespace_types_reach_the_drawn_rows() {
+    for (member, expected) in [
+        ("+std::string name", "+std::string name"),
+        ("+name: std::string", "+name : std::string"),
+        (
+            "+fetch(id: model::Id, tags: string[]) model::Result[]",
+            "+fetch(id: model::Id, tags: string[]) : model::Result[]",
+        ),
+        ("+consume(id: model::Id)", "+consume(id: model::Id)"),
+        ("+qualified() ::std::string", "+qualified() : ::std::string"),
+        (
+            "+load(items: List~model::Item~)$ Result~model::Item~",
+            "+load(items: List<model::Item>) : Result<model::Item>",
+        ),
+        (
+            "+read(key: string) : model::A&amp;B",
+            "+read(key: string) : model::A&B",
+        ),
+    ] {
+        assert_eq!(drawn_row(member), [expected], "{member}");
+    }
+}
+
+#[test]
+fn compact_class_bodies_render_the_same_members_as_multiline_bodies() {
+    let compact = "classDiagram\nclass Api { +fetch(id: model::Id) model::Result }\nclass Result { +std::string value }\nApi --> Result";
+    let multiline = "classDiagram\nclass Api {\n+fetch(id: model::Id) model::Result\n}\nclass Result {\n+std::string value\n}\nApi --> Result";
+    let compact_ir = fm_parser::parse(compact).ir;
+    let multiline_ir = fm_parser::parse(multiline).ir;
+    assert_eq!(compact_ir.nodes.len(), 2);
+    assert_eq!(compact_ir.edges.len(), 1);
+    let compact_rows = text_runs(&fm_render_svg::render_svg(&compact_ir));
+    let multiline_rows = text_runs(&fm_render_svg::render_svg(&multiline_ir));
+    assert_eq!(compact_rows, multiline_rows);
+    assert!(
+        compact_rows
+            .iter()
+            .any(|row| row == "+fetch(id: model::Id) : model::Result")
+    );
+    assert!(compact_rows.iter().any(|row| row == "+std::string value"));
+}
+
 #[test]
 fn every_method_row_draws_what_mermaid_draws() {
     let mut divergent = Vec::new();
