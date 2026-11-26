@@ -20,7 +20,10 @@ This document outlines the strategy for publishing frankenmermaid workspace crat
 
 ## Git Dependencies (Blockers)
 
-### franken-kernel (BLOCKING)
+### franken-kernel (RESOLVED)
+
+**Status (2026-11-26):** consumed from crates.io; the workspace pins `franken-kernel = "0.7.0"`.
+`cargo package -p fm-core --no-verify` succeeds. The notes below are kept as history.
 
 **Source:** `https://github.com/Dicklesworthstone/asupersync.git`
 **Used by:** fm-core (hard dependency)
@@ -41,13 +44,35 @@ This document outlines the strategy for publishing frankenmermaid workspace crat
 
 **Decision:** Publish franken-kernel to crates.io first. The types are stable and the repo is maintained by the same team.
 
-### fnx-* crates (NON-BLOCKING)
+### fnx-* crates (BLOCKING)
 
-**Source:** `https://github.com/Dicklesworthstone/franken_networkx.git`
+**Source:** `https://github.com/Dicklesworthstone/franken_networkx.git` (pinned `rev`, no `version`)
 **Used by:** fm-layout (optional, behind `fnx-integration` feature flag)
 **Crates:** fnx-runtime, fnx-classes, fnx-algorithms, fnx-views
 
-**Resolution:** These are already optional via feature flags. Publishing with default features works fine. Users who need `fnx-integration` must use git dependencies until fnx-* is published.
+Being optional does not help. Cargo checks every dependency in the manifest, optional ones
+included, and refuses a git dependency that has no `version` requirement. Checked on
+2026-11-26 with `cargo package -p fm-layout --no-verify`:
+
+```
+error: failed to verify manifest at `crates/fm-layout/Cargo.toml`
+  all dependencies must have a version requirement specified when packaging.
+  dependency `fnx-algorithms` does not specify a version
+```
+
+fm-core and fm-parser package cleanly. fm-layout fails, and so does every crate that depends
+on it: fm-render-svg, fm-render-term, fm-render-canvas, fm-wasm and frankenmermaid-cli.
+
+**Resolution options** (one is needed before fm-layout can be published):
+
+1. Depend on the fnx-* releases on crates.io. 0.4.1 is the latest. The pinned rev reports
+   version 0.1.0, which was never published, so this means porting the adapter to the
+   published API.
+2. Leave `fnx-integration` out of the published manifests until option 1 is done. Users who
+   need FNX would then build from git.
+
+Adding `version = "0.1.0"` next to the `rev` would get past this check, but the published
+crate would then require an fnx version that does not exist on crates.io.
 
 ## Publishing Order
 
@@ -75,7 +100,7 @@ For each crate:
 - [ ] `keywords` field set (max 5)
 - [ ] `categories` field set
 - [ ] `readme` field set (if crate-specific README exists)
-- [ ] No git dependencies in default feature set
+- [ ] Every git dependency also has a `version` requirement that crates.io can satisfy. This applies to optional dependencies too, not only the default feature set.
 - [ ] `cargo publish --dry-run` passes
 
 ## Required Metadata Fields
@@ -109,8 +134,12 @@ homepage = "https://github.com/Dicklesworthstone/frankenmermaid"
 
 ```bash
 # Step 0: Ensure franken-kernel is published and update fm-core dependency
+#         (done: fm-core uses franken-kernel 0.7.0 from crates.io)
 
-# Step 1: Dry-run all crates
+# Step 1: Dry-run all crates.
+# Until fm-core is on crates.io, a per-crate dry run of anything above it fails with
+# "no matching package named `fm-core` found". Packaging the crates in one invocation
+# (`cargo package -p fm-core -p fm-parser ... --no-verify`) resolves them against each other.
 for crate in fm-core fm-parser fm-layout fm-render-svg fm-render-term fm-render-canvas fm-wasm frankenmermaid-cli; do
     echo "=== $crate ==="
     cargo publish --dry-run -p $crate
@@ -143,6 +172,6 @@ cargo publish -p frankenmermaid-cli
 
 1. **fm-cli name conflict:** The name `fm-cli` is already taken on crates.io (2 versions, 2,684 downloads). We must rename to `frankenmermaid-cli`.
 
-2. **fm-regression-harness:** This crate is for internal testing only and should NOT be published. Add `publish = false` to its Cargo.toml.
+2. **fm-regression-harness:** This crate is for internal testing only and should NOT be published. Its Cargo.toml already sets `publish = false`.
 
 3. **Edition 2024:** Requires Rust 1.95+. Most users should have this, but document the MSRV clearly.
