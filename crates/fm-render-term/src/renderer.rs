@@ -2866,8 +2866,14 @@ impl TermRenderer {
                     (1, 0)
                 };
                 for offset in -1..=1 {
-                    let from = (x0.saturating_add(ox * offset), y0.saturating_add(oy * offset));
-                    let to = (x1.saturating_add(ox * offset), y1.saturating_add(oy * offset));
+                    let from = (
+                        x0.saturating_add(ox * offset),
+                        y0.saturating_add(oy * offset),
+                    );
+                    let to = (
+                        x1.saturating_add(ox * offset),
+                        y1.saturating_add(oy * offset),
+                    );
                     if stroke == EdgeStroke::ThickDotted {
                         Self::draw_dashed_segment(canvas, from.0, from.1, to.0, to.1);
                     } else {
@@ -9837,7 +9843,8 @@ mod tests {
     #[test]
     fn authored_dashes_preserve_thick_shafts_in_cell_and_subcell_output() {
         let mut ir = sample_ir();
-        ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string("stroke-dasharray:5")));
+        ir.edges[0].inline_style =
+            Some(Box::new(fm_core::parse_style_string("stroke-dasharray:5")));
         let path = terminal_edge_test_path(&[(4.0, 12.0), (40.0, 12.0)]);
         let renderer = TermRenderer::new(ResolvedConfig::resolve(
             &TermRenderConfig {
