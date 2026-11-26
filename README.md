@@ -287,7 +287,7 @@ fnx-integration          = ["fm-layout/fnx-integration"]               # Phase-1
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]    # Phase-2 directed FNX
 ```
 
-Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerly git-pinned `franken-kernel` is now consumed from crates.io (currently pinned to `0.3.1`); only the FNX feature still requires a git-pinned dependency on `franken_networkx`.
+Default builds remain FNX-free. `franken-kernel`, formerly git-pinned, has been consumed from crates.io since 2026-04-21 and is currently pinned to `0.7.0`. Only the FNX feature still uses a git-pinned dependency on `franken_networkx`. Cargo refuses to package a git dependency without a version requirement, even an optional one, so `fm-layout` and the crates built on it cannot be published to crates.io until that changes (see `docs/CRATES_IO_PUBLISHING.md`).
 
 `fm-layout` and `fm-render-svg` use the pure-Rust microlp solver by default. Authored
 pins, rank/order constraints, minimum edge lengths, and non-overlap constraints remain
@@ -2995,9 +2995,9 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |
 | **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | Opt-in device rendering includes multi-face text; the synchronous `Diagram` API retains its Canvas2D fallback |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
-| **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
+| **LP/MIP solver backend for constraint layout** | Done | Pins, rank/order, minimum lengths and non-overlap are solved as one LP/MIP: pure-Rust microlp by default, HiGHS behind the `highs` feature. Only a proven optimum is applied; any other outcome keeps the heuristic layout |
 | **`@frankenmermaid/core` npm publish** | Awaiting `/dsr` release | Build and verify the package through `/dsr`, then confirm the public registry from a clean consumer before documenting npm installation |
-| **Crates.io publish** | Blocker-clear | Per `docs/CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
+| **Crates.io publish** | Blocked | `franken-kernel` is migrated, but the optional fnx-* git dependencies have no version requirement, and cargo refuses to package `fm-layout` (and every crate built on it) without one. `fm-core` and `fm-parser` package cleanly. See `docs/CRATES_IO_PUBLISHING.md` |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |
 
