@@ -2969,6 +2969,20 @@ impl IrBuilder {
         });
     }
 
+    /// Replace an existing edge label through the same interning path as a new edge.
+    /// An explicitly empty label removes the association without disturbing shared label IDs.
+    pub(crate) fn set_edge_label(&mut self, edge_index: usize, label: Option<&str>, span: Span) {
+        if edge_index >= self.ir.edges.len() {
+            return;
+        }
+        self.mark_reusable_prefix_edge_dirty(edge_index);
+        let parsed_label = clean_label(label).map(ParsedLabel::plain);
+        let label_id = parsed_label
+            .as_ref()
+            .map(|value| self.intern_label(value, span));
+        self.ir.edges[edge_index].label = label_id;
+    }
+
     /// Preserve the flowchart operator's rank-distance hint without allocating extras for
     /// ordinary one-rank edges. Other diagram families reuse the edge parser but not this syntax.
     pub(crate) fn set_last_edge_min_length(&mut self, min_length: u8) {

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, iter::Peekable, str::CharIndices};
+use std::{borrow::Cow, collections::BTreeMap, iter::Peekable, str::CharIndices};
 
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrConstraint, IrStyleTarget, NodeShape, Span,
@@ -169,6 +169,11 @@ pub fn parse_dot(input: &str) -> ParseResult {
     let cleaned = strip_all_comments_cow(input);
     let cleaned = cleaned.as_ref();
     let directed = is_directed_graph_cleaned(cleaned);
+    // Strictness belongs to the graph, including edges declared in nested scopes. Node IDs,
+    // rather than source spelling or labels, identify an edge; ordinary DOT remains a multigraph.
+    let mut strict_edges = (dot_header_kind(cleaned).is_some()
+        && strip_dot_keyword(cleaned.trim_start(), "strict").is_some())
+    .then(BTreeMap::new);
     let body = extract_body(cleaned);
     let normalized_body_storage;
     let normalized_body = if dot_body_needs_normalization(body) {
@@ -479,7 +484,13 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 active_subgraphs: &active_subgraphs,
                 defaults: &defaults,
             };
-            if parse_dot_edge_statement(statement, directed, ctx, &mut builder) {
+            if parse_dot_edge_statement(
+                statement,
+                directed,
+                ctx,
+                &mut strict_edges,
+                &mut builder,
+            ) {
                 continue;
             }
             if parse_dot_node_statement(statement, ctx, &mut builder) {
@@ -493,6 +504,31 @@ pub fn parse_dot(input: &str) -> ParseResult {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported DOT statement: {statement}"
             ));
+        }
+    }
+
+    if let Some(strict_edges) = strict_edges {
+        // Emit only the final rank requirement for each logical edge. Appending a constraint on
+        // every statement would leave an old minlen=3 active after a later minlen=1 update.
+        let mut edges: Vec<_> = strict_edges.into_values().collect();
+        edges.sort_unstable_by_key(|edge| edge.index);
+        for edge in edges {
+            if let Some((min_len, span)) = edge.min_len {
+                let ir = builder.ir();
+                let edge = &ir.edges[edge.index];
+                if let (Some(from), Some(to)) = (
+                    edge.from.resolved_node_id(&ir.ports),
+                    edge.to.resolved_node_id(&ir.ports),
+                ) {
+                    let constraint = IrConstraint::MinLength {
+                        from_id: ir.nodes[from.0].id.clone(),
+                        to_id: ir.nodes[to.0].id.clone(),
+                        min_len,
+                        span,
+                    };
+                    builder.add_constraint(constraint);
+                }
+            }
         }
     }
 
@@ -659,6 +695,7 @@ impl DotNodeColors {
 /// renderer cannot show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DotEdgeStyle {
+    Solid,
     Dotted,
     Bold,
 }
@@ -670,12 +707,14 @@ enum DotEdgeStyle {
 /// are skipped rather than treated as an error: they are valid DOT this engine simply does not draw.
 fn parse_dot_edge_style(attributes: &str) -> Option<DotEdgeStyle> {
     let value = extract_dot_attribute_raw(attributes, "style")?;
+    let value = value.as_ref().trim().trim_matches(['"', '\'']);
+    if value.trim().is_empty() {
+        return Some(DotEdgeStyle::Solid);
+    }
     value
-        .as_ref()
-        .trim()
-        .trim_matches(['"', '\''])
         .split(',')
         .find_map(|token| match token.trim().to_ascii_lowercase().as_str() {
+            "solid" => Some(DotEdgeStyle::Solid),
             "dashed" | "dotted" => Some(DotEdgeStyle::Dotted),
             "bold" => Some(DotEdgeStyle::Bold),
             _ => None,
@@ -685,8 +724,8 @@ fn parse_dot_edge_style(attributes: &str) -> Option<DotEdgeStyle> {
 /// The arrow type for an edge, given the graph's directedness and the style in force.
 const fn dot_arrow_type(directed: bool, style: Option<DotEdgeStyle>) -> ArrowType {
     match (directed, style) {
-        (true, None) => ArrowType::Arrow,
-        (false, None) => ArrowType::Line,
+        (true, None | Some(DotEdgeStyle::Solid)) => ArrowType::Arrow,
+        (false, None | Some(DotEdgeStyle::Solid)) => ArrowType::Line,
         (true, Some(DotEdgeStyle::Dotted)) => ArrowType::DottedArrow,
         (false, Some(DotEdgeStyle::Dotted)) => ArrowType::DottedLine,
         (true, Some(DotEdgeStyle::Bold)) => ArrowType::ThickArrow,
@@ -1108,10 +1147,18 @@ struct DotStatementContext<'a> {
     defaults: &'a DotDefaults,
 }
 
+/// One logical edge in a strict graph. The first declaration fixes its index and orientation;
+/// subsequent declarations update attributes without appending IR or graph-edge records.
+struct DotStrictEdge {
+    index: usize,
+    min_len: Option<(usize, Span)>,
+}
+
 fn parse_dot_edge_statement(
     statement: &str,
     directed: bool,
     ctx: DotStatementContext<'_>,
+    strict_edges: &mut Option<BTreeMap<(usize, usize), DotStrictEdge>>,
     builder: &mut IrBuilder,
 ) -> bool {
     let DotStatementContext {
@@ -1139,17 +1186,19 @@ fn parse_dot_edge_statement(
     let (last_fragment, shared_attrs) = split_endpoint_and_attrs(last_part);
     *last_part = last_fragment;
 
-    let edge_label_str = shared_attrs.and_then(parse_dot_label);
+    let label_attribute = shared_attrs.and_then(|attrs| extract_dot_attribute_raw(attrs, "label"));
+    let edge_label_str = label_attribute.as_deref().and_then(parse_dot_label_value);
     let min_len = shared_attrs.and_then(parse_dot_minlen);
     // A style on the statement wins over the `edge [style=…]` default, which is what DOT does.
-    let style = shared_attrs
-        .and_then(parse_dot_edge_style)
-        .or(defaults.edge_style);
+    let explicit_style = shared_attrs.and_then(parse_dot_edge_style);
+    let style = explicit_style.or(defaults.edge_style);
     let arrow = dot_arrow_type(operator == "->" || directed, style);
     // Edge visuals resolve the same way node visuals do: per attribute, statement over default.
-    let edge_css = shared_attrs
+    let explicit_visuals = shared_attrs
         .map(DotNodeColors::parse)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let explicit_css = explicit_visuals.to_edge_css();
+    let edge_css = explicit_visuals
         .resolved_over(&defaults.edge_visuals)
         .to_edge_css();
 
@@ -1191,11 +1240,37 @@ fn parse_dot_edge_statement(
         );
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
-            // Captured BEFORE the push, because `push_style_ref` addresses the edge by index and the
-            // index of the edge about to be added is the current count.
-            let edge_index = builder.edge_count();
-            builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
-            if let Some(css) = edge_css.clone() {
+            let key = if !directed && from_id.0 > to_id.0 {
+                (to_id.0, from_id.0)
+            } else {
+                (from_id.0, to_id.0)
+            };
+            let mut strict_edge = strict_edges.as_mut().map(|edges| {
+                edges.entry(key).or_insert_with(|| DotStrictEdge {
+                    index: builder.edge_count(),
+                    min_len: None,
+                })
+            });
+            let edge_index = strict_edge
+                .as_ref()
+                .map_or_else(|| builder.edge_count(), |edge| edge.index);
+            let repeated = edge_index < builder.edge_count();
+            let css = if repeated {
+                // Defaults describe newly created edges only. Repeating an edge is an update,
+                // including label="" to remove a label and style=solid to reset its line family.
+                if label_attribute.is_some() {
+                    builder.set_edge_label(edge_index, edge_label_str.as_deref(), span);
+                }
+                if let Some(style) = explicit_style {
+                    builder.ir_mut().edges[edge_index].arrow =
+                        dot_arrow_type(operator == "->" || directed, Some(style));
+                }
+                explicit_css.clone()
+            } else {
+                builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
+                edge_css.clone()
+            };
+            if let Some(css) = css {
                 builder.push_style_ref(IrStyleTarget::Link(edge_index), css, span);
             }
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
@@ -1205,14 +1280,21 @@ fn parse_dot_edge_statement(
             // `a -> b -> c [minlen=2]`, which is what graphviz does with a shared attribute list.
             match &min_len {
                 Some(DotMinLen::Ranks(ranks)) => {
-                    builder.add_constraint(IrConstraint::MinLength {
-                        from_id: from_node.id.clone(),
-                        to_id: to_node.id.clone(),
-                        min_len: *ranks,
-                        span,
-                    });
+                    if let Some(edge) = strict_edge.as_mut() {
+                        edge.min_len = (*ranks > 1).then_some((*ranks, span));
+                    } else if *ranks > 1 {
+                        builder.add_constraint(IrConstraint::MinLength {
+                            from_id: from_node.id.clone(),
+                            to_id: to_node.id.clone(),
+                            min_len: *ranks,
+                            span,
+                        });
+                    }
                 }
                 Some(DotMinLen::SameRankUnsupported) => {
+                    if let Some(edge) = strict_edge.as_mut() {
+                        edge.min_len = None;
+                    }
                     builder.add_warning(format!(
                         "Line {line_number}: DOT minlen=0 asks for both endpoints on one rank, \
                          which this engine cannot express for an edge; use {{ rank=same; \
@@ -1649,9 +1731,9 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
 /// Read DOT's `minlen` edge attribute — the minimum number of ranks an edge must span.
 ///
 /// Becomes an [`IrConstraint::MinLength`], which both `apply_ir_constraints` and the LP solver
-/// already honor. Returns `None` for a missing, unparseable, or `minlen=1` value: 1 is the DOT
-/// default and every edge already spans at least one rank, so a constraint for it would only inflate
-/// the solver's applied-constraint count. `minlen=0` is DOT's "same rank" spelling for an edge, which
+/// already honor. The default `minlen=1` is retained so a repeated strict edge can clear an older
+/// requirement, but does not itself emit a constraint: every edge already spans at least one rank.
+/// `minlen=0` is DOT's "same rank" spelling for an edge, which
 /// [`IrConstraint::MinLength`] cannot express (its gap is a minimum, not an equality), so it is
 /// rejected here and reported by the caller rather than silently rounded up to 1.
 fn parse_dot_minlen(attributes: &str) -> Option<DotMinLen> {
@@ -1659,7 +1741,6 @@ fn parse_dot_minlen(attributes: &str) -> Option<DotMinLen> {
     let text = value.as_ref().trim().trim_matches(['"', '\'']).trim();
     match text.parse::<usize>() {
         Ok(0) => Some(DotMinLen::SameRankUnsupported),
-        Ok(1) => None,
         Ok(min_len) => Some(DotMinLen::Ranks(min_len)),
         Err(_) => Some(DotMinLen::Invalid(text.to_string())),
     }
@@ -1704,7 +1785,7 @@ fn parse_dot_rankdir(statement: &str) -> Option<Result<GraphDirection, String>> 
 /// Outcome of reading `minlen`, kept distinct so the caller can report what it could not honor.
 #[derive(Debug, PartialEq, Eq)]
 enum DotMinLen {
-    /// A usable minimum rank span (>= 2).
+    /// A usable minimum rank span (>= 1); 1 clears an older strict-edge requirement.
     Ranks(usize),
     /// `minlen=0`: DOT's request to place both endpoints on one rank.
     SameRankUnsupported,
@@ -2116,6 +2197,27 @@ fn expand_edge_groups(input: &str) -> String {
         // Extract group members (respecting quotes).
         let inner = rest[brace_start + 1..brace_end].trim();
         let members = split_dot_group_members(inner);
+        let after_group = &rest[brace_end + 1..];
+        let mut attribute_end = 0;
+        let mut bracket_depth = 0_usize;
+        for (index, ch) in dot_syntax_chars(after_group) {
+            if bracket_depth == 0 && !ch.is_whitespace() && ch != '[' {
+                break;
+            }
+            match ch {
+                '[' => bracket_depth += 1,
+                ']' => {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    if bracket_depth == 0 {
+                        attribute_end = index + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A list after the group belongs to every expanded edge. Leaving it on the trailing
+        // source text applied it only to the last member, including when strict updates merged it.
+        let attributes = &after_group[..attribute_end];
 
         // Expand: emit "source -> member" for each member.
         if members.is_empty() {
@@ -2130,10 +2232,11 @@ fn expand_edge_groups(input: &str) -> String {
                 output.push_str(operator);
                 output.push(' ');
                 output.push_str(member);
+                output.push_str(attributes);
             }
         }
 
-        rest = &rest[brace_end + 1..];
+        rest = &after_group[attribute_end..];
     }
 
     output.push_str(rest);
@@ -2381,6 +2484,233 @@ mod tests {
         assert_eq!(parsed.ir.edges.len(), 2);
         assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn strict_dot_deduplicates_by_directedness_and_preserves_multigraphs() {
+        for (header, operator, expected_edges) in [
+            ("strict digraph", "->", 3),
+            ("digraph", "->", 5),
+            ("strict graph", "--", 2),
+            ("graph", "--", 5),
+        ] {
+            let parsed = parse_dot(&format!(
+                "{header} G {{ a {operator} b; a {operator} b; b {operator} a; \
+                 a {operator} a; a {operator} a; }}"
+            ));
+            assert_eq!(parsed.ir.edges.len(), expected_edges, "{header}");
+            assert_eq!(parsed.ir.graph.edges.len(), expected_edges, "{header}");
+            for (index, (edge, graph_edge)) in parsed
+                .ir
+                .edges
+                .iter()
+                .zip(&parsed.ir.graph.edges)
+                .enumerate()
+            {
+                assert_eq!(graph_edge.edge_id, index);
+                assert_eq!(graph_edge.from, edge.from);
+                assert_eq!(graph_edge.to, edge.to);
+            }
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+    }
+
+    #[test]
+    fn strict_dot_updates_attributes_without_reapplying_new_defaults() {
+        // Graphviz's strict-edge update contract: the existing forward edge keeps its original
+        // color and line style; the new reverse edge receives defaults in force at creation.
+        let parsed = parse_dot(
+            "strict digraph { a -> b [color=red,label=first,minlen=3]; \
+             edge [color=green,style=bold]; a -> b [label=second,minlen=1]; \
+             b -> a [color=blue]; }",
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.graph.edges.len(), 2);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
+        assert_eq!(parsed.ir.edges[1].arrow, ArrowType::ThickArrow);
+        let label = parsed.ir.edges[0].label.expect("updated label");
+        assert_eq!(parsed.ir.labels[label.0].text, "second");
+        assert!(parsed.ir.edges[1].label.is_none());
+        assert!(parsed.ir.constraints.is_empty());
+        let styles: Vec<_> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .map(|style| (&style.target, style.style.as_str()))
+            .collect();
+        assert_eq!(
+            styles,
+            [
+                (&fm_core::IrStyleTarget::Link(0), "stroke:red"),
+                (&fm_core::IrStyleTarget::Link(1), "stroke:blue"),
+            ]
+        );
+    }
+
+    #[test]
+    fn strict_dot_merges_only_declared_visuals_and_clears_explicit_empty_labels() {
+        for reset_style in ["solid", "\"\""] {
+            let parsed = parse_dot(&format!(
+                "strict digraph {{ \
+                 edge [color=red,penwidth=2,fontsize=9,fontname=Georgia,style=dashed]; \
+                 a -> b [label=keep]; \
+                 edge [color=green,penwidth=8,fontsize=20,fontname=Arial,style=bold]; \
+                 a -> b [color=blue]; a -> b [penwidth=4]; \
+                 a -> b [style={reset_style}]; a -> b [label=\"\"]; c -> d; }}"
+            ));
+            assert_eq!(parsed.ir.edges.len(), 2);
+            assert!(parsed.ir.edges[0].label.is_none());
+            assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
+            assert_eq!(parsed.ir.edges[1].arrow, ArrowType::ThickArrow);
+            let styles: Vec<_> = parsed
+                .ir
+                .style_refs
+                .iter()
+                .filter_map(|style| match style.target {
+                    fm_core::IrStyleTarget::Link(index) => Some((index, style.style.as_str())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                styles,
+                [
+                    (0, "stroke:red,stroke-width:2,font-size:9pt,font-family:Georgia"),
+                    (0, "stroke:blue"),
+                    (0, "stroke-width:4"),
+                    (1, "stroke:green,stroke-width:8,font-size:20pt,font-family:Arial"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn strict_dot_replaces_minlen_per_edge_and_keeps_first_undirected_orientation() {
+        let parsed = parse_dot(
+            "strict graph { b -- a [minlen=5]; a -- b [minlen=2]; \
+             a -- c [minlen=4]; b -- a [label=keep]; \
+             c -- d [minlen=3]; d -- c [minlen=1]; }",
+        );
+        assert_eq!(parsed.ir.edges.len(), 3);
+        let constraints: Vec<_> = parsed
+            .ir
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                fm_core::IrConstraint::MinLength {
+                    from_id,
+                    to_id,
+                    min_len,
+                    ..
+                } => Some((from_id.as_str(), to_id.as_str(), *min_len)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(constraints, [("b", "a", 2), ("a", "c", 4)]);
+        let label = parsed.ir.edges[0].label.expect("updated undirected label");
+        assert_eq!(parsed.ir.labels[label.0].text, "keep");
+    }
+
+    #[test]
+    fn strict_dot_edge_identity_spans_scopes_and_normalized_endpoint_spellings() {
+        let parsed = parse_dot(
+            "/* comment */ StRiCt DiGrApH { edge [color=red,style=dashed]; \
+             \"a\" -> b; subgraph cluster_inner { edge [color=green,style=bold]; \
+             a:n -> \"b\":s [label=inside]; a -> c; } \
+             a -> b [penwidth=3]; b -> c; }",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 3);
+        assert_eq!(parsed.ir.graph.edges.len(), 3);
+        let arrows: Vec<_> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        assert_eq!(
+            arrows,
+            [
+                ArrowType::DottedArrow,
+                ArrowType::ThickArrow,
+                ArrowType::DottedArrow,
+            ]
+        );
+        let label = parsed.ir.edges[0].label.expect("in-scope update");
+        assert_eq!(parsed.ir.labels[label.0].text, "inside");
+        let styles: Vec<_> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter_map(|style| match style.target {
+                fm_core::IrStyleTarget::Link(index) => Some((index, style.style.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            [
+                (0, "stroke:red"),
+                (1, "stroke:green"),
+                (0, "stroke-width:3"),
+                (2, "stroke:red"),
+            ]
+        );
+        assert_eq!(parsed.ir.clusters[0].members.len(), 3);
+    }
+
+    #[test]
+    fn strict_dot_merges_chain_and_expanded_group_updates_at_stable_indices() {
+        let parsed = parse_dot(
+            "strict digraph { a -> {b b c}; a -> b -> c [label=hop,minlen=2]; \
+             a -> c [label=shortcut,color=red]; }",
+        );
+        assert_eq!(parsed.ir.edges.len(), 3);
+        assert_eq!(parsed.ir.graph.edges.len(), 3);
+        let labels: Vec<_> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| parsed.ir.labels[edge.label.unwrap().0].text.as_str())
+            .collect();
+        assert_eq!(labels, ["hop", "shortcut", "hop"]);
+        assert_eq!(parsed.ir.constraints.len(), 2);
+        assert_eq!(parsed.ir.style_refs.len(), 1);
+        assert_eq!(parsed.ir.style_refs[0].target, fm_core::IrStyleTarget::Link(1));
+    }
+
+    #[test]
+    fn dot_group_attributes_reach_every_expanded_edge_and_strict_update() {
+        for prefix in ["", "strict "] {
+            let parsed = parse_dot(&format!(
+                "{prefix}digraph {{ a -> {{b c}} [color=red,label=\"initial [x]\"]; \
+                 a -> {{b c}} [label=updated][minlen=2,style=dashed]; }}"
+            ));
+            let expected_edges = if prefix.is_empty() { 4 } else { 2 };
+            assert_eq!(parsed.ir.edges.len(), expected_edges);
+            assert_eq!(parsed.ir.graph.edges.len(), expected_edges);
+            for (index, edge) in parsed.ir.edges.iter().enumerate() {
+                let updated = !prefix.is_empty() || index >= 2;
+                let label = edge.label.expect("group label");
+                assert_eq!(
+                    parsed.ir.labels[label.0].text,
+                    if updated { "updated" } else { "initial [x]" }
+                );
+                assert_eq!(
+                    edge.arrow,
+                    if updated {
+                        ArrowType::DottedArrow
+                    } else {
+                        ArrowType::Arrow
+                    }
+                );
+            }
+            assert_eq!(parsed.ir.constraints.len(), 2);
+            let styles: Vec<_> = parsed
+                .ir
+                .style_refs
+                .iter()
+                .filter_map(|style| match style.target {
+                    fm_core::IrStyleTarget::Link(index) => Some((index, style.style.as_str())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(styles, [(0, "stroke:red"), (1, "stroke:red")]);
+        }
     }
 
     #[test]
