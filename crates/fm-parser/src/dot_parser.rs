@@ -153,8 +153,16 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
+// Many-to-many endpoint sets can describe quadratically more edges than source tokens.
+// Explicit edges and single-sided fans grow linearly and do not consume this allowance.
+const DOT_SET_PRODUCT_EDGE_LIMIT: usize = 16_384;
+
 #[must_use]
 pub fn parse_dot(input: &str) -> ParseResult {
+    parse_dot_with_set_budget(input, DOT_SET_PRODUCT_EDGE_LIMIT)
+}
+
+fn parse_dot_with_set_budget(input: &str, mut remaining_set_edges: usize) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
     // Mermaid init directives apply to a DOT document too (bd-mqmx2). Run against the ORIGINAL
     // text, before the directive lines are stripped below — otherwise routing a directive-carrying
@@ -177,8 +185,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
     let body = extract_body(cleaned);
     let normalized_body_storage;
     let normalized_body = if dot_body_needs_normalization(body) {
-        let expanded_groups = expand_edge_groups(body);
-        normalized_body_storage = normalize_dot_body(&expanded_groups);
+        normalized_body_storage = normalize_dot_body(body);
         normalized_body_storage.as_str()
     } else {
         body
@@ -191,6 +198,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
     // silently fell outside the cluster it was written inside.
     let mut brace_scopes: Vec<DotBraceScope> = Vec::new();
     let mut defaults = DotDefaults::default();
+    let mut awaiting_subgraph_brace = false;
 
     for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
@@ -216,6 +224,11 @@ pub fn parse_dot(input: &str) -> ParseResult {
             if statement.is_empty() {
                 continue;
             }
+            // The named subgraph declaration already pushed its scope. Its following
+            // opening brace must not push an anonymous scope above it.
+            if std::mem::take(&mut awaiting_subgraph_brace) && statement == "{" {
+                continue;
+            }
             if statement == "{" {
                 brace_scopes.push(DotBraceScope {
                     saved_defaults: defaults.clone(),
@@ -223,21 +236,6 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 });
                 continue;
             }
-            // An anonymous group that opens on the same line as its first statement, e.g.
-            // `{ rank=same` after the `;` split. The brace opens a scope that pushes nothing.
-            let statement = if let Some(rest) = statement.strip_prefix('{') {
-                brace_scopes.push(DotBraceScope {
-                    saved_defaults: defaults.clone(),
-                    ..DotBraceScope::default()
-                });
-                rest.trim()
-            } else {
-                statement
-            };
-            if statement.is_empty() {
-                continue;
-            }
-
             // A bare `label=…` statement names the enclosing group — the standard DOT spelling for a
             // cluster title — or the whole graph at top level. Handled before the node parser, which
             // would otherwise read `label` as a node id and draw a stray box.
@@ -338,6 +336,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 // an enclosing scope instead.
                 if opens_scope {
                     brace_scopes.push(scope);
+                    awaiting_subgraph_brace = true;
                 }
                 continue;
             }
@@ -489,6 +488,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 directed,
                 ctx,
                 &mut strict_edges,
+                &mut remaining_set_edges,
                 &mut builder,
             ) {
                 continue;
@@ -1159,6 +1159,7 @@ fn parse_dot_edge_statement(
     directed: bool,
     ctx: DotStatementContext<'_>,
     strict_edges: &mut Option<BTreeMap<(usize, usize), DotStrictEdge>>,
+    remaining_set_edges: &mut usize,
     builder: &mut IrBuilder,
 ) -> bool {
     let DotStatementContext {
@@ -1202,113 +1203,137 @@ fn parse_dot_edge_statement(
         .resolved_over(&defaults.edge_visuals)
         .to_edge_css();
 
-    // Edge groups (A -> {B C D}) are expanded in expand_edge_groups() before
-    // normalization, so they arrive here as individual "A -> B", "A -> C" etc.
+    // Each adjacent pair in a chain contributes its own Cartesian product.
     for window in parts.windows(2) {
-        let from_text = window[0].trim();
-        let to_text = window[1].trim();
-
-        let Some(from_node) = parse_dot_node_fragment(from_text) else {
-            builder.add_warning(format!(
-                "Line {line_number}: invalid DOT edge source: {from_text}"
-            ));
-            continue;
-        };
-        let Some(to_node) = parse_dot_node_fragment(to_text) else {
-            builder.add_warning(format!(
-                "Line {line_number}: invalid DOT edge target: {to_text}"
-            ));
-            continue;
-        };
-
-        // An endpoint mentioned only in an edge is still a node the `node [shape=…]` default
-        // applies to, so it must not be hardcoded to Rect.
-        let endpoint_shape = |declared: Option<NodeShape>| {
-            declared.or(defaults.node_shape).unwrap_or(NodeShape::Rect)
-        };
-        let from = builder.intern_node_exact(
-            &from_node.id,
-            from_node.label.as_deref(),
-            endpoint_shape(from_node.shape),
-            span,
-        );
-        let to = builder.intern_node_exact(
-            &to_node.id,
-            to_node.label.as_deref(),
-            endpoint_shape(to_node.shape),
-            span,
-        );
-
-        if let (Some(from_id), Some(to_id)) = (from, to) {
-            let key = if !directed && from_id.0 > to_id.0 {
-                (to_id.0, from_id.0)
+        let sources = dot_endpoint_members(&window[0]);
+        let targets = dot_endpoint_members(&window[1]);
+        let mut emit_edges = !sources.is_empty() && !targets.is_empty();
+        if sources.len() > 1 && targets.len() > 1 {
+            let count = sources.len().checked_mul(targets.len());
+            if let Some(remaining) = count.and_then(|n| remaining_set_edges.checked_sub(n)) {
+                *remaining_set_edges = remaining;
             } else {
-                (from_id.0, to_id.0)
-            };
-            let mut strict_edge = strict_edges.as_mut().map(|edges| {
-                edges.entry(key).or_insert_with(|| DotStrictEdge {
-                    index: builder.edge_count(),
-                    min_len: None,
-                })
-            });
-            let edge_index = strict_edge
-                .as_ref()
-                .map_or_else(|| builder.edge_count(), |edge| edge.index);
-            let repeated = edge_index < builder.edge_count();
-            let css = if repeated {
-                // Defaults describe newly created edges only. Repeating an edge is an update,
-                // including label="" to remove a label and style=solid to reset its line family.
-                if label_attribute.is_some() {
-                    builder.set_edge_label(edge_index, edge_label_str.as_deref(), span);
-                }
-                if let Some(style) = explicit_style {
-                    builder.ir_mut().edges[edge_index].arrow =
-                        dot_arrow_type(operator == "->" || directed, Some(style));
-                }
-                explicit_css.clone()
-            } else {
-                builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
-                edge_css.clone()
-            };
-            if let Some(css) = css {
-                builder.push_style_ref(IrStyleTarget::Link(edge_index), css, span);
+                builder.add_warning(format!(
+                    "Line {line_number}: DOT endpoint set product {} × {} exceeds the remaining \
+                     budget of {remaining_set_edges} implied edges; this hop was omitted",
+                    sources.len(), targets.len(),
+                ));
+                emit_edges = false;
             }
-            add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
-            add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
+        }
+        if !emit_edges {
+            // Empty and over-budget products still declare their endpoint nodes.
+            for member in sources.iter().chain(targets.iter()) {
+                parse_dot_node_statement(member, ctx, builder);
+            }
+            continue;
+        }
+        for (&from_text, &to_text) in sources
+            .iter()
+            .flat_map(|from| targets.iter().map(move |to| (from, to)))
+        {
+            let Some(from_node) = parse_dot_node_fragment(from_text) else {
+                builder.add_warning(format!(
+                    "Line {line_number}: invalid DOT edge source: {from_text}"
+                ));
+                continue;
+            };
+            let Some(to_node) = parse_dot_node_fragment(to_text) else {
+                builder.add_warning(format!(
+                    "Line {line_number}: invalid DOT edge target: {to_text}"
+                ));
+                continue;
+            };
 
-            // `minlen` applies to every edge in the statement, including each hop of a chain like
-            // `a -> b -> c [minlen=2]`, which is what graphviz does with a shared attribute list.
-            match &min_len {
-                Some(DotMinLen::Ranks(ranks)) => {
-                    if let Some(edge) = strict_edge.as_mut() {
-                        edge.min_len = (*ranks > 1).then_some((*ranks, span));
-                    } else if *ranks > 1 {
-                        builder.add_constraint(IrConstraint::MinLength {
-                            from_id: from_node.id.clone(),
-                            to_id: to_node.id.clone(),
-                            min_len: *ranks,
-                            span,
-                        });
+            // An endpoint mentioned only in an edge is still a node the `node [shape=…]` default
+            // applies to, so it must not be hardcoded to Rect.
+            let endpoint_shape = |declared: Option<NodeShape>| {
+                declared.or(defaults.node_shape).unwrap_or(NodeShape::Rect)
+            };
+            let from = builder.intern_node_exact(
+                &from_node.id,
+                from_node.label.as_deref(),
+                endpoint_shape(from_node.shape),
+                span,
+            );
+            let to = builder.intern_node_exact(
+                &to_node.id,
+                to_node.label.as_deref(),
+                endpoint_shape(to_node.shape),
+                span,
+            );
+
+            if let (Some(from_id), Some(to_id)) = (from, to) {
+                let key = if !directed && from_id.0 > to_id.0 {
+                    (to_id.0, from_id.0)
+                } else {
+                    (from_id.0, to_id.0)
+                };
+                let mut strict_edge = strict_edges.as_mut().map(|edges| {
+                    edges.entry(key).or_insert_with(|| DotStrictEdge {
+                        index: builder.edge_count(),
+                        min_len: None,
+                    })
+                });
+                let edge_index = strict_edge
+                    .as_ref()
+                    .map_or_else(|| builder.edge_count(), |edge| edge.index);
+                let repeated = edge_index < builder.edge_count();
+                let css = if repeated {
+                    // Defaults describe newly created edges only. Repeating an edge is an update,
+                    // including label="" to remove a label and style=solid to reset its line family.
+                    if label_attribute.is_some() {
+                        builder.set_edge_label(edge_index, edge_label_str.as_deref(), span);
                     }
-                }
-                Some(DotMinLen::SameRankUnsupported) => {
-                    if let Some(edge) = strict_edge.as_mut() {
-                        edge.min_len = None;
+                    if let Some(style) = explicit_style {
+                        builder.ir_mut().edges[edge_index].arrow =
+                            dot_arrow_type(operator == "->" || directed, Some(style));
                     }
-                    builder.add_warning(format!(
-                        "Line {line_number}: DOT minlen=0 asks for both endpoints on one rank, \
-                         which this engine cannot express for an edge; use {{ rank=same; \
-                         {}; {}; }} instead",
-                        from_node.id, to_node.id
-                    ));
+                    explicit_css.clone()
+                } else {
+                    builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
+                    edge_css.clone()
+                };
+                if let Some(css) = css {
+                    builder.push_style_ref(IrStyleTarget::Link(edge_index), css, span);
                 }
-                Some(DotMinLen::Invalid(text)) => {
-                    builder.add_warning(format!(
-                        "Line {line_number}: DOT minlen={text} is not a non-negative integer and \
-                         was ignored"
-                    ));
+                add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
+                add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
+
+                // `minlen` applies to every edge in the statement, including each hop of a chain like
+                // `a -> b -> c [minlen=2]`, which is what graphviz does with a shared attribute list.
+                match &min_len {
+                    Some(DotMinLen::Ranks(ranks)) => {
+                        if let Some(edge) = strict_edge.as_mut() {
+                            edge.min_len = (*ranks > 1).then_some((*ranks, span));
+                        } else if *ranks > 1 {
+                            builder.add_constraint(IrConstraint::MinLength {
+                                from_id: from_node.id.clone(),
+                                to_id: to_node.id.clone(),
+                                min_len: *ranks,
+                                span,
+                            });
+                        }
+                    }
+                    Some(DotMinLen::SameRankUnsupported) => {
+                        if let Some(edge) = strict_edge.as_mut() {
+                            edge.min_len = None;
+                        }
+                        builder.add_warning(format!(
+                            "Line {line_number}: DOT minlen=0 asks for both endpoints on one rank, \
+                             which this engine cannot express for an edge; use {{ rank=same; \
+                             {}; {}; }} instead",
+                            from_node.id, to_node.id
+                        ));
+                    }
+                    Some(DotMinLen::Invalid(text)) => {
+                        builder.add_warning(format!(
+                            "Line {line_number}: DOT minlen={text} is not a non-negative integer and \
+                             was ignored"
+                        ));
+                    }
+                    None => {}
                 }
-                None => {}
             }
         }
     }
@@ -2011,99 +2036,119 @@ fn dot_body_needs_normalization(body: &str) -> bool {
 }
 
 fn normalize_dot_body(body: &str) -> String {
-    let mut output = String::with_capacity(body.len().saturating_mul(2));
-    let mut quote_char: Option<char> = None;
-    let mut escaped = false;
-
-    for ch in body.chars() {
-        if let Some(active_quote) = quote_char {
-            output.push(ch);
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == active_quote {
-                quote_char = None;
-            }
-            continue;
-        }
-
+    // Locate endpoint sets before inserting statement separators around cluster scopes.
+    // A leading set is distinguishable from an anonymous scope only after its closing brace.
+    let mut opens = Vec::new();
+    let mut sets = Vec::new();
+    for (index, ch) in dot_syntax_chars(body) {
         match ch {
-            '"' | '\'' => {
-                quote_char = Some(ch);
-                output.push(ch);
+            '{' => opens.push(index),
+            '}' => {
+                if let Some(start) = opens.pop()
+                    && (ends_dot_edge_operator(&body[..start])
+                        || starts_dot_edge_operator(&body[index + 1..]))
+                {
+                    sets.push((start, index));
+                }
             }
-            '{' | '}' => {
-                output.push(';');
-                output.push(ch);
-                output.push(';');
-            }
-            _ => output.push(ch),
+            _ => {}
         }
     }
-
+    sets.sort_unstable();
+    let mut sets = sets.into_iter().peekable();
+    let mut end = None;
+    let mut output = String::with_capacity(body.len());
+    let mut cursor = 0;
+    let mut whitespace_end = 0;
+    for (index, ch) in dot_syntax_chars(body) {
+        // Joining a continuation consumes the entire whitespace run, including later newlines.
+        if index < cursor {
+            continue;
+        }
+        if ch == '{'
+            && let Some((_, close)) = sets.next_if(|(open, _)| *open == index)
+        {
+            end = Some(close);
+            continue;
+        }
+        if end == Some(index) {
+            end = None;
+            continue;
+        }
+        let replacement = match ch {
+            '{' => ";{;",
+            '}' => ";};",
+            ';' if end.is_some() => ",",
+            '\n' if end.is_some() => " ",
+            '\n' if index >= whitespace_end => {
+                let after = body[index + 1..].trim_start();
+                whitespace_end = body.len() - after.len();
+                if ends_dot_edge_operator(&body[..index])
+                    || starts_dot_edge_operator(after)
+                    || (body[..index].trim_end().ends_with('}') && after.starts_with('['))
+                {
+                    output.push_str(&body[cursor..index]);
+                    output.push(' ');
+                    cursor = whitespace_end;
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        output.push_str(&body[cursor..index]);
+        output.push_str(replacement);
+        cursor = index + ch.len_utf8();
+    }
+    output.push_str(&body[cursor..]);
     output
 }
 
-/// Split simple DOT edge-group members on whitespace, semicolons, or commas.
-///
-/// Handles both double and single quotes. Quoted strings are preserved intact.
-/// For example: `"node 1" B 'node 2'` → `["\"node 1\"", "B", "'node 2'"]`
-fn split_dot_group_members(input: &str) -> Vec<&str> {
-    let mut result = Vec::new();
+fn ends_dot_edge_operator(text: &str) -> bool {
+    let text = text.trim_end();
+    text.ends_with("->") || text.ends_with("--")
+}
+
+fn starts_dot_edge_operator(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("->") || text.starts_with("--")
+}
+
+/// Preserve singleton operands without allocating. An anonymous endpoint set contributes
+/// each node once, even when different ports or quoted spellings name the same node.
+fn dot_endpoint_members<'a>(endpoint: &'a &'a str) -> Cow<'a, [&'a str]> {
+    let Some(group) = endpoint
+        .strip_prefix('{')
+        .and_then(|text| text.strip_suffix('}'))
+    else {
+        return Cow::Borrowed(std::slice::from_ref(endpoint));
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut members = Vec::new();
     let mut start = 0;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-    let bytes = input.as_bytes();
-
-    for (i, &b) in bytes.iter().enumerate() {
-        let ch = b as char;
-
-        match in_quote {
-            Some(quote_char) => {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == quote_char {
-                    in_quote = None;
-                }
-            }
-            None => {
-                if ch == '"' || ch == '\'' {
-                    in_quote = Some(ch);
-                } else if ch.is_ascii_whitespace() || matches!(ch, ';' | ',') {
-                    if ch.is_ascii_whitespace()
-                        && (input[start..i].trim_end().ends_with('+')
-                            || input[i..].trim_start().starts_with('+'))
-                    {
-                        continue;
-                    }
-                    if i > start {
-                        let token = &input[start..i];
-                        if !token.trim().is_empty() {
-                            result.push(token.trim());
-                        }
-                    }
-                    start = i + 1;
-                }
-            }
+    for (index, ch) in dot_syntax_chars(group).chain(std::iter::once((group.len(), ','))) {
+        if !(ch.is_ascii_whitespace() || matches!(ch, ',' | ';')) {
+            continue;
         }
-    }
-
-    // Don't forget the last token
-    if start < input.len() {
-        let token = &input[start..];
-        if !token.trim().is_empty() {
-            result.push(token.trim());
+        // Check for quoted-string concatenation once per whitespace run. Rechecking
+        // every suffix of a long run would make a padded endpoint list quadratic.
+        if ch.is_ascii_whitespace()
+            && index > 0
+            && group.as_bytes()[index - 1].is_ascii_whitespace()
+        {
+            continue;
         }
+        let member = group[start..index].trim();
+        if ch.is_ascii_whitespace()
+            && (member.ends_with('+') || group[index..].trim_start().starts_with('+'))
+        {
+            continue;
+        }
+        if !member.is_empty() && seen.insert(normalize_identifier(dot_id_without_port(member))) {
+            members.push(member);
+        }
+        start = index + ch.len_utf8();
     }
-
-    result
+    Cow::Owned(members)
 }
 
 /// Structural characters outside opaque DOT strings. Byte positions still refer to the
@@ -2140,107 +2185,6 @@ fn dot_syntax_chars(input: &str) -> impl Iterator<Item = (usize, char)> + '_ {
             _ => None,
         }
     })
-}
-
-/// Pre-expand DOT edge group syntax: `A -> {B C D}` → `A -> B; A -> C; A -> D`.
-/// This must run BEFORE `normalize_dot_body` which inserts semicolons around braces.
-fn expand_edge_groups(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-
-    while let Some((brace_start, _)) = dot_syntax_chars(rest).find(|(_, ch)| *ch == '{') {
-        // Check if this brace is preceded by an edge operator (-> or --)
-        let before = &rest[..brace_start];
-        let is_edge_group = before.trim_end().ends_with("->") || before.trim_end().ends_with("--");
-
-        if !is_edge_group {
-            // Not an edge group — might be a subgraph brace. Pass through.
-            output.push_str(&rest[..=brace_start]);
-            rest = &rest[brace_start + 1..];
-            continue;
-        }
-
-        let Some((brace_end, _)) =
-            dot_syntax_chars(&rest[brace_start + 1..]).find(|(_, ch)| *ch == '}')
-        else {
-            // Unclosed brace — pass through rest.
-            output.push_str(rest);
-            return output;
-        };
-        let brace_end = brace_start + 1 + brace_end;
-
-        // Extract source node (everything before the operator).
-        let operator_end = before.trim_end().len();
-        let op_len = 2; // "--" or "->"
-        let operator = &before.trim_end()[operator_end - op_len..operator_end];
-
-        let mut last_idx = 0;
-        let source_prefix = &before[..operator_end - op_len];
-        for (index, ch) in dot_syntax_chars(source_prefix) {
-            if matches!(ch, ';' | '\n' | '{' | '}') {
-                last_idx = index + ch.len_utf8();
-            } else if ch == '-'
-                && source_prefix
-                    .as_bytes()
-                    .get(index + 1)
-                    .is_some_and(|next| matches!(next, b'>' | b'-'))
-            {
-                last_idx = index + 2;
-            }
-        }
-
-        let prefix = &before[..last_idx];
-        let source = before[last_idx..operator_end - op_len].trim();
-
-        output.push_str(prefix);
-
-        // Extract group members (respecting quotes).
-        let inner = rest[brace_start + 1..brace_end].trim();
-        let members = split_dot_group_members(inner);
-        let after_group = &rest[brace_end + 1..];
-        let mut attribute_end = 0;
-        let mut bracket_depth = 0_usize;
-        for (index, ch) in dot_syntax_chars(after_group) {
-            if bracket_depth == 0 && !ch.is_whitespace() && ch != '[' {
-                break;
-            }
-            match ch {
-                '[' => bracket_depth += 1,
-                ']' => {
-                    bracket_depth = bracket_depth.saturating_sub(1);
-                    if bracket_depth == 0 {
-                        attribute_end = index + 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        // A list after the group belongs to every expanded edge. Leaving it on the trailing
-        // source text applied it only to the last member, including when strict updates merged it.
-        let attributes = &after_group[..attribute_end];
-
-        // Expand: emit "source -> member" for each member.
-        if members.is_empty() {
-            output.push_str(source);
-        } else {
-            for (i, member) in members.iter().enumerate() {
-                if i > 0 {
-                    output.push_str("; ");
-                }
-                output.push_str(source);
-                output.push(' ');
-                output.push_str(operator);
-                output.push(' ');
-                output.push_str(member);
-                output.push_str(attributes);
-            }
-        }
-
-        rest = &after_group[attribute_end..];
-    }
-
-    output.push_str(rest);
-    output
 }
 
 fn clean_optional(raw: &str) -> Option<String> {
@@ -4147,4 +4091,100 @@ fn dot_edge_groups_keep_quoted_syntax_opaque_and_accept_statement_separators() {
     for edge in &result.ir.edges[..4] {
         assert_eq!(edge.from, fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)));
     }
+}
+
+#[test]
+fn dot_group_chain_connects_each_adjacent_set_with_shared_attributes() {
+    let result = parse_dot(
+        r#"digraph {
+        subgraph cluster_one {
+            { "read:one":p; b; b:port }
+                -> { c, d }
+                -> target [label="fan out", color=blue, minlen=3];
+        }
+        target -> outside;
+    }"#,
+    );
+    let ir = &result.ir;
+    let edges: Vec<_> = ir
+        .edges
+        .iter()
+        .map(|edge| {
+            let fm_core::IrEndpoint::Node(from) = edge.from else {
+                panic!("expected node")
+            };
+            let fm_core::IrEndpoint::Node(to) = edge.to else {
+                panic!("expected node")
+            };
+            (ir.nodes[from.0].id.as_str(), ir.nodes[to.0].id.as_str())
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            ("read:one", "c"), ("read:one", "d"), ("b", "c"), ("b", "d"),
+            ("c", "target"), ("d", "target"), ("target", "outside"),
+        ]
+    );
+    assert_eq!(ir.graph.subgraphs[0].members.len(), 5);
+    assert!(ir.edges[..6].iter().all(|edge| ir.labels[edge.label.unwrap().0].text == "fan out"));
+    assert!(ir.edges[6].label.is_none());
+    assert_eq!(ir.style_refs.len(), 6);
+    assert_eq!(ir.constraints.len(), 6);
+}
+
+#[test]
+fn dot_empty_endpoint_set_declares_neighbors_and_breaks_connectivity() {
+    let result = parse_dot("graph { {a b} -- {} -- c -- d; }");
+    assert_eq!(result.ir.nodes.len(), 4);
+    assert_eq!(result.ir.edges.len(), 1);
+    assert_eq!(result.ir.edges[0].arrow, fm_core::ArrowType::Line);
+}
+
+#[test]
+fn dot_set_budget_is_cumulative_and_keeps_the_rest_of_the_graph() {
+    let result = parse_dot_with_set_budget(
+        "digraph { {a b} -> {c d}; {e f} -> {g h} -> i; x -> {y z}; u -> v; }",
+        7,
+    );
+    // The first 2 × 2 product consumes four slots. The next product cannot fit
+    // in the three remaining slots. Its nodes survive and the chain continues.
+    assert_eq!(result.ir.nodes.len(), 14);
+    assert_eq!(result.ir.edges.len(), 9);
+    let edges: Vec<_> = result.ir.edges.iter().map(|edge| {
+        let fm_core::IrEndpoint::Node(from) = edge.from else { panic!("expected node") };
+        let fm_core::IrEndpoint::Node(to) = edge.to else { panic!("expected node") };
+        (result.ir.nodes[from.0].id.as_str(), result.ir.nodes[to.0].id.as_str())
+    }).collect();
+    assert_eq!(&edges[4..], &[("g", "i"), ("h", "i"), ("x", "y"), ("x", "z"), ("u", "v")]);
+    assert!(result.warnings.iter().any(|warning| warning.contains("budget of 3 implied edges")));
+}
+
+#[test]
+fn dot_set_handles_blank_continuations_and_padded_concatenated_names() {
+    let padding = " ".repeat(4096);
+    let result = parse_dot(&format!(
+        "digraph {{ {{ \"first\"{padding}+{padding}\" node\" next }}\n\r\n ->\n\n \
+         {{ x y }}\n\n [label=\"uses\"]; }}"
+    ));
+    assert_eq!(result.ir.nodes.len(), 4);
+    assert!(result.ir.nodes.iter().any(|node| node.id == "first node"));
+    assert_eq!(result.ir.edges.len(), 4);
+    assert!(result.ir.edges.iter().all(|edge| edge.label.is_some()));
+}
+
+#[test]
+fn strict_dot_explicit_override_updates_only_the_matching_group_edge() {
+    let result = parse_dot(
+        r#"strict graph {
+            {a b} -- {c d} [label="initial", minlen=3];
+            c -- a [label="updated", minlen=1];
+        }"#,
+    );
+    assert_eq!(result.ir.edges.len(), 4);
+    let labels: Vec<_> = result.ir.edges.iter()
+        .map(|edge| result.ir.labels[edge.label.unwrap().0].text.as_str())
+        .collect();
+    assert_eq!(labels, ["updated", "initial", "initial", "initial"]);
+    assert_eq!(result.ir.constraints.len(), 3);
 }
