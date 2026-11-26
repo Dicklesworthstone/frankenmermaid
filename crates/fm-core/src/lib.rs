@@ -4516,17 +4516,27 @@ impl MermaidGraphIr {
     }
 
     /// Returns ancestors from the root-most parent down to the immediate parent.
+    ///
+    /// Invalid parent IDs stop the chain. Cycles stop at the first repeated ID,
+    /// and the queried subgraph is never included among its own ancestors.
     #[must_use]
     pub fn subgraph_ancestors(&self, subgraph_id: IrSubgraphId) -> Vec<&IrSubgraph> {
         let mut ancestors = Vec::new();
-        let mut current = self
-            .subgraph(subgraph_id)
-            .and_then(|subgraph| subgraph.parent);
+        let Some(start_subgraph) = self.subgraph(subgraph_id) else {
+            return ancestors;
+        };
+        let mut visited = vec![false; self.subgraphs.len()];
+        visited[subgraph_id.0] = true;
+        let mut current = start_subgraph.parent;
 
         while let Some(parent_id) = current {
             let Some(parent) = self.subgraph(parent_id) else {
                 break;
             };
+            if visited[parent_id.0] {
+                break;
+            }
+            visited[parent_id.0] = true;
             ancestors.push(parent);
             current = parent.parent;
         }
@@ -4535,13 +4545,18 @@ impl MermaidGraphIr {
         ancestors
     }
 
-    /// Returns descendant subgraphs in deterministic pre-order traversal.
+    /// Returns unique descendant subgraphs in deterministic pre-order traversal.
+    ///
+    /// Invalid child IDs are skipped. Shared descendants are visited at their
+    /// first encounter, and cycles cannot include the queried subgraph itself.
     #[must_use]
     pub fn subgraph_descendants(&self, subgraph_id: IrSubgraphId) -> Vec<&IrSubgraph> {
         let mut descendants = Vec::new();
         let Some(start_subgraph) = self.subgraph(subgraph_id) else {
             return descendants;
         };
+        let mut visited = vec![false; self.subgraphs.len()];
+        visited[subgraph_id.0] = true;
 
         // Use a stack to hold the children. To maintain deterministic pre-order
         // traversal (left-to-right), we push children in reverse order.
@@ -4551,6 +4566,10 @@ impl MermaidGraphIr {
             let Some(child) = self.subgraph(current_id) else {
                 continue;
             };
+            if visited[current_id.0] {
+                continue;
+            }
+            visited[current_id.0] = true;
             descendants.push(child);
             stack.extend(child.children.iter().copied().rev());
         }
@@ -4559,9 +4578,17 @@ impl MermaidGraphIr {
     }
 
     /// Returns unique member nodes from this subgraph and all descendant subgraphs.
+    ///
+    /// Each reachable subgraph is visited once even if malformed or restored IR
+    /// contains cycles or shared descendants. Missing subgraphs are skipped;
+    /// member IDs retain their existing sorted, deduplicated representation.
     #[must_use]
     pub fn subgraph_members_recursive(&self, subgraph_id: IrSubgraphId) -> Vec<IrNodeId> {
+        if self.subgraph(subgraph_id).is_none() {
+            return Vec::new();
+        }
         let mut seen = vec![false; self.nodes.len()];
+        let mut visited = vec![false; self.subgraphs.len()];
         let mut out_of_range = Vec::new();
         let mut stack = vec![subgraph_id];
 
@@ -4569,6 +4596,10 @@ impl MermaidGraphIr {
             let Some(subgraph) = self.subgraph(current_id) else {
                 continue;
             };
+            if visited[current_id.0] {
+                continue;
+            }
+            visited[current_id.0] = true;
             for &member in &subgraph.members {
                 if member.0 < seen.len() {
                     seen[member.0] = true;
@@ -17820,6 +17851,225 @@ mod tests {
                 .map(|subgraph| subgraph.id)
                 .collect::<Vec<_>>(),
             vec![IrSubgraphId(0), IrSubgraphId(1), IrSubgraphId(2)]
+        );
+    }
+
+    #[test]
+    fn graph_ir_traversal_helpers_terminate_on_restored_self_cycles() {
+        let graph = super::MermaidGraphIr {
+            nodes: vec![IrGraphNode::default()],
+            subgraphs: vec![IrSubgraph {
+                id: IrSubgraphId(0),
+                parent: Some(IrSubgraphId(0)),
+                children: vec![IrSubgraphId(0), IrSubgraphId(0)],
+                members: vec![IrNodeId(0), IrNodeId(9)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let restored: super::MermaidGraphIr =
+            serde_json::from_str(&serde_json::to_string(&graph).unwrap()).unwrap();
+
+        assert!(restored.subgraph_ancestors(IrSubgraphId(0)).is_empty());
+        assert!(restored.subgraph_descendants(IrSubgraphId(0)).is_empty());
+        assert_eq!(
+            restored.subgraph_members_recursive(IrSubgraphId(0)),
+            vec![IrNodeId(0), IrNodeId(9)]
+        );
+    }
+
+    #[test]
+    fn graph_ir_traversal_helpers_preserve_reachable_records_across_back_edges() {
+        let graph = super::MermaidGraphIr {
+            nodes: vec![IrGraphNode::default(); 4],
+            subgraphs: [(2, 1), (0, 2), (1, 0), (1, 1)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (parent, child))| IrSubgraph {
+                    id: IrSubgraphId(index),
+                    parent: Some(IrSubgraphId(parent)),
+                    children: vec![IrSubgraphId(child)],
+                    members: vec![IrNodeId(index)],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            graph
+                .subgraph_ancestors(IrSubgraphId(2))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(0), IrSubgraphId(1)]
+        );
+        assert_eq!(
+            graph
+                .subgraph_descendants(IrSubgraphId(0))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(1), IrSubgraphId(2)]
+        );
+        assert_eq!(
+            graph.subgraph_members_recursive(IrSubgraphId(0)),
+            vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)]
+        );
+
+        // A chain may enter a cycle that does not contain the queried subgraph.
+        assert_eq!(
+            graph
+                .subgraph_ancestors(IrSubgraphId(3))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(2), IrSubgraphId(0), IrSubgraphId(1)]
+        );
+        assert_eq!(
+            graph
+                .subgraph_descendants(IrSubgraphId(3))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(1), IrSubgraphId(2), IrSubgraphId(0)]
+        );
+        assert_eq!(
+            graph.subgraph_members_recursive(IrSubgraphId(3)),
+            vec![IrNodeId(0), IrNodeId(1), IrNodeId(2), IrNodeId(3)]
+        );
+    }
+
+    #[test]
+    fn graph_ir_traversal_helpers_skip_invalid_references_without_dropping_members() {
+        let missing = IrSubgraphId(usize::MAX);
+        let graph = super::MermaidGraphIr {
+            nodes: vec![IrGraphNode::default(); 2],
+            subgraphs: vec![
+                IrSubgraph {
+                    id: IrSubgraphId(0),
+                    parent: Some(missing),
+                    children: vec![missing, IrSubgraphId(1), IrSubgraphId(5), IrSubgraphId(1)],
+                    members: vec![IrNodeId(9), IrNodeId(1)],
+                    ..Default::default()
+                },
+                IrSubgraph {
+                    id: IrSubgraphId(1),
+                    parent: Some(IrSubgraphId(0)),
+                    children: vec![missing],
+                    members: vec![IrNodeId(2), IrNodeId(0), IrNodeId(usize::MAX)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(graph.subgraph_ancestors(IrSubgraphId(0)).is_empty());
+        assert_eq!(
+            graph
+                .subgraph_ancestors(IrSubgraphId(1))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(0)]
+        );
+        assert_eq!(
+            graph
+                .subgraph_descendants(IrSubgraphId(0))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(1)]
+        );
+        assert_eq!(
+            graph.subgraph_members_recursive(IrSubgraphId(0)),
+            vec![
+                IrNodeId(0),
+                IrNodeId(1),
+                IrNodeId(2),
+                IrNodeId(9),
+                IrNodeId(usize::MAX)
+            ]
+        );
+        for invalid in [IrSubgraphId(2), missing] {
+            assert!(graph.subgraph_ancestors(invalid).is_empty());
+            assert!(graph.subgraph_descendants(invalid).is_empty());
+            assert!(graph.subgraph_members_recursive(invalid).is_empty());
+        }
+    }
+
+    #[test]
+    fn graph_ir_traversal_helpers_visit_shared_descendants_in_first_encounter_order() {
+        let graph = super::MermaidGraphIr {
+            nodes: vec![IrGraphNode::default(); 4],
+            subgraphs: [vec![1, 2, 1], vec![3], vec![3], vec![]]
+                .into_iter()
+                .enumerate()
+                .map(|(index, children)| IrSubgraph {
+                    id: IrSubgraphId(index),
+                    children: children.into_iter().map(IrSubgraphId).collect(),
+                    members: vec![IrNodeId(index)],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            graph
+                .subgraph_descendants(IrSubgraphId(0))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            vec![IrSubgraphId(1), IrSubgraphId(3), IrSubgraphId(2)]
+        );
+        assert_eq!(
+            graph.subgraph_members_recursive(IrSubgraphId(0)),
+            vec![IrNodeId(0), IrNodeId(1), IrNodeId(2), IrNodeId(3)]
+        );
+    }
+
+    #[test]
+    fn graph_ir_traversal_helpers_handle_deep_shared_hierarchies_without_recursion() {
+        const DEPTH: usize = 8_192;
+        let graph = super::MermaidGraphIr {
+            nodes: vec![IrGraphNode::default(); DEPTH],
+            subgraphs: (0..DEPTH)
+                .map(|index| IrSubgraph {
+                    id: IrSubgraphId(index),
+                    parent: index.checked_sub(1).map(IrSubgraphId),
+                    children: if index + 1 < DEPTH {
+                        // Repeated links must not multiply the traversal of the suffix.
+                        vec![IrSubgraphId(index + 1); 2]
+                    } else {
+                        Vec::new()
+                    },
+                    members: vec![IrNodeId(index)],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            graph
+                .subgraph_ancestors(IrSubgraphId(DEPTH - 1))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            (0..DEPTH - 1).map(IrSubgraphId).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            graph
+                .subgraph_descendants(IrSubgraphId(0))
+                .iter()
+                .map(|subgraph| subgraph.id)
+                .collect::<Vec<_>>(),
+            (1..DEPTH).map(IrSubgraphId).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            graph.subgraph_members_recursive(IrSubgraphId(0)),
+            (0..DEPTH).map(IrNodeId).collect::<Vec<_>>()
         );
     }
 
