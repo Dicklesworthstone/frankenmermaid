@@ -22405,7 +22405,11 @@ fn block_beta_group_identity_path(ir: &MermaidDiagramIr, node_index: usize) -> V
     };
 
     let mut path = Vec::new();
+    let mut visited = BTreeSet::new();
     while let Some(subgraph) = ir.graph.subgraphs.get(current_subgraph.0) {
+        if !visited.insert(current_subgraph) {
+            break;
+        }
         path.push(subgraph.id.0);
 
         let Some(parent) = subgraph.parent else {
@@ -22440,6 +22444,13 @@ fn layout_block_beta_grouped_items(
     order_by_node: &mut [usize],
     centers: &mut [(f32, f32)],
 ) -> bool {
+    // The parser bounds nesting, but public/restored IR may contain cycles, duplicate children,
+    // missing references or unbounded depth. Keep every node in the flat grid when the recursive
+    // grouped placer cannot safely visit each group and node exactly once.
+    if !block_beta_group_hierarchy_is_safe(ir) {
+        tracing::warn!("block-beta hierarchy is invalid or too deep; using flat grid placement");
+        return false;
+    }
     let items = block_beta_direct_items(ir, None);
     if items.is_empty() {
         return false;
@@ -22461,6 +22472,53 @@ fn layout_block_beta_grouped_items(
         centers,
     );
     true
+}
+
+fn block_beta_group_hierarchy_is_safe(ir: &MermaidDiagramIr) -> bool {
+    const MAX_NESTING: usize = 256;
+    if ir.graph.nodes.len() != ir.nodes.len()
+        || ir
+            .graph
+            .subgraphs
+            .iter()
+            .enumerate()
+            .any(|(index, subgraph)| subgraph.id.0 != index)
+    {
+        return false;
+    }
+
+    let mut visited = vec![false; ir.graph.subgraphs.len()];
+    let mut pending: Vec<_> = ir
+        .graph
+        .subgraphs
+        .iter()
+        .filter(|subgraph| subgraph.parent.is_none())
+        .map(|subgraph| (subgraph.id, 1usize))
+        .collect();
+    while let Some((id, depth)) = pending.pop() {
+        if depth > MAX_NESTING || visited[id.0] {
+            return false;
+        }
+        visited[id.0] = true;
+        for &child_id in &ir.graph.subgraphs[id.0].children {
+            let Some(child) = ir.graph.subgraph(child_id) else {
+                return false;
+            };
+            if child.parent != Some(id) {
+                return false;
+            }
+            pending.push((child_id, depth + 1));
+        }
+    }
+
+    // A component with no root is a parent cycle; a missing child link leaves a group unreachable.
+    // Unrepresented nodes must also take the flat path instead of retaining the default (0, 0).
+    visited.iter().all(|seen| *seen)
+        && ir.graph.nodes.iter().all(|node| {
+            node.subgraphs
+                .last()
+                .is_none_or(|id| visited.get(id.0) == Some(&true))
+        })
 }
 
 fn block_beta_direct_items(
@@ -24139,12 +24197,19 @@ fn subgraph_depth(ir: &MermaidDiagramIr, subgraph_id: fm_core::IrSubgraphId) -> 
         .graph
         .subgraph(subgraph_id)
         .and_then(|subgraph| subgraph.parent);
-    while let Some(parent) = current {
-        depth = depth.saturating_add(1);
-        current = ir
-            .graph
-            .subgraph(parent)
-            .and_then(|subgraph| subgraph.parent);
+    let mut visited = BTreeSet::new();
+    // Restored IR can contain cyclic parent chains. Track just the visited ancestry, not a
+    // bitmap of every group for each edge's rank-axis lookup, and never count a group as its
+    // own ancestor. Missing parents end the chain without contributing a fictitious level.
+    while let Some(parent_id) = current {
+        let Some(parent) = ir.graph.subgraph(parent_id) else {
+            break;
+        };
+        if parent_id == subgraph_id || !visited.insert(parent_id) {
+            break;
+        }
+        depth += 1;
+        current = parent.parent;
     }
     depth
 }
@@ -27164,18 +27229,13 @@ fn subgraph_rank_axis(ir: &MermaidDiagramIr, source: usize, target: usize) -> Op
             .get(node)
             .map_or(&[][..], |graph_node| graph_node.subgraphs.as_slice())
     };
-    let depth = |mut id: fm_core::IrSubgraphId| {
-        let mut depth = 0_usize;
-        while let Some(parent) = ir.graph.subgraph(id).and_then(|s| s.parent) {
-            depth += 1;
-            id = parent;
-        }
-        depth
-    };
     held(source)
         .iter()
         .filter(|subgraph| held(target).contains(subgraph))
-        .filter_map(|&subgraph| Some((depth(subgraph), ir.graph.subgraph(subgraph)?.direction?)))
+        .filter_map(|&subgraph| {
+            let direction = ir.graph.subgraph(subgraph)?.direction?;
+            Some((subgraph_depth(ir, subgraph), direction))
+        })
         .max_by_key(|&(depth, _)| depth)
         .map(|(_, direction)| matches!(direction, GraphDirection::LR | GraphDirection::RL))
 }
@@ -34591,6 +34651,79 @@ mod tests {
             .map(|edge| super::polyline_length(&edge.points))
             .sum();
         assert!((layout.stats.total_edge_length - route_length).abs() < 0.01);
+    }
+
+    #[test]
+    fn block_beta_malformed_group_hierarchies_keep_every_node_in_the_grid() {
+        let base = fm_parser::parse(
+            "block-beta\ncolumns 2\nblock:outer:2\nblock:inner\nA\nend\nB\nend\nC\nA --> C\n",
+        )
+        .ir;
+        let outer = base.graph.subgraphs[0].id;
+        let inner = base.graph.subgraphs[1].id;
+        assert!(super::block_beta_group_hierarchy_is_safe(&base));
+        assert_eq!(base.nodes.len(), 3);
+        for case in 0..10 {
+            let mut ir = base.clone();
+            match case {
+                0 => ir.graph.subgraphs[outer.0].parent = Some(outer),
+                1 => ir.graph.subgraphs[inner.0].parent = Some(inner),
+                2 => ir.graph.subgraphs[inner.0].children.push(outer),
+                3 => ir.graph.subgraphs[outer.0].children.push(inner),
+                4 => ir.graph.subgraphs[outer.0]
+                    .children
+                    .push(IrSubgraphId(usize::MAX)),
+                5 => ir.graph.subgraphs[inner.0].parent = Some(IrSubgraphId(usize::MAX)),
+                6 => ir.graph.nodes[0].subgraphs = vec![IrSubgraphId(usize::MAX)],
+                7 => ir.graph.nodes.truncate(2),
+                8 => ir.graph.subgraphs[outer.0].parent = Some(inner),
+                9 => ir.graph.subgraphs[outer.0].children.clear(),
+                _ => unreachable!(),
+            }
+            let restored: MermaidDiagramIr =
+                serde_json::from_str(&serde_json::to_string(&ir).unwrap()).unwrap();
+            assert!(!super::block_beta_group_hierarchy_is_safe(&restored));
+            let layout = layout_diagram_grid(&restored);
+            assert_eq!(layout.nodes.len(), restored.nodes.len(), "case {case}");
+            assert_eq!(layout.edges.len(), restored.edges.len(), "case {case}");
+            let mut positions = BTreeSet::new();
+            for node in &layout.nodes {
+                assert!(node.bounds.x.is_finite() && node.bounds.y.is_finite());
+                assert!(node.bounds.width.is_finite() && node.bounds.width > 0.0);
+                assert!(node.bounds.height.is_finite() && node.bounds.height > 0.0);
+                positions.insert((node.bounds.x.to_bits(), node.bounds.y.to_bits()));
+            }
+            assert_eq!(positions.len(), restored.nodes.len(), "case {case}");
+            assert_eq!(layout, layout_diagram_grid(&restored), "case {case}");
+        }
+    }
+
+    #[test]
+    fn block_beta_deep_restored_hierarchy_uses_nonrecursive_placement() {
+        let mut ir = fm_parser::parse("block-beta\ncolumns 2\nA B\n").ir;
+        const DEPTH: usize = 1_024;
+        ir.graph.subgraphs = (0..DEPTH)
+            .map(|index| IrSubgraph {
+                id: IrSubgraphId(index),
+                parent: index.checked_sub(1).map(IrSubgraphId),
+                children: if index + 1 < DEPTH {
+                    vec![IrSubgraphId(index + 1)]
+                } else {
+                    Vec::new()
+                },
+                members: vec![IrNodeId(0), IrNodeId(1)],
+                ..IrSubgraph::default()
+            })
+            .collect();
+        for node in &mut ir.graph.nodes {
+            node.subgraphs = vec![IrSubgraphId(DEPTH - 1)];
+        }
+        assert!(!super::block_beta_group_hierarchy_is_safe(&ir));
+        assert_eq!(super::block_beta_group_identity_path(&ir, 0).len(), DEPTH);
+        let layout = layout_diagram_grid(&ir);
+        assert_eq!(layout.nodes.len(), 2);
+        assert!(layout.nodes[1].bounds.x > layout.nodes[0].bounds.x);
+        assert_eq!(layout, layout_diagram_grid(&ir));
     }
 
     #[test]
@@ -48472,6 +48605,122 @@ mod tests {
             width >= 601.78125 + 16.0,
             "the full heading must fit: {width}"
         );
+    }
+
+    #[test]
+    fn restored_subgraph_parent_cycles_do_not_stall_layout() {
+        let base = fm_parser::parse(
+            "flowchart TB\nsubgraph Outer[Outer]\nsubgraph Inner[Inner]\ndirection LR\nA --> B\nend\nend\nB --> C\n",
+        )
+        .ir;
+        let outer = base
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == "Outer")
+            .unwrap()
+            .id;
+        let inner = base
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == "Inner")
+            .unwrap()
+            .id;
+
+        for self_cycle in [true, false] {
+            let mut ir = base.clone();
+            if self_cycle {
+                ir.graph.subgraphs[inner.0].parent = Some(inner);
+                ir.graph.subgraphs[inner.0].children.push(inner);
+            } else {
+                ir.graph.subgraphs[outer.0].parent = Some(inner);
+                ir.graph.subgraphs[inner.0].children.push(outer);
+            }
+            let restored: MermaidDiagramIr =
+                serde_json::from_str(&serde_json::to_string(&ir).unwrap()).unwrap();
+            assert_eq!(
+                super::subgraph_depth(&restored, inner),
+                usize::from(!self_cycle),
+            );
+            assert_eq!(super::subgraph_rank_axis(&restored, 0, 1), Some(true));
+
+            for algorithm in [
+                LayoutAlgorithm::Sugiyama,
+                LayoutAlgorithm::Tree,
+                LayoutAlgorithm::Force,
+            ] {
+                let render = || {
+                    layout_diagram_traced_with_config_and_guardrails(
+                        &restored,
+                        algorithm,
+                        LayoutConfig {
+                            fnx_enabled: false,
+                            ..LayoutConfig::default()
+                        },
+                        LayoutGuardrails::default(),
+                    )
+                    .layout
+                };
+                let layout = render();
+                assert_eq!(layout.nodes.len(), restored.nodes.len());
+                assert_eq!(layout.edges.len(), restored.edges.len());
+                assert_eq!(layout.clusters.len(), restored.clusters.len());
+                for bounds in layout
+                    .nodes
+                    .iter()
+                    .map(|node| node.bounds)
+                    .chain(layout.clusters.iter().map(|cluster| cluster.bounds))
+                {
+                    assert!(bounds.x.is_finite() && bounds.y.is_finite());
+                    assert!(bounds.width.is_finite() && bounds.width > 0.0);
+                    assert!(bounds.height.is_finite() && bounds.height > 0.0);
+                }
+                assert_eq!(
+                    layout,
+                    render(),
+                    "{algorithm:?}: best-effort cyclic hierarchy layout must stay deterministic",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subgraph_depth_and_rank_axis_skip_invalid_parent_references() {
+        let mut ir = fm_parser::parse(
+            "flowchart TB\nsubgraph Outer[Outer]\ndirection TB\nsubgraph Inner[Inner]\ndirection LR\nA --> B\nend\nend\n",
+        )
+        .ir;
+        let outer = ir
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == "Outer")
+            .unwrap()
+            .id;
+        let inner = ir
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == "Inner")
+            .unwrap()
+            .id;
+        let missing = fm_core::IrSubgraphId(usize::MAX);
+        ir.graph.subgraphs[outer.0].parent = Some(missing);
+        for node in &mut ir.graph.nodes {
+            node.subgraphs.push(missing);
+        }
+
+        assert_eq!(super::subgraph_depth(&ir, missing), 0);
+        assert_eq!(super::subgraph_depth(&ir, outer), 0);
+        assert_eq!(super::subgraph_depth(&ir, inner), 1);
+        assert_eq!(super::subgraph_rank_axis(&ir, 0, 1), Some(true));
+        assert_eq!(super::subgraph_rank_axis(&ir, 0, usize::MAX), None);
+        // An invalid outer link must not displace the innermost valid direction override.
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 2);
+        assert_eq!(layout.edges.len(), 1);
+        assert_eq!(layout.clusters.len(), 2);
     }
 
     #[test]
