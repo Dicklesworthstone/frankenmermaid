@@ -12281,6 +12281,11 @@ mod tests {
             // Sequence central-connection dots submit via PrimitiveFamily::SequenceCentralConnection
             // in the foreground marker pass (verified by gpu_pipeline_layout.rs).
             "draw_sequence_central_connections",
+            // Typed participant symbols (actor, boundary, control, entity, database, collections,
+            // queue) reach the plan as node_fill_triangles and node_border_segments, with the
+            // caption below the symbol. Every kind, mirrored headers included, is checked by
+            // typed_sequence_headers_use_paths_and_keep_captions_below_top_and_mirror_symbols.
+            "draw_sequence_participant",
         ];
 
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
