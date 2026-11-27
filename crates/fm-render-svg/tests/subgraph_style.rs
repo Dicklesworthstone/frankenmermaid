@@ -553,6 +553,7 @@ fn browser_computed_paints_honor_authored_cascade_once() {
     let mut fixtures = Vec::new();
     for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
         for theme in [ThemePreset::Default, ThemePreset::Dark] {
+            let palette = fm_render_svg::ThemeColors::from_preset(theme);
             for portable in [false, true] {
                 let mut config = SvgRenderConfig {
                     backend,
@@ -575,6 +576,8 @@ fn browser_computed_paints_honor_authored_cascade_once() {
                         "name": format!("{backend:?}/{theme:?}/portable={portable}/{kind}"),
                         "scene": backend == SvgBackend::Scene,
                         "embedded": config.embed_theme_css,
+                        "nodeFill": palette.node_fill,
+                        "edgeStroke": palette.edge,
                         "kind": kind,
                         "svg": svg,
                     }));
@@ -626,7 +629,7 @@ for (const fixture of fixtures) {
       ? 'path[data-fm-source-kind="node"][data-fm-source-index="0"]'
       : '.fm-node[data-id="A"] > rect');
     const edge = one(fixture.scene
-      ? 'path[data-fm-source-kind="edge"][data-fm-source-index="0"]'
+      ? '#edges path[data-fm-source-kind="edge"][data-fm-source-index="0"]'
       : 'path.fm-edge[data-fm-edge-id="0"]');
     const cluster = one(fixture.scene
       ? 'path[data-fm-source-kind="cluster"][data-fm-source-index="0"]'
@@ -645,6 +648,13 @@ for (const fixture of fixtures) {
       captionAlpha: alpha(caption, 'fill'),
     });
     if (fixture.kind === 'control') {
+      // The scene's edge-label backplate shares the edge source id. Inspect the
+      // shaft in its own layer to check the color the reader sees on the route.
+      if (fixture.scene) {
+        const rgb = hex => 'rgb(' + [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(', ') + ')';
+        expect(getComputedStyle(node).fill === rgb(fixture.nodeFill), 'unstyled node ignored its theme fill');
+        expect(getComputedStyle(edge).stroke === rgb(fixture.edgeStroke), 'unstyled connector ignored its theme stroke');
+      }
       expect(getComputedStyle(node).fill !== 'rgb(171, 205, 239)', 'unstyled node acquired author fill');
       expect(getComputedStyle(caption).fill !== 'rgb(18, 52, 86)', 'unstyled caption acquired author colour');
       near(alpha(nodeLabel, 'fill'), 1, 'unstyled node label alpha');

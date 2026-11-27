@@ -751,12 +751,16 @@ fn render_svg_with_layout_impl_reusing(
                     &accents,
                 )
             } else {
-                build_render_scene_with_icon_position(
+                let mut scene = build_render_scene_with_icon_position(
                     ir,
                     layout,
                     &config.font_metrics(),
                     config.node_icon_position,
-                )
+                );
+                if ir.diagram_type == DiagramType::Flowchart {
+                    apply_flowchart_scene_theme(&mut scene, ir, layout, config);
+                }
+                scene
             };
             (
                 render_scene_document_with_ir(&scene, config, Some(ir)),
@@ -2044,6 +2048,101 @@ fn semantic_node_css(colors: &fm_core::NodeShapeStyle) -> String {
     )
 }
 
+/// Assign SVG palette defaults to the flowchart primitives as they enter this backend. Doing
+/// this before marker generation gives the shaft and its endpoints the same resolved paint.
+/// Standalone scenes supplied to `render_scene_to_svg` already own their paints.
+fn apply_flowchart_scene_theme(
+    scene: &mut RenderScene,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+) {
+    let colors = resolve_theme(Some(ir), config).colors;
+    // Node bodies precede their captions in paint order. Choose text against the actual
+    // painted surface, including a semantic shape tint or an author override.
+    let mut node_label_colors = vec![colors.text.as_str(); ir.nodes.len()];
+    let cluster_colors: BTreeMap<_, _> = layout
+        .clusters
+        .iter()
+        .filter_map(|cluster| {
+            Some((
+                cluster.cluster_index,
+                fm_layout::scene_paint(cluster.color.as_deref()?)?,
+            ))
+        })
+        .collect();
+
+    for layer in &mut scene.root.children {
+        let RenderItem::Group(layer) = layer else {
+            continue;
+        };
+        for item in &mut layer.children {
+            match item {
+                RenderItem::Path(path) => {
+                    let style = scene_source_style(ir, path.source);
+                    let semantic;
+                    let (fill, stroke) = match path.source {
+                        RenderSource::Node(index) => {
+                            semantic = ir.nodes.get(index).and_then(|node| {
+                                semantic_node_colors(ir, index, node.shape, config, &colors)
+                            });
+                            semantic
+                                .as_ref()
+                                .map_or((&colors.node_fill, &colors.node_stroke), |style| {
+                                    (&style.fill, &style.stroke)
+                                })
+                        }
+                        // Filled edge paths are caption backplates. linkStyle's fill is not
+                        // a backplate declaration; the shared scene has already composed alpha.
+                        RenderSource::Edge(_) => (&colors.background, &colors.edge),
+                        RenderSource::Cluster(index) => (
+                            cluster_colors.get(&index).unwrap_or(&colors.cluster_fill),
+                            cluster_colors
+                                .get(&index)
+                                .filter(|color| !color.eq_ignore_ascii_case("transparent"))
+                                .unwrap_or(&colors.cluster_stroke),
+                        ),
+                        RenderSource::Diagram => continue,
+                    };
+                    if let Some(FillStyle::Solid { color, .. }) = &mut path.fill
+                        && (matches!(path.source, RenderSource::Edge(_))
+                            || !style_has_scene_paint(&style, "fill"))
+                    {
+                        color.clone_from(fill);
+                    }
+                    if let Some(outline) = &mut path.stroke
+                        && !style_has_scene_paint(&style, "stroke")
+                    {
+                        outline.color.clone_from(stroke);
+                    }
+                    if let RenderSource::Node(index) = path.source
+                        && let Some(FillStyle::Solid { color, .. }) = &path.fill
+                        && let Some(label) = node_label_colors.get_mut(index)
+                    {
+                        *label =
+                            fm_core::readable_label_color(color, &colors.text, &colors.background);
+                    }
+                }
+                RenderItem::Text(text) => {
+                    let style = scene_source_style(ir, text.source);
+                    if style_has_scene_paint(&style, "color") {
+                        continue;
+                    }
+                    let label_color = if let RenderSource::Node(index) = text.source {
+                        node_label_colors.get(index).copied().unwrap_or(&colors.text)
+                    } else {
+                        &colors.text
+                    };
+                    let FillStyle::Solid { color, .. } = &mut text.fill;
+                    label_color.clone_into(color);
+                }
+                // Nested icon and caption groups have their own semantic paint roles.
+                RenderItem::Group(_) => {}
+            }
+        }
+    }
+}
+
 const SANKEY_MARKER_URLS: [&str; 8] = [
     "url(#fm-sankey-arrow-0)",
     "url(#fm-sankey-arrow-1)",
@@ -3328,7 +3427,11 @@ fn render_scene_item(
 /// Theme defaults may recolor a scene, but an author's valid paint has already won the
 /// cascade in a resolved layer. Keep that decision while applying backend theme defaults.
 fn scene_has_authored_paint(ir: &MermaidDiagramIr, source: RenderSource, property: &str) -> bool {
-    let style = match source {
+    style_has_scene_paint(&scene_source_style(ir, source), property)
+}
+
+fn scene_source_style(ir: &MermaidDiagramIr, source: RenderSource) -> BTreeMap<String, String> {
+    match source {
         RenderSource::Node(index) => ir.resolved_node_style(index),
         RenderSource::Edge(index) => fm_layout::edge_labels::edge_label_style(ir, index),
         RenderSource::Cluster(index) => {
@@ -3340,8 +3443,11 @@ fn scene_has_authored_paint(ir: &MermaidDiagramIr, source: RenderSource, propert
             }
             style
         }
-        RenderSource::Diagram => return false,
-    };
+        RenderSource::Diagram => BTreeMap::new(),
+    }
+}
+
+fn style_has_scene_paint(style: &BTreeMap<String, String>, property: &str) -> bool {
     style.get(property).is_some_and(|paint| {
         (property != "color" && paint.trim().eq_ignore_ascii_case("none"))
             || fm_layout::scene_paint(paint).is_some()
@@ -23032,6 +23138,68 @@ mod tests {
             .filter(|(name, _)| *name == property)
             .map(|(_, value)| value.trim())
             .next_back()
+    }
+
+    #[test]
+    fn flowchart_scene_uses_theme_colors_under_author_styles() {
+        let ir = fm_parser::parse(
+            "flowchart LR\nsubgraph G[Gate]\nA[Start] -->|check| B{Ready}\nend\n\
+             B --> C[End]\nstyle C fill:#ffffff,stroke:none\nlinkStyle 1 stroke:#334411",
+        )
+        .ir;
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        for embed_theme_css in [true, false] {
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                theme: ThemePreset::Dark,
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            let decision = semantic_node_colors(&ir, 1, NodeShape::Diamond, &config, &colors)
+                .expect("decision role");
+            for (tag, kind, index, property, expected) in [
+                ("path", "node", 0, "fill", colors.node_fill.as_str()),
+                ("path", "node", 0, "stroke", &colors.node_stroke),
+                ("text", "node", 0, "fill", &colors.text),
+                ("path", "node", 1, "fill", &decision.fill),
+                ("path", "node", 1, "stroke", &decision.stroke),
+                (
+                    "text",
+                    "node",
+                    1,
+                    "fill",
+                    fm_core::readable_label_color(&decision.fill, &colors.text, &colors.background),
+                ),
+                ("path", "node", 2, "fill", "#ffffff"),
+                ("path", "node", 2, "stroke", "none"),
+                ("text", "node", 2, "fill", &colors.background),
+                ("path", "cluster", 0, "fill", &colors.cluster_fill),
+                ("path", "cluster", 0, "stroke", &colors.cluster_stroke),
+                ("path", "edge", 0, "stroke", &colors.edge),
+                ("text", "edge", 0, "fill", &colors.text),
+                ("path", "edge", 1, "stroke", "#334411"),
+            ] {
+                let leaf = scene_tag_for_source(&svg, tag, kind, index);
+                assert_eq!(
+                    scene_style_property(leaf, property),
+                    Some(expected),
+                    "{leaf}"
+                );
+            }
+            let edge_plate = svg
+                .split('<')
+                .find(|tag| {
+                    tag.starts_with("path ")
+                        && tag.contains("data-fm-source-kind=\"edge\"")
+                        && scene_attribute(tag, "stroke") == Some("none")
+                })
+                .expect("edge label backplate");
+            assert_eq!(
+                scene_style_property(edge_plate, "fill"),
+                Some(colors.background.as_str())
+            );
+        }
     }
 
     #[test]
