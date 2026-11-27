@@ -247,7 +247,7 @@ test("HTML export embeds the exact canonical runtime and paired SVG without recu
   assert.equal(JSON.parse(payload).title, hostile);
   assert.ok(!payload.includes("<"));
   assert.ok(!payload.includes("\u2028"));
-  const encodedSvg = built.html.match(/\n    svg: (.*),\n/)[1];
+  const encodedSvg = built.html.match(/\n  var svgSource = (.*);\n/)[1];
   assert.equal(JSON.parse(encodedSvg), deck.svg);
   assert.equal((built.html.match(/<script nonce=/g) || []).length, 4);
   assert.ok(built.html.includes(`script-src 'nonce-${nonce}'`));

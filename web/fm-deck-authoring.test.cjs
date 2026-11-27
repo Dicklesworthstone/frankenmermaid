@@ -453,6 +453,39 @@ test('removing final optional properties leaves a valid JSON5 object without dro
   assert.equal(prepared.deck.manifest.slides[0].caption ?? '', '');
 });
 
+test('native membership edits preserve selector comments, spelling and reveal groups', async () => {
+  const source = "flowchart LR\n a-->b-->c-->d\n%%{deck:{slides:[{id:'talk'," +
+    "nodes:[/*entry*/ '\\u0061', 'b' /*middle*/, // next\n 'd',]," +
+    "reveal /*policy*/ : [ [/*step one*/ 'b'], [ /*step two*/ 'd'], ]}]}}%%";
+  const h = await nativeSourceEdit(source);
+  const draft = structuredClone(h.original);
+  draft.slides[0].nodes.splice(2, 0, 'c');
+  draft.slides[0].reveal[0].push('c');
+  let prepared = await h.s.prepare(JSON.stringify(draft), [0]);
+  assert.equal(prepared.updatedSource, source
+    .replace("/*middle*/,", '/*middle*/,"c",')
+    .replace("/*step one*/ 'b'", "/*step one*/ 'b', \"c\""));
+  assert.deepEqual(prepared.deck.manifest.slides[0].nodes.map(n => n.step), [0, 1, 1, 2]);
+
+  draft.slides[0].nodes = ['a', 'd'];
+  draft.slides[0].reveal = [['d']];
+  prepared = await h.s.prepare(JSON.stringify(draft), [0]);
+  assert.deepEqual(prepared.deck.manifest.slides[0].nodes.map(n => n.sourceId), ['a', 'd']);
+  assert.ok(prepared.updatedSource.includes("/*entry*/ '\\u0061'"));
+  assert.ok(prepared.updatedSource.includes("/*step two*/ 'd'"));
+  for (const marker of ['/*middle*/', '// next\n', '/*step one*/']) assert.ok(prepared.updatedSource.includes(marker));
+
+  for (const mode of ['auto', undefined]) {
+    draft.slides[0].reveal = mode;
+    prepared = await h.s.prepare(JSON.stringify(draft), [0]);
+    for (const marker of ['/*policy*/', '/*step one*/', '/*step two*/']) {
+      assert.equal(prepared.updatedSource.split(marker).length, 2);
+    }
+  }
+  assert.equal(h.s.commit(prepared), prepared.updatedSource);
+  assert.equal(h.s.undo(), source);
+});
+
 test('existing-source mode refuses duplicate keys, escaped property names and lossy native normalization', async () => {
   const { deckSourceDocument } = await modulePromise;
   const wasm = await nativeEngine();

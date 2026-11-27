@@ -208,6 +208,23 @@ class DeckAuthoringBrowserTests(unittest.TestCase):
         self.page.locator('#deck-compose-apply').click()
         self.assertEqual(self.page.evaluate('native.renderDeck(document.querySelector("#source").value).manifest.slides.map(s=>s.id)'), ['intro', 'slide-2', 'detail', 'slide-1'])
 
+    def test_uneditable_directive_does_not_block_editing_a_sibling(self):
+        self.native_source()
+        source = self.page.locator('#source').input_value().replace(
+            "%%{deck:{slides:[{id:'last'", "%%{deck:{'slid\\u0065s':[{id:'last'")
+        self.page.locator('#source').fill(source)
+        self.mount()
+        self.page.locator('#deck-compose-load-existing').click()
+        self.page.wait_for_function('!document.querySelector("#deck-compose-edit-existing").disabled')
+        self.assertEqual(self.page.locator('#deck-compose-source-directive option').count(), 1)
+        self.assertIn('Escaped deck property names', self.page.locator('#deck-compose-status').inner_text())
+        self.page.locator('#deck-compose-edit-existing').click()
+        self.page.wait_for_function('document.querySelector("#deck-compose-id").value === "intro"')
+        self.page.locator('#deck-compose-slide-title').fill('Edited')
+        self.prepare()
+        self.page.locator('#deck-compose-apply').click()
+        self.assertEqual(self.page.locator('#source').input_value(), source.replace("title:'Introduction'", 'title:"Edited"'))
+
     def test_actual_deck_panel_forwards_native_source_reads_to_its_lazy_composer_backend(self):
         self.native_source()
         self.page.evaluate('''() => {
@@ -369,7 +386,7 @@ class DeckAuthoringBrowserTests(unittest.TestCase):
         self.add_slide()
         self.assertEqual(self.page.locator('#deck-compose-id').input_value(), 'slide-2')
         self.prepare()
-        self.assertIn('1 existing slides retained', self.page.locator('#deck-compose-status').inner_text())
+        self.assertIn('1 other slides retained', self.page.locator('#deck-compose-status').inner_text())
         self.page.locator('#deck-compose-apply').click()
         self.assertEqual(self.source_spec()['slides'][0]['id'], 'slide-2')
 

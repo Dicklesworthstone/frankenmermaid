@@ -488,6 +488,61 @@ function spliceDeck(text, edits) {
 const deckLiteral = value => JSON.stringify(value).replace(/[%\u2028\u2029]/gu,
   character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
+// Preserve authored comments even when the surrounding value or property is
+// removed. Quoted text can itself contain comment markers.
+function deckComments(raw, start, end) {
+  const comments = [];
+  for (let at = start; at < end;) {
+    if (raw[at] === '"' || raw[at] === "'") {
+      at = deckStringEnd(raw, at);
+      continue;
+    }
+    const next = deckTrivia(raw, at);
+    if (next === at) { at++; continue; }
+    const trivia = raw.slice(at, Math.min(next, end));
+    if (trivia.includes("/")) comments.push(trivia);
+    at = next;
+  }
+  return comments.join("");
+}
+
+function patchDeckValue(raw, start, end, before, after) {
+  if (!Array.isArray(before) || !Array.isArray(after)) {
+    return deckComments(raw, start, end) + deckLiteral(after);
+  }
+  // Anchor both ends on unchanged selectors or reveal groups. For a checkbox
+  // insertion/removal this leaves every other original token in place.
+  const entries = deckMembers(raw, start, end, true), edits = [];
+  const shared = Math.min(before.length, after.length);
+  let first = 0, suffix = 0;
+  while (first < shared && JSON.stringify(before[first]) === JSON.stringify(after[first])) first++;
+  while (first + suffix < shared &&
+    JSON.stringify(before.at(-suffix - 1)) === JSON.stringify(after.at(-suffix - 1))) suffix++;
+  const oldEnd = before.length - suffix, newEnd = after.length - suffix;
+  for (let i = first; i < oldEnd; i++) {
+    const { from, to, comma } = entries[i];
+    if (i < newEnd) {
+      if (JSON.stringify(before[i]) !== JSON.stringify(after[i])) {
+        edits.push({ from, to, text: patchDeckValue(raw, from, to, before[i], after[i]) });
+      }
+    } else {
+      edits.push({ from, to, text: deckComments(raw, from, to) });
+      if (comma !== null) edits.push({ from: comma, to: comma + 1, text: "" });
+    }
+  }
+  if (newEnd > oldEnd) {
+    const values = after.slice(oldEnd, newEnd).map(deckLiteral).join(", ");
+    if (suffix) {
+      const insert = oldEnd === 0 ? start + 1 : entries[oldEnd - 1].comma + 1;
+      edits.push({ from: insert, to: insert, text: values + "," });
+    } else {
+      const prefix = entries.length && entries.at(-1).comma === null ? ", " : "";
+      edits.push({ from: end - 1, to: end - 1, text: prefix + values });
+    }
+  }
+  return spliceDeck(raw.slice(start, end), edits.map(edit => ({ ...edit, from: edit.from - start, to: edit.to - start })));
+}
+
 function patchDeckObject(raw, start, end, fields, before, after) {
   const edits = [], additions = [];
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
@@ -497,10 +552,11 @@ function patchDeckObject(raw, start, end, fields, before, after) {
     const field = fields.find(item => item.key === key);
     if (after[key] === undefined) {
       if (field) {
-        edits.push({ from: field.keyFrom, to: field.to, text: "" });
+        edits.push({ from: field.keyFrom, to: field.to, text: deckComments(raw, field.keyFrom, field.to) });
         if (field.comma !== null) edits.push({ from: field.comma, to: field.comma + 1, text: "" });
       }
-    } else if (field) edits.push({ from: field.from, to: field.to, text: deckLiteral(after[key]) });
+    } else if (field) edits.push({ from: field.from, to: field.to,
+      text: patchDeckValue(raw, field.from, field.to, before[key], after[key]) });
     else additions.push(`${JSON.stringify(key)}: ${deckLiteral(after[key])}`);
   }
   if (additions.length) {
