@@ -72,6 +72,7 @@ fn rows() -> Vec<Row> {
 
 struct Edge {
     arrow: ArrowType,
+    co_arrow: Option<ArrowType>,
     from: String,
     to: String,
     dashed: bool,
@@ -93,12 +94,16 @@ fn edge(op: &str) -> Edge {
     // realization so that a dotted variant of every relation would not double the ArrowType enum.
     // Both count; asking about only one of them is how the realization dash went unnoticed in the
     // partition sweep (see class_association_arrow.rs).
-    let dashed = matches!(e.arrow, ArrowType::DottedArrow | ArrowType::DottedLine)
-        || e.inline_style
-            .as_ref()
-            .is_some_and(|style| style.properties.contains_key("stroke-dasharray"));
+    let dashed = matches!(
+        e.arrow,
+        ArrowType::DottedArrow | ArrowType::DoubleDottedArrow | ArrowType::DottedLine
+    ) || e
+        .inline_style
+        .as_ref()
+        .is_some_and(|style| style.properties.contains_key("stroke-dasharray"));
     Edge {
         arrow: e.arrow,
+        co_arrow: e.co_arrow(),
         from: name(&e.from),
         to: name(&e.to),
         dashed,
@@ -182,93 +187,65 @@ fn the_line_type_matches_the_incumbent() {
     );
 }
 
-/// The marker we draw must be the one the author wrote at the end they wrote it.
-///
-/// ⚠️ THIS IS A RELATIONAL TEST, NOT A RESTATEMENT OF THE MAPPING. It never names an expected
-/// `ArrowType`; it asserts that two spellings carrying the SAME incumbent marker on the SAME end
-/// produce the same `ArrowType` here, taking the single-ended solid spelling as the reference. A
-/// test that instead listed `("o..", Aggregation)` would pass by construction against the very
-/// table it is meant to check.
-///
-/// ⚠️ SPELLINGS MARKED AT BOTH ENDS ARE INCLUDED NOW (bd-f9t0r). They used to be skipped, because
-/// `ArrowType` names an edge rather than a pair of ends and `o--*` could not be expressed at all.
-/// The second marker is now carried beside the primary as `IrEdgeExtras::co_arrow` — the
-/// `ArrowType` that already draws that marker on that end — so a both-ends spelling has a
-/// source-end marker to check like any other, and the exclusion is gone rather than reworded.
-#[test]
-fn a_single_ended_relation_keeps_its_marker_and_its_end() {
-    let reference = |type1: Option<u8>, type2: Option<u8>| -> Option<String> {
-        // The canonical SOLID spelling carrying this marker on this end.
-        let start = match type1 {
-            Some(0) => "o",
-            Some(1) => "<|",
-            Some(2) => "*",
-            Some(3) => "<",
-            Some(4) => "()",
-            None => "",
-            _ => return None,
-        };
-        let end = match type2 {
-            Some(0) => "o",
-            Some(1) => "|>",
-            Some(2) => "*",
-            Some(3) => ">",
-            Some(4) => "()",
-            None => "",
-            _ => return None,
-        };
-        Some(format!("{start}--{end}"))
-    };
+/// Decode the IR's marker vocabulary independently of the Mermaid spelling. A co-arrow supplies
+/// the target marker, so combining it with an existing target marker would be ambiguous between
+/// renderers and is rejected here.
+fn marker_pair(arrow: ArrowType) -> (Option<u8>, Option<u8>) {
+    match arrow {
+        ArrowType::Line | ArrowType::DottedLine => (None, None),
+        ArrowType::Arrow | ArrowType::DottedArrow => (None, Some(3)),
+        ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => (Some(3), Some(3)),
+        ArrowType::Aggregation => (Some(0), None),
+        ArrowType::AggregationReverse => (None, Some(0)),
+        ArrowType::Inheritance => (Some(1), None),
+        ArrowType::InheritanceReverse => (None, Some(1)),
+        ArrowType::Composition => (Some(2), None),
+        ArrowType::CompositionReverse => (None, Some(2)),
+        ArrowType::Lollipop => (Some(4), None),
+        ArrowType::LollipopReverse => (None, Some(4)),
+        other => panic!("unexpected class relation arrow {other:?}"),
+    }
+}
 
+fn authored_marker_pair(edge: &Edge) -> (Option<u8>, Option<u8>) {
+    let (start, mut end) = marker_pair(edge.arrow);
+    if let Some(co_arrow) = edge.co_arrow {
+        let (co_start, co_end) = marker_pair(co_arrow);
+        assert_eq!(co_start, None, "a co-arrow must mark the target");
+        assert!(co_end.is_some(), "a co-arrow must carry a marker");
+        assert_eq!(end, None, "two markers compete for the target");
+        end = co_end;
+    }
+    match (edge.from.as_str(), edge.to.as_str()) {
+        ("Alpha", "Beta") => (start, end),
+        ("Beta", "Alpha") => (end, start),
+        ends => panic!("unexpected class relation endpoints {ends:?}"),
+    }
+}
+
+/// Compare both physical ends with the pinned Mermaid fixture, including reversed IR edges.
+/// Checking only the primary ArrowType missed all ten dependency-start, two-ended spellings:
+/// `<--*` looked like `<--` while its arrow landed on Beta and its diamond disappeared (bd-onsya).
+#[test]
+fn every_relation_keeps_both_markers_on_the_authored_classes() {
     let mut bad = Vec::new();
     for row in rows() {
-        // The SOURCE-end marker is the primary `ArrowType` whether or not the target end is marked
-        // too, so a both-ends row is compared against the canonical spelling carrying the same
-        // start marker and no end marker.
-        let canonical_type2 = if row.type1.is_some() { None } else { row.type2 };
-        let Some(canonical) = reference(row.type1, canonical_type2) else {
-            continue;
-        };
-        if canonical == row.op {
-            continue;
-        }
-        let got = edge(&row.op);
-        let want = edge(&canonical);
-        if !same_marker(got.arrow, want.arrow) {
+        let edge = edge(&row.op);
+        let actual = authored_marker_pair(&edge);
+        let expected = (row.type1, row.type2);
+        if actual != expected {
             bad.push(format!(
-                "  {:<8} -> {:?}, but {:<8} -> {:?} and they carry the same marker on the same end",
-                row.op, got.arrow, canonical, want.arrow
+                "  {:<8} expected {expected:?}, got {actual:?} ({} -> {}, {:?} + {:?})",
+                row.op, edge.from, edge.to, edge.arrow, edge.co_arrow
             ));
         }
     }
     assert!(
         bad.is_empty(),
-        "{} spelling(s) lose the marker their solid twin keeps:\n{}",
+        "{} spelling(s) disagree with the incumbent's endpoint markers:\n{}",
         bad.len(),
         bad.join("\n")
     );
-}
-
-/// Do these two arrow types carry the same MARKER on the same end, ignoring the line type?
-///
-/// ⚠️ TWO PAIRS, AND ONLY TWO. Almost every relation carries its line type as the inline
-/// `stroke-dasharray` the lowering site attaches, so the dotted and solid spellings share one
-/// `ArrowType` and compare equal. The dependency and the bare link are the exceptions: their line
-/// type is in the VARIANT NAME (`Arrow`/`DottedArrow`, `Line`/`DottedLine`), which predates this
-/// work and is why `..>` and `-->` are two variants rather than one plus a dash.
-///
-/// Naming the exceptions here rather than widening the comparison keeps this test about the marker.
-/// The line type itself is not waived — `the_line_type_matches_the_incumbent` checks all 72 rows
-/// against the incumbent's own `lineType` column, in both directions.
-fn same_marker(a: ArrowType, b: ArrowType) -> bool {
-    a == b
-        || matches!(
-            (a, b),
-            (ArrowType::DottedArrow, ArrowType::Arrow)
-                | (ArrowType::Arrow, ArrowType::DottedArrow)
-                | (ArrowType::DottedLine, ArrowType::Line)
-                | (ArrowType::Line, ArrowType::DottedLine)
-        )
 }
 
 /// ⚠️ AND THE MARKED RELATIONS MUST STILL DIFFER FROM THE UNMARKED LINE. Splitting the endpoints
@@ -334,7 +311,9 @@ fn the_spellings_the_table_already_knew_are_unchanged() {
 /// exactly the kind of thing this change could break without any arrow type moving.
 #[test]
 fn the_left_pointing_dependencies_still_swap_their_endpoints() {
-    for op in ["<--", "<.."] {
+    for op in [
+        "<--", "<..", "<--o", "<--*", "<--|>", "<--()", "<..o", "<..*", "<..|>", "<..()",
+    ] {
         let e = edge(op);
         assert_eq!(
             (e.from.as_str(), e.to.as_str()),
@@ -342,8 +321,8 @@ fn the_left_pointing_dependencies_still_swap_their_endpoints() {
             "`Alpha {op} Beta` must draw its head at Alpha"
         );
     }
-    // The negative control: the mirror spellings must NOT swap.
-    for op in ["-->", "..>"] {
+    // Forward and native double-arrow spellings keep the authored order.
+    for op in ["-->", "..>", "<-->", "<..>"] {
         let e = edge(op);
         assert_eq!(
             (e.from.as_str(), e.to.as_str()),
@@ -366,14 +345,8 @@ fn a_trailing_o_in_a_class_name_is_not_an_aggregation_marker() {
     );
 }
 
-/// ⚠️ AND THE FAR MARKER MUST ACTUALLY ARRIVE (bd-f9t0r). Every test above reads the PRIMARY
-/// `ArrowType`, which carries the source-end marker — so all of them passed while a both-ends
-/// relation silently drew one marker and dropped the other. That is the defect this file's earlier
-/// exclusion was recording, and only `co_arrow` can see it.
-///
-/// Driven by the fixture's own `type2` column, so the expectation is the incumbent's answer rather
-/// than a list written here: every spelling mermaid reports with BOTH ends marked must carry a
-/// co-arrow, and every spelling it reports with at most one must not.
+/// Mixed marker pairs need a target co-arrow, including dependency-start pairs (bd-onsya).
+/// Native double arrows carry both markers themselves and must not duplicate their target marker.
 #[test]
 fn a_relation_marked_at_both_ends_carries_its_far_marker() {
     let mut missing = Vec::new();
@@ -386,11 +359,8 @@ fn a_relation_marked_at_both_ends_carries_its_far_marker() {
             .first()
             .unwrap_or_else(|| panic!("`{}` produced NO EDGE at all", row.op));
         let both_ends = row.type1.is_some() && row.type2.is_some();
-        // The start-side DEPENDENCY spellings are the documented exception: they map onto the
-        // forward `Arrow`/`DottedArrow` and rely on the endpoints being SWAPPED, so there is no
-        // reverse variant to pair against them — see `class_relation_co_arrow`.
-        let swaps = row.type1 == Some(3);
-        match (both_ends && !swaps, e.co_arrow()) {
+        let native_double_arrow = row.type1 == Some(3) && row.type2 == Some(3);
+        match (both_ends && !native_double_arrow, e.co_arrow()) {
             (true, None) => missing.push(format!(
                 "  {:<8} type1={:?} type2={:?}",
                 row.op, row.type1, row.type2
@@ -410,4 +380,60 @@ fn a_relation_marked_at_both_ends_carries_its_far_marker() {
         spurious.len(),
         spurious.join("\n")
     );
+}
+
+/// Endpoint normalization must move multiplicities with their classes while keeping generics and
+/// the relationship label intact. Exercise the full fixture because marker direction and line
+/// style are independent of these grammar fields.
+#[test]
+fn relation_metadata_stays_with_its_authored_class_after_normalization() {
+    for row in rows() {
+        let source = format!(
+            "classDiagram\n  Alpha~T~ \"1\" {} \"many\" Beta~U~ : maps List~T~\n",
+            row.op
+        );
+        let parsed = fm_parser::parse(&source);
+        assert!(
+            parsed.warnings.is_empty(),
+            "`{}` emitted warnings: {:?}",
+            row.op,
+            parsed.warnings
+        );
+        let ir = parsed.ir;
+        assert_eq!(ir.nodes.len(), 2, "`{}` changed the class set", row.op);
+        assert_eq!(ir.edges.len(), 1, "`{}` changed the relation count", row.op);
+        let edge = &ir.edges[0];
+        for (endpoint, cardinality) in [
+            (&edge.from, edge.source_cardinality()),
+            (&edge.to, edge.target_cardinality()),
+        ] {
+            let IrEndpoint::Node(id) = endpoint else {
+                panic!("`{}` has a non-class endpoint: {endpoint:?}", row.op);
+            };
+            let node = &ir.nodes[id.0];
+            let (expected_cardinality, expected_generic) = match node.id.as_str() {
+                "Alpha" => ("1", "T"),
+                "Beta" => ("many", "U"),
+                other => panic!("`{}` invented class {other:?}", row.op),
+            };
+            assert_eq!(
+                cardinality,
+                Some(expected_cardinality),
+                "`{}` moved the multiplicity away from {}",
+                row.op,
+                node.id
+            );
+            assert_eq!(
+                node.class_meta.as_ref().unwrap().generics,
+                [expected_generic],
+                "`{}` changed the generic for {}",
+                row.op,
+                node.id
+            );
+        }
+        let label = edge
+            .label
+            .expect("relationship label survives normalization");
+        assert_eq!(ir.labels[label.0].text, "maps List~T~", "`{}`", row.op);
+    }
 }

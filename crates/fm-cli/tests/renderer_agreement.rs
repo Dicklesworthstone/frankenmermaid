@@ -626,3 +626,101 @@ fn the_renderers_agree_on_declared_styling() {
         canvas_misses.join("\n  ")
     );
 }
+
+#[test]
+fn dependency_start_class_relations_match_their_equivalent_reversed_spelling() {
+    use fm_core::MermaidRenderMode;
+    use fm_layout::MarkerKind;
+    use fm_render_canvas::GpuRenderPlan;
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg_with_config};
+
+    // These are equivalent authored relationships. Explicit declarations keep node identity and
+    // source spans stable, so every drawing command can be compared rather than merely counting
+    // that some marker appeared. The right-hand spellings already preserve both ends.
+    for (forward, reverse, marker) in [
+        ("<--*", "*-->", MarkerKind::Diamond),
+        ("<--o", "o-->", MarkerKind::DiamondOpen),
+        ("<--|>", "<|-->", MarkerKind::TriangleOpenStart),
+        ("<--()", "()-->", MarkerKind::LollipopStart),
+        ("<..*", "*..>", MarkerKind::Diamond),
+        ("<..o", "o..>", MarkerKind::DiamondOpen),
+        ("<..|>", "<|..>", MarkerKind::TriangleOpenStart),
+        ("<..()", "()..>", MarkerKind::LollipopStart),
+    ] {
+        let header = "classDiagram\ndirection LR\nclass Alpha\nclass Beta\n";
+        let actual = fm_parser::parse(&format!(
+            "{header}Alpha \"one\" {forward} \"many\" Beta : uses\n"
+        ));
+        let expected = fm_parser::parse(&format!(
+            "{header}Beta \"many\" {reverse} \"one\" Alpha : uses\n"
+        ));
+        assert!(
+            actual.warnings.is_empty(),
+            "{forward}: {:?}",
+            actual.warnings
+        );
+        assert!(
+            expected.warnings.is_empty(),
+            "{reverse}: {:?}",
+            expected.warnings
+        );
+        let (actual, expected) = (&actual.ir, &expected.ir);
+        assert_eq!(actual.edges.len(), 1, "{forward}");
+        assert_eq!(expected.edges.len(), 1, "{reverse}");
+        assert_eq!(
+            fm_layout::edge_marker_kinds(&actual.edges[0], false),
+            (marker, MarkerKind::Arrow),
+            "{forward} must keep the UML marker on Beta and the dependency arrow on Alpha"
+        );
+        assert_eq!(actual.edges[0].from, expected.edges[0].from);
+        assert_eq!(actual.edges[0].to, expected.edges[0].to);
+        assert_eq!(actual.edges[0].source_cardinality(), Some("many"));
+        assert_eq!(actual.edges[0].target_cardinality(), Some("one"));
+
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                ..Default::default()
+            };
+            assert_eq!(
+                render_svg_with_config(actual, &config),
+                render_svg_with_config(expected, &config),
+                "{forward} differs from {reverse} on {backend:?}"
+            );
+        }
+
+        let config = CanvasRenderConfig::default();
+        let mut actual_canvas = MockCanvas2dContext::new(1200.0, 900.0);
+        let mut expected_canvas = MockCanvas2dContext::new(1200.0, 900.0);
+        render_to_canvas(actual, &mut actual_canvas, &config);
+        render_to_canvas(expected, &mut expected_canvas, &config);
+        assert_eq!(
+            actual_canvas.operations(),
+            expected_canvas.operations(),
+            "{forward}: Canvas2D"
+        );
+
+        let actual_layout = fm_layout::layout_diagram(actual);
+        let expected_layout = fm_layout::layout_diagram(expected);
+        assert_eq!(
+            GpuRenderPlan::from_layout_with_config(actual, &actual_layout, &config),
+            GpuRenderPlan::from_layout_with_config(expected, &expected_layout, &config),
+            "{forward}: GPU primitives"
+        );
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::rich()
+            };
+            let actual_output = render_term_with_config(actual, &config, 180, 60).output;
+            let expected_output = render_term_with_config(expected, &config, 180, 60).output;
+            assert_eq!(actual_output, expected_output, "{forward}: {mode:?}");
+            assert!(actual_output.contains("Alpha") && actual_output.contains("Beta"));
+        }
+    }
+}

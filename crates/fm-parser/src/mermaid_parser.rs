@@ -6123,10 +6123,9 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // endpoints. Adding `<--` here without the table entry above (or the reverse) leaves an
             // association pointing the wrong way, which is worse than the missing head it replaces.
             //
-            // ⚠️ DERIVED FROM THE TOKEN'S PARTS, NOT FROM A LIST OF SPELLINGS. This used to read
-            // `matches!(class_operator, Some("<.." | "<--"))`, which is a list the relation matcher
-            // now outruns: it returns 72 different tokens, and `<-->` or `<--o` would silently stop
-            // swapping while still being a start-side dependency.
+            // Derive the swap from both marker halves. Mixed relations such as `<--o` also need
+            // it: aggregation becomes the new source marker and the dependency the new target.
+            // `<-->` and `<..>` have native double-arrow variants and keep their authored order.
             let reversed_dependency = class_operator.is_some_and(class_relation_is_reversed);
             // UML REALIZATION is a DASHED line with a hollow triangle. bd-u9hcc gave `..|>`/`<|..`
             // the correct head and direction by mapping them onto Inheritance/InheritanceReverse,
@@ -6154,7 +6153,7 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // fm-layout and all three renderers to express one bit that already has a home.
             //
             // ⚠️ ALSO DERIVED, for the same reason. The literal list dashed exactly four spellings;
-            // every `..`-bodied relation needs it except the two whose ArrowType is already dotted
+            // every `..`-bodied relation needs it except those whose ArrowType is already dotted
             // by name. `class_relation_is_dashed` states that rule once — see it for the exclusion.
             let is_dashed_relation = class_operator.is_some_and(class_relation_is_dashed);
             for ast in asts {
@@ -14274,6 +14273,7 @@ enum StateStatement {
     },
 }
 
+// ubs:ignore[rust.security.hardcoded-secrets] -- Internal grammar sentinel, not a credential.
 const STATE_PSEUDO_TOKEN: &str = "__state_start_end";
 const STATE_START_NODE_ID: &str = "__state_start";
 const STATE_END_NODE_ID: &str = "__state_end";
@@ -16795,7 +16795,7 @@ fn match_mermaid_class_relation(statement: &str, idx: usize) -> Option<(usize, A
 /// The lowering site needs the parts, not the spelling: it decides the dash and the endpoint swap,
 /// and both used to be `matches!` over a handful of literals (`"..|>" | "<|.." | "().." | "..()"`).
 /// A literal list cannot survive a matcher that returns 72 different tokens — it would silently
-/// stop dashing `o..` and stop swapping `<-->` — so both decisions are re-derived from here.
+/// stop dashing `o..` and stop swapping `<--o` — so both decisions are re-derived from here.
 fn class_relation_parts(token: &str) -> Option<(Option<ClassMarker>, Option<ClassMarker>, bool)> {
     let bytes = token.as_bytes();
     let mut cursor = 0;
@@ -16836,21 +16836,22 @@ fn class_relation_parts(token: &str) -> Option<(Option<ClassMarker>, Option<Clas
 /// written out verbatim there. The point of this change is the 54 spellings the table could not
 /// name, not a new answer for the 18 it could.
 ///
-/// ⚠️ A RELATION MARKED AT BOTH ENDS IS DRAWN WITH ONE MARKER, AND THAT IS A KNOWN, RECORDED LOSS.
-/// `ArrowType` names an edge, not a pair of ends, so `o--*` (aggregation at the source, composition
-/// at the target) has no variant. Expressing the pair means a marker-PAIR representation reaching
-/// fm-core, fm-layout, a11y and all three renderers — every ArrowType->marker mapping is forked
-/// across those crates — which is its own bead, not a rider on this one. What this function
-/// guarantees meanwhile is the half that is a correctness defect rather than a fidelity gap: the
-/// endpoints are the classes the author named, and the source-end marker is the one they wrote.
+/// Two-ended UML relations use a primary source marker plus a target `co_arrow`. A dependency
+/// has no source-only ArrowType, so `<--o` is normalized to `o-->` with swapped endpoints: its
+/// aggregation stays on the authored right class and its arrow stays on the authored left class.
+/// Two dependencies use the native double-arrow variants without swapping endpoints (bd-onsya).
 fn class_relation_arrow(
     start: Option<ClassMarker>,
     end: Option<ClassMarker>,
     dotted: bool,
 ) -> ArrowType {
-    // The source end wins when both are marked; see the note above.
     match (start, end) {
-        (Some(marker), _) => match marker {
+        (Some(ClassMarker::Dependency), Some(ClassMarker::Dependency)) => {
+            dotted_or(dotted, ArrowType::DoubleDottedArrow, ArrowType::DoubleArrow)
+        }
+        // The lowering site reverses a dependency-start mixed relation, so its authored target
+        // becomes the source marker. The dependency is retained separately as the target co-arrow.
+        (Some(ClassMarker::Dependency), Some(marker)) | (Some(marker), _) => match marker {
             ClassMarker::Aggregation => ArrowType::Aggregation,
             ClassMarker::Composition => ArrowType::Composition,
             ClassMarker::Extension => ArrowType::Inheritance,
@@ -16879,9 +16880,9 @@ const fn dotted_or(dotted: bool, when_dotted: ArrowType, when_solid: ArrowType) 
 
 /// Does this relation need a `stroke-dasharray` of its own?
 ///
-/// ⚠️ ONLY WHEN THE ARROW TYPE DOES NOT ALREADY CARRY THE DASH. `DottedArrow` and `DottedLine` are
-/// dotted by name, so `..>` and `..` must NOT also get an inline style — adding one would change
-/// bytes on two spellings that are already correct. Everything else with a `..` body does need it,
+/// Only when the arrow type does not already carry the dash: `DottedArrow`, `DoubleDottedArrow`
+/// and `DottedLine` are dotted by name and need no additional inline style.
+/// Everything else with a `..` body does need it,
 /// which is how a dotted aggregation (`o..`) gets the dash that `<|..` already had.
 fn class_relation_is_dashed(token: &str) -> bool {
     let Some((start, end, dotted)) = class_relation_parts(token) else {
@@ -16890,31 +16891,30 @@ fn class_relation_is_dashed(token: &str) -> bool {
     dotted
         && !matches!(
             class_relation_arrow(start, end, dotted),
-            ArrowType::DottedArrow | ArrowType::DottedLine
+            ArrowType::DottedArrow | ArrowType::DoubleDottedArrow | ArrowType::DottedLine
         )
 }
 
 /// The SECOND marker for a relation marked at BOTH ends, as the `ArrowType` that draws it there.
 ///
-/// `None` unless both ends carry a marker, so every single-ended spelling is unaffected. When both
-/// do, `class_relation_arrow` keeps the SOURCE-end marker as the primary `ArrowType` and this
-/// returns the TARGET-end one as its `*Reverse` counterpart — `o--*` gives
+/// `None` unless both ends carry a marker and need a pair of ArrowTypes. The normalized edge's
+/// source marker is primary, and this returns its target marker — `o--*` gives
 /// `(Aggregation, CompositionReverse)`, which the renderers merge into one diamond-open at the start
 /// and one diamond at the end.
 ///
-/// ⚠️ THE DEPENDENCY PAIR IS THE ONE THAT CANNOT BE EXPRESSED THIS WAY. A start-side dependency
-/// makes `class_relation_arrow` return the FORWARD `Arrow`/`DottedArrow` and relies on the lowering
-/// site SWAPPING the endpoints to put the head at the source; there is no reverse variant to pair
-/// against it, and emitting one would draw both heads on the same end after the swap. So a
-/// dependency start keeps its swap and takes no co-arrow, and `class_relation_is_reversed` is
-/// already restricted to `(Dependency, None)` for the same reason.
+/// A dependency-start mixed relation swaps its endpoints, so its co-arrow marks the authored
+/// source class. Two dependencies need no co-arrow: the primary double arrow carries both ends.
 fn class_relation_co_arrow(token: &str) -> Option<ArrowType> {
     let (start, end, dotted) = class_relation_parts(token)?;
-    let (Some(_), Some(end)) = (start, end) else {
+    let (Some(start), Some(end)) = (start, end) else {
         return None;
     };
-    if matches!(start, Some(ClassMarker::Dependency)) {
-        return None;
+    if start == ClassMarker::Dependency {
+        return (end != ClassMarker::Dependency).then_some(dotted_or(
+            dotted,
+            ArrowType::DottedArrow,
+            ArrowType::Arrow,
+        ));
     }
     Some(match end {
         ClassMarker::Aggregation => ArrowType::AggregationReverse,
@@ -16929,13 +16929,12 @@ fn class_relation_co_arrow(token: &str) -> Option<ArrowType> {
 
 /// Does this relation put its head on the SOURCE end, so the endpoints must swap?
 ///
-/// True for the dependency spelled at the start with nothing at the end — `<--` and `<..`. Both
-/// map onto the forward `Arrow`/`DottedArrow`, so without the swap the head lands on the target and
-/// the diagram states the opposite relationship.
+/// A start-side dependency uses a forward arrow at the normalized target, including mixed pairs
+/// such as `<--*`. Two dependencies have a double-arrow variant and retain their authored order.
 fn class_relation_is_reversed(token: &str) -> bool {
     matches!(
         class_relation_parts(token),
-        Some((Some(ClassMarker::Dependency), None, _))
+        Some((Some(ClassMarker::Dependency), end, _)) if end != Some(ClassMarker::Dependency)
     )
 }
 

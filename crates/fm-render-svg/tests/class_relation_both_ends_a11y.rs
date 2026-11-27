@@ -19,9 +19,8 @@ use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_config};
 
 /// Both-ends spellings, one per distinct co-arrow shape, with the two words each must speak.
 ///
-/// `<--`/`<..` are deliberately absent: a start-side dependency maps onto the forward arrow and
-/// relies on the endpoints being swapped, so it has no far marker to name. That exception is
-/// `class_relation_co_arrow`'s, and it is stated here rather than left to be inferred from a gap.
+/// Mixed dependency-start relations reverse their stored endpoints, so their co-arrow names the
+/// dependency at the original source while the primary phrase names the original target marker.
 const BOTH_ENDS: &[(&str, &str, &str)] = &[
     ("o--o", "aggregates", "is aggregated by"),
     ("o--*", "aggregates", "composes"),
@@ -29,6 +28,12 @@ const BOTH_ENDS: &[(&str, &str, &str)] = &[
     ("<|--|>", "is inherited by", "inherits"),
     ("o--|>", "aggregates", "inherits"),
     ("*..*", "is composed of", "composes"),
+    ("<--*", "is composed of", "points to"),
+    ("<--o", "aggregates", "points to"),
+    ("<--|>", "is inherited by", "points to"),
+    ("<..*", "is composed of", "optionally points to"),
+    ("<..o", "aggregates", "optionally points to"),
+    ("<..|>", "is inherited by", "optionally points to"),
 ];
 
 fn render(source: &str) -> String {

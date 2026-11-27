@@ -1195,9 +1195,7 @@ fn parse_dot_edge_statement(
     let style = explicit_style.or(defaults.edge_style);
     let arrow = dot_arrow_type(operator == "->" || directed, style);
     // Edge visuals resolve the same way node visuals do: per attribute, statement over default.
-    let explicit_visuals = shared_attrs
-        .map(DotNodeColors::parse)
-        .unwrap_or_default();
+    let explicit_visuals = shared_attrs.map(DotNodeColors::parse).unwrap_or_default();
     let explicit_css = explicit_visuals.to_edge_css();
     let edge_css = explicit_visuals
         .resolved_over(&defaults.edge_visuals)
@@ -1216,7 +1214,8 @@ fn parse_dot_edge_statement(
                 builder.add_warning(format!(
                     "Line {line_number}: DOT endpoint set product {} × {} exceeds the remaining \
                      budget of {remaining_set_edges} implied edges; this hop was omitted",
-                    sources.len(), targets.len(),
+                    sources.len(),
+                    targets.len(),
                 ));
                 emit_edges = false;
             }
@@ -1748,6 +1747,7 @@ fn parse_dot_label_value(value: &str) -> Option<String> {
     (!decoded_label.is_empty()).then_some(decoded_label)
 }
 
+#[cfg(test)]
 fn parse_dot_label(attributes: &str) -> Option<String> {
     let value = extract_dot_attribute_raw(attributes, "label")?;
     parse_dot_label_value(value.as_ref())
@@ -2518,10 +2518,16 @@ mod tests {
             assert_eq!(
                 styles,
                 [
-                    (0, "stroke:red,stroke-width:2,font-size:9pt,font-family:Georgia"),
+                    (
+                        0,
+                        "stroke:red,stroke-width:2,font-size:9pt,font-family:Georgia"
+                    ),
                     (0, "stroke:blue"),
                     (0, "stroke-width:4"),
-                    (1, "stroke:green,stroke-width:8,font-size:20pt,font-family:Arial"),
+                    (
+                        1,
+                        "stroke:green,stroke-width:8,font-size:20pt,font-family:Arial"
+                    ),
                 ]
             );
         }
@@ -2614,7 +2620,10 @@ mod tests {
         assert_eq!(labels, ["hop", "shortcut", "hop"]);
         assert_eq!(parsed.ir.constraints.len(), 2);
         assert_eq!(parsed.ir.style_refs.len(), 1);
-        assert_eq!(parsed.ir.style_refs[0].target, fm_core::IrStyleTarget::Link(1));
+        assert_eq!(
+            parsed.ir.style_refs[0].target,
+            fm_core::IrStyleTarget::Link(1)
+        );
     }
 
     #[test]
@@ -4122,12 +4131,21 @@ fn dot_group_chain_connects_each_adjacent_set_with_shared_attributes() {
     assert_eq!(
         edges,
         [
-            ("read:one", "c"), ("read:one", "d"), ("b", "c"), ("b", "d"),
-            ("c", "target"), ("d", "target"), ("target", "outside"),
+            ("read:one", "c"),
+            ("read:one", "d"),
+            ("b", "c"),
+            ("b", "d"),
+            ("c", "target"),
+            ("d", "target"),
+            ("target", "outside"),
         ]
     );
     assert_eq!(ir.graph.subgraphs[0].members.len(), 5);
-    assert!(ir.edges[..6].iter().all(|edge| ir.labels[edge.label.unwrap().0].text == "fan out"));
+    assert!(
+        ir.edges[..6]
+            .iter()
+            .all(|edge| ir.labels[edge.label.unwrap().0].text == "fan out")
+    );
     assert!(ir.edges[6].label.is_none());
     assert_eq!(ir.style_refs.len(), 6);
     assert_eq!(ir.constraints.len(), 6);
@@ -4151,13 +4169,33 @@ fn dot_set_budget_is_cumulative_and_keeps_the_rest_of_the_graph() {
     // in the three remaining slots. Its nodes survive and the chain continues.
     assert_eq!(result.ir.nodes.len(), 14);
     assert_eq!(result.ir.edges.len(), 9);
-    let edges: Vec<_> = result.ir.edges.iter().map(|edge| {
-        let fm_core::IrEndpoint::Node(from) = edge.from else { panic!("expected node") };
-        let fm_core::IrEndpoint::Node(to) = edge.to else { panic!("expected node") };
-        (result.ir.nodes[from.0].id.as_str(), result.ir.nodes[to.0].id.as_str())
-    }).collect();
-    assert_eq!(&edges[4..], &[("g", "i"), ("h", "i"), ("x", "y"), ("x", "z"), ("u", "v")]);
-    assert!(result.warnings.iter().any(|warning| warning.contains("budget of 3 implied edges")));
+    let edges: Vec<_> = result
+        .ir
+        .edges
+        .iter()
+        .map(|edge| {
+            let fm_core::IrEndpoint::Node(from) = edge.from else {
+                panic!("expected node")
+            };
+            let fm_core::IrEndpoint::Node(to) = edge.to else {
+                panic!("expected node")
+            };
+            (
+                result.ir.nodes[from.0].id.as_str(),
+                result.ir.nodes[to.0].id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        &edges[4..],
+        &[("g", "i"), ("h", "i"), ("x", "y"), ("x", "z"), ("u", "v")]
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("budget of 3 implied edges"))
+    );
 }
 
 #[test]
@@ -4182,7 +4220,10 @@ fn strict_dot_explicit_override_updates_only_the_matching_group_edge() {
         }"#,
     );
     assert_eq!(result.ir.edges.len(), 4);
-    let labels: Vec<_> = result.ir.edges.iter()
+    let labels: Vec<_> = result
+        .ir
+        .edges
+        .iter()
         .map(|edge| result.ir.labels[edge.label.unwrap().0].text.as_str())
         .collect();
     assert_eq!(labels, ["updated", "initial", "initial", "initial"]);

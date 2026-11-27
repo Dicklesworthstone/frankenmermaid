@@ -157,10 +157,129 @@ fn referenced_marker<'a>(svg: &'a str, edge: &str, slot: &str) -> Option<&'a str
             .skip(1)
             .find_map(|fragment| {
                 let (marker, _) = fragment.split_once("</marker>")?;
-                marker.starts_with(&format!("id=\"{id}\"")).then_some(marker)
+                marker
+                    .starts_with(&format!("id=\"{id}\""))
+                    .then_some(marker)
             })
             .unwrap_or_else(|| panic!("dangling {slot}={reference} in {svg}")),
     )
+}
+
+fn marker_path_geometry(path: &str) -> (String, Vec<f32>) {
+    // These marker fixtures use absolute commands and whitespace-separated coordinates. Compare
+    // their geometry independently of whether an SVG backend writes a number as 3.5 or 3.50.
+    (
+        path.chars().filter(|c| c.is_ascii_alphabetic()).collect(),
+        path.split(|c: char| c.is_ascii_alphabetic() || c.is_ascii_whitespace() || c == ',')
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse().expect("numeric marker coordinate"))
+            .collect(),
+    )
+}
+
+#[test]
+fn dependency_start_class_relations_render_both_authored_markers() {
+    use fm_render_svg::SvgBackend;
+
+    for (operator, start, end) in [
+        ("<--*", "arrow-diamond", "arrow-end"),
+        ("<--o", "arrow-diamond-open", "arrow-end"),
+        ("<--|>", "start-arrow-triangle-open", "arrow-end"),
+        ("<--()", "start-arrow-lollipop", "arrow-end"),
+        ("<-->", "arrow-start", "arrow-end"),
+        ("<..*", "arrow-diamond", "arrow-end"),
+        ("<..o", "arrow-diamond-open", "arrow-end"),
+        ("<..|>", "start-arrow-triangle-open", "arrow-end"),
+        ("<..()", "start-arrow-lollipop", "arrow-end"),
+        ("<..>", "arrow-start", "arrow-end"),
+    ] {
+        let ir = fm_parser::parse(&format!(
+            "classDiagram\nAlpha \"one\" {operator} \"many\" Beta : uses\n"
+        ))
+        .ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            let edge = edge_path(&svg, 0);
+            for (slot, marker) in [("marker-start", start), ("marker-end", end)] {
+                let reference =
+                    attribute(edge, slot).expect("both authored markers are referenced");
+                if backend == SvgBackend::LegacyLayout {
+                    assert_eq!(reference, format!("url(#{marker})"), "{operator}: {edge}");
+                } else {
+                    // Scene IDs include resolved paint and endpoint identity. Its source arrow
+                    // uses the same base name as a target arrow, with reversed marker orientation.
+                    let base = if marker == "arrow-start" {
+                        "arrow-end"
+                    } else {
+                        marker
+                    };
+                    assert!(reference.starts_with("url(#fm-scene-"), "{reference}");
+                    assert!(
+                        reference.ends_with(&format!("-{base})")),
+                        "{operator}: {reference}"
+                    );
+                }
+                let definition = referenced_marker(&svg, edge, slot)
+                    .expect("each authored marker has a definition");
+                let (ref_x, orient, geometry, hollow) = match marker {
+                    "arrow-start" => (
+                        8.0,
+                        "auto-start-reverse",
+                        "M0 0 L8 3.5 L0 7 L2 3.5 Z",
+                        false,
+                    ),
+                    "arrow-end" => (8.0, "auto", "M0 0 L8 3.5 L0 7 L2 3.5 Z", false),
+                    "arrow-diamond" => (8.0, "auto-start-reverse", "M4 0 L8 4 L4 8 L0 4 Z", false),
+                    "arrow-diamond-open" => {
+                        (8.0, "auto-start-reverse", "M4 0 L8 4 L4 8 L0 4 Z", true)
+                    }
+                    "start-arrow-triangle-open" => {
+                        (10.0, "auto-start-reverse", "M0 0 L10 5 L0 10 Z", true)
+                    }
+                    "start-arrow-lollipop" => {
+                        (13.0, "auto", "M13 7 A6 6 0 0 1 1 7 A6 6 0 0 1 13 7 Z", true)
+                    }
+                    _ => unreachable!("all class endpoint shapes are covered"),
+                };
+                assert_eq!(
+                    attribute(definition, "orient"),
+                    Some(orient),
+                    "{operator}/{backend:?}: {definition}"
+                );
+                assert_eq!(
+                    attribute(definition, "refX")
+                        .unwrap()
+                        .parse::<f32>()
+                        .unwrap(),
+                    ref_x,
+                    "{operator}/{backend:?}: {definition}"
+                );
+                assert_eq!(
+                    marker_path_geometry(attribute(definition, "d").expect("marker path")),
+                    marker_path_geometry(geometry),
+                    "{operator}/{backend:?}: {definition}"
+                );
+                assert_eq!(
+                    attribute(definition, "fill").unwrap() == "none",
+                    hollow,
+                    "{operator}/{backend:?}: {definition}"
+                );
+            }
+            let dashed = attribute(edge, "stroke-dasharray")
+                .or_else(|| style_property(edge, "stroke-dasharray"));
+            assert_eq!(
+                dashed.is_some(),
+                operator.contains(".."),
+                "{operator}/{backend:?}: {edge}"
+            );
+        }
+    }
 }
 
 fn style_property<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -214,7 +333,12 @@ fn link_styles_paint_each_endpoint_independently_in_both_svg_backends() {
                 assert_eq!(marker_opacity(marker), 0.0, "{marker}");
             }
             for marker in svg.split("<marker ").skip(1) {
-                let id = marker.strip_prefix("id=\"").unwrap().split('"').next().unwrap();
+                let id = marker
+                    .strip_prefix("id=\"")
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap();
                 assert!(
                     svg.contains(&format!("url(#{id})")),
                     "unused theme marker survived its authored replacement: {id}"
@@ -305,7 +429,11 @@ fn styled_uml_and_er_relationships_keep_both_endpoint_shapes() {
                 let path = edge_path(&svg, 0);
                 for (slot, shape) in [("marker-start", start), ("marker-end", end)] {
                     let marker = referenced_marker(&svg, path, slot).unwrap();
-                    assert!(attribute(path, slot).unwrap().ends_with(&format!("{shape})")));
+                    assert!(
+                        attribute(path, slot)
+                            .unwrap()
+                            .ends_with(&format!("{shape})"))
+                    );
                     assert!(marker.contains("stroke=\"#5e2381\""), "{marker}");
                     let expected_opacity = if backend == SvgBackend::LegacyLayout {
                         0.6
@@ -317,12 +445,18 @@ fn styled_uml_and_er_relationships_keep_both_endpoint_shapes() {
                         "{marker}"
                     );
                     if user_space {
-                        assert!(marker.contains("markerUnits=\"userSpaceOnUse\""), "{marker}");
+                        assert!(
+                            marker.contains("markerUnits=\"userSpaceOnUse\""),
+                            "{marker}"
+                        );
                     }
                 }
                 if user_space {
                     let marker = referenced_marker(&svg, path, "marker-end").unwrap();
-                    assert!(marker.contains("<circle"), "zero cardinality lost its bubble");
+                    assert!(
+                        marker.contains("<circle"),
+                        "zero cardinality lost its bubble"
+                    );
                     assert!(
                         marker.contains("fill=\"#ffffff\""),
                         "the shaft must not cross the bubble"
@@ -352,7 +486,10 @@ fn styled_sankey_arrowheads_keep_fixed_size_and_source_palette_when_only_alpha_c
             let color = style_property(path, "stroke").expect("source category paint");
             let marker = referenced_marker(&svg, path, "marker-end").unwrap();
             assert!(marker.contains(&format!("fill=\"{color}\"")), "{marker}");
-            assert!(marker.contains("markerUnits=\"userSpaceOnUse\""), "{marker}");
+            assert!(
+                marker.contains("markerUnits=\"userSpaceOnUse\""),
+                "{marker}"
+            );
             for (name, expected) in [("markerWidth", 32.0_f32), ("markerHeight", 28.0)] {
                 let size: f32 = attribute(marker, name).unwrap().parse().unwrap();
                 assert!((size - expected).abs() < f32::EPSILON, "{marker}");
