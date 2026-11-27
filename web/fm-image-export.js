@@ -236,19 +236,33 @@ function tiledSvg(root, box) {
   return camera;
 }
 
-async function deflateRaster(bytes, host, signal, timeoutMs) {
+/** Compress one PDF image channel without buffering more than the remaining document budget. */
+export async function deflateRaster(bytes, host, signal, timeoutMs, remainingBytes = MAX_PDF_BYTES) {
   if (signal?.aborted) throw aborted();
+  if (!Number.isSafeInteger(remainingBytes) || remainingBytes < 0 || remainingBytes > MAX_PDF_BYTES) {
+    throw new RangeError("Invalid PDF compression byte budget.");
+  }
   const reader = new host.Blob([bytes]).stream().pipeThrough(new host.CompressionStream("deflate")).getReader();
   const collect = async () => {
     const parts = [];
+    let size = 0;
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (signal?.aborted) throw aborted();
         if (done) return new host.Blob(parts);
+        size += value.byteLength;
+        if (size > remainingBytes) {
+          throw new RangeError("PDF exceeds the 64 MiB output limit. Lower the scale or download SVG instead.");
+        }
         parts.push(value);
       }
-    } finally { reader.releaseLock(); }
+    } finally {
+      // Stop the upstream compressor immediately on oversize or read failure.
+      // A completed stream needs no cancellation.
+      if (size > remainingBytes) await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   };
   try {
     return await boundedStep((resolve, reject) => { collect().then(resolve, reject); },
@@ -259,7 +273,7 @@ async function deflateRaster(bytes, host, signal, timeoutMs) {
   }
 }
 
-async function pdfRaster(canvas, context, host, signal, timeoutMs) {
+async function pdfRaster(canvas, context, host, signal, timeoutMs, remainingBytes) {
   const count = canvas.width * canvas.height;
   const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
   const rgb = new Uint8Array(count * 3), alpha = new Uint8Array(count);
@@ -277,9 +291,12 @@ async function pdfRaster(canvas, context, host, signal, timeoutMs) {
     // Give source edits and Cancel a chance to invalidate this export during pixel packing.
     if (end < count) await new Promise(resolve => host.setTimeout(resolve, 0));
   }
+  const compressedRgb = await deflateRaster(rgb, host, signal, timeoutMs, remainingBytes);
+  const compressedAlpha = transparent
+    ? await deflateRaster(alpha, host, signal, timeoutMs, remainingBytes - compressedRgb.size)
+    : null;
   return { width: canvas.width, height: canvas.height,
-    rgb: await deflateRaster(rgb, host, signal, timeoutMs),
-    alpha: transparent ? await deflateRaster(alpha, host, signal, timeoutMs) : null };
+    rgb: compressedRgb, alpha: compressedAlpha };
 }
 
 function pdfText(text) {
@@ -344,7 +361,7 @@ export async function pdfArtifact(svg, { filename = "diagram", scale = 2, backgr
   for (const page of layout.pages) {
     const image = await withRasterCanvas(camera, [box[0] + page.x, box[1] + page.y, page.width, page.height],
       page.pixels, background, timeoutMs, host, signal, "PDF",
-      (canvas, context) => pdfRaster(canvas, context, host, signal, timeoutMs));
+      (canvas, context) => pdfRaster(canvas, context, host, signal, timeoutMs, MAX_PDF_BYTES - compressedBytes));
     compressedBytes += image.rgb.size + (image.alpha?.size || 0);
     if (compressedBytes > MAX_PDF_BYTES) throw new RangeError("PDF exceeds the 64 MiB output limit. Lower the scale or download SVG instead.");
     images.push(image);
