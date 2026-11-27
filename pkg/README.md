@@ -232,7 +232,7 @@ The authoritative parity matrix against the FrankenTUI reference implementation 
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh" | bash
 ```
 
-The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.6.1` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
+The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.7.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
 
 Use `--from-source` to build with `cargo install --locked`; this path installs a minimal Rust toolchain via `rustup` if needed. Explicit `FM_INSTALL_PATH` or `FM_INSTALL_GIT_*` selectors also choose source installation. Source builds require a C/C++ toolchain and CMake. Existing source-selector precedence is preserved.
 
@@ -287,7 +287,7 @@ fnx-integration          = ["fm-layout/fnx-integration"]               # Phase-1
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]    # Phase-2 directed FNX
 ```
 
-Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerly git-pinned `franken-kernel` is now consumed from crates.io (currently pinned to `0.3.1`); only the FNX feature still requires a git-pinned dependency on `franken_networkx`.
+Default builds remain FNX-free. `franken-kernel`, formerly git-pinned, has been consumed from crates.io since 2026-04-21 and is currently pinned to `0.7.0`. Only the FNX feature still uses a git-pinned dependency on `franken_networkx`. Cargo refuses to package a git dependency without a version requirement, even an optional one, so `fm-layout` and the crates built on it cannot be published to crates.io until that changes (see `docs/CRATES_IO_PUBLISHING.md`).
 
 `fm-layout` and `fm-render-svg` use the pure-Rust microlp solver by default. Authored
 pins, rank/order constraints, minimum edge lengths, and non-overlap constraints remain
@@ -296,7 +296,7 @@ available without a C++ toolchain. Enable `highs` on either library or on
 
 ### Crates.io status
 
-The workspace is at version `0.6.1`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.7.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -602,6 +602,20 @@ diagram.setTheme('dark');
 diagram.on('rendered', () => console.log('done'));
 diagram.destroy();
 ```
+
+### Canvas and WebGPU interactions
+
+`hitRegions(source, config)` returns each interactive node's layout bounds, `href`, `linkTarget`,
+`callback`, `tooltip`, and `menuLinks` (an array of `{ label, url }` entries). Sequence actor
+`link` and `links` directives work without a separate `click` declaration. URLs use the same
+sanitization policy as SVG, including when a Rust caller constructs the IR directly.
+
+For an existing Canvas2D `Diagram`, call `diagram.hitTestInteraction(x, y)` with backing-store
+pixel coordinates. It returns the topmost node's metadata or `null`, using the viewport of the
+last completed draw without parsing or laying out the source again. Resizing invalidates the
+query until redraw, and an ordinary node covering a link blocks clicks through it. The host
+displays menus and tooltips and handles activation; querying metadata never follows a link or
+invokes a callback.
 
 ### SVG labels and detail levels
 
@@ -912,7 +926,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.6.1)
+├── Cargo.toml                 # Workspace root (version 0.7.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
@@ -1286,8 +1300,8 @@ Radial   → Tree → Sugiyama
 The integration is gated by two feature flags:
 
 ```bash
-cargo build -p fm-cli --features fnx-integration              # Phase 1 (undirected)
-cargo build -p fm-cli --features fnx-experimental-directed    # Phase 1 + Phase 2 (directed)
+cargo build -p frankenmermaid-cli --features fnx-integration              # Phase 1 (undirected)
+cargo build -p frankenmermaid-cli --features fnx-experimental-directed    # Phase 1 + Phase 2 (directed)
 ```
 
 Default builds remain FNX-free.
@@ -2981,9 +2995,9 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |
 | **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | Opt-in device rendering includes multi-face text; the synchronous `Diagram` API retains its Canvas2D fallback |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
-| **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
+| **LP/MIP solver backend for constraint layout** | Done | Pins, rank/order, minimum lengths and non-overlap are solved as one LP/MIP: pure-Rust microlp by default, HiGHS behind the `highs` feature. Only a proven optimum is applied; any other outcome keeps the heuristic layout |
 | **`@frankenmermaid/core` npm publish** | Awaiting `/dsr` release | Build and verify the package through `/dsr`, then confirm the public registry from a clean consumer before documenting npm installation |
-| **Crates.io publish** | Blocker-clear | Per `docs/CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
+| **Crates.io publish** | Blocked | `franken-kernel` is migrated, but the optional fnx-* git dependencies have no version requirement, and cargo refuses to package `fm-layout` (and every crate built on it) without one. `fm-core` and `fm-parser` package cleanly. See `docs/CRATES_IO_PUBLISHING.md` |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |
 

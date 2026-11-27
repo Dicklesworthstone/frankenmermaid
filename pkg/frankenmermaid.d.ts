@@ -123,7 +123,9 @@ export class Diagram {
      */
     hitTestEdge(x: number, y: number, max_distance: number): number | undefined;
     /**
-     * Inspect the topmost node's interaction metadata without following a URL or calling JS.
+     * Return the topmost node's link, callback, tooltip and actor-menu metadata, or null.
+     * Coordinates are backing-store pixels in the last completed draw's viewport. A resize
+     * invalidates the result until redraw. This only queries metadata; the host owns activation.
      */
     hitTestInteraction(x: number, y: number): any;
     /**
