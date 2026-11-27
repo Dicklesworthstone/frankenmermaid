@@ -338,7 +338,15 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # layout budget retention). wasm-opt still runs -Oz --strip-producers --converge with LTO, single
 # codegen unit, opt-level=z, and immediate-abort std. Smallest whole-KiB ceiling fitting 1204707
 # (541 bytes headroom).
-MAX_GZIP_BYTES=$((1177 * 1024))
+# Raised 1177K -> 1232K for v0.7.0 (measured: 1259092 gzip / 3160295 raw, +54385 gzip / +130092 raw
+# over v0.6.1, on tree e86ca75a plus the v0.7.0 version edits, source digest 1c952a2c before this
+# edit; built with this script, nightly-2026-08-31, wasm-pack 0.14.0, wasm-bindgen 0.2.130 and
+# Binaryen 125). Pipeline-only shrink ruled out (w2: every fitting build config costs render speed);
+# growth since v0.6.1 is browser YAML front matter (d114d09c) plus features and the 2.2x render
+# speed-up. wasm-opt still runs -Oz --strip-producers --converge with LTO, single codegen unit,
+# opt-level=z, and immediate-abort std. Smallest 4 KiB-multiple ceiling fitting 1259092 (2476 bytes
+# headroom).
+MAX_GZIP_BYTES=$((1232 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
