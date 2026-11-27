@@ -409,6 +409,7 @@ fn sequence_layout_at_origin(layout: &DiagramLayout) -> Option<DiagramLayout> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EdgeStroke {
+    Hidden,
     Solid,
     Dotted,
     Thick,
@@ -437,7 +438,14 @@ impl EdgeDashPhase {
 
 impl EdgeStroke {
     const fn with_dashes(self, dashed: bool) -> Self {
-        match (matches!(self, Self::Thick | Self::ThickDotted), dashed) {
+        if matches!(self, Self::Hidden) {
+            return Self::Hidden;
+        }
+        Self::from_weight_and_dashes(matches!(self, Self::Thick | Self::ThickDotted), dashed)
+    }
+
+    const fn from_weight_and_dashes(thick: bool, dashed: bool) -> Self {
+        match (thick, dashed) {
             (false, false) => Self::Solid,
             (false, true) => Self::Dotted,
             (true, false) => Self::Thick,
@@ -448,6 +456,7 @@ impl EdgeStroke {
 
 const fn arrow_stroke(arrow: ArrowType) -> EdgeStroke {
     match arrow {
+        ArrowType::Invisible => EdgeStroke::Hidden,
         ArrowType::ThickLine
         | ArrowType::ThickArrow
         | ArrowType::DoubleThickArrow
@@ -479,6 +488,9 @@ fn edge_stroke(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> EdgeStroke {
     let Some(edge) = ir.edges.get(path.edge_index) else {
         return EdgeStroke::Solid;
     };
+    if edge.arrow == ArrowType::Invisible {
+        return EdgeStroke::Hidden;
+    }
     let base = if let Some(notation) = edge.er_notation() {
         if notation.contains("..") {
             EdgeStroke::Dotted
@@ -486,7 +498,7 @@ fn edge_stroke(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> EdgeStroke {
             EdgeStroke::Solid
         }
     } else if fm_layout::edge_uses_feedback_marker(edge, path.reversed) {
-        EdgeStroke::Dotted
+        arrow_stroke(edge.arrow).with_dashes(true)
     } else {
         arrow_stroke(edge.arrow)
     };
@@ -498,10 +510,36 @@ fn edge_stroke(ir: &MermaidDiagramIr, path: &LayoutEdgePath) -> EdgeStroke {
         return base;
     }
     let style = fm_layout::edge_labels::edge_label_style(ir, path.edge_index);
-    style
+    let width = style.get("stroke-width").and_then(|value| {
+        let value = value.trim();
+        value
+            .strip_suffix("px")
+            .unwrap_or(value)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|width| width.is_finite() && *width >= 0.0)
+    });
+    if width == Some(0.0)
+        || fm_layout::scene_style_opacity(&style, "stroke-opacity") == 0.0
+        || style.get("stroke").is_some_and(|value| {
+            let color = value.trim();
+            color.eq_ignore_ascii_case("none") || color.eq_ignore_ascii_case("transparent")
+        })
+    {
+        return EdgeStroke::Hidden;
+    }
+    // Standard graphical shafts use 1.8 layout units; thick shafts use 2.5.
+    // Quantize an explicit width to the two weights available on the terminal.
+    let thick = width.map_or(
+        matches!(base, EdgeStroke::Thick | EdgeStroke::ThickDotted),
+        |w| w >= 2.5,
+    );
+    let dashed = style
         .get("stroke-dasharray")
         .and_then(|raw| terminal_dash_pattern(raw))
-        .map_or(base, |dashed| base.with_dashes(dashed))
+        .unwrap_or(matches!(base, EdgeStroke::Dotted | EdgeStroke::ThickDotted));
+    EdgeStroke::from_weight_and_dashes(thick, dashed)
 }
 
 /// Terminal fidelity chooses the visible cadence; CSS supplies whether the line has gaps.
@@ -1228,6 +1266,9 @@ impl TermRenderer {
         let mut central_cells = std::collections::BTreeSet::new();
         if let Some(metrics) = &central_metrics {
             for edge in &layout.edges {
+                if edge_stroke(ir, edge) == EdgeStroke::Hidden {
+                    continue;
+                }
                 for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
                     if let Some(cell) = self.marker_point_to_cells(&marker.center, scale_x, scale_y)
                     {
@@ -1712,6 +1753,9 @@ impl TermRenderer {
         let mut central_mask = None;
         if let Some(metrics) = &central_metrics {
             for edge in &layout.edges {
+                if edge_stroke(ir, edge) == EdgeStroke::Hidden {
+                    continue;
+                }
                 for marker in fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge, metrics) {
                     let Some((x, y)) = Self::padded_raster_point(
                         (
@@ -1980,6 +2024,9 @@ impl TermRenderer {
         }
 
         let stroke = edge_stroke(ir, edge_path);
+        if stroke == EdgeStroke::Hidden {
+            return;
+        }
 
         // Draw line segments.
         for window in painted_route(ir, edge_path).points.windows(2) {
@@ -2009,6 +2056,9 @@ impl TermRenderer {
         metrics: &fm_core::FontMetrics,
         (scale_x, scale_y): (f32, f32),
     ) {
+        if edge_stroke(ir, edge_path) == EdgeStroke::Hidden {
+            return;
+        }
         let markers: std::collections::BTreeSet<_> =
             fm_layout::LayoutSequenceCentralMarker::for_edge(ir, edge_path, metrics)
                 .filter_map(|marker| self.marker_point_to_cells(&marker.center, scale_x, scale_y))
@@ -2064,6 +2114,9 @@ impl TermRenderer {
     }
 
     fn draw_raster_line_cell(&self, buffer: &mut CellBuffer, line: RasterLine, stroke: EdgeStroke) {
+        if stroke == EdgeStroke::Hidden {
+            return;
+        }
         let glyphs = &self.edge_glyphs;
         let (dx, dy) = line.delta();
         let line_char = if matches!(stroke, EdgeStroke::Dotted | EdgeStroke::ThickDotted) {
@@ -2129,7 +2182,7 @@ impl TermRenderer {
             return [None; 2];
         };
         if path.bundled
-            || edge.arrow == ArrowType::Invisible
+            || edge_stroke(ir, path) == EdgeStroke::Hidden
             || path
                 .points
                 .iter()
@@ -2882,6 +2935,9 @@ impl TermRenderer {
             return;
         }
         let stroke = edge_stroke(ir, edge_path);
+        if stroke == EdgeStroke::Hidden {
+            return;
+        }
         let mut phase = EdgeDashPhase::default();
         for pair in rendered.points.windows(2) {
             Self::draw_canvas_shaft(
@@ -2944,6 +3000,7 @@ impl TermRenderer {
             phase.advance(line.steps(), Self::canvas_dash_length(canvas, line) * 2)
         };
         match stroke {
+            EdgeStroke::Hidden => {}
             EdgeStroke::Solid => canvas.draw_line(x0, y0, x1, y1),
             EdgeStroke::Dotted => {
                 Self::draw_dashed_segment_at(canvas, x0, y0, x1, y1, phase_offset)
@@ -5336,6 +5393,9 @@ impl TermRenderer {
                 continue;
             }
             let stroke = edge_stroke(ir, path);
+            if stroke == EdgeStroke::Hidden {
+                continue;
+            }
             let mut segments = Vec::new();
             for pair in path.points.windows(2) {
                 if foreign {
@@ -7582,7 +7642,7 @@ impl TermRenderer {
         let mut canvas = Canvas::new(width, height, mode);
         let widest = fm_layout::sankey_widest_flow(ir);
         for edge in &layout.edges {
-            if edge.bundled || is_invisible_edge(ir, edge) {
+            if edge.bundled || edge_stroke(ir, edge) == EdgeStroke::Hidden {
                 continue;
             }
             // Invalid or absent weights retain a plain connector, just as on the graphical
@@ -10013,19 +10073,12 @@ mod tests {
         for routing in [None, Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)] {
             ir.meta.edge_routing = routing;
             for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-                let path = terminal_edge_test_path(&[
-                    (2.0, 4.0),
-                    (8.0, 4.0),
-                    (invalid, 4.0),
-                    (8.0, 12.0),
-                ]);
+                let path =
+                    terminal_edge_test_path(&[(2.0, 4.0), (8.0, 4.0), (invalid, 4.0), (8.0, 12.0)]);
                 let mut cells = CellBuffer::new(24, 24);
                 renderer.render_edge_cell(&mut cells, &ir, &path, 1.0, 1.0);
                 assert!(cells.cells.iter().all(|&cell| cell == ' '));
-                assert_eq!(
-                    renderer.edge_marker_cells(&ir, &path, 1.0, 1.0),
-                    [None; 2]
-                );
+                assert_eq!(renderer.edge_marker_cells(&ir, &path, 1.0, 1.0), [None; 2]);
                 for mode in [
                     MermaidRenderMode::Braille,
                     MermaidRenderMode::Block,
@@ -10288,6 +10341,95 @@ mod tests {
         bundled.bundled = true;
         renderer.render_edge_cell(&mut buffer, &ir, &bundled, 1.0, 1.0);
         assert!(buffer.cells.iter().all(|ch| *ch == ' '));
+    }
+
+    #[test]
+    fn authored_width_and_dash_overrides_match_semantic_weights_in_public_output() {
+        let render_source = |source: &str| fm_parser::parse(&format!("flowchart LR\n{source}")).ir;
+        for (source, equivalent) in [
+            ("A --> B\nlinkStyle default stroke-width:4px", "A ==> B"),
+            ("A ==> B\nlinkStyle 0 stroke-width:0.5", "A --> B"),
+            (
+                "A -.-> B\nlinkStyle 0 stroke-width:3",
+                "A ==> B\nlinkStyle 0 stroke-dasharray:4",
+            ),
+            ("A ==> B\nlinkStyle 0 stroke-width:-1", "A ==> B"),
+        ] {
+            let styled = render_source(source);
+            let expected = render_source(equivalent);
+            let layout = layout_diagram(&styled);
+            for config in [
+                TermRenderConfig::compact(),
+                TermRenderConfig {
+                    render_mode: MermaidRenderMode::CellOnly,
+                    ..TermRenderConfig::rich()
+                },
+                TermRenderConfig {
+                    render_mode: MermaidRenderMode::Block,
+                    ..TermRenderConfig::rich()
+                },
+                TermRenderConfig {
+                    render_mode: MermaidRenderMode::HalfBlock,
+                    ..TermRenderConfig::rich()
+                },
+                TermRenderConfig::rich(),
+            ] {
+                let render = |ir| {
+                    render_diagram_with_layout_and_config(ir, &layout, &config, 120, 40).output
+                };
+                assert_eq!(render(&styled), render(&expected), "{source}/{config:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_stroke_removes_shaft_arrow_and_central_dots_in_every_mode() {
+        let (mut ir, layout) = sequence_central_marker_fixture(&[(10.0, 8.0), (50.0, 8.0)]);
+        ir.edges[0].extras_mut().sequence_central_connection =
+            Some(fm_core::SequenceCentralConnection::Both);
+        for mode in [
+            MermaidRenderMode::CellOnly,
+            MermaidRenderMode::Block,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Braille,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                show_labels: false,
+                padding: 0,
+                ..TermRenderConfig::rich()
+            };
+            let render = |ir: &MermaidDiagramIr| {
+                render_diagram_with_layout_and_config(ir, &layout, &config, 80, 24).output
+            };
+            ir.edges[0].inline_style = None;
+            let has_ink = |output: &str| {
+                output
+                    .chars()
+                    .any(|ch| ch != '\n' && !blank_terminal_cell(ch))
+            };
+            assert!(has_ink(&render(&ir)), "{mode:?}");
+            for style in [
+                "stroke:none",
+                "stroke:transparent",
+                "stroke-width:0px",
+                "stroke-opacity:0%",
+            ] {
+                ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+                assert!(!has_ink(&render(&ir)), "{style}/{mode:?}");
+            }
+        }
+
+        let ir =
+            fm_parser::parse("flowchart LR\nA -->|message| B\nlinkStyle default stroke:none").ir;
+        let config = TermRenderConfig::rich();
+        let output =
+            render_diagram_with_layout_and_config(&ir, &layout_diagram(&ir), &config, 140, 45)
+                .output;
+        assert!(
+            output.contains("message") && !output.contains('▶'),
+            "{output}"
+        );
     }
 
     #[test]
