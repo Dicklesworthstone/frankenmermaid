@@ -461,9 +461,26 @@ test('existing-source mode refuses duplicate keys, escaped property names and lo
     "%%{deck:{'slid\\u0065s':[{id:'s',nodes:['a']}]}}%%",
   ]) {
     const source = 'flowchart LR\n a\n' + block;
-    assert.throws(() => deckSourceDocument(source, wasm.parseLens(source)), /property names/);
+    const doc = deckSourceDocument(source, wasm.parseLens(source));
+    assert.equal(doc.targets.length, 0);
+    assert.equal(doc.unavailable[0].line, 3);
+    assert.match(doc.unavailable[0].reason, /property names/);
   }
   await assert.rejects(nativeSourceEdit("flowchart LR\n a\n%%{deck:{slides:[{id:'s',nodes:['a'],fitMargin:-1}]}}%%"), /source repair/);
+});
+
+test('native editing preserves uneditable sibling directives and their resolved slides', async () => {
+  const sibling = "%%{deck:{'slid\\u0065s':[{id:'original',nodes:['b']}]}}%%";
+  const source = `flowchart LR\r\n a-->b\r\n${sibling}\r\n${authoredBlock}`;
+  const h = await nativeSourceEdit(source);
+  assert.deepEqual(h.document.targets.map(target => target.line), [4]);
+  assert.deepEqual(h.document.unavailable.map(item => item.line), [3]);
+  const spec = structuredClone(h.original);
+  spec.slides[0].title = 'Edited around sibling';
+  const prepared = await h.s.prepare(JSON.stringify(spec), [0, 1]);
+  assert.deepEqual(prepared.deck.manifest.slides.map(slide => slide.id), ['original', 'intro', 'detail']);
+  assert.equal(h.s.commit(prepared), source.replace("title:'Introduction'", 'title:"Edited around sibling"'));
+  assert.equal(h.s.undo(), source);
 });
 
 test('existing-source mode rejects aliasing another directive and invalid source identities', async () => {

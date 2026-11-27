@@ -390,6 +390,21 @@ function deckInlineCommentEnd(text, start, end) {
   return found ? at : start;
 }
 
+function readDeckTarget(raw, prefixLength) {
+  const bodyStart = deckTrivia(raw, prefixLength), bodyEnd = deckValueEnd(raw, bodyStart);
+  const terminator = raw.trimEnd().length - 3;
+  if (raw.slice(terminator).trim() !== "}%%" || deckTrivia(raw.slice(0, terminator), bodyEnd) !== terminator) {
+    throw new Error("Unsupported deck directive boundary. Edit it in the source.");
+  }
+  const fields = deckMembers(raw, bodyStart, bodyEnd);
+  const slides = fields.find(field => field.key === "slides");
+  if (!slides) return null;
+  const entries = deckMembers(raw, slides.from, slides.to, true);
+  if (!entries.length) return null;
+  const objects = entries.map(entry => deckMembers(raw, entry.from, entry.to));
+  return { raw, bodyStart, bodyEnd, fields, slides, entries, objects };
+}
+
 /** Trust only engine-reported directive ranges that exactly match this UTF-8 source. */
 export function deckSourceDocument(source, snapshot) {
   authorText(source, MAX_DECK_SOURCE, "Source");
@@ -397,14 +412,20 @@ export function deckSourceDocument(source, snapshot) {
   if (!Array.isArray(directives)) throw new Error("The engine did not return deck source ranges. Update the WASM package.");
   const requested = new Set(directives.flatMap(directive => [directive.textRange?.startByte, directive.textRange?.endByte]));
   const offsets = new Map([[0, 0]]);
-  let bytes = 0, units = 0;
+  const lines = new Map([[0, 1]]);
+  let bytes = 0, units = 0, lineNumber = 1, previousWasCR = false;
   for (const character of source) {
     const code = character.codePointAt(0);
     bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
     units += character.length;
-    if (requested.has(bytes)) offsets.set(bytes, units);
+    if (character === "\r" || (character === "\n" && !previousWasCR)) lineNumber++;
+    previousWasCR = character === "\r";
+    if (requested.has(bytes)) {
+      offsets.set(bytes, units);
+      lines.set(bytes, lineNumber);
+    }
   }
-  const targets = [];
+  const targets = [], unavailable = [];
   let previous = 0;
   for (const directive of directives) {
     const from = offsets.get(directive.textRange?.startByte), to = offsets.get(directive.textRange?.endByte);
@@ -413,23 +434,19 @@ export function deckSourceDocument(source, snapshot) {
     previous = to;
     const prefix = /^\s*%%\{\s*deck\s*:\s*/iu.exec(directive.text);
     if (!prefix) continue;
-    const raw = directive.text, bodyStart = deckTrivia(raw, prefix[0].length), bodyEnd = deckValueEnd(raw, bodyStart);
-    const terminator = raw.trimEnd().length - 3;
-    if (raw.slice(terminator).trim() !== "}%%" || deckTrivia(raw.slice(0, terminator), bodyEnd) !== terminator) {
-      throw new Error("Unsupported deck directive boundary. Edit it in the source.");
+    const line = lines.get(directive.textRange.startByte);
+    try {
+      const target = readDeckTarget(directive.text, prefix[0].length);
+      if (target) targets.push({ ...target, from, to, line });
+    } catch (error) {
+      // Range integrity was verified above. An unsupported JSON5 shape in this
+      // verified block must not prevent selection of an independent sibling.
+      unavailable.push({ line, reason: error.message });
     }
-    const fields = deckMembers(raw, bodyStart, bodyEnd);
-    const slides = fields.find(field => field.key === "slides");
-    if (!slides) continue; // Options-only directives remain untouched.
-    const entries = deckMembers(raw, slides.from, slides.to, true);
-    if (!entries.length) continue;
-    const objects = entries.map(entry => deckMembers(raw, entry.from, entry.to));
-    targets.push({ from, to, raw, bodyStart, bodyEnd, fields, slides, entries, objects,
-      line: (source.slice(0, from).match(/\r\n|\r|\n/gu) || []).length + 1 });
   }
   const slideIds = (snapshot?.parsed?.ir?.deck?.slides || []).map(slide => slide.id)
     .filter(id => typeof id === "string");
-  return freezeDeck({ source, targets, slideIds });
+  return freezeDeck({ source, targets, unavailable, slideIds });
 }
 
 /** Decode a selected directive using its isolated native parse, never eval or a JS JSON5 parser.
@@ -977,6 +994,9 @@ export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = cre
       }
       status.textContent = found.targets.length ? "Choose the directive to edit. Other directives, settings and comments are retained."
         : "No editable slide directives found. Compose additional slides or edit the source directly.";
+      if (found.unavailable.length) {
+        status.textContent += " " + found.unavailable.map(item => `Line ${item.line}: ${item.reason}`).join(" ");
+      }
     });
   }
   async function editSelectedDirective() {
