@@ -245,12 +245,12 @@ export async function deflateRaster(bytes, host, signal, timeoutMs, remainingByt
   const reader = new host.Blob([bytes]).stream().pipeThrough(new host.CompressionStream("deflate")).getReader();
   const collect = async () => {
     const parts = [];
-    let size = 0;
+    let size = 0, complete = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (signal?.aborted) throw aborted();
-        if (done) return new host.Blob(parts);
+        if (done) { complete = true; return new host.Blob(parts); }
         size += value.byteLength;
         if (size > remainingBytes) {
           throw new RangeError("PDF exceeds the 64 MiB output limit. Lower the scale or download SVG instead.");
@@ -258,9 +258,8 @@ export async function deflateRaster(bytes, host, signal, timeoutMs, remainingByt
         parts.push(value);
       }
     } finally {
-      // Stop the upstream compressor immediately on oversize or read failure.
-      // A completed stream needs no cancellation.
-      if (size > remainingBytes) await reader.cancel().catch(() => {});
+      // A rejected read or exceeded budget must stop the upstream compressor.
+      if (!complete) await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   };
