@@ -239,3 +239,28 @@ test('poster page and total-pixel limits reject excessive work during planning',
   assert.throws(() => pdfPageLayout(752 * 8, 992 * 8, { ...options, scale: 2 }), /128-megapixel/);
   assert.throws(() => pdfPageLayout(100, 100, { mode: 'typo' }), /mode/);
 });
+
+test('PDF channel compression enforces the remaining document budget while streaming', async () => {
+  const { deflateRaster } = await modulePromise;
+  const bytes = new Uint8Array(8192);
+  // Real DEFLATE output must be accepted within a sufficient byte budget.
+  const accepted = await deflateRaster(bytes, globalThis, null, 5000, 1024);
+  assert.ok(accepted.size > 0 && accepted.size <= 1024);
+  const roundTrip = await new Response(accepted.stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+  assert.deepEqual(new Uint8Array(roundTrip), bytes);
+
+  // The compressor must reject as soon as its output exceeds the space left
+  // by preceding PDF pages/channels, rather than buffering the whole image.
+  await assert.rejects(deflateRaster(bytes, globalThis, null, 5000, 1), /64 MiB output limit/);
+  await assert.rejects(deflateRaster(bytes, globalThis, null, 5000, -1), /byte budget/);
+  await assert.rejects(deflateRaster(bytes, globalThis, null, 5000, 64 * 1024 * 1024 + 1), /byte budget/);
+});
+
+test('PDF compression respects an already-aborted signal before opening a stream', async () => {
+  const { deflateRaster } = await modulePromise;
+  const controller = new AbortController();
+  controller.abort();
+  const host = new Proxy({}, { get() { throw new Error('resource accessed after cancellation'); } });
+  await assert.rejects(deflateRaster(new Uint8Array(1), host, controller.signal, 1000, 10),
+    { name: 'AbortError' });
+});
