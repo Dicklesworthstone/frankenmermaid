@@ -1292,11 +1292,8 @@ impl TermRenderer {
                 .chain(edge_foreground.into_iter().map(|(x, y, _)| (x, y)))
                 .map(|(x, y)| (x, y, x.saturating_add(1), y.saturating_add(1))),
         );
-        if self.config.show_labels
-            && matches!(
-                ir.diagram_type,
-                fm_core::DiagramType::Class | fm_core::DiagramType::Er
-            )
+        if ir.diagram_type == fm_core::DiagramType::Er
+            || (self.config.show_labels && ir.diagram_type == fm_core::DiagramType::Class)
         {
             // A blank cell inside a class or entity belongs to its body. Keep endpoint
             // multiplicities in the corridor between boxes, even for a bundled shaft.
@@ -1306,6 +1303,16 @@ impl TermRenderer {
             }
         }
         for path in &layout.edges {
+            if ir.diagram_type == fm_core::DiagramType::Er && !self.config.show_labels {
+                self.overlay_er_cell_symbols(
+                    &mut grid,
+                    &mut protected,
+                    ir,
+                    path,
+                    (scale_x, scale_y),
+                );
+                continue;
+            }
             self.overlay_edge_cardinalities(
                 &mut grid,
                 &mut text_labels,
@@ -4963,6 +4970,129 @@ impl TermRenderer {
                     line.push_str(&" ".repeat(label.width - line.width()));
                 }
                 labels.push(label);
+            }
+        }
+    }
+
+    /// A cell-only ER connector has no subpixel crow's foot. With captions disabled, put its
+    /// two cardinality marks on the shaft: the bar or fork nearest the entity, and the minimum
+    /// (bar or open circle) behind it. Keep each pair together, including on compressed routes.
+    fn overlay_er_cell_symbols(
+        &self,
+        grid: &mut [Vec<char>],
+        protected: &mut Vec<(usize, usize, usize, usize)>,
+        ir: &MermaidDiagramIr,
+        path: &LayoutEdgePath,
+        (scale_x, scale_y): (f32, f32),
+    ) {
+        use fm_core::ErCardinality::{OneOrMore, ZeroOrMore, ZeroOrOne};
+
+        let Some(notation) = ir
+            .edges
+            .get(path.edge_index)
+            .and_then(fm_core::IrEdge::er_notation)
+        else {
+            return;
+        };
+        if path.bundled || edge_stroke(ir, path) == EdgeStroke::Hidden {
+            return;
+        }
+        let route = painted_route(ir, path);
+        let Some(mut points) = route
+            .points
+            .iter()
+            .map(|p| self.line_point_to_cells(p, scale_x, scale_y))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        let (source, target) = fm_core::parse_er_cardinality_forms(notation);
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        let ascii = self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii;
+        let symbols = [(source, false), (target, true)].map(|(kind, reverse)| {
+            let kind = kind?;
+            if reverse {
+                points.reverse();
+            }
+            let &anchor = points.first()?;
+            if anchor.0 < 0
+                || anchor.1 < 0
+                || anchor.0 as usize >= width
+                || anchor.1 as usize >= height
+            {
+                return None;
+            }
+            let &opposite = points.last()?;
+            let mut cells = [(0, 0); 2];
+            let mut count = 0;
+            for leg in points.windows(2) {
+                let (previous, next) = (leg[0], leg[1]);
+                let line = RasterLine::signed(previous.0, previous.1, next.0, next.1);
+                line.visit(width, height, |x, y| {
+                    let p = (x as isize, y as isize);
+                    if count < 2 && p != previous && p != opposite && p != anchor {
+                        cells[count] = (x, y);
+                        count += 1;
+                    }
+                });
+                if count == 2 {
+                    break;
+                }
+            }
+            if count != 2 {
+                return None;
+            }
+            let dx = cells[0].0 as isize - anchor.0;
+            let dy = cells[0].1 as isize - anchor.1;
+            if dx.abs().max(dy.abs()) != 1
+                || cells[0]
+                    .0
+                    .abs_diff(cells[1].0)
+                    .max(cells[0].1.abs_diff(cells[1].1))
+                    != 1
+            {
+                return None;
+            }
+            let horizontal = dx.abs() >= dy.abs();
+            let bar = if horizontal {
+                self.edge_glyphs.line_v
+            } else {
+                self.edge_glyphs.line_h
+            };
+            // The braces are Mermaid's horizontal feet. A vertical chevron opens toward
+            // the entity in exactly the same way.
+            let outer = match kind {
+                OneOrMore | ZeroOrMore if horizontal && dx > 0 => '}',
+                OneOrMore | ZeroOrMore if horizontal => '{',
+                OneOrMore | ZeroOrMore if dy > 0 => 'v',
+                OneOrMore | ZeroOrMore => '^',
+                _ => bar,
+            };
+            let inner = if matches!(kind, ZeroOrOne | ZeroOrMore) {
+                if ascii { 'o' } else { '○' }
+            } else {
+                bar
+            };
+            Some([(cells[0], outer), (cells[1], inner)])
+        });
+        if let [Some(a), Some(b)] = symbols
+            && a.iter()
+                .any(|(cell, _)| b.iter().any(|(other, _)| cell == other))
+        {
+            return;
+        }
+        for pair in symbols.into_iter().flatten() {
+            if pair.iter().any(|&((x, y), _)| {
+                protected.iter().any(|&(left, top, right, bottom)| {
+                    x >= left && x < right && y >= top && y < bottom
+                })
+            }) {
+                continue;
+            }
+            for ((x, y), glyph) in pair {
+                grid[y][x] = glyph;
+                protected.push((x, y, x + 1, y + 1));
             }
         }
     }
@@ -11015,6 +11145,80 @@ mod tests {
                 "{kind:?} filled its zero marker"
             );
             assert!(canvas.get_pixel(bubble_x + 6, 20), "{kind:?} lost its ring");
+        }
+    }
+
+    #[test]
+    fn cell_only_er_endpoints_keep_four_cardinalities_with_labels_disabled() {
+        for (operator, source, target) in [
+            ("||--||", ['|', '|'], ['|', '|']),
+            ("|o--o|", ['|', 'o'], ['|', 'o']),
+            ("}|--|{", ['}', '|'], ['{', '|']),
+            ("}o..o{", ['}', 'o'], ['{', 'o']),
+        ] {
+            let ir = fm_parser::parse(&format!("erDiagram\nA {operator} B : relates")).ir;
+            let mut layout = layout_diagram(&ir);
+            layout.nodes.clear();
+            for (from, to) in [
+                ((3_i32, 8_i32), (25, 8)),
+                ((25, 8), (3, 8)),
+                ((8, 3), (8, 19)),
+                ((8, 19), (8, 3)),
+            ] {
+                let (dx, dy) = ((to.0 - from.0).signum(), (to.1 - from.1).signum());
+                layout.edges[0] = terminal_edge_test_path(&[
+                    (from.0 as f32, from.1 as f32),
+                    ((from.0 + dx) as f32, (from.1 + dy) as f32),
+                    (to.0 as f32, to.1 as f32),
+                ]);
+                for config in [TermRenderConfig::compact(), TermRenderConfig::rich()] {
+                    let config = TermRenderConfig {
+                        render_mode: MermaidRenderMode::CellOnly,
+                        glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+                        show_labels: false,
+                        padding: 0,
+                        ..config
+                    };
+                    let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 32, 24));
+                    let output = renderer
+                        .render_cell_mode(&ir, &layout, 32, 24, 1.0, 1.0)
+                        .output;
+                    for ((x, y), step, pair) in [(from, 1, source), (to, -1, target)] {
+                        for (i, glyph) in pair.into_iter().enumerate() {
+                            let inward = step * (i as i32 + 1);
+                            let glyph = match glyph {
+                                '|' if dx == 0 => '-',
+                                '}' | '{' if dx == 0 => {
+                                    if dy * step > 0 {
+                                        'v'
+                                    } else {
+                                        '^'
+                                    }
+                                }
+                                '}' | '{' => {
+                                    if dx * step > 0 {
+                                        '}'
+                                    } else {
+                                        '{'
+                                    }
+                                }
+                                other => other,
+                            };
+                            assert_eq!(
+                                output
+                                    .lines()
+                                    .nth((y + dy * inward) as usize)
+                                    .unwrap()
+                                    .chars()
+                                    .nth((x + dx * inward) as usize),
+                                Some(glyph),
+                                "{operator}: {output}"
+                            );
+                        }
+                    }
+                    assert!(!output.contains("relates"));
+                }
+            }
         }
     }
 
