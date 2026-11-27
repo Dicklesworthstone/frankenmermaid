@@ -694,7 +694,7 @@ fn closest_clear_route_position_with_offset(
     // Key = (distance, original segment index, in-segment interval order): its lexicographic minimum
     // is exactly the linear scan's route-order-first pick under `distance < best_distance`.
     let mut best_key = (f32::INFINITY, usize::MAX, u32::MAX);
-    for &(index, from, to, dx, dy, length_squared, lower_bound) in &segments {
+    'segments: for &(index, from, to, dx, dy, length_squared, lower_bound) in &segments {
         if lower_bound > best_key.0 {
             break;
         }
@@ -703,6 +703,9 @@ fn closest_clear_route_position_with_offset(
         // Level 2 cheap reject before the ~30ns forbidden_route_interval.
         let (seg_x_lo, seg_x_hi) = (from.x.min(to.x), from.x.max(to.x));
         let (seg_y_lo, seg_y_hi) = (from.y.min(to.y), from.y.max(to.y));
+        // Advance a fraction of a pixel past an exclusion boundary so f32 rounding cannot
+        // turn a tangency into an overlap when a renderer reconstructs the plate.
+        let epsilon = 0.01 / length_squared.sqrt();
         let mut intervals: Vec<(f32, f32)> = Vec::new();
         for &obstacle in &near {
             let (o_lo_x, o_hi_x, o_lo_y, o_hi_y) = match obstacle {
@@ -721,13 +724,16 @@ fn closest_clear_route_position_with_offset(
                 continue;
             }
             if let Some(interval) = forbidden_route_interval(from, to, obstacle, width, height) {
+                // This obstacle alone leaves neither endpoint nor an interior gap.
+                // Use the sweep's arithmetic: on long segments hi + epsilon can
+                // round back to 1.0, leaving the endpoint eligible.
+                if interval.0 - epsilon < 0.0 && interval.1 + epsilon > 1.0 {
+                    continue 'segments;
+                }
                 intervals.push(interval);
             }
         }
         intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        // Advance a fraction of a pixel past an exclusion boundary so f32 rounding cannot
-        // turn a tangency into an overlap when a renderer reconstructs the plate.
-        let epsilon = 0.01 / length_squared.sqrt();
         let mut cursor = 0.0_f32;
         let mut gap_order = 0u32;
         let mut consider = |lo: f32, hi: f32, order: u32| {
@@ -2045,6 +2051,27 @@ mod tests {
             bundle_count: 1,
             bundled: false,
         }
+    }
+
+    #[test]
+    fn fully_blocked_segment_preserves_the_sweeps_rounded_endpoint() {
+        let anchor = LayoutPoint { x: 0.0, y: 0.0 };
+        let obstacles = [EdgeLabelObstacle::Bounds(LayoutRect {
+            x: -10.0,
+            y: -10.0,
+            width: 1_050_000.0,
+            height: 30.0,
+        })];
+        let short = route(&[(0.0, 0.0), (128.0, 0.0)]);
+        assert!(closest_clear_route_position(&short, anchor, 2.0, 2.0, &obstacles).is_none());
+        let long = route(&[(0.0, 0.0), (1_048_576.0, 0.0)]);
+        assert_eq!(
+            closest_clear_route_position(&long, anchor, 2.0, 2.0, &obstacles),
+            Some(LayoutPoint {
+                x: 1_048_576.0,
+                y: 0.0
+            })
+        );
     }
 
     #[test]
