@@ -425,11 +425,10 @@ struct EdgeDashPhase {
 
 impl EdgeDashPhase {
     fn advance(&mut self, steps: u128, period: u128) -> u128 {
-        let offset = if self.period == 0 {
-            0
-        } else {
-            self.offset * period / self.period
-        };
+        // Only a fresh phase has `self.period == 0`, and its `offset` is 0 too: this is the sole
+        // writer, it always stores a nonzero `period` (zero would already panic in `steps % period`)
+        // and keeps `offset < period`. So the product is 0 there and `checked_div` yields the same 0.
+        let offset = (self.offset * period).checked_div(self.period).unwrap_or(0);
         self.offset = (offset + steps % period) % period;
         self.period = period;
         offset
@@ -10860,6 +10859,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn edge_dash_phase_starts_at_zero_and_rescales_across_period_changes() {
+        // A fresh phase (period 0) contributes no offset, whatever the first leg's cadence.
+        let mut phase = EdgeDashPhase::default();
+        assert_eq!(phase.advance(5, 4), 0);
+        assert_eq!((phase.offset, phase.period), (1, 4));
+        // A bend into a cadence twice as long keeps the same relative position: 1/4 -> 2/8.
+        assert_eq!(phase.advance(3, 8), 2);
+        assert_eq!((phase.offset, phase.period), (5, 8));
+        // Rescaling floors: 5/8 of a 6-step cycle is 3.75 -> 3.
+        assert_eq!(phase.advance(7, 6), 3);
+        assert_eq!((phase.offset, phase.period), (4, 6));
     }
 
     #[test]
